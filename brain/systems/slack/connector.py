@@ -27,6 +27,11 @@ from brain.systems.slack.client import (
     slack_bot_token_from_env,
 )
 from brain.systems.slack.ingress import normalize_slack_socket_event
+from brain.systems.slack.interrupt_delivery import (
+    interrupt_delivery_from_inbound,
+    post_interrupt_reply,
+    should_add_reflex_ack,
+)
 from brain.systems.slack.monitored_intakes import (
     enrich_monitored_intake,
     is_monitored_intake,
@@ -372,16 +377,6 @@ async def process_normalized_slack_envelope(
         connection=connection,
         envelope=envelope,
     )
-    acknowledged = False
-    if monitored_intake or acknowledge_all:
-        # Reflex acknowledgement: leave a 👀 on every observed message so the
-        # channel knows Illo has seen it, independent of whether the ensuing
-        # triage run decides to reply.
-        acknowledged = await _acknowledge_monitored_message(
-            config,
-            envelope,
-            client=acknowledgement_client,
-        )
     if monitored_intake and existing_inbound is None:
         await enrich_monitored_intake(
             envelope,
@@ -394,6 +389,27 @@ async def process_normalized_slack_envelope(
         envelope=envelope,
         ingress_context=dict(ingress_context),
     )
+    delivery_directive = interrupt_delivery_from_inbound(inbound)
+    acknowledged = False
+    if should_add_reflex_ack(
+        delivery_directive,
+        default=monitored_intake or acknowledge_all,
+    ):
+        # Reflex acknowledgement: leave a 👀 on every observed message so the
+        # channel knows Illo has seen it, independent of whether the ensuing
+        # triage run decides to reply.
+        acknowledged = await _acknowledge_monitored_message(
+            config,
+            envelope,
+            client=acknowledgement_client,
+        )
+    interrupt_reply = None
+    if delivery_directive is not None and not inbound.get("idempotent_replay"):
+        interrupt_reply = await post_interrupt_reply(
+            config.bot_token,
+            delivery_directive,
+            client=acknowledgement_client,
+        )
     if (
         set_processing_status
         and not monitored_intake
@@ -404,6 +420,7 @@ async def process_normalized_slack_envelope(
     return {
         "acknowledged": acknowledged,
         "inbound": inbound,
+        "interrupt_reply": interrupt_reply,
     }
 
 

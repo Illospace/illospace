@@ -147,7 +147,7 @@ def slack_event_type(payload: Mapping[str, Any]) -> str:
     }:
         return origin
     if monitored_policy is not None:
-        return monitored_policy.origin
+        return monitored_policy.recognition.origin
     event_kind = _clean(payload.get("event_kind"))
     if event_kind == "direct_message":
         return "slack.direct_message"

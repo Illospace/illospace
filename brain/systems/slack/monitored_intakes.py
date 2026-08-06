@@ -5,8 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
+import re
 from typing import Any, Awaitable, Callable, Mapping
 
+from brain.systems.inbound.handlers import InboundCompletion
+from brain.systems.inbound.status import STATUS_PROCESSED
+from brain.systems.liveness_state import LivenessSnapshot
 from brain.systems.runs.obligation_specs import (
     ObligationAnswerer,
     ObligationSettlementPolicy,
@@ -27,14 +31,26 @@ from brain.systems.slack.contact_form_leads import (
     CONTACT_FORM_LEAD_ORIGIN,
     ContactFormLead,
 )
+from brain.systems.slack.interrupt_delivery import (
+    SlackAcknowledgementMode,
+    SlackInterruptDeliveryDirective,
+    SlackInterruptReply,
+)
 from brain.systems.slack.monitors import contact_form_lead_mandate
 
 
 logger = logging.getLogger(__name__)
 
 SLACK_CHANNEL_MESSAGE_ORIGIN = "slack.channel_message"
+DIRECT_LIVENESS_PROBE_ORIGIN = "slack.direct_liveness_probe"
 SLACK_REPLY_TOOL = "post_slack_reply"
 
+DIRECT_LIVENESS_PROBE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:are\s+you\s+(?:still\s+)?alive|you\s+(?:still\s+)?alive|still\s+alive)[\s?!.,:;…]*", re.IGNORECASE),
+    re.compile(r"(?:are\s+you\s+dead|you\s+dead)[\s?!.,:;…]*", re.IGNORECASE),
+    re.compile(r"(?:are\s+you\s+(?:still\s+)?there|you\s+(?:still\s+)?there|still\s+there)[\s?!.,:;…]*", re.IGNORECASE),
+    re.compile(r"(?:are\s+you\s+up|you\s+up|still\s+up)[\s?!.,:;…]*", re.IGNORECASE),
+)
 _NO_MATCH = object()
 
 
@@ -67,13 +83,33 @@ class ChannelMessageRecognition:
 
 
 @dataclass(frozen=True, slots=True)
+class DirectLivenessProbeRecognition:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class MonitoredIntakeRecognition:
+    """Shared classification data for one ordered Slack intake recognizer."""
+
+    origin: str
+    event_kind: str
+    recognize: Callable[
+        [Mapping[str, Any], SlackVisibleContent, str | None],
+        Any,
+    ]
+    text: Callable[[Any], str]
+    allowed_ignored_subtypes: frozenset[str] = frozenset()
+    can_disable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class MonitoredIntakeMatch:
     policy: MonitoredIntakePolicy
     decoded: Any
 
     @property
     def text(self) -> str:
-        return self.policy.text(self.decoded)
+        return self.policy.recognition.text(self.decoded)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,13 +132,10 @@ class MonitoredIntakeContext:
 
 
 @dataclass(frozen=True, slots=True)
-class MonitoredIntakePolicy:
-    """All behavior that varies by monitored intake type."""
+class RunIntakePolicy:
+    """Recognition and shaping behavior for an admitted AgentRun."""
 
-    origin: str
-    event_kind: str
-    recognize: Callable[[Mapping[str, Any], SlackVisibleContent], Any]
-    text: Callable[[Any], str]
+    recognition: MonitoredIntakeRecognition
     enrich_payload: Callable[[dict[str, Any], Any], None]
     enrich: Callable[
         [dict[str, Any], MonitoredIntakeContext],
@@ -117,7 +150,77 @@ class MonitoredIntakePolicy:
         [Mapping[str, Any], Mapping[str, Any]],
         ObligationSpec | None,
     ]
-    allowed_ignored_subtypes: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class ImmediateReplyDisposition:
+    """One immediate action, including completion and visible Slack behavior."""
+
+    completion: InboundCompletion
+    delivery: SlackInterruptDeliveryDirective
+
+
+@dataclass(frozen=True, slots=True)
+class ImmediateReplyPolicy:
+    """Recognition and completion behavior for a reply without an AgentRun."""
+
+    recognition: MonitoredIntakeRecognition
+    action_type: str
+    operation: str
+    render_reply: Callable[[LivenessSnapshot], str]
+    acknowledgement: SlackAcknowledgementMode
+
+    def build_disposition(
+        self,
+        envelope: Mapping[str, Any],
+        *,
+        event_id: str,
+        source_kind: str | None,
+        snapshot: LivenessSnapshot,
+    ) -> ImmediateReplyDisposition:
+        payload = _mapping(envelope.get("payload"))
+        response_target = _mapping(payload.get("response_target"))
+        delivery = SlackInterruptDeliveryDirective(
+            acknowledgement=self.acknowledgement,
+            reply=SlackInterruptReply(
+                channel_id=_clean(
+                    response_target.get("channel_id") or payload.get("channel_id")
+                ),
+                thread_ts=_clean(response_target.get("thread_ts")) or None,
+                text=self.render_reply(snapshot),
+                idempotency_key=_clean(envelope.get("idempotency_key")),
+            ),
+        )
+        completion = InboundCompletion(
+            status=STATUS_PROCESSED,
+            action_type=self.action_type,
+            action_result={
+                "operation": self.operation,
+                "event_id": event_id,
+                "origin": envelope.get("origin"),
+                "delivery_directive": delivery.to_payload(),
+            },
+            confidence=1.0,
+            target={
+                "kind": "slack_message",
+                "channel_id": response_target.get("channel_id"),
+                "thread_ts": response_target.get("thread_ts"),
+            },
+            tool_use={"type": SLACK_REPLY_TOOL, "status": "interrupt"},
+            reasoning_summary=(
+                "A typed Slack intake policy routed this direct liveness "
+                "probe to a deterministic process-local reply."
+            ),
+            reusable_pattern_candidate={
+                "kind": "slack_message",
+                "origin": envelope.get("origin"),
+                "source_kind": source_kind,
+            },
+        )
+        return ImmediateReplyDisposition(completion=completion, delivery=delivery)
+
+
+MonitoredIntakePolicy = RunIntakePolicy | ImmediateReplyPolicy
 
 
 def visible_slack_content(
@@ -136,11 +239,14 @@ def visible_slack_content(
 def recognize_monitored_intake(
     event: Mapping[str, Any],
     content: SlackVisibleContent,
+    *,
+    bot_user_id: str | None = None,
 ) -> MonitoredIntakeMatch:
     """Return the first typed policy match; the ordinary alert policy is fallback."""
 
     for policy in MONITORED_INTAKE_POLICIES:
-        decoded = policy.recognize(event, content)
+        recognition = policy.recognition
+        decoded = recognition.recognize(event, content, bot_user_id)
         if decoded is not _NO_MATCH:
             return MonitoredIntakeMatch(policy=policy, decoded=decoded)
     raise RuntimeError("monitored intake registry requires a fallback policy")
@@ -150,7 +256,8 @@ def enrich_monitored_intake_payload(
     payload: dict[str, Any],
     match: MonitoredIntakeMatch,
 ) -> None:
-    match.policy.enrich_payload(payload, match.decoded)
+    if isinstance(match.policy, RunIntakePolicy):
+        match.policy.enrich_payload(payload, match.decoded)
 
 
 async def enrich_monitored_intake(
@@ -160,7 +267,7 @@ async def enrich_monitored_intake(
     bot_token: str,
 ) -> None:
     policy = monitored_intake_policy(envelope)
-    if policy is None:
+    if not isinstance(policy, RunIntakePolicy):
         return
     await policy.enrich(
         envelope,
@@ -176,7 +283,7 @@ def route_monitored_intake(
     slack_trigger_payload: Mapping[str, Any],
 ) -> MonitoredIntakeRoute | None:
     policy = monitored_intake_policy(payload)
-    if policy is None:
+    if not isinstance(policy, RunIntakePolicy):
         return None
     rendered = policy.render(payload, slack_trigger_payload)
     metadata = {
@@ -205,11 +312,11 @@ def monitored_intake_policy(
     event_kind = _clean(source.get("event_kind"))
     if origin:
         for policy in MONITORED_INTAKE_POLICIES:
-            if origin == policy.origin:
+            if origin == policy.recognition.origin:
                 return policy
         return None
     for policy in MONITORED_INTAKE_POLICIES:
-        if event_kind == policy.event_kind:
+        if event_kind == policy.recognition.event_kind:
             return policy
     return None
 
@@ -239,6 +346,7 @@ def slack_response_thread_ts(
 def _recognize_contact_form(
     event: Mapping[str, Any],
     content: SlackVisibleContent,
+    _bot_user_id: str | None,
 ) -> ContactFormLeadRecognition | object:
     lead = ContactFormLead.decode(content.contact_form_text)
     if lead is None:
@@ -352,6 +460,7 @@ def _contact_form_obligation(
 def _recognize_channel_message(
     _event: Mapping[str, Any],
     content: SlackVisibleContent,
+    _bot_user_id: str | None,
 ) -> ChannelMessageRecognition:
     return ChannelMessageRecognition(text=content.message_text)
 
@@ -446,44 +555,101 @@ def _no_obligation(
     return None
 
 
-# A third monitored intake is integrated by adding one policy entry here. The
-# policy owns recognition, enrichment, rendering, routing, and obligations;
-# ingress, connector, triggers, and run shaping dispatch through this registry.
+def _recognize_direct_liveness_probe(
+    event: Mapping[str, Any],
+    content: SlackVisibleContent,
+    bot_user_id: str | None,
+) -> DirectLivenessProbeRecognition | object:
+    text = content.message_text.strip()
+    channel_type = _clean(event.get("channel_type"))
+    if channel_type != "im":
+        mention = f"<@{_clean(bot_user_id)}>" if _clean(bot_user_id) else ""
+        if not mention or not text.startswith(mention):
+            return _NO_MATCH
+        text = text[len(mention):].lstrip(" \t,:;-—")
+    elif bot_user_id:
+        mention = f"<@{_clean(bot_user_id)}>"
+        if text.startswith(mention):
+            text = text[len(mention):].lstrip(" \t,:;-—")
+    if not any(pattern.fullmatch(text) for pattern in DIRECT_LIVENESS_PROBE_PATTERNS):
+        return _NO_MATCH
+    return DirectLivenessProbeRecognition(text=content.message_text)
+
+
+def _direct_liveness_probe_text(
+    recognition: DirectLivenessProbeRecognition,
+) -> str:
+    return recognition.text
+
+
+def _direct_liveness_probe_reply(
+    snapshot: LivenessSnapshot,
+) -> str:
+    last_run_id = str(snapshot.last_run_id) if snapshot.last_run_id is not None else "none"
+    # Honesty boundary: handling this message proves that the API process ran;
+    # it does not prove that the scheduler or any other process is ticking.
+    return (
+        "Yes — the Illo API process handled this message. "
+        f"Liveness snapshot: timestamp `{snapshot.ts}`, last run ID `{last_run_id}`, "
+        f"coarse last surface `{snapshot.last_surface}`. "
+        "This confirms API message handling; it does not confirm that the scheduler is ticking."
+    )
+
+
+# Recognition order lives in one registry. Each entry then selects exactly one
+# action shape: admit a run or complete with an immediate reply.
 MONITORED_INTAKE_POLICIES: tuple[MonitoredIntakePolicy, ...] = (
-    MonitoredIntakePolicy(
-        origin=CONTACT_FORM_LEAD_ORIGIN,
-        event_kind=CONTACT_FORM_LEAD_ORIGIN,
-        recognize=_recognize_contact_form,
-        text=_contact_form_text,
+    ImmediateReplyPolicy(
+        recognition=MonitoredIntakeRecognition(
+            origin=DIRECT_LIVENESS_PROBE_ORIGIN,
+            event_kind="direct_liveness_probe",
+            recognize=_recognize_direct_liveness_probe,
+            text=_direct_liveness_probe_text,
+        ),
+        action_type="slack.liveness_probe_interrupt",
+        operation="slack_liveness_probe_interrupt",
+        render_reply=_direct_liveness_probe_reply,
+        acknowledgement=SlackAcknowledgementMode.SUPPRESS,
+    ),
+    RunIntakePolicy(
+        recognition=MonitoredIntakeRecognition(
+            origin=CONTACT_FORM_LEAD_ORIGIN,
+            event_kind=CONTACT_FORM_LEAD_ORIGIN,
+            recognize=_recognize_contact_form,
+            text=_contact_form_text,
+            allowed_ignored_subtypes=frozenset({"bot_message"}),
+            can_disable=True,
+        ),
         enrich_payload=_enrich_contact_form_payload,
         enrich=_enrich_contact_form,
         render=_render_contact_form,
         routing=_contact_form_routing,
         obligation=_contact_form_obligation,
-        allowed_ignored_subtypes=frozenset({"bot_message"}),
     ),
-    MonitoredIntakePolicy(
-        origin=SLACK_CHANNEL_MESSAGE_ORIGIN,
-        event_kind="channel_message",
-        recognize=_recognize_channel_message,
-        text=_channel_message_text,
+    RunIntakePolicy(
+        recognition=MonitoredIntakeRecognition(
+            origin=SLACK_CHANNEL_MESSAGE_ORIGIN,
+            event_kind="channel_message",
+            recognize=_recognize_channel_message,
+            text=_channel_message_text,
+            allowed_ignored_subtypes=frozenset({"bot_message"}),
+        ),
         enrich_payload=_enrich_channel_message_payload,
         enrich=_enrich_channel_message,
         render=_render_channel_message,
         routing=_channel_message_routing,
         obligation=_no_obligation,
-        allowed_ignored_subtypes=frozenset({"bot_message"}),
     ),
 )
 
 
-def typed_monitored_intake_origins() -> frozenset[str]:
-    """Return registry origins that precede the channel-message fallback."""
+def configurable_monitored_intake_origins() -> frozenset[str]:
+    """Return passive intake origins that a Slack connection can disable."""
 
     return frozenset(
-        policy.origin
+        policy.recognition.origin
         for policy in MONITORED_INTAKE_POLICIES
-        if policy.origin != SLACK_CHANNEL_MESSAGE_ORIGIN
+        if policy.recognition.can_disable
     )
 
 
@@ -559,12 +725,19 @@ def _slack_message_datetime(message_ts: str) -> datetime | None:
 
 
 __all__ = [
+    "DIRECT_LIVENESS_PROBE_ORIGIN",
+    "DIRECT_LIVENESS_PROBE_PATTERNS",
+    "ImmediateReplyDisposition",
+    "ImmediateReplyPolicy",
     "MONITORED_INTAKE_POLICIES",
     "MonitoredIntakeMatch",
     "MonitoredIntakePolicy",
+    "MonitoredIntakeRecognition",
     "MonitoredIntakeRoute",
+    "RunIntakePolicy",
     "SLACK_CHANNEL_MESSAGE_ORIGIN",
     "SlackVisibleContent",
+    "configurable_monitored_intake_origins",
     "enrich_monitored_intake",
     "enrich_monitored_intake_payload",
     "is_monitored_intake",
@@ -572,6 +745,5 @@ __all__ = [
     "recognize_monitored_intake",
     "route_monitored_intake",
     "slack_response_thread_ts",
-    "typed_monitored_intake_origins",
     "visible_slack_content",
 ]
