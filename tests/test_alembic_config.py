@@ -55,6 +55,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0048_failure_guard_trigger_state.py",
     # Downgrade removes only the cold-start receipt table introduced here.
     "0050_scheduler_cold_start_reconciliation.py",
+    # Downgrade removes only the scheduler alert-latch table introduced here.
+    "0054_scheduler_alert_latches.py",
 }
 
 

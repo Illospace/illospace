@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+import uuid
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
+from brain.app.scheduler.overdue_alert_state import (
+    SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+    release_scheduler_alert,
+    try_claim_scheduler_alert,
+)
 from brain.app.scheduler.overdue_monitor import SchedulerOverdueMonitor
 from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
 )
-from brain.platform.db.models.scheduler import SchedulerLease, SchedulerRun
+from brain.platform.db.models.scheduler import (
+    SchedulerAlertLatch,
+    SchedulerLease,
+    SchedulerRun,
+)
 from tests.scheduler_test_support import (
     make_scheduler_job,
     make_scheduler_test_session,
@@ -19,6 +31,32 @@ from tests.scheduler_test_support import (
 
 
 NOW = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+
+
+class _FakeAlertLatch:
+    def __init__(self) -> None:
+        self.claimed = False
+
+    async def claim(self, *, alerted_at: datetime) -> bool:
+        del alerted_at
+        if self.claimed:
+            return False
+        self.claimed = True
+        return True
+
+    async def release(self) -> None:
+        self.claimed = False
+
+
+def _monitor(
+    *,
+    alert_latch: _FakeAlertLatch | None = None,
+    **kwargs,
+) -> SchedulerOverdueMonitor:
+    latch = alert_latch or _FakeAlertLatch()
+    kwargs.setdefault("claim_alert", latch.claim)
+    kwargs.setdefault("release_alert", latch.release)
+    return SchedulerOverdueMonitor(**kwargs)
 
 
 @pytest.fixture
@@ -55,7 +93,7 @@ async def test_job_overdue_by_more_than_fifteen_minutes_alerts_with_tick_time():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -85,7 +123,7 @@ async def test_all_jobs_on_schedule_for_twenty_four_hours_produces_no_alert():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -110,7 +148,7 @@ async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -127,6 +165,148 @@ async def test_alert_fires_once_per_freeze_and_rearms_after_recovery():
     assert recovered.alert_sent is False
     assert later_freeze.alert_sent is True
     assert len(deliveries) == 2
+
+
+async def test_api_restart_mid_freeze_uses_the_existing_scheduler_claim():
+    deliveries = []
+    alert_latch = _FakeAlertLatch()
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    first_monitor = _monitor(
+        alert_latch=alert_latch,
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+    restarted_monitor = _monitor(
+        alert_latch=alert_latch,
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+
+    first = await first_monitor._check(object(), now=NOW)
+    after_restart = await restarted_monitor._check(
+        object(),
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert first.alert_sent is True
+    assert after_restart.alert_sent is False
+    assert len(deliveries) == 1
+
+
+async def test_two_replicas_deliver_only_after_winning_the_atomic_claim():
+    deliveries = []
+    claim_results = iter((True, False))
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def claim_alert(*, alerted_at):
+        assert alerted_at == NOW
+        return next(claim_results)
+
+    async def release_alert():
+        raise AssertionError("an overdue observation must not release the claim")
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    replicas = tuple(
+        _monitor(
+            candidate_provider=candidates,
+            liveness_checkpoint=liveness_checkpoint,
+            claim_alert=claim_alert,
+            release_alert=release_alert,
+            deliver_alert=deliver_alert,
+        )
+        for _ in range(2)
+    )
+
+    results = await asyncio.gather(
+        *(replica._check(object(), now=NOW) for replica in replicas)
+    )
+
+    assert [result.alert_sent for result in results].count(True) == 1
+    assert len(deliveries) == 1
+
+
+async def test_scheduler_alert_claim_is_atomic_and_can_rearm(scheduler_session):
+    first = await try_claim_scheduler_alert(
+        scheduler_session,
+        alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+        alerted_at=NOW,
+    )
+    repeated = await try_claim_scheduler_alert(
+        scheduler_session,
+        alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+        alerted_at=NOW + timedelta(minutes=1),
+    )
+
+    latch = await scheduler_session.get(
+        SchedulerAlertLatch,
+        SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+    )
+    assert first is True
+    assert repeated is False
+    assert latch is not None
+    assert latch.alert_key == SCHEDULER_OVERDUE_FREEZE_ALERT_KEY
+    assert latch.alerted_at.replace(tzinfo=timezone.utc) == NOW
+
+    await release_scheduler_alert(
+        scheduler_session,
+        alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+    )
+    later_freeze = await try_claim_scheduler_alert(
+        scheduler_session,
+        alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+        alerted_at=NOW + timedelta(hours=2),
+    )
+
+    assert later_freeze is True
+
+
+@pytest.mark.requires_db
+async def test_postgres_concurrent_scheduler_alert_claim_has_one_winner(db_engine):
+    alert_key = f"scheduler_overdue_freeze_test_{uuid.uuid4().hex}"
+
+    async def claim() -> bool:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            won = await try_claim_scheduler_alert(
+                session,
+                alert_key=alert_key,
+                alerted_at=NOW,
+            )
+            await session.commit()
+            return won
+
+    try:
+        assert sorted(await asyncio.gather(claim(), claim())) == [False, True]
+    finally:
+        async with AsyncSession(bind=db_engine) as session:
+            await release_scheduler_alert(session, alert_key=alert_key)
+            await session.commit()
+
+
+def test_scheduler_alert_latch_has_no_job_owner_and_names_its_timestamp():
+    table = SchedulerAlertLatch.__table__
+
+    assert set(table.columns.keys()) == {"alert_key", "alerted_at"}
+    assert table.columns["alert_key"].type.length == 80
+    assert table.columns["alerted_at"].nullable is False
+    assert not table.foreign_keys
 
 
 async def test_multiple_overdue_jobs_produce_one_freeze_alert():
@@ -148,7 +328,7 @@ async def test_multiple_overdue_jobs_produce_one_freeze_alert():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -176,7 +356,7 @@ async def test_fresh_daemon_heartbeat_does_not_hide_stale_next_run_at():
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
@@ -211,6 +391,12 @@ async def test_slack_delivery_starts_after_read_transaction_closes():
         assert transaction_open is True
         return NOW
 
+    async def try_claim(_session, *, alert_key, alerted_at):
+        assert alert_key == SCHEDULER_OVERDUE_FREEZE_ALERT_KEY
+        assert alerted_at == NOW
+        assert transaction_open is True
+        return True
+
     async def deliver_alert(**_kwargs):
         assert transaction_open is False
 
@@ -222,6 +408,9 @@ async def test_slack_delivery_starts_after_read_transaction_closes():
     with patch(
         "brain.platform.db.repositories.unit_of_work.UnitOfWork",
         FakeUnitOfWork,
+    ), patch(
+        "brain.app.scheduler.overdue_alert_state.try_claim_scheduler_alert",
+        try_claim,
     ):
         result = await monitor._run_once(now=NOW)
 
@@ -323,7 +512,7 @@ async def test_monitor_skips_active_job_while_health_reports_canonical_lag(
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
     )
@@ -338,7 +527,9 @@ async def test_monitor_skips_active_job_while_health_reports_canonical_lag(
     assert deliveries == []
 
 
-async def test_in_memory_latch_is_independent_of_job_identity(scheduler_session):
+async def test_scheduler_global_latch_is_independent_of_job_identity(
+    scheduler_session,
+):
     job = make_scheduler_job(
         job_key="stalled_job",
         family="stalled_job",
@@ -355,7 +546,7 @@ async def test_in_memory_latch_is_independent_of_job_identity(scheduler_session)
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
-    monitor = SchedulerOverdueMonitor(
+    monitor = _monitor(
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
     )

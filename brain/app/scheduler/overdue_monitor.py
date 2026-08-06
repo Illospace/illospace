@@ -1,10 +1,10 @@
 """Alert when scheduler-owned jobs stop advancing.
 
-The freeze latch is process-local and belongs to the one monitor hosted by the API
-lifespan. An API restart during a freeze can therefore repeat at most one alert.
-That duplicate is acceptable because it is strictly better than the failure this
-monitor exists to prevent: 34 hours of silence. Restart-safe or multi-replica
-deduplication needs a scheduler-global state table and a database migration.
+The freeze latch is scheduler-global and durable. Each API monitor atomically
+claims the same stable database key in a short transaction, then delivers only
+after that claim commits. API restarts and concurrent replicas therefore share
+one alert per freeze without holding a database transaction across Slack. A
+healthy observation releases the key so a later freeze can alert again.
 """
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.cold_start import scheduler_liveness_checkpoint
+from brain.app.scheduler.overdue_alert_state import (
+    claim_scheduler_overdue_alert,
+    release_scheduler_overdue_alert,
+)
 from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
@@ -37,6 +41,8 @@ CandidateProvider = Callable[
 ]
 LivenessCheckpointProvider = Callable[[AsyncSession], Awaitable[datetime | None]]
 AlertDelivery = Callable[..., Awaitable[None]]
+AlertClaim = Callable[..., Awaitable[bool]]
+AlertRelease = Callable[[], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +79,7 @@ def _alert_summary(
 
 
 class SchedulerOverdueMonitor:
-    """Own one API-process scheduler freeze latch and its monitoring loop."""
+    """Monitor scheduler progress through one shared durable freeze latch."""
 
     name = "scheduler_overdue_monitor"
     overdue_after = timedelta(minutes=15)
@@ -84,12 +90,15 @@ class SchedulerOverdueMonitor:
         *,
         candidate_provider: CandidateProvider = async_scheduler_overdue_candidates,
         liveness_checkpoint: LivenessCheckpointProvider = scheduler_liveness_checkpoint,
+        claim_alert: AlertClaim = claim_scheduler_overdue_alert,
+        release_alert: AlertRelease = release_scheduler_overdue_alert,
         deliver_alert: AlertDelivery = async_deliver_failure_alert,
     ) -> None:
         self._candidate_provider = candidate_provider
         self._liveness_checkpoint = liveness_checkpoint
+        self._claim_alert = claim_alert
+        self._release_alert = release_alert
         self._deliver_alert = deliver_alert
-        self._alerted_for_current_freeze = False
 
     async def run(self) -> None:
         """Check scheduler progress on the independent API event loop."""
@@ -153,13 +162,13 @@ class SchedulerOverdueMonitor:
             candidate.job_key for candidate in overdue_candidates
         )
         if not overdue_candidates:
-            self._alerted_for_current_freeze = False
+            await self._release_alert()
             return _SchedulerOverdueCheck(
                 overdue_job_keys=(),
                 alert_sent=False,
                 last_tick_at=observation.last_tick_at,
             )
-        if self._alerted_for_current_freeze:
+        if not await self._claim_alert(alerted_at=now):
             return _SchedulerOverdueCheck(
                 overdue_job_keys=overdue_job_keys,
                 alert_sent=False,
@@ -194,7 +203,6 @@ class SchedulerOverdueMonitor:
             ),
             error_text="Scheduler jobs stopped advancing past next_run_at.",
         )
-        self._alerted_for_current_freeze = True
         return _SchedulerOverdueCheck(
             overdue_job_keys=overdue_job_keys,
             alert_sent=True,
