@@ -62,10 +62,13 @@ one table, many connectors, hybrid retrieval, agent as orchestrator.
    named bundle ever earns its existence, it is a saved filter (a
    `domain_record`), not schema. `domain` is not a knowledge-base scoping term.
 
-8. **Additive coexistence with the memory subsystem.** Workspace-visible memory
-   content mirrors into the index as one source among many. Memory retains its
-   own recall and mutation paths, and the mirror never widens private or
-   user-scoped visibility.
+8. **Additive coexistence now; unification only if measured.** Workspace-visible
+   memory content mirrors into the index as one source among many. Memory retains
+   its own recall and mutation paths, and the mirror never widens private or
+   user-scoped visibility. Retiring that duplicate path remains the intended end
+   state, but it is gated on recall measured to be at least as good — and
+   permanent coexistence is a legitimate answer if the measurement never earns
+   the swap. Zero blast radius now; one system only on evidence.
 
 ## Consumers, in priority order
 
