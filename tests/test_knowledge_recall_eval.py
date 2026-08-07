@@ -1403,21 +1403,50 @@ async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_revi
         ],
     }
     issue.resolution = "Resolved by merged PR Illospace/illospace#607"
-    knowledge_session.add(issue)
-    knowledge_session.add(
-        AgentRunRow(
-            id=44,
-            org_id=_ORG_ID,
-            thread_id="thread-44",
-            profile="default",
-            recipe="fast",
-            status="blocked",
-            input_message="Why did the deploy lose all AgentRun capacity?",
-            target_ref={},
-            workspace_ref={},
-            model_policy={},
-            metadata_={},
-        )
+    other_org_issue = _item(
+        587,
+        "github:OtherOrg/other-repo#587",
+        "Why did another org lose capacity?",
+    )
+    other_org_issue.extra = {
+        "org_id": "22222222-2222-4222-8222-222222222222",
+        "state": "closed",
+    }
+    archived_issue = _item(
+        588,
+        "github:Illospace/illospace#588",
+        "Why did the archived issue lose capacity?",
+    )
+    archived_issue.extra = {"org_id": _ORG_ID, "state": "closed"}
+    archived_issue.archived_at = datetime(2026, 7, 31, tzinfo=timezone.utc)
+    matching_run = AgentRunRow(
+        id=44,
+        org_id=_ORG_ID,
+        thread_id="thread-44",
+        profile="default",
+        recipe="fast",
+        status="blocked",
+        input_message="Why did the deploy lose all AgentRun capacity?",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+    )
+    other_org_run = AgentRunRow(
+        id=45,
+        org_id="22222222-2222-4222-8222-222222222222",
+        thread_id="thread-45",
+        profile="default",
+        recipe="fast",
+        status="blocked",
+        input_message="Why did another org lose all AgentRun capacity?",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+    )
+    knowledge_session.add_all(
+        [issue, other_org_issue, archived_issue, matching_run, other_org_run]
     )
     await knowledge_session.flush()
 
@@ -1438,6 +1467,7 @@ async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_revi
         "closed_github_issues": 1,
         "agent_run_transcripts": 1,
         "needs_ground_truth": 1,
+        "evidence_source_counts": {"github": 1},
     }
     github_candidate, run_candidate = payload["candidates"]
     assert (
@@ -1458,11 +1488,128 @@ async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_revi
     assert run_candidate["question"] == "Why did the deploy lose all AgentRun capacity?"
     assert run_candidate["acceptable_evidence"] == []
     assert run_candidate["ground_truth_status"] == "needs_labeling"
+    excluded_candidate_ids = {
+        "knowledge-item:github:OtherOrg/other-repo#587",
+        "knowledge-item:github:Illospace/illospace#588",
+        "agent-run:45",
+    }
+    assert excluded_candidate_ids.isdisjoint(
+        candidate["candidate_id"] for candidate in payload["candidates"]
+    )
 
 
-async def test_harvester_caps_run_candidates_independently(
+async def test_harvester_harvests_org_scoped_non_github_evidence(
     knowledge_session,
 ):
+    slack = _item(
+        600,
+        "slack:T123:C456:1712345678.000100",
+        "Slack #incidents: Checkout stopped responding",
+    )
+    slack.source = "slack"
+    slack.kind = "slack_thread"
+    slack.extra = {
+        "org_id": _ORG_ID,
+        "distillation": {
+            "question": "Why did checkout stop responding?",
+        },
+    }
+    memory = _item(601, "memory_node:601", "How do we recover checkout?")
+    memory.source = "memory"
+    memory.kind = "memory"
+    memory.extra = {"org_id": _ORG_ID}
+
+    excluded_rows = []
+    for item_id, source, source_ref in (
+        (602, "slack", "slack:T999:C999:1712345678.000200"),
+        (603, "memory", "memory_node:603"),
+    ):
+        other_org = _item(item_id, source_ref, f"Other org {source} question?")
+        other_org.source = source
+        other_org.extra = {"org_id": "22222222-2222-4222-8222-222222222222"}
+        excluded_rows.append(other_org)
+
+        archived = _item(
+            item_id + 10,
+            f"{source_ref}:archived",
+            f"Archived {source} question?",
+        )
+        archived.source = source
+        archived.extra = {"org_id": _ORG_ID}
+        archived.archived_at = datetime(2026, 7, 31, tzinfo=timezone.utc)
+        excluded_rows.append(archived)
+
+    no_question = _item(620, "memory_node:620", "   ")
+    no_question.source = "memory"
+    no_question.extra = {"org_id": _ORG_ID}
+    knowledge_session.add_all([slack, memory, no_question, *excluded_rows])
+    await knowledge_session.flush()
+
+    payload = (
+        await harvest_knowledge_recall_candidates(
+            knowledge_session,
+            org_id=_ORG_ID,
+            limit_per_source=10,
+            generated_at=_FIXED_TIME,
+        )
+    ).to_dict()
+
+    assert [candidate["question"] for candidate in payload["candidates"]] == [
+        "Why did checkout stop responding?",
+        "How do we recover checkout?",
+    ]
+    assert [
+        candidate["acceptable_evidence"] for candidate in payload["candidates"]
+    ] == [
+        [
+            {
+                "source": "slack",
+                "source_ref": "slack:T123:C456:1712345678.000100",
+            }
+        ],
+        [{"source": "memory", "source_ref": "memory_node:601"}],
+    ]
+    assert all(
+        candidate["ground_truth_status"] == "provisional"
+        for candidate in payload["candidates"]
+    )
+    assert [
+        candidate["candidate_source"] for candidate in payload["candidates"]
+    ] == ["slack_knowledge_item", "memory_knowledge_item"]
+    assert payload["summary"] == {
+        "total": 2,
+        "closed_github_issues": 0,
+        "agent_run_transcripts": 0,
+        "needs_ground_truth": 0,
+        "evidence_source_counts": {"memory": 1, "slack": 1},
+    }
+
+
+async def test_harvester_caps_each_source_independently(
+    knowledge_session,
+):
+    for item_id in range(1, 4):
+        github = _item(
+            700 + item_id,
+            f"github:Illospace/illospace#{700 + item_id}",
+            f"What happened in issue {item_id}?",
+        )
+        github.extra = {"org_id": _ORG_ID, "state": "closed"}
+        slack = _item(
+            710 + item_id,
+            f"slack:T123:C456:1712345678.000{item_id}",
+            f"What happened in Slack thread {item_id}?",
+        )
+        slack.source = "slack"
+        slack.kind = "slack_thread"
+        memory = _item(
+            720 + item_id,
+            f"memory_node:{720 + item_id}",
+            f"What happened in memory {item_id}?",
+        )
+        memory.source = "memory"
+        memory.kind = "memory"
+        knowledge_session.add_all([github, slack, memory])
     for run_id in range(1, 4):
         knowledge_session.add(
             AgentRunRow(
@@ -1491,4 +1638,16 @@ async def test_harvester_caps_run_candidates_independently(
     ).to_dict()
 
     assert payload["summary"]["agent_run_transcripts"] == 2
-    assert len(payload["candidates"]) == 2
+    assert payload["summary"]["evidence_source_counts"] == {
+        "github": 2,
+        "memory": 2,
+        "slack": 2,
+    }
+    candidate_sources = [
+        candidate["candidate_source"] for candidate in payload["candidates"]
+    ]
+    assert candidate_sources.count("closed_github_issue") == 2
+    assert candidate_sources.count("slack_knowledge_item") == 2
+    assert candidate_sources.count("memory_knowledge_item") == 2
+    assert candidate_sources.count("agent_run_transcript") == 2
+    assert len(payload["candidates"]) == 8
