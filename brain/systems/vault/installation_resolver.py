@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Protocol
+from typing import Callable
 
 import httpx
 
@@ -29,16 +29,18 @@ _DISCOVERY_STATUS_MESSAGES = {
 }
 
 
-class _GitHubAppCredential(Protocol):
+@dataclass(frozen=True)
+class RepositoryInstallationResolverInput:
     app_id: str
-    installation_id: str
     client_id: str | None
+    default_installation_id: str
+    private_key_sha256: str
 
 
 @dataclass(frozen=True)
 class ResolvedRepositoryInstallation:
     installation_id: str
-    repository: str
+    repository_name: str
     repository_slug: str
 
 
@@ -97,22 +99,20 @@ class RepositoryInstallationResolver:
 
     async def resolve_many(
         self,
-        credential: _GitHubAppCredential,
+        resolver_input: RepositoryInstallationResolverInput,
         *,
         repositories: list[str] | tuple[str, ...],
         app_jwt: str,
-        private_key_sha256: str,
     ) -> list[ResolvedRepositoryInstallation]:
         repository_refs = _normalize_repository_slugs(repositories)
         now = self._current_time()
         installation_ids = await asyncio.gather(
             *(
                 self._resolve(
-                    credential,
+                    resolver_input,
                     owner=owner,
                     repository=repository,
                     app_jwt=app_jwt,
-                    private_key_sha256=private_key_sha256,
                     now=now,
                 )
                 for owner, repository in repository_refs
@@ -121,7 +121,7 @@ class RepositoryInstallationResolver:
         return [
             ResolvedRepositoryInstallation(
                 installation_id=installation_id,
-                repository=repository,
+                repository_name=repository,
                 repository_slug=f"{owner}/{repository}",
             )
             for (owner, repository), installation_id in zip(
@@ -146,19 +146,17 @@ class RepositoryInstallationResolver:
 
     async def _resolve(
         self,
-        credential: _GitHubAppCredential,
+        resolver_input: RepositoryInstallationResolverInput,
         *,
         owner: str,
         repository: str,
         app_jwt: str,
-        private_key_sha256: str,
         now: datetime,
     ) -> str:
         cache_key = self._cache_key(
-            credential,
+            resolver_input,
             owner=owner,
             repository=repository,
-            private_key_sha256=private_key_sha256,
         )
         cached = self._cache.get(cache_key)
         if self._cache_is_fresh(cached, now=now):
@@ -178,7 +176,7 @@ class RepositoryInstallationResolver:
                 )
             except GitHubConnectorError as discovery_error:
                 installation_id = await self._stored_installation_fallback(
-                    credential,
+                    resolver_input,
                     requested_owner=owner,
                     app_jwt=app_jwt,
                     discovery_error=discovery_error,
@@ -191,7 +189,7 @@ class RepositoryInstallationResolver:
 
     async def _stored_installation_fallback(
         self,
-        credential: _GitHubAppCredential,
+        resolver_input: RepositoryInstallationResolverInput,
         *,
         requested_owner: str,
         app_jwt: str,
@@ -200,28 +198,27 @@ class RepositoryInstallationResolver:
         """Use the stored id only after GitHub confirms its account owner."""
         try:
             fallback_owner = await self._fetch_installation_owner(
-                installation_id=credential.installation_id,
+                installation_id=resolver_input.default_installation_id,
                 app_jwt=app_jwt,
             )
         except GitHubConnectorError:
             raise discovery_error
         if fallback_owner.lower() != requested_owner.lower():
             raise discovery_error
-        return credential.installation_id
+        return resolver_input.default_installation_id
 
     @staticmethod
     def _cache_key(
-        credential: _GitHubAppCredential,
+        resolver_input: RepositoryInstallationResolverInput,
         *,
         owner: str,
         repository: str,
-        private_key_sha256: str,
     ) -> str:
         payload = {
-            "app_id": credential.app_id,
-            "client_id": credential.client_id,
-            "default_installation_id": credential.installation_id,
-            "private_key_sha256": private_key_sha256,
+            "app_id": resolver_input.app_id,
+            "client_id": resolver_input.client_id,
+            "default_installation_id": resolver_input.default_installation_id,
+            "private_key_sha256": resolver_input.private_key_sha256,
             "repository": f"{owner}/{repository}".lower(),
         }
         serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -349,5 +346,6 @@ repository_installation_resolver = RepositoryInstallationResolver()
 
 
 __all__ = [
+    "RepositoryInstallationResolverInput",
     "repository_installation_resolver",
 ]

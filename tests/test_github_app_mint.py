@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -209,6 +210,46 @@ async def test_mint_discovers_repository_installation_before_exchange(
     assert requests[1]["json"] == {
         "repositories": ["illospace"],
         "permissions": {"contents": "write"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_mint_does_not_pass_private_key_pem_to_resolver(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    _patch_now(monkeypatch, lambda: NOW)
+    _patch_http(
+        monkeypatch,
+        [
+            _installation_response(789),
+            _token_response("illospace-token", NOW + timedelta(hours=1)),
+        ],
+    )
+    resolver = installation_resolver.repository_installation_resolver
+    real_resolve_many = resolver.resolve_many
+    received_inputs = []
+
+    async def inspect_resolver_input(resolver_input, **kwargs):
+        assert not hasattr(resolver_input, "private_key_pem")
+        received_inputs.append(resolver_input)
+        return await real_resolve_many(resolver_input, **kwargs)
+
+    monkeypatch.setattr(resolver, "resolve_many", inspect_resolver_input)
+
+    await async_mint_installation_token(
+        _blob(private_pem),
+        repositories=["illospace/illospace"],
+    )
+
+    assert vars(received_inputs[0]) == {
+        "app_id": "123",
+        "client_id": "Iv23.client",
+        "default_installation_id": "456",
+        "private_key_sha256": hashlib.sha256(
+            private_pem.strip().encode("utf-8")
+        ).hexdigest(),
     }
 
 

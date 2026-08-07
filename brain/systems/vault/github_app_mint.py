@@ -18,6 +18,7 @@ from brain.systems.cortex.project_context.github import (
     _headers,
 )
 from brain.systems.vault.installation_resolver import (
+    RepositoryInstallationResolverInput,
     repository_installation_resolver,
 )
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
@@ -392,10 +393,14 @@ async def async_mint_installation_token(
     current = _utc_datetime(None)
     app_jwt = _build_app_jwt(cred, now=current)
     resolved_repositories = await repository_installation_resolver.resolve_many(
-        cred,
+        RepositoryInstallationResolverInput(
+            app_id=cred.app_id,
+            client_id=cred.client_id,
+            default_installation_id=cred.installation_id,
+            private_key_sha256=_private_key_sha256(cred),
+        ),
         repositories=repositories,
         app_jwt=app_jwt,
-        private_key_sha256=_private_key_sha256(cred),
     )
     installation_ids = {
         resolved.installation_id for resolved in resolved_repositories
@@ -411,7 +416,9 @@ async def async_mint_installation_token(
     minted = await _mint_for_installation(
         cred,
         installation_id=installation_ids.pop(),
-        repositories=[resolved.repository for resolved in resolved_repositories],
+        repositories=[
+            resolved.repository_name for resolved in resolved_repositories
+        ],
         scope_repositories=[
             resolved.repository_slug for resolved in resolved_repositories
         ],
