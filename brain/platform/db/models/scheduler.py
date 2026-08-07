@@ -42,7 +42,7 @@ __all__ = [
 
 
 class SchedulerAlertLatch(Base):
-    """One durable scheduler-global alert latch."""
+    """One durable scheduler-global, duration-aware alert latch."""
 
     __tablename__ = "scheduler_alert_latches"
 
@@ -50,6 +50,14 @@ class SchedulerAlertLatch(Base):
     alerted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+    )
+    freeze_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    next_alert_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 
