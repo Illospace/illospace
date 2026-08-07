@@ -639,12 +639,10 @@ async def test_create_github_issue_uses_minted_github_app_project_binding(
 ):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers.github import _handle_create_github_issue
-    from brain.systems.vault import github_app_mint
+    from brain.systems.vault import github_app_mint, installation_resolver
 
-    github_app_mint._TOKEN_CACHE.clear()
-    github_app_mint._MINT_LOCKS.clear()
-    github_app_mint._INSTALLATION_CACHE.clear()
-    github_app_mint._INSTALLATION_LOCKS.clear()
+    github_app_mint.reset_cache()
+    installation_resolver.repository_installation_resolver.reset()
     app_blob = json.dumps({
         "app_id": "123",
         "client_id": "Iv23.client",
@@ -667,6 +665,10 @@ async def test_create_github_issue_uses_minted_github_app_project_binding(
     client = _MockGitHubClient()
     monkeypatch.setattr(
         "brain.systems.vault.github_app_mint.async_http_client",
+        lambda **_kwargs: client,
+    )
+    monkeypatch.setattr(
+        "brain.systems.vault.installation_resolver.async_http_client",
         lambda **_kwargs: client,
     )
     monkeypatch.setattr(

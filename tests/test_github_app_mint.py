@@ -12,6 +12,7 @@ from jose import jwt
 
 from brain.systems.cortex.project_context.github import GITHUB_API_BASE, GitHubConnectorError
 from brain.systems.vault import github_app_mint as mint
+from brain.systems.vault import installation_resolver
 from brain.systems.vault.github_app_mint import (
     GitHubAppCredential,
     _build_app_jwt,
@@ -25,15 +26,11 @@ NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
 
 @pytest.fixture(autouse=True)
 def clear_mint_cache():
-    mint._TOKEN_CACHE.clear()
-    mint._MINT_LOCKS.clear()
-    mint._INSTALLATION_CACHE.clear()
-    mint._INSTALLATION_LOCKS.clear()
+    mint.reset_cache()
+    installation_resolver.repository_installation_resolver.reset()
     yield
-    mint._TOKEN_CACHE.clear()
-    mint._MINT_LOCKS.clear()
-    mint._INSTALLATION_CACHE.clear()
-    mint._INSTALLATION_LOCKS.clear()
+    mint.reset_cache()
+    installation_resolver.repository_installation_resolver.reset()
 
 
 @pytest.fixture
@@ -105,7 +102,17 @@ def _patch_http(monkeypatch, responses: list[httpx.Response], *, delay: float = 
     requests: list[dict] = []
     client = _HTTPClient(responses, requests, delay=delay)
     monkeypatch.setattr(mint, "async_http_client", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        installation_resolver,
+        "async_http_client",
+        lambda **_kwargs: client,
+    )
     return requests
+
+
+def _patch_now(monkeypatch, clock) -> None:
+    monkeypatch.setattr(mint, "_now", clock)
+    monkeypatch.setattr(installation_resolver, "_now", clock)
 
 
 def _decode(token: str, public_pem: str) -> dict:
@@ -179,7 +186,7 @@ async def test_mint_discovers_repository_installation_before_exchange(
     rsa_keypair,
 ):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
@@ -206,12 +213,26 @@ async def test_mint_discovers_repository_installation_before_exchange(
 
 
 @pytest.mark.asyncio
+async def test_mint_requires_canonical_repository_slugs(monkeypatch, rsa_keypair):
+    private_pem, _public_pem = rsa_keypair
+    requests = _patch_http(monkeypatch, [])
+
+    with pytest.raises(RuntimeSecretUnavailable, match="owner/repository"):
+        await async_mint_installation_token(
+            _blob(private_pem),
+            repositories=["uwear-backend"],
+        )
+
+    assert requests == []
+
+
+@pytest.mark.asyncio
 async def test_mint_falls_back_to_stored_installation_and_caches_the_resolution(
     monkeypatch,
     rsa_keypair,
 ):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
@@ -257,7 +278,7 @@ async def test_mint_does_not_fallback_to_stored_installation_for_another_owner(
     rsa_keypair,
 ):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
@@ -287,19 +308,17 @@ async def test_mint_does_not_fallback_to_stored_installation_for_another_owner(
 
 
 @pytest.mark.asyncio
-async def test_mint_splits_repositories_across_installations(
+async def test_mint_rejects_repositories_across_installations_before_exchange(
     monkeypatch,
     rsa_keypair,
 ):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
             _installation_response(111),
             _installation_response(222),
-            _token_response("first-token", NOW + timedelta(hours=1)),
-            _token_response("second-token", NOW + timedelta(hours=1)),
         ],
     )
 
@@ -311,14 +330,7 @@ async def test_mint_splits_repositories_across_installations(
         )
 
     exchanges = [request for request in requests if request["method"] == "POST"]
-    assert [request["url"] for request in exchanges] == [
-        f"{GITHUB_API_BASE}/app/installations/111/access_tokens",
-        f"{GITHUB_API_BASE}/app/installations/222/access_tokens",
-    ]
-    assert [request["json"]["repositories"] for request in exchanges] == [
-        ["backend"],
-        ["frontend"],
-    ]
+    assert exchanges == []
 
 
 @pytest.mark.asyncio
@@ -327,7 +339,7 @@ async def test_repository_installation_discovery_is_cached_across_token_scopes(
     rsa_keypair,
 ):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
@@ -364,7 +376,7 @@ async def test_repository_installation_cache_misses_after_pem_rotation(
         serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption(),
     ).decode("ascii")
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
@@ -401,49 +413,68 @@ async def test_repository_installation_cache_misses_after_pem_rotation(
 async def test_mint_cache_reuses_until_expiry_window_then_remints(monkeypatch, rsa_keypair):
     private_pem, _public_pem = rsa_keypair
     current = {"now": NOW}
-    monkeypatch.setattr(mint, "_now", lambda: current["now"])
+    _patch_now(monkeypatch, lambda: current["now"])
     requests = _patch_http(
         monkeypatch,
         [
+            _installation_response(456),
             _token_response("token-1", NOW + timedelta(hours=1)),
+            _installation_response(456),
             _token_response("token-2", NOW + timedelta(hours=2)),
         ],
     )
     blob = _blob(private_pem)
 
-    assert await async_mint_installation_token(blob, repositories=["uwear-backend"]) == "token-1"
-    assert await async_mint_installation_token(blob, repositories=["uwear-backend"]) == "token-1"
-    assert len(requests) == 1
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["uwear-ai/uwear-backend"],
+    ) == "token-1"
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["uwear-ai/uwear-backend"],
+    ) == "token-1"
+    assert len(requests) == 2
 
     current["now"] = NOW + timedelta(minutes=56)
-    assert await async_mint_installation_token(blob, repositories=["uwear-backend"]) == "token-2"
-    assert len(requests) == 2
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["uwear-ai/uwear-backend"],
+    ) == "token-2"
+    assert len(requests) == 4
 
 
 @pytest.mark.asyncio
 async def test_mint_cache_separates_repositories_and_permissions(monkeypatch, rsa_keypair):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
+            _installation_response(456),
             _token_response("issues-token", NOW + timedelta(hours=1)),
+            _installation_response(456),
             _token_response("other-repo-token", NOW + timedelta(hours=1)),
             _token_response("metadata-token", NOW + timedelta(hours=1)),
         ],
     )
     blob = _blob(private_pem)
 
-    assert await async_mint_installation_token(blob, repositories=["uwear-backend"]) == "issues-token"
-    assert await async_mint_installation_token(blob, repositories=["uwear-mobile"]) == "other-repo-token"
     assert await async_mint_installation_token(
         blob,
-        repositories=["uwear-backend"],
+        repositories=["uwear-ai/uwear-backend"],
+    ) == "issues-token"
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["uwear-ai/uwear-mobile"],
+    ) == "other-repo-token"
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["uwear-ai/uwear-backend"],
         permissions={"metadata": "read"},
     ) == "metadata-token"
 
     default_scope = {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"}
-    assert [request["json"] for request in requests] == [
+    assert [request["json"] for request in requests if request["method"] == "POST"] == [
         {"repositories": ["uwear-backend"], "permissions": default_scope},
         {"repositories": ["uwear-mobile"], "permissions": default_scope},
         {"repositories": ["uwear-backend"], "permissions": {"metadata": "read"}},
@@ -456,10 +487,11 @@ async def test_mint_falls_back_to_read_only_pull_requests_for_older_installation
     rsa_keypair,
 ):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
+            _installation_response(456),
             httpx.Response(422, json={"message": "Validation Failed"}),
             _token_response("read-only-pr-token", NOW + timedelta(hours=1)),
         ],
@@ -468,11 +500,12 @@ async def test_mint_falls_back_to_read_only_pull_requests_for_older_installation
 
     token = await async_mint_installation_token(
         blob,
-        repositories=["uwear-backend"],
+        repositories=["uwear-ai/uwear-backend"],
     )
 
     assert token == "read-only-pr-token"
-    assert [request["json"]["permissions"]["pull_requests"] for request in requests] == [
+    exchanges = [request for request in requests if request["method"] == "POST"]
+    assert [request["json"]["permissions"]["pull_requests"] for request in exchanges] == [
         "write",
         "read",
     ]
@@ -481,21 +514,27 @@ async def test_mint_falls_back_to_read_only_pull_requests_for_older_installation
 @pytest.mark.asyncio
 async def test_concurrent_mint_calls_share_one_http_exchange(monkeypatch, rsa_keypair):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
-        [_token_response("shared-token", NOW + timedelta(hours=1))],
+        [
+            _installation_response(456),
+            _token_response("shared-token", NOW + timedelta(hours=1)),
+        ],
         delay=0.01,
     )
     blob = _blob(private_pem)
 
     tokens = await asyncio.gather(*[
-        async_mint_installation_token(blob, repositories=["uwear-backend"])
+        async_mint_installation_token(
+            blob,
+            repositories=["uwear-ai/uwear-backend"],
+        )
         for _ in range(8)
     ])
 
     assert tokens == ["shared-token"] * 8
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio
@@ -507,18 +546,26 @@ async def test_pem_rotation_misses_cache(monkeypatch, rsa_keypair):
         serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption(),
     ).decode("ascii")
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
         [
+            _installation_response(456),
             _token_response("token-before-rotation", NOW + timedelta(hours=1)),
+            _installation_response(456),
             _token_response("token-after-rotation", NOW + timedelta(hours=1)),
         ],
     )
 
-    assert await async_mint_installation_token(_blob(first_private_pem), repositories=["uwear-backend"]) == "token-before-rotation"
-    assert await async_mint_installation_token(_blob(second_private_pem), repositories=["uwear-backend"]) == "token-after-rotation"
-    assert len(requests) == 2
+    assert await async_mint_installation_token(
+        _blob(first_private_pem),
+        repositories=["uwear-ai/uwear-backend"],
+    ) == "token-before-rotation"
+    assert await async_mint_installation_token(
+        _blob(second_private_pem),
+        repositories=["uwear-ai/uwear-backend"],
+    ) == "token-after-rotation"
+    assert len(requests) == 4
 
 
 def test_from_blob_fails_closed_without_echoing_bad_secret_values():
@@ -579,14 +626,20 @@ async def test_exchange_errors_are_sanitized(monkeypatch, rsa_keypair, status_co
 @pytest.mark.asyncio
 async def test_mint_does_not_log_pem_jwt_or_minted_token(monkeypatch, caplog, rsa_keypair):
     private_pem, _public_pem = rsa_keypair
-    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    _patch_now(monkeypatch, lambda: NOW)
     requests = _patch_http(
         monkeypatch,
-        [_token_response("minted-token-secret", NOW + timedelta(hours=1))],
+        [
+            _installation_response(456),
+            _token_response("minted-token-secret", NOW + timedelta(hours=1)),
+        ],
     )
 
     with caplog.at_level("DEBUG"):
-        token = await async_mint_installation_token(_blob(private_pem), repositories=["uwear-backend"])
+        token = await async_mint_installation_token(
+            _blob(private_pem),
+            repositories=["uwear-ai/uwear-backend"],
+        )
 
     app_jwt = requests[0]["headers"]["Authorization"].removeprefix("Bearer ")
     assert token == "minted-token-secret"
