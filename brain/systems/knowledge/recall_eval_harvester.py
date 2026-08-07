@@ -17,7 +17,7 @@ to read one and does not introduce a schema change.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -53,7 +53,6 @@ _TERMINAL_RUN_STATUSES = (
     *TERMINAL_RUN_STATUS_VALUES,
     *LEGACY_AGENT_RUN_STATUS_VALUES,
 )
-_NON_GITHUB_KNOWLEDGE_SOURCES = ("slack", "memory")
 
 
 @dataclass(frozen=True)
@@ -143,6 +142,46 @@ def _github_evidence(item: KnowledgeItem) -> tuple[EvidencePointer, ...]:
     return tuple(pointers)
 
 
+def _single_item_evidence(item: KnowledgeItem) -> tuple[EvidencePointer, ...]:
+    return (
+        EvidencePointer(source=item.source, source_ref=item.source_ref),
+    )
+
+
+@dataclass(frozen=True)
+class _KnowledgeItemSource:
+    source: str
+    candidate_source: str
+    extra_predicates: tuple[Any, ...]
+    evidence_builder: Callable[[KnowledgeItem], tuple[EvidencePointer, ...]]
+
+
+# Exclude skills: connectors/skills.py writes global rows without org scope.
+_HARVESTED_KNOWLEDGE_ITEM_SOURCES = (
+    _KnowledgeItemSource(
+        source="github",
+        candidate_source="closed_github_issue",
+        extra_predicates=(
+            KnowledgeItem.kind == "issue",
+            KnowledgeItem.extra["state"].as_string() == "closed",
+        ),
+        evidence_builder=_github_evidence,
+    ),
+    _KnowledgeItemSource(
+        source="slack",
+        candidate_source="slack_knowledge_item",
+        extra_predicates=(),
+        evidence_builder=_single_item_evidence,
+    ),
+    _KnowledgeItemSource(
+        source="memory",
+        candidate_source="memory_knowledge_item",
+        extra_predicates=(),
+        evidence_builder=_single_item_evidence,
+    ),
+)
+
+
 def _knowledge_item_question(item: KnowledgeItem) -> str:
     extra = item.extra if isinstance(item.extra, Mapping) else {}
     distillation = extra.get("distillation")
@@ -161,6 +200,52 @@ def _looks_like_question(value: str) -> bool:
     )
 
 
+async def _harvest_knowledge_item_candidates(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    limit: int,
+    source: _KnowledgeItemSource,
+) -> list[KnowledgeRecallCandidate]:
+    items = list(
+        (
+            await session.scalars(
+                select(KnowledgeItem)
+                .where(
+                    KnowledgeItem.source == source.source,
+                    KnowledgeItem.archived_at.is_(None),
+                    KnowledgeItem.extra["org_id"].as_string() == org_id,
+                    *source.extra_predicates,
+                )
+                .order_by(
+                    KnowledgeItem.source_updated_at.desc(),
+                    KnowledgeItem.id.desc(),
+                )
+                .limit(limit)
+            )
+        ).all()
+    )
+    candidates: list[KnowledgeRecallCandidate] = []
+    for item in items:
+        question = _knowledge_item_question(item)
+        if not question:
+            continue
+        candidates.append(
+            KnowledgeRecallCandidate(
+                candidate_id=f"knowledge-item:{item.source_ref}",
+                question=question,
+                candidate_source=source.candidate_source,
+                acceptable_evidence=source.evidence_builder(item),
+                ground_truth_status="provisional",
+                context={
+                    "title": item.title,
+                    "resolution": item.resolution,
+                },
+            )
+        )
+    return candidates
+
+
 async def harvest_knowledge_recall_candidates(
     session: AsyncSession,
     *,
@@ -175,44 +260,6 @@ async def harvest_knowledge_recall_candidates(
         raise ValueError("org_id is required")
     limit = max(1, min(int(limit_per_source), 200))
 
-    github_rows = list(
-        (
-            await session.scalars(
-                select(KnowledgeItem)
-                .where(
-                    KnowledgeItem.source == "github",
-                    KnowledgeItem.kind == "issue",
-                    KnowledgeItem.archived_at.is_(None),
-                    KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
-                    KnowledgeItem.extra["state"].as_string() == "closed",
-                )
-                .order_by(
-                    KnowledgeItem.source_updated_at.desc(),
-                    KnowledgeItem.id.desc(),
-                )
-                .limit(limit)
-            )
-        ).all()
-    )
-    non_github_rows: dict[str, list[KnowledgeItem]] = {}
-    for source in _NON_GITHUB_KNOWLEDGE_SOURCES:
-        non_github_rows[source] = list(
-            (
-                await session.scalars(
-                    select(KnowledgeItem)
-                    .where(
-                        KnowledgeItem.source == source,
-                        KnowledgeItem.archived_at.is_(None),
-                        KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
-                    )
-                    .order_by(
-                        KnowledgeItem.source_updated_at.desc(),
-                        KnowledgeItem.id.desc(),
-                    )
-                    .limit(limit)
-                )
-            ).all()
-        )
     run_rows = list(
         (
             await session.scalars(
@@ -228,46 +275,15 @@ async def harvest_knowledge_recall_candidates(
     )
 
     candidates: list[KnowledgeRecallCandidate] = []
-    for item in github_rows:
-        question = _knowledge_item_question(item)
-        if not question:
-            continue
-        candidates.append(
-            KnowledgeRecallCandidate(
-                candidate_id=f"knowledge-item:{item.source_ref}",
-                question=question,
-                candidate_source="closed_github_issue",
-                acceptable_evidence=_github_evidence(item),
-                ground_truth_status="provisional",
-                context={
-                    "title": item.title,
-                    "resolution": item.resolution,
-                },
+    for source in _HARVESTED_KNOWLEDGE_ITEM_SOURCES:
+        candidates.extend(
+            await _harvest_knowledge_item_candidates(
+                session,
+                org_id=clean_org_id,
+                limit=limit,
+                source=source,
             )
         )
-    for source, items in non_github_rows.items():
-        for item in items:
-            question = _knowledge_item_question(item)
-            if not question:
-                continue
-            candidates.append(
-                KnowledgeRecallCandidate(
-                    candidate_id=f"knowledge-item:{item.source_ref}",
-                    question=question,
-                    candidate_source=f"{source}_knowledge_item",
-                    acceptable_evidence=(
-                        EvidencePointer(
-                            source=item.source,
-                            source_ref=item.source_ref,
-                        ),
-                    ),
-                    ground_truth_status="provisional",
-                    context={
-                        "title": item.title,
-                        "resolution": item.resolution,
-                    },
-                )
-            )
     run_candidates = [
         KnowledgeRecallCandidate(
             candidate_id=f"agent-run:{run.id}",

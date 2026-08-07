@@ -1403,21 +1403,50 @@ async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_revi
         ],
     }
     issue.resolution = "Resolved by merged PR Illospace/illospace#607"
-    knowledge_session.add(issue)
-    knowledge_session.add(
-        AgentRunRow(
-            id=44,
-            org_id=_ORG_ID,
-            thread_id="thread-44",
-            profile="default",
-            recipe="fast",
-            status="blocked",
-            input_message="Why did the deploy lose all AgentRun capacity?",
-            target_ref={},
-            workspace_ref={},
-            model_policy={},
-            metadata_={},
-        )
+    other_org_issue = _item(
+        587,
+        "github:OtherOrg/other-repo#587",
+        "Why did another org lose capacity?",
+    )
+    other_org_issue.extra = {
+        "org_id": "22222222-2222-4222-8222-222222222222",
+        "state": "closed",
+    }
+    archived_issue = _item(
+        588,
+        "github:Illospace/illospace#588",
+        "Why did the archived issue lose capacity?",
+    )
+    archived_issue.extra = {"org_id": _ORG_ID, "state": "closed"}
+    archived_issue.archived_at = datetime(2026, 7, 31, tzinfo=timezone.utc)
+    matching_run = AgentRunRow(
+        id=44,
+        org_id=_ORG_ID,
+        thread_id="thread-44",
+        profile="default",
+        recipe="fast",
+        status="blocked",
+        input_message="Why did the deploy lose all AgentRun capacity?",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+    )
+    other_org_run = AgentRunRow(
+        id=45,
+        org_id="22222222-2222-4222-8222-222222222222",
+        thread_id="thread-45",
+        profile="default",
+        recipe="fast",
+        status="blocked",
+        input_message="Why did another org lose all AgentRun capacity?",
+        target_ref={},
+        workspace_ref={},
+        model_policy={},
+        metadata_={},
+    )
+    knowledge_session.add_all(
+        [issue, other_org_issue, archived_issue, matching_run, other_org_run]
     )
     await knowledge_session.flush()
 
@@ -1459,6 +1488,14 @@ async def test_harvester_uses_indexed_github_provenance_and_labels_runs_for_revi
     assert run_candidate["question"] == "Why did the deploy lose all AgentRun capacity?"
     assert run_candidate["acceptable_evidence"] == []
     assert run_candidate["ground_truth_status"] == "needs_labeling"
+    excluded_candidate_ids = {
+        "knowledge-item:github:OtherOrg/other-repo#587",
+        "knowledge-item:github:Illospace/illospace#588",
+        "agent-run:45",
+    }
+    assert excluded_candidate_ids.isdisjoint(
+        candidate["candidate_id"] for candidate in payload["candidates"]
+    )
 
 
 async def test_harvester_harvests_org_scoped_non_github_evidence(
