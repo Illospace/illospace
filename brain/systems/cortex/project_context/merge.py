@@ -5,7 +5,7 @@ import copy
 import json
 from typing import Any
 
-from brain.systems.cortex.project_context.github import parse_github_repo_slug
+from brain.contracts.github import parse_github_repo_slug
 
 
 def project_resource_identity(resource: dict[str, Any]) -> str:

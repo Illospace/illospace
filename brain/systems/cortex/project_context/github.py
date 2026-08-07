@@ -15,6 +15,7 @@ from urllib.parse import quote
 import httpx
 
 from brain.contracts.github import GitHubConnectorError
+from brain.contracts.github import parse_github_repo_slug as _parse_github_repo_slug
 from brain.kernel.common.pagination import InvalidPageToken, decode_page_token, encode_page_token
 from brain.platform.async_io import async_http_client, sync_http_client
 
@@ -109,38 +110,6 @@ class GithubIssueClosure:
     closed_at: datetime | None
     closed_by: str | None
     fixing_pull_requests: tuple[GithubFixingPullRequest, ...]
-
-
-# The prefixes that mark a value as an explicit GitHub reference. Stated once: the
-# same list decides whether the origin is trusted AND what gets stripped, so the two
-# can never drift apart.
-_GITHUB_PREFIX_RE = re.compile(
-    r"^(?:git@github\.com:|https?://github\.com/|github://|github\.com/)",
-    flags=re.IGNORECASE,
-)
-
-
-def parse_github_repo_slug(value: str) -> str | None:
-    slug = (value or "").strip()
-    if not slug:
-        return None
-    stripped = _GITHUB_PREFIX_RE.sub("", slug, count=1)
-    has_github_prefix = stripped != slug
-    slug = re.sub(r"[?#].*$", "", stripped)
-    if not has_github_prefix:
-        if slug.startswith("/") or len(slug.strip("/").split("/")) != 2:
-            return None
-    slug = slug.strip("/")
-    parts = [part for part in slug.split("/") if part]
-    if len(parts) < 2:
-        return None
-    owner = parts[0]
-    repo = re.sub(r"\.git$", "", parts[1], flags=re.IGNORECASE)
-    if not re.fullmatch(r"[A-Za-z0-9-]+", owner):
-        return None
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", repo):
-        return None
-    return f"{owner}/{repo}"
 
 
 def _headers(token: str | None = None) -> dict[str, str]:
@@ -1668,7 +1637,7 @@ def _graphql_parent_reference(data: Any) -> tuple[str, int] | None:
     if parent is None:
         return None
     repository = parent.get("repository") if isinstance(parent, dict) else None
-    parent_slug = parse_github_repo_slug(
+    parent_slug = _parse_github_repo_slug(
         str(repository.get("nameWithOwner") or "") if isinstance(repository, dict) else ""
     )
     parent_number = parent.get("number") if isinstance(parent, dict) else None
@@ -1778,7 +1747,7 @@ def _sub_issue_repository_slug(issue: dict[str, Any]) -> str | None:
             value,
             flags=re.IGNORECASE,
         )
-        parsed = parse_github_repo_slug(api_slug)
+        parsed = _parse_github_repo_slug(api_slug)
         if parsed:
             return parsed
     return None
@@ -1936,7 +1905,7 @@ async def async_get_repo_issue_parent(
                 if exc.status_code != 404:
                     raise
             if isinstance(parent, dict):
-                parent_slug = parse_github_repo_slug(str(parent.get("html_url") or ""))
+                parent_slug = _parse_github_repo_slug(str(parent.get("html_url") or ""))
                 parent_payload = _issue_payload(parent)
                 parent_payload["repo"] = parent_slug
     return {
@@ -2659,7 +2628,7 @@ def search_repos(query: str, *, token: str | None = None) -> dict[str, Any]:
     if not trimmed:
         raise GitHubConnectorError(status_code=422, message="Search query is required.")
 
-    slug = parse_github_repo_slug(trimmed)
+    slug = _parse_github_repo_slug(trimmed)
     if slug:
         token_candidates = [token, None] if token else [None]
         first_error: GitHubConnectorError | None = None
@@ -2702,7 +2671,7 @@ async def async_search_repos(query: str, *, token: str | None = None) -> dict[st
     if not trimmed:
         raise GitHubConnectorError(status_code=422, message="Search query is required.")
 
-    slug = parse_github_repo_slug(trimmed)
+    slug = _parse_github_repo_slug(trimmed)
     if slug:
         token_candidates = [token, None] if token else [None]
         first_error: GitHubConnectorError | None = None

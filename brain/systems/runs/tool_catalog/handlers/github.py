@@ -7,6 +7,7 @@ import json
 import re
 from typing import Any, Hashable, Mapping
 
+from brain.contracts.github import parse_github_repo_slug
 from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
@@ -29,7 +30,6 @@ from brain.systems.cortex.project_context.github import (
     async_list_repo_sub_issues,
     async_remove_repo_sub_issue,
     async_update_repo_issue,
-    parse_github_repo_slug,
 )
 from brain.systems.cortex.project_context.github_promotion import (
     PROMOTION_PULL_REQUEST_POLICY,

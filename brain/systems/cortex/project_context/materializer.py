@@ -11,10 +11,10 @@ import subprocess
 import tempfile
 from typing import Any
 
+from brain.contracts.github import parse_github_repo_slug
 from brain.platform.async_io import check_output_sync, run_subprocess_sync
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.cortex.project_context.drafts import load_draft_metadata, sync_draft_from_root
 from brain.systems.cortex.project_context.identity import durable_project_id_from_context
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope

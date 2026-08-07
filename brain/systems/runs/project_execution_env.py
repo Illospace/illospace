@@ -145,7 +145,7 @@ def _canonical_project_token_slug(value: object, *, require_repo_like: bool = Fa
     if not raw:
         return None
     try:
-        from brain.systems.cortex.project_context.github import parse_github_repo_slug
+        from brain.contracts.github import parse_github_repo_slug
 
         github_slug = parse_github_repo_slug(raw)
     except Exception:

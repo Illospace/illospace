@@ -14,12 +14,12 @@ from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db
 from brain.app.api.routers.cortex._helpers import UPLOAD_DIR, _caller_is_service_principal
 from brain.app.api.routers.cortex._router import router
+from brain.contracts.github import parse_github_repo_slug
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
     async_connect_with_token,
     async_get_repo_by_slug,
     async_search_repos,
-    parse_github_repo_slug,
 )
 from brain.systems.cortex.project_context.browser import (
     project_file_blob,
