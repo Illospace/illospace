@@ -241,6 +241,8 @@ services:
       ILLO_SELF_UPDATE_STATUS_FILE: /data/private/self-update/status.json
       ILLO_SELF_UPDATE_HEARTBEAT_FILE: /data/private/self-update/heartbeat.json
       ILLO_SELF_UPDATE_LOG_PATH: /data/private/logs/illo-self-update.log
+      ILLO_AUTO_UPDATE_ENABLED: ${ILLO_AUTO_UPDATE_ENABLED:-1}
+      ILLO_AUTO_UPDATE_POLL_SECONDS: ${ILLO_AUTO_UPDATE_POLL_SECONDS:-300}
       ILLO_RUNTIME_SERVICES_REQUEST_FILE: /data/private/runtime-services/request.json
       ILLO_RUNTIME_SERVICES_STATUS_FILE: /data/private/runtime-services/status.json
       ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/runtime-services/heartbeat.json

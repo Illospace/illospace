@@ -103,14 +103,15 @@ deadman can see that, and it already alerts.
 
 ## Next Agent Prompt
 
-Slice 1 is complete in the worktree. The overdue monitor now claims a bounded,
-durable self-heal attempt before it writes the existing runtime-services queue;
-queue-busy claims are refunded, recovery resets the episode, and Slack reports
-attempts, exhausted escalation, and recovery. Migration 0056 adds the atomic
-attempt counter. Focused Slice 1 tests pass (`154 passed, 3 skipped`).
+Slices 1 and 2 are complete in the worktree. The overdue monitor uses a durable,
+bounded self-heal claim before the existing runtime-services writer, and the
+updater's existing two-second loop now performs a five-minute, 60-second-bounded
+origin/main poll. It queues the normal update request only for a fast-forward,
+and shares the Python writer's start lock. The focused auto-update and deploy
+tests pass (`89 passed`).
 
-Next: implement Slice 2 in `deploy/scripts/self-update-daemon.sh`. Keep the
-existing update and upgrade flow unchanged. Add time-bounded origin polling to
-the current two-second loop, preserve all three request queues, add Compose
-defaults, and use the deploy-script test harness for ahead, running, and fetch
-failure cases.
+Next: implement Slice 3. Add an overdue-lag scheduler CLI healthcheck and a
+scheduler-only Compose healthcheck. Add the host watchdog check and systemd
+timer installer without any teardown or `--force-recreate` path. Do not add a
+worker healthcheck unless a cheap truthful signal is found; the current worker
+lifecycle phase is not one.
