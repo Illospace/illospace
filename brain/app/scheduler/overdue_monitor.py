@@ -30,7 +30,6 @@ from brain.app.scheduler.overdue_alert_state import (
     claim_scheduler_self_heal,
     claim_scheduler_overdue_alert,
     release_scheduler_overdue_alert,
-    release_scheduler_self_heal,
     release_scheduler_self_heal_claim,
 )
 from brain.app.scheduler.read_models import (
@@ -38,6 +37,7 @@ from brain.app.scheduler.read_models import (
     async_scheduler_overdue_candidates,
 )
 from brain.kernel.common.time import assume_utc
+from brain.platform.db.models.scheduler import SchedulerAlertLatch
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.slack_delivery import (
     FailureAlertPresentation,
@@ -76,13 +76,71 @@ AlertDelivery = Callable[..., Awaitable[None]]
 AlertClaim = Callable[..., Awaitable[bool]]
 AlertRelease = Callable[[], Awaitable[SchedulerOverdueAlertState | None]]
 SelfHealClaim = Callable[..., Awaitable[SchedulerSelfHealState]]
-SelfHealRelease = Callable[[], Awaitable[None]]
 SelfHealClaimRelease = Callable[..., Awaitable[None]]
 RuntimeServicesRestart = Callable[..., Awaitable[bool]]
+FreezeConfirmation = Callable[..., Awaitable[bool]]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _candidates_past_threshold(
+    candidates: tuple[SchedulerOverdueCandidate, ...],
+    *,
+    now: datetime,
+    overdue_after: timedelta,
+) -> tuple[SchedulerOverdueCandidate, ...]:
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.lag_seconds_at(now) > overdue_after.total_seconds()
+    )
+
+
+def _freeze_started_at(
+    candidates: tuple[SchedulerOverdueCandidate, ...],
+    *,
+    overdue_after: timedelta,
+) -> datetime:
+    return min(
+        assume_utc(candidate.next_run_at) + overdue_after
+        for candidate in candidates
+    )
+
+
+async def _async_scheduler_freeze_is_current(
+    *,
+    now: datetime,
+    overdue_after: timedelta,
+    freeze_started_at: datetime | None = None,
+) -> bool:
+    """Confirm overdue work and, when provided, its durable episode."""
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    async with UnitOfWork() as uow:
+        candidates = await async_scheduler_overdue_candidates(uow.session, now=now)
+        latch_freeze_started_at = None
+        if freeze_started_at is not None:
+            latch = await uow.session.get(
+                SchedulerAlertLatch,
+                SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+            )
+            latch_freeze_started_at = (
+                latch.freeze_started_at if latch is not None else None
+            )
+    overdue_candidates = _candidates_past_threshold(
+        candidates,
+        now=now,
+        overdue_after=overdue_after,
+    )
+    if freeze_started_at is None:
+        return bool(overdue_candidates)
+    return (
+        bool(overdue_candidates)
+        and latch_freeze_started_at is not None
+        and assume_utc(latch_freeze_started_at) == assume_utc(freeze_started_at)
+    )
 
 
 def _elapsed_text(*, started_at: datetime, ended_at: datetime) -> str:
@@ -152,13 +210,13 @@ class SchedulerOverdueMonitor:
         claim_alert: AlertClaim = claim_scheduler_overdue_alert,
         release_alert: AlertRelease = release_scheduler_overdue_alert,
         claim_self_heal: SelfHealClaim = claim_scheduler_self_heal,
-        release_self_heal: SelfHealRelease = release_scheduler_self_heal,
         release_self_heal_claim: SelfHealClaimRelease = (
             release_scheduler_self_heal_claim
         ),
         restart_runtime_services: RuntimeServicesRestart = (
             async_try_restart_runtime_services
         ),
+        confirm_freeze: FreezeConfirmation = _async_scheduler_freeze_is_current,
         deliver_alert: AlertDelivery = async_deliver_failure_alert,
         self_heal_after: timedelta | None = None,
         self_heal_max_attempts: int | None = None,
@@ -168,9 +226,9 @@ class SchedulerOverdueMonitor:
         self._claim_alert = claim_alert
         self._release_alert = release_alert
         self._claim_self_heal = claim_self_heal
-        self._release_self_heal = release_self_heal
         self._release_self_heal_claim = release_self_heal_claim
         self._restart_runtime_services = restart_runtime_services
+        self._confirm_freeze = confirm_freeze
         self._deliver_alert = deliver_alert
         self.self_heal_after = (
             self_heal_after
@@ -236,18 +294,31 @@ class SchedulerOverdueMonitor:
         *,
         now: datetime,
     ) -> _SchedulerOverdueCheck:
-        overdue_candidates = tuple(
-            candidate
-            for candidate in observation.candidates
-            if candidate.lag_seconds_at(now) > self.overdue_after.total_seconds()
+        overdue_candidates = _candidates_past_threshold(
+            observation.candidates,
+            now=now,
+            overdue_after=self.overdue_after,
         )
         overdue_job_keys = tuple(
             candidate.job_key for candidate in overdue_candidates
         )
         if not overdue_candidates:
+            try:
+                freeze_is_current = await self._confirm_freeze(
+                    now=now,
+                    overdue_after=self.overdue_after,
+                )
+            except Exception:  # noqa: BLE001 - preserve state on uncertainty
+                logger.exception("Failed to confirm scheduler recovery")
+                freeze_is_current = True
+            if freeze_is_current:
+                return _SchedulerOverdueCheck(
+                    overdue_job_keys=(),
+                    alert_sent=False,
+                    last_tick_at=observation.last_tick_at,
+                )
             released = await self._release_alert()
             if released is not None:
-                await self._release_self_heal()
                 await self._deliver_recovery(
                     released,
                     recovered_at=observation.last_tick_at or now,
@@ -258,9 +329,9 @@ class SchedulerOverdueMonitor:
                 alert_sent=False,
                 last_tick_at=observation.last_tick_at,
             )
-        freeze_started_at = min(
-            assume_utc(candidate.next_run_at) + self.overdue_after
-            for candidate in overdue_candidates
+        freeze_started_at = _freeze_started_at(
+            overdue_candidates,
+            overdue_after=self.overdue_after,
         )
         alert_claimed = await self._claim_alert(
             alerted_at=now,
@@ -331,6 +402,24 @@ class SchedulerOverdueMonitor:
         )
         if state.attempt is None or state.freeze_started_at is None:
             return state
+
+        try:
+            freeze_is_current = await self._confirm_freeze(
+                freeze_started_at=state.freeze_started_at,
+                now=now,
+                overdue_after=self.overdue_after,
+            )
+        except Exception:  # noqa: BLE001 - do not restart on stale evidence
+            logger.exception("Failed to confirm scheduler freeze before self-heal")
+            freeze_is_current = False
+        if not freeze_is_current:
+            await self._refund_self_heal_claim(state, attempted_at=now)
+            return SchedulerSelfHealState(
+                attempt=None,
+                attempts=max(0, state.attempts - 1),
+                exhausted=False,
+                freeze_started_at=state.freeze_started_at,
+            )
 
         try:
             queued = await self._restart_runtime_services(

@@ -302,18 +302,6 @@ async def _scheduler_self_heal_state(
     )
 
 
-async def release_scheduler_self_heal() -> None:
-    """Release all restart-attempt state after scheduler recovery."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-    async with UnitOfWork() as uow:
-        await uow.session.execute(
-            delete(SchedulerAlertLatch).where(
-                SchedulerAlertLatch.alert_key == SCHEDULER_SELF_HEAL_ALERT_KEY
-            )
-        )
-
-
 async def release_scheduler_self_heal_claim(
     *,
     attempted_at: datetime,
@@ -349,7 +337,6 @@ __all__ = [
     "claim_scheduler_overdue_alert",
     "release_scheduler_alert",
     "release_scheduler_overdue_alert",
-    "release_scheduler_self_heal",
     "release_scheduler_self_heal_claim",
     "try_claim_scheduler_overdue_alert",
     "try_claim_scheduler_self_heal",

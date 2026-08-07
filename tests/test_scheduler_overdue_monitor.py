@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.app.scheduler import overdue_monitor as overdue_monitor_module
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.overdue_alert_state import (
     SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
@@ -94,13 +95,13 @@ def _monitor(
             exhausted=False,
         )
 
-    async def release_self_heal(**_kwargs):
-        return None
+    async def confirm_freeze(**kwargs):
+        return kwargs.get("freeze_started_at") is not None
 
     kwargs.setdefault("claim_alert", latch.claim)
     kwargs.setdefault("release_alert", latch.release)
     kwargs.setdefault("claim_self_heal", no_self_heal)
-    kwargs.setdefault("release_self_heal", release_self_heal)
+    kwargs.setdefault("confirm_freeze", confirm_freeze)
     return SchedulerOverdueMonitor(**kwargs)
 
 
@@ -690,6 +691,13 @@ async def test_releasing_overdue_latch_returns_durable_self_heal_attempts(
 
     assert released is not None
     assert released.self_heal_attempts == 2
+    assert (
+        await scheduler_session.get(
+            SchedulerAlertLatch,
+            "scheduler_self_heal",
+        )
+        is not None
+    )
 
 
 async def test_overdue_monitor_queues_one_self_heal_request_and_alert():
@@ -826,9 +834,114 @@ async def test_failed_restart_write_consumes_attempt_and_preserves_escalation():
     )
 
 
-async def test_recovery_after_self_heal_resets_attempts_and_posts_one_line():
+async def test_recovered_scheduler_is_not_restarted_from_stale_observation():
+    restart_calls = []
+    refunded_attempts = []
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def claim_self_heal(**_kwargs):
+        return SchedulerSelfHealState(
+            attempt=1,
+            attempts=1,
+            exhausted=False,
+            freeze_started_at=NOW - timedelta(minutes=45),
+        )
+
+    async def confirm_freeze(**_kwargs):
+        return False
+
+    async def release_self_heal_claim(**kwargs):
+        refunded_attempts.append(kwargs)
+
+    async def restart_runtime_services(*args, **kwargs):
+        restart_calls.append((args, kwargs))
+        return True
+
+    async def deliver_alert(**_kwargs):
+        return None
+
+    monitor = _monitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        claim_self_heal=claim_self_heal,
+        confirm_freeze=confirm_freeze,
+        release_self_heal_claim=release_self_heal_claim,
+        restart_runtime_services=restart_runtime_services,
+        deliver_alert=deliver_alert,
+    )
+
+    result = await monitor._check(object(), now=NOW)
+
+    assert result.self_heal_attempt is None
+    assert restart_calls == []
+    assert refunded_attempts == [
+        {
+            "attempted_at": NOW,
+            "freeze_started_at": NOW - timedelta(minutes=45),
+            "attempt": 1,
+        }
+    ]
+
+
+async def test_self_heal_confirmation_rejects_replaced_durable_episode(
+    scheduler_session,
+    monkeypatch,
+):
+    old_episode = NOW - timedelta(minutes=45)
+    current_episode = NOW - timedelta(minutes=30)
+    scheduler_session.add(
+        SchedulerAlertLatch(
+            alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+            alerted_at=current_episode,
+            freeze_started_at=current_episode,
+            next_alert_at=NOW + timedelta(hours=1),
+        )
+    )
+    await scheduler_session.flush()
+
+    class FakeUnitOfWork:
+        session = scheduler_session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    monkeypatch.setattr(
+        overdue_monitor_module,
+        "async_scheduler_overdue_candidates",
+        candidates,
+    )
+    with patch(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        FakeUnitOfWork,
+    ):
+        stale = await overdue_monitor_module._async_scheduler_freeze_is_current(
+            freeze_started_at=old_episode,
+            now=NOW,
+            overdue_after=timedelta(minutes=15),
+        )
+        current = await overdue_monitor_module._async_scheduler_freeze_is_current(
+            freeze_started_at=current_episode,
+            now=NOW,
+            overdue_after=timedelta(minutes=15),
+        )
+
+    assert stale is False
+    assert current is True
+
+
+async def test_recovery_after_self_heal_reports_attempts_and_posts_one_line():
     deliveries = []
-    released_self_heal = 0
     alert_latch = _FakeAlertLatch()
     alert_latch.state = SchedulerOverdueAlertState(
         alerted_at=NOW - timedelta(minutes=20),
@@ -843,10 +956,6 @@ async def test_recovery_after_self_heal_resets_attempts_and_posts_one_line():
     async def liveness_checkpoint(_session):
         return NOW
 
-    async def release_self_heal():
-        nonlocal released_self_heal
-        released_self_heal += 1
-
     async def deliver_alert(**kwargs):
         deliveries.append(kwargs)
 
@@ -854,20 +963,46 @@ async def test_recovery_after_self_heal_resets_attempts_and_posts_one_line():
         alert_latch=alert_latch,
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
-        release_self_heal=release_self_heal,
         deliver_alert=deliver_alert,
     )
 
     await monitor._check(object(), now=NOW)
 
-    assert released_self_heal == 1
     assert deliveries[0]["presentation"].summary == (
         "Scheduler recovered after automatic restart, freeze 20m, attempts 1/2."
     )
 
 
-async def test_recovery_resets_attempts_even_when_slack_delivery_fails():
-    released_self_heal = 0
+async def test_stale_healthy_observation_does_not_release_current_freeze():
+    release_calls = 0
+
+    async def candidates(_session, *, now):
+        return ()
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def release_alert():
+        nonlocal release_calls
+        release_calls += 1
+        return None
+
+    async def confirm_freeze(**_kwargs):
+        return True
+
+    monitor = _monitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        release_alert=release_alert,
+        confirm_freeze=confirm_freeze,
+    )
+
+    await monitor._check(object(), now=NOW)
+
+    assert release_calls == 0
+
+
+async def test_recovery_restores_alert_when_slack_delivery_fails():
     alert_latch = _FakeAlertLatch()
     alert_latch.state = SchedulerOverdueAlertState(
         alerted_at=NOW - timedelta(minutes=20),
@@ -882,10 +1017,6 @@ async def test_recovery_resets_attempts_even_when_slack_delivery_fails():
     async def liveness_checkpoint(_session):
         return NOW
 
-    async def release_self_heal():
-        nonlocal released_self_heal
-        released_self_heal += 1
-
     async def deliver_alert(**_kwargs):
         raise RuntimeError("Slack delivery failed")
 
@@ -893,14 +1024,12 @@ async def test_recovery_resets_attempts_even_when_slack_delivery_fails():
         alert_latch=alert_latch,
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
-        release_self_heal=release_self_heal,
         deliver_alert=deliver_alert,
     )
 
     with pytest.raises(RuntimeError, match="Slack delivery failed"):
         await monitor._check(object(), now=NOW)
 
-    assert released_self_heal == 1
     assert alert_latch.claimed is True
 
 
