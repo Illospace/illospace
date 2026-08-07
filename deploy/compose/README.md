@@ -121,7 +121,7 @@ but one is absent (inert), and `4` when nothing is running (down). The split
 matters for an external watcher: `3` is the failure nothing else reports.
 `./illo deploy doctor` runs the same assertion.
 
-### Surviving a host reboot
+### Surviving a host reboot and runtime failures
 
 Per-container restart policies are not enough on their own. They are a property
 of a *container*, so anything that mutates or loses that property — an
@@ -138,9 +138,22 @@ The unit is generated per host rather than committed, because the Docker unit
 name and binary path differ (a Docker snap install has no `docker.service` at
 all). Inspect it before installing with `./illo deploy boot-unit --print`.
 
-It installs a **user** unit by default when you are not root, so it needs no
-`sudo` — user units start at boot on their own provided the account has
-lingering enabled (the installer turns it on when it can). A user unit cannot
+Install both the boot reconcile and the five-minute health watchdog with one
+command:
+
+```bash
+deploy/scripts/install-boot-unit.sh && deploy/scripts/install-watchdog-unit.sh
+```
+
+The watchdog runs `inert-stack-check.sh`, reconciles a missing stack with
+`docker compose up -d`, and restarts services that Docker marks unhealthy. It
+does not recreate running services, and it takes no action while an update is
+in flight. Its output is available in the systemd journal. Inspect the units
+before installation with `deploy/scripts/install-watchdog-unit.sh --print`.
+
+Both installers use **user** units by default when you are not root, so they
+need no `sudo`. User units start at boot on their own provided the account has
+lingering enabled (each installer turns it on when it can). A user unit cannot
 order itself after a system Docker unit, so it waits for the daemon to accept
 connections instead, bounded by `TimeoutStartSec`. Pass `--system` to install
 into `/etc/systemd/system` and order directly after the Docker unit; that path

@@ -19,6 +19,10 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.cold_start import scheduler_liveness_checkpoint
+from brain.app.scheduler.health_policy import (
+    scheduler_self_heal_after,
+    scheduler_self_heal_max_attempts,
+)
 from brain.app.scheduler.overdue_alert_state import (
     SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
     SchedulerOverdueAlertState,
@@ -33,7 +37,6 @@ from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
 )
-from brain.kernel.common.env import env_int
 from brain.kernel.common.time import assume_utc
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.slack_delivery import (
@@ -172,22 +175,12 @@ class SchedulerOverdueMonitor:
         self.self_heal_after = (
             self_heal_after
             if self_heal_after is not None
-            else timedelta(
-                minutes=env_int(
-                    "SCHEDULER_SELF_HEAL_AFTER_MINUTES",
-                    10,
-                    minimum=1,
-                )
-            )
+            else scheduler_self_heal_after()
         )
         self.self_heal_max_attempts = (
             self_heal_max_attempts
             if self_heal_max_attempts is not None
-            else env_int(
-                "SCHEDULER_SELF_HEAL_MAX_ATTEMPTS",
-                2,
-                minimum=1,
-            )
+            else scheduler_self_heal_max_attempts()
         )
 
     async def run(self) -> None:

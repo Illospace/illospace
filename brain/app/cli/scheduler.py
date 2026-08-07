@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from brain.app.scheduler.catalog import (
     async_list_scheduler_jobs,
@@ -27,8 +27,11 @@ from brain.app.scheduler.executor import (
     async_set_scheduler_job_owner_mode,
     async_set_scheduler_job_paused,
 )
+from brain.app.scheduler.health_policy import scheduler_self_heal_after
 from brain.app.scheduler.planner import async_materialize_due_runs
+from brain.app.scheduler.read_models import async_scheduler_overdue_candidates
 from brain.app.scheduler.runtime import make_lease_owner
+from brain.kernel.common.time import assume_utc
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 
@@ -56,6 +59,37 @@ async def cmd_status(args: argparse.Namespace) -> int:
         )
     _emit(snapshot)
     return 0
+
+
+async def cmd_healthcheck(args: argparse.Namespace) -> int:
+    """Report unhealthy when scheduler-owned jobs exceed the freeze threshold."""
+    now = assume_utc(_now_from_args(args) or datetime.now(timezone.utc))
+    threshold = scheduler_self_heal_after()
+    threshold_seconds = int(threshold.total_seconds())
+    async with UnitOfWork() as uow:
+        candidates = await async_scheduler_overdue_candidates(uow.session, now=now)
+    frozen = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.lag_seconds_at(now) >= threshold_seconds
+    )
+    _emit(
+        {
+            "ok": not frozen,
+            "checked_at": now.isoformat(),
+            "threshold_seconds": threshold_seconds,
+            "frozen_jobs": [
+                {
+                    "job_key": candidate.job_key,
+                    "lag_seconds": candidate.lag_seconds_at(now),
+                    "next_run_at": candidate.next_run_at.isoformat(),
+                }
+                for candidate in frozen
+            ],
+        },
+        compact=True,
+    )
+    return 1 if frozen else 0
 
 
 async def cmd_state(args: argparse.Namespace) -> int:
@@ -248,6 +282,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--recent-run-limit", type=int, default=20, help="How many recent runs to include")
     p_status.add_argument("--now", default=None, help="Optional ISO timestamp override")
     p_status.set_defaults(func=cmd_status)
+
+    p_healthcheck = sub.add_parser(
+        "healthcheck",
+        help="Exit nonzero when scheduler jobs exceed the freeze threshold",
+    )
+    p_healthcheck.add_argument(
+        "--now",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    p_healthcheck.set_defaults(func=cmd_healthcheck)
 
     p_state = sub.add_parser("state", help="Show raw scheduler jobs and runs")
     p_state.add_argument("--limit", type=int, default=20, help="How many recent runs to include")

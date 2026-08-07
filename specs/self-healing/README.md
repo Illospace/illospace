@@ -103,15 +103,13 @@ deadman can see that, and it already alerts.
 
 ## Next Agent Prompt
 
-Slices 1 and 2 are complete in the worktree. The overdue monitor uses a durable,
-bounded self-heal claim before the existing runtime-services writer, and the
-updater's existing two-second loop now performs a five-minute, 60-second-bounded
-origin/main poll. It queues the normal update request only for a fast-forward,
-and shares the Python writer's start lock. The focused auto-update and deploy
-tests pass (`89 passed`).
+All three slices are complete in the worktree. The scheduler healthcheck uses
+the same configurable overdue threshold as self-heal, and Compose applies it to
+the scheduler only. The worker has no cheap truthful signal. The five-minute
+host watchdog reconciles inert/down stacks without forced recreation, restarts
+Docker-unhealthy services, and rechecks the updater's `.running` marker before
+each mutation. The focused scheduler and deploy suite passes (`228 passed, 3
+skipped`), and `docker compose config -q` succeeds.
 
-Next: implement Slice 3. Add an overdue-lag scheduler CLI healthcheck and a
-scheduler-only Compose healthcheck. Add the host watchdog check and systemd
-timer installer without any teardown or `--force-recreate` path. Do not add a
-worker healthcheck unless a cheap truthful signal is found; the current worker
-lifecycle phase is not one.
+Next: run the final combined acceptance checks, review the complete change set,
+then archive this spec under `specs/done/`.
