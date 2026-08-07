@@ -1,8 +1,9 @@
 """Harvest candidate knowledge-recall questions from sources that exist today.
 
-Closed GitHub issue candidates are harvested from ``knowledge_items`` and carry
-provisional known-best pointers to the indexed issue and any resolving pull
-requests recorded by the connector. AgentRun candidates are harvested from old
+Indexed GitHub, Slack, and shared-memory candidates are harvested from
+``knowledge_items`` and carry provisional known-best pointers to their source
+rows. GitHub candidates also include any resolving pull requests recorded by
+the connector. AgentRun candidates are harvested from old
 ``agent_runs.input_message`` transcripts, but deliberately carry no known-best
 evidence: a curator must attach stable ``source`` + ``source_ref`` pointers
 before promoting one into the scored set.
@@ -15,6 +16,7 @@ to read one and does not introduce a schema change.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,6 +53,7 @@ _TERMINAL_RUN_STATUSES = (
     *TERMINAL_RUN_STATUS_VALUES,
     *LEGACY_AGENT_RUN_STATUS_VALUES,
 )
+_NON_GITHUB_KNOWLEDGE_SOURCES = ("slack", "memory")
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,15 @@ class KnowledgeRecallCandidateSet:
             candidate.candidate_source == "closed_github_issue"
             for candidate in self.candidates
         )
+        run_count = sum(
+            candidate.candidate_source == "agent_run_transcript"
+            for candidate in self.candidates
+        )
+        evidence_source_counts: Counter[str] = Counter()
+        for candidate in self.candidates:
+            evidence_source_counts.update(
+                {pointer.source for pointer in candidate.acceptable_evidence}
+            )
         return {
             "artifact_type": "knowledge-recall-candidates",
             "schema_version": 1,
@@ -93,10 +105,13 @@ class KnowledgeRecallCandidateSet:
             "summary": {
                 "total": len(self.candidates),
                 "closed_github_issues": github_count,
-                "agent_run_transcripts": len(self.candidates) - github_count,
+                "agent_run_transcripts": run_count,
                 "needs_ground_truth": sum(
                     candidate.ground_truth_status == "needs_labeling"
                     for candidate in self.candidates
+                ),
+                "evidence_source_counts": dict(
+                    sorted(evidence_source_counts.items())
                 ),
             },
             "org_id": self.org_id,
@@ -128,7 +143,7 @@ def _github_evidence(item: KnowledgeItem) -> tuple[EvidencePointer, ...]:
     return tuple(pointers)
 
 
-def _github_question(item: KnowledgeItem) -> str:
+def _knowledge_item_question(item: KnowledgeItem) -> str:
     extra = item.extra if isinstance(item.extra, Mapping) else {}
     distillation = extra.get("distillation")
     if isinstance(distillation, Mapping):
@@ -153,7 +168,7 @@ async def harvest_knowledge_recall_candidates(
     limit_per_source: int = 25,
     generated_at: str | None = None,
 ) -> KnowledgeRecallCandidateSet:
-    """Return reviewable candidates; only GitHub candidates have ground truth."""
+    """Return org-scoped reviewable candidates with source-backed evidence."""
 
     clean_org_id = str(org_id or "").strip()
     if not clean_org_id:
@@ -179,6 +194,25 @@ async def harvest_knowledge_recall_candidates(
             )
         ).all()
     )
+    non_github_rows: dict[str, list[KnowledgeItem]] = {}
+    for source in _NON_GITHUB_KNOWLEDGE_SOURCES:
+        non_github_rows[source] = list(
+            (
+                await session.scalars(
+                    select(KnowledgeItem)
+                    .where(
+                        KnowledgeItem.source == source,
+                        KnowledgeItem.archived_at.is_(None),
+                        KnowledgeItem.extra["org_id"].as_string() == clean_org_id,
+                    )
+                    .order_by(
+                        KnowledgeItem.source_updated_at.desc(),
+                        KnowledgeItem.id.desc(),
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        )
     run_rows = list(
         (
             await session.scalars(
@@ -195,7 +229,7 @@ async def harvest_knowledge_recall_candidates(
 
     candidates: list[KnowledgeRecallCandidate] = []
     for item in github_rows:
-        question = _github_question(item)
+        question = _knowledge_item_question(item)
         if not question:
             continue
         candidates.append(
@@ -211,6 +245,29 @@ async def harvest_knowledge_recall_candidates(
                 },
             )
         )
+    for source, items in non_github_rows.items():
+        for item in items:
+            question = _knowledge_item_question(item)
+            if not question:
+                continue
+            candidates.append(
+                KnowledgeRecallCandidate(
+                    candidate_id=f"knowledge-item:{item.source_ref}",
+                    question=question,
+                    candidate_source=f"{source}_knowledge_item",
+                    acceptable_evidence=(
+                        EvidencePointer(
+                            source=item.source,
+                            source_ref=item.source_ref,
+                        ),
+                    ),
+                    ground_truth_status="provisional",
+                    context={
+                        "title": item.title,
+                        "resolution": item.resolution,
+                    },
+                )
+            )
     run_candidates = [
         KnowledgeRecallCandidate(
             candidate_id=f"agent-run:{run.id}",
