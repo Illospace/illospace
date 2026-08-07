@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
+from brain.contracts.github import GitHubConnectorError
 from brain.kernel.common.pagination import InvalidPageToken, decode_page_token, encode_page_token
 from brain.platform.async_io import async_http_client, sync_http_client
 
@@ -80,15 +81,6 @@ query GetIssueClosingPullRequests(
   }
 }
 """.strip()
-
-
-@dataclass
-class GitHubConnectorError(Exception):
-    status_code: int
-    message: str
-
-    def __post_init__(self) -> None:
-        super().__init__(self.message)
 
 
 @dataclass(frozen=True, slots=True)

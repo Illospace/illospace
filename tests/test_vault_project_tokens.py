@@ -664,11 +664,7 @@ async def test_create_github_issue_uses_minted_github_app_project_binding(
     )
     client = _MockGitHubClient()
     monkeypatch.setattr(
-        "brain.systems.vault.github_app_mint.async_http_client",
-        lambda **_kwargs: client,
-    )
-    monkeypatch.setattr(
-        "brain.systems.vault.installation_resolver.async_http_client",
+        "brain.platform.integrations.github_app.async_http_client",
         lambda **_kwargs: client,
     )
     monkeypatch.setattr(
