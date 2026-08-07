@@ -8,15 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from jose import jwt
 
-from brain.platform.async_io import async_http_client
-from brain.systems.cortex.project_context.github import (
-    GITHUB_API_BASE,
-    GitHubConnectorError,
-    _headers,
-)
+from brain.contracts.github import GitHubConnectorError
+from brain.platform.integrations.github_app import github_app_api_client
 from brain.systems.vault.installation_resolver import (
     RepositoryInstallationResolverInput,
     repository_installation_resolver,
@@ -43,12 +38,6 @@ DEFAULT_INSTALLATION_PERMISSIONS: dict[str, str] = {
 }
 _CACHE_FRESHNESS_WINDOW = timedelta(minutes=5)
 _PEM_HASH_PREFIX_LENGTH = 16
-_MINT_STATUS_MESSAGES = {
-    401: "GitHub rejected the GitHub App JWT.",
-    403: "GitHub denied the GitHub App installation token request.",
-    404: "GitHub App installation was not found.",
-    422: "GitHub could not mint an installation token for the requested repositories or permissions.",
-}
 
 
 @dataclass(frozen=True)
@@ -95,8 +84,6 @@ class GitHubAppCredential:
 class MintedInstallationToken:
     token: str
     expires_at: datetime
-    installation_id: str
-    scope_key: str
 
 
 _TOKEN_CACHE: dict[str, MintedInstallationToken] = {}
@@ -162,25 +149,6 @@ def _build_app_jwt(
         ) from None
 
 
-def _normalize_repositories(repositories: list[str] | tuple[str, ...]) -> list[str]:
-    cleaned: list[str] = []
-    for repo in repositories:
-        name = str(repo or "").strip()
-        if not name:
-            continue
-        if "/" in name:
-            raise RuntimeSecretUnavailable(
-                "GitHub App token field 'repositories' must contain bare repository names"
-            )
-        if name not in cleaned:
-            cleaned.append(name)
-    if not cleaned:
-        raise RuntimeSecretUnavailable(
-            "GitHub App token field 'repositories' is required"
-        )
-    return cleaned
-
-
 def _normalize_permissions(permissions: dict[str, str] | None) -> dict[str, str]:
     if permissions is None:
         raise RuntimeSecretUnavailable(
@@ -201,12 +169,12 @@ def _normalize_permissions(permissions: dict[str, str] | None) -> dict[str, str]
 def _scope_key(
     cred: GitHubAppCredential,
     *,
-    installation_id: str | None = None,
+    installation_id: str,
     repositories: list[str],
     permissions: dict[str, str],
 ) -> str:
     payload = {
-        "installation_id": installation_id or cred.installation_id,
+        "installation_id": installation_id,
         "repositories": sorted(repositories),
         "permissions": sorted(permissions.items()),
         "private_key_sha256": _private_key_sha256(cred)[:_PEM_HASH_PREFIX_LENGTH],
@@ -243,94 +211,6 @@ def _cache_is_fresh(
     return minted.expires_at - now > _CACHE_FRESHNESS_WINDOW
 
 
-def _parse_expires_at(value: Any) -> datetime:
-    if not isinstance(value, str) or not value.strip():
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub installation token response was missing expires_at.",
-        )
-    try:
-        expires_at = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub installation token response had an invalid expires_at.",
-        ) from None
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return expires_at.astimezone(timezone.utc)
-
-
-def _mint_error(response: httpx.Response) -> GitHubConnectorError:
-    return GitHubConnectorError(
-        status_code=response.status_code,
-        message=_MINT_STATUS_MESSAGES.get(
-            response.status_code,
-            f"GitHub returned {response.status_code} while minting an installation token.",
-        ),
-    )
-
-
-async def _exchange_installation_token(
-    cred: GitHubAppCredential,
-    *,
-    repositories: list[str],
-    permissions: dict[str, str],
-    installation_id: str | None = None,
-    app_jwt: str | None = None,
-    now: datetime | int | float | None = None,
-) -> MintedInstallationToken:
-    clean_repositories = _normalize_repositories(repositories)
-    clean_permissions = _normalize_permissions(permissions)
-    resolved_installation_id = installation_id or cred.installation_id
-    scope_key = _scope_key(
-        cred,
-        installation_id=resolved_installation_id,
-        repositories=clean_repositories,
-        permissions=clean_permissions,
-    )
-    exchange_jwt = app_jwt or _build_app_jwt(cred, now=now)
-    path = f"/app/installations/{resolved_installation_id}/access_tokens"
-    try:
-        async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-            response = await client.request(
-                "POST",
-                f"{GITHUB_API_BASE}{path}",
-                headers=_headers(exchange_jwt),
-                json={
-                    "repositories": clean_repositories,
-                    "permissions": clean_permissions,
-                },
-            )
-    except httpx.HTTPError:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="Could not reach GitHub.",
-        ) from None
-
-    if response.status_code != 201:
-        raise _mint_error(response)
-    try:
-        payload = response.json()
-    except Exception:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub installation token response was not valid JSON.",
-        ) from None
-    token = payload.get("token") if isinstance(payload, dict) else None
-    if not isinstance(token, str) or not token.strip():
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub installation token response was missing token.",
-        )
-    return MintedInstallationToken(
-        token=token.strip(),
-        expires_at=_parse_expires_at(payload.get("expires_at")),
-        installation_id=resolved_installation_id,
-        scope_key=scope_key,
-    )
-
-
 async def _mint_for_installation(
     cred: GitHubAppCredential,
     *,
@@ -357,26 +237,34 @@ async def _mint_for_installation(
         if _cache_is_fresh(cached, now=current):
             return cached
         try:
-            minted = await _exchange_installation_token(
-                cred,
-                repositories=repositories,
-                permissions=permissions,
-                installation_id=installation_id,
-                app_jwt=app_jwt,
-                now=current,
+            token, expires_at = (
+                await github_app_api_client.create_installation_token(
+                    installation_id=installation_id,
+                    repositories=repositories,
+                    permissions=permissions,
+                    app_jwt=app_jwt,
+                )
+            )
+            minted = MintedInstallationToken(
+                token=token,
+                expires_at=expires_at,
             )
         except GitHubConnectorError as exc:
             if exc.status_code != 422 or permissions.get("pull_requests") != "write":
                 raise
             fallback_permissions = dict(permissions)
             fallback_permissions["pull_requests"] = "read"
-            minted = await _exchange_installation_token(
-                cred,
-                repositories=repositories,
-                permissions=fallback_permissions,
-                installation_id=installation_id,
-                app_jwt=app_jwt,
-                now=current,
+            token, expires_at = (
+                await github_app_api_client.create_installation_token(
+                    installation_id=installation_id,
+                    repositories=repositories,
+                    permissions=fallback_permissions,
+                    app_jwt=app_jwt,
+                )
+            )
+            minted = MintedInstallationToken(
+                token=token,
+                expires_at=expires_at,
             )
         _TOKEN_CACHE[scope_key] = minted
         return minted
@@ -434,6 +322,5 @@ __all__ = [
     "GitHubAppCredential",
     "MintedInstallationToken",
     "_build_app_jwt",
-    "_exchange_installation_token",
     "async_mint_installation_token",
 ]

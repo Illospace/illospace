@@ -6,27 +6,15 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Protocol
 
-import httpx
-
-from brain.platform.async_io import async_http_client
-from brain.systems.cortex.project_context.github import (
-    GITHUB_API_BASE,
-    GitHubConnectorError,
-    _headers,
-    parse_github_repo_slug,
-)
+from brain.contracts.github import GitHubConnectorError
+from brain.platform.integrations.github_app import github_app_api_client
+from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
 _CACHE_FRESHNESS_WINDOW = timedelta(minutes=5)
 _CACHE_LIFETIME = timedelta(hours=1)
-_DISCOVERY_STATUS_MESSAGES = {
-    401: "GitHub rejected the GitHub App JWT while finding the repository installation.",
-    403: "GitHub denied the GitHub App repository installation request.",
-    404: "GitHub App installation was not found for the repository.",
-    422: "GitHub could not find an installation for the repository.",
-}
 
 
 @dataclass(frozen=True)
@@ -48,6 +36,23 @@ class ResolvedRepositoryInstallation:
 class _CachedRepositoryInstallation:
     installation_id: str
     expires_at: datetime
+
+
+class RepositoryInstallationTransport(Protocol):
+    async def find_repository_installation(
+        self,
+        *,
+        owner: str,
+        repository: str,
+        app_jwt: str,
+    ) -> str: ...
+
+    async def get_installation_owner(
+        self,
+        *,
+        installation_id: str,
+        app_jwt: str,
+    ) -> str: ...
 
 
 def _now() -> datetime:
@@ -87,8 +92,14 @@ def _normalize_repository_slugs(
 class RepositoryInstallationResolver:
     """Own repository installation discovery, caching, and fallback policy."""
 
-    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        transport: RepositoryInstallationTransport | None = None,
+    ) -> None:
         self._clock = clock
+        self._transport = transport or github_app_api_client
         self._cache: dict[str, _CachedRepositoryInstallation] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -169,7 +180,7 @@ class RepositoryInstallationResolver:
                 assert cached is not None
                 return cached.installation_id
             try:
-                installation_id = await self._fetch_repository_installation(
+                installation_id = await self._transport.find_repository_installation(
                     owner=owner,
                     repository=repository,
                     app_jwt=app_jwt,
@@ -197,7 +208,7 @@ class RepositoryInstallationResolver:
     ) -> str:
         """Use the stored id only after GitHub confirms its account owner."""
         try:
-            fallback_owner = await self._fetch_installation_owner(
+            fallback_owner = await self._transport.get_installation_owner(
                 installation_id=resolver_input.default_installation_id,
                 app_jwt=app_jwt,
             )
@@ -235,117 +246,13 @@ class RepositoryInstallationResolver:
             and cached.expires_at - now > _CACHE_FRESHNESS_WINDOW
         )
 
-    @staticmethod
-    async def _fetch_repository_installation(
-        *,
-        owner: str,
-        repository: str,
-        app_jwt: str,
-    ) -> str:
-        path = f"/repos/{owner}/{repository}/installation"
-        try:
-            async with async_http_client(
-                timeout=httpx.Timeout(12.0, connect=5.0)
-            ) as client:
-                response = await client.request(
-                    "GET",
-                    f"{GITHUB_API_BASE}{path}",
-                    headers=_headers(app_jwt),
-                )
-        except httpx.HTTPError:
-            raise GitHubConnectorError(
-                status_code=502,
-                message=(
-                    "Could not reach GitHub while finding the repository installation."
-                ),
-            ) from None
-
-        if response.status_code != 200:
-            raise _discovery_error(response)
-        try:
-            payload = response.json()
-        except Exception:
-            raise GitHubConnectorError(
-                status_code=502,
-                message="GitHub repository installation response was not valid JSON.",
-            ) from None
-        installation_id = payload.get("id") if isinstance(payload, dict) else None
-        if (
-            installation_id is None
-            or installation_id is True
-            or installation_id is False
-            or not str(installation_id).strip()
-        ):
-            raise GitHubConnectorError(
-                status_code=502,
-                message="GitHub repository installation response was missing id.",
-            )
-        try:
-            return str(int(str(installation_id).strip()))
-        except (TypeError, ValueError):
-            raise GitHubConnectorError(
-                status_code=502,
-                message="GitHub repository installation response had an invalid id.",
-            ) from None
-
-    @staticmethod
-    async def _fetch_installation_owner(
-        *,
-        installation_id: str,
-        app_jwt: str,
-    ) -> str:
-        path = f"/app/installations/{installation_id}"
-        try:
-            async with async_http_client(
-                timeout=httpx.Timeout(12.0, connect=5.0)
-            ) as client:
-                response = await client.request(
-                    "GET",
-                    f"{GITHUB_API_BASE}{path}",
-                    headers=_headers(app_jwt),
-                )
-        except httpx.HTTPError:
-            raise GitHubConnectorError(
-                status_code=502,
-                message="Could not reach GitHub while verifying the fallback installation.",
-            ) from None
-
-        if response.status_code != 200:
-            raise _discovery_error(response)
-        try:
-            payload = response.json()
-        except Exception:
-            raise GitHubConnectorError(
-                status_code=502,
-                message="GitHub fallback installation response was not valid JSON.",
-            ) from None
-        account = payload.get("account") if isinstance(payload, dict) else None
-        owner = account.get("login") if isinstance(account, dict) else None
-        if not isinstance(owner, str) or not owner.strip():
-            raise GitHubConnectorError(
-                status_code=502,
-                message="GitHub fallback installation response was missing account login.",
-            )
-        return owner.strip()
-
-
-def _discovery_error(response: httpx.Response) -> GitHubConnectorError:
-    return GitHubConnectorError(
-        status_code=response.status_code,
-        message=_DISCOVERY_STATUS_MESSAGES.get(
-            response.status_code,
-            (
-                f"GitHub returned {response.status_code} while finding the repository "
-                "installation."
-            ),
-        ),
-    )
-
 
 repository_installation_resolver = RepositoryInstallationResolver()
 
 
 __all__ = [
+    "RepositoryInstallationResolver",
     "RepositoryInstallationResolverInput",
+    "ResolvedRepositoryInstallation",
     "repository_installation_resolver",
 ]
