@@ -511,6 +511,95 @@ async def test_runtime_services_queues_restart_request(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_system_self_heal_queues_scheduler_restart(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime, timezone
+
+    from brain.systems.runtime_settings.runtime_services import (
+        async_try_restart_runtime_services,
+    )
+
+    request_file = tmp_path / "runtime-services" / "request.json"
+    heartbeat_file = tmp_path / "runtime-services" / "heartbeat.json"
+    heartbeat_file.parent.mkdir(parents=True)
+    heartbeat_file.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv(
+        "ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE",
+        str(heartbeat_file),
+    )
+
+    queued = await async_try_restart_runtime_services(
+        ["scheduler"],
+        requested_by="scheduler-self-heal",
+    )
+
+    assert queued is True
+    payload = json.loads(request_file.read_text(encoding="utf-8"))
+    assert payload.pop("requested_at")
+    assert payload == {
+        "action": "restart",
+        "requested_by": "scheduler-self-heal",
+        "services": ["scheduler"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_services_running_file_blocks_a_second_request(
+    monkeypatch,
+    tmp_path,
+):
+    import json
+    from datetime import datetime, timezone
+
+    from brain.systems.runtime_settings.runtime_services import (
+        async_try_restart_runtime_services,
+    )
+
+    request_file = tmp_path / "runtime-services" / "request.json"
+    running_file = request_file.with_name(f"{request_file.name}.running")
+    heartbeat_file = tmp_path / "runtime-services" / "heartbeat.json"
+    heartbeat_file.parent.mkdir(parents=True)
+    running_file.write_text(
+        json.dumps({"action": "restart", "services": ["worker"]}),
+        encoding="utf-8",
+    )
+    heartbeat_file.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ILLO_RUNTIME_SERVICES_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv(
+        "ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE",
+        str(heartbeat_file),
+    )
+
+    queued = await async_try_restart_runtime_services(
+        ["scheduler"],
+        requested_by="scheduler-self-heal",
+    )
+
+    assert queued is False
+    assert not request_file.exists()
+    assert json.loads(running_file.read_text(encoding="utf-8"))["services"] == [
+        "worker"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_services_requires_dedicated_controller_heartbeat(monkeypatch, tmp_path):
     import json
     from datetime import datetime, timezone

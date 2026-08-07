@@ -65,6 +65,31 @@ async def async_restart_runtime_services(
     *,
     requested_by: str | None = None,
 ) -> RuntimeServicesRead:
+    result, _queued = await _async_queue_runtime_services_restart(
+        services,
+        requested_by=requested_by,
+    )
+    return result
+
+
+async def async_try_restart_runtime_services(
+    services: list[str] | tuple[str, ...] | str | None,
+    *,
+    requested_by: str | None = None,
+) -> bool:
+    """Queue a restart only when no runtime-service operation is in flight."""
+    _result, queued = await _async_queue_runtime_services_restart(
+        services,
+        requested_by=requested_by,
+    )
+    return queued
+
+
+async def _async_queue_runtime_services_restart(
+    services: list[str] | tuple[str, ...] | str | None,
+    *,
+    requested_by: str | None,
+) -> tuple[RuntimeServicesRead, bool]:
     request_file = _RUNTIME_SERVICES_QUEUE.request_file()
     if request_file is None:
         raise HTTPException(
@@ -79,26 +104,47 @@ async def async_restart_runtime_services(
     requested_services = normalize_runtime_service_ids(services)
     existing = await async_get_runtime_services_status()
     if existing.status == "running":
-        return RuntimeServicesRead(
-            **{
-                **existing.model_dump(),
-                "detail": "A runtime service operation is already running.",
-            }
+        return (
+            RuntimeServicesRead(
+                **{
+                    **existing.model_dump(),
+                    "detail": "A runtime service operation is already running.",
+                }
+            ),
+            False,
         )
 
     lock_path = _RUNTIME_SERVICES_QUEUE.start_lock_path(request_file)
     lock_fd = acquire_start_lock(lock_path)
     if lock_fd is None:
         current = await async_get_runtime_services_status()
-        return RuntimeServicesRead(
-            **{
-                **current.model_dump(),
-                "status": "running",
-                "detail": "A runtime service operation is starting.",
-            }
+        return (
+            RuntimeServicesRead(
+                **{
+                    **current.model_dump(),
+                    "status": "running",
+                    "detail": "A runtime service operation is starting.",
+                }
+            ),
+            False,
         )
 
     try:
+        if (
+            request_file.exists()
+            or _RUNTIME_SERVICES_QUEUE.running_file(request_file).exists()
+        ):
+            current = await async_get_runtime_services_status()
+            return (
+                RuntimeServicesRead(
+                    **{
+                        **current.model_dump(),
+                        "status": "running",
+                        "detail": "A runtime service operation is already running.",
+                    }
+                ),
+                False,
+            )
         started_at = datetime.now(timezone.utc)
         payload = {
             "action": "restart",
@@ -116,14 +162,17 @@ async def async_restart_runtime_services(
                 "detail": "Runtime service restart queued for the host controller.",
             },
         )
-        return RuntimeServicesRead(
-            status="running",
-            available=True,
-            services=runtime_service_catalog(),
-            requested_services=requested_services,
-            started_at=started_at,
-            log_path=str(_RUNTIME_SERVICES_QUEUE.log_path()),
-            detail="Runtime service restart queued for the host controller.",
+        return (
+            RuntimeServicesRead(
+                status="running",
+                available=True,
+                services=runtime_service_catalog(),
+                requested_services=requested_services,
+                started_at=started_at,
+                log_path=str(_RUNTIME_SERVICES_QUEUE.log_path()),
+                detail="Runtime service restart queued for the host controller.",
+            ),
+            True,
         )
     finally:
         release_start_lock(lock_fd, lock_path)

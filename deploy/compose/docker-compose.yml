@@ -22,6 +22,8 @@ x-illo-env: &illo-env
   SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD: ${SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD:-3}
   SCHEDULER_FAILURE_RATE_THRESHOLD: ${SCHEDULER_FAILURE_RATE_THRESHOLD:-3}
   SCHEDULER_FAILURE_RATE_WINDOW_HOURS: ${SCHEDULER_FAILURE_RATE_WINDOW_HOURS:-24}
+  SCHEDULER_SELF_HEAL_AFTER_MINUTES: ${SCHEDULER_SELF_HEAL_AFTER_MINUTES:-10}
+  SCHEDULER_SELF_HEAL_MAX_ATTEMPTS: ${SCHEDULER_SELF_HEAL_MAX_ATTEMPTS:-2}
   EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-api}
   EMBEDDING_API_PROVIDER: ${EMBEDDING_API_PROVIDER:-gemini}
   EMBEDDING_API_MODEL: ${EMBEDDING_API_MODEL:-gemini-embedding-2}
@@ -175,6 +177,12 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "brain.app.cli.scheduler", "healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 2m
 
   slack-connector:
     <<: *backend-service
@@ -239,6 +247,8 @@ services:
       ILLO_SELF_UPDATE_STATUS_FILE: /data/private/self-update/status.json
       ILLO_SELF_UPDATE_HEARTBEAT_FILE: /data/private/self-update/heartbeat.json
       ILLO_SELF_UPDATE_LOG_PATH: /data/private/logs/illo-self-update.log
+      ILLO_AUTO_UPDATE_ENABLED: ${ILLO_AUTO_UPDATE_ENABLED:-1}
+      ILLO_AUTO_UPDATE_POLL_SECONDS: ${ILLO_AUTO_UPDATE_POLL_SECONDS:-300}
       ILLO_RUNTIME_SERVICES_REQUEST_FILE: /data/private/runtime-services/request.json
       ILLO_RUNTIME_SERVICES_STATUS_FILE: /data/private/runtime-services/status.json
       ILLO_RUNTIME_SERVICES_HEARTBEAT_FILE: /data/private/runtime-services/heartbeat.json

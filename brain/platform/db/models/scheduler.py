@@ -59,6 +59,12 @@ class SchedulerAlertLatch(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
 
 
 class SchedulerColdStartReconciliation(Base, CreatedAtMixin):

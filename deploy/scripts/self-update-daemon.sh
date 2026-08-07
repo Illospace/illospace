@@ -16,9 +16,12 @@ WORKSPACE_TOOLS_HEARTBEAT_FILE="${ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE:-/data/pri
 WORKSPACE_TOOLS_LOG_PATH="${ILLO_WORKSPACE_TOOLS_LOG_PATH:-/data/private/logs/illo-workspace-tools.log}"
 WORKER_DRAIN_TIMEOUT_FILE="${ILLO_SELF_UPDATE_WORKER_DRAIN_TIMEOUT_FILE:-/data/private/self-update/worker-drain-timeout.json}"
 POLL_SECONDS="${ILLO_SELF_UPDATE_POLL_SECONDS:-2}"
+AUTO_UPDATE_ENABLED="${ILLO_AUTO_UPDATE_ENABLED:-1}"
+AUTO_UPDATE_POLL_SECONDS="${ILLO_AUTO_UPDATE_POLL_SECONDS:-300}"
 APP_UID="${ILLO_APP_UID:-10001}"
 APP_GID="${ILLO_APP_GID:-10001}"
 RUNNING_FILE="${REQUEST_FILE}.running"
+START_LOCK_FILE="$(dirname "$REQUEST_FILE")/.$(basename "$REQUEST_FILE").starting"
 RUNTIME_SERVICES_RUNNING_FILE="${RUNTIME_SERVICES_REQUEST_FILE}.running"
 WORKSPACE_TOOLS_RUNNING_FILE="${WORKSPACE_TOOLS_REQUEST_FILE}.running"
 
@@ -139,13 +142,14 @@ write_workspace_tools_heartbeat() {
 }
 
 process_request() {
-  local requested_at requested_by build_no_cache worker_drain_timeout_seconds exit_code
+  local requested_at requested_by request_detail build_no_cache worker_drain_timeout_seconds exit_code
   if ! mv "$REQUEST_FILE" "$RUNNING_FILE" 2>/dev/null; then
     return 0
   fi
 
   requested_at="$(jq -r '.requested_at // ""' "$RUNNING_FILE" 2>/dev/null || true)"
   requested_by="$(jq -r '.requested_by // ""' "$RUNNING_FILE" 2>/dev/null || true)"
+  request_detail="$(jq -r '.detail // ""' "$RUNNING_FILE" 2>/dev/null || true)"
   build_no_cache="$(jq -r 'if .build_no_cache == true then "1" else "" end' "$RUNNING_FILE" 2>/dev/null || true)"
   worker_drain_timeout_seconds="$(jq -r '.worker_drain_timeout_seconds // ""' "$RUNNING_FILE" 2>/dev/null || true)"
   write_status "running" "Illospace update is syncing origin/main, running migrations, and recreating runtime services." "$requested_at" "$requested_by"
@@ -156,6 +160,7 @@ process_request() {
     echo
     echo "=== Illospace Compose self-update started at $(date -u +"%Y-%m-%dT%H:%M:%SZ") ==="
     [ -z "$requested_by" ] || echo "Requested by: $requested_by"
+    [ -z "$request_detail" ] || echo "Request detail: $request_detail"
     [ -z "$build_no_cache" ] || echo "Build no-cache: enabled"
     cd "$REPO"
     ILLO_UPDATE_MODE=compose \
@@ -178,6 +183,76 @@ process_request() {
     write_status "idle" "Illospace update failed with exit code $exit_code. Check the update log." "$requested_at" "$requested_by" "$exit_code"
   fi
   rm -f "$RUNNING_FILE"
+}
+
+maybe_queue_auto_update() {
+  local old_sha new_sha requested_at detail
+  [ "$AUTO_UPDATE_ENABLED" = "1" ] || return 0
+  [ ! -e "$REQUEST_FILE" ] || return 0
+  [ ! -e "$RUNNING_FILE" ] || return 0
+
+  mkdir -p "$(dirname "$LOG_PATH")" "$(dirname "$REQUEST_FILE")"
+  if ! timeout 60 git -C "$REPO" fetch origin main >> "$LOG_PATH" 2>&1; then
+    echo "Auto-update fetch failed at $(date -u +"%Y-%m-%dT%H:%M:%SZ"); retrying next interval." >> "$LOG_PATH"
+    return 0
+  fi
+
+  old_sha="$(git -C "$REPO" rev-parse refs/heads/main 2>> "$LOG_PATH" || true)"
+  new_sha="$(git -C "$REPO" rev-parse refs/remotes/origin/main 2>> "$LOG_PATH" || true)"
+  if [ -z "$old_sha" ] || [ -z "$new_sha" ]; then
+    echo "Auto-update could not resolve main refs; retrying next interval." >> "$LOG_PATH"
+    return 0
+  fi
+  [ "$old_sha" != "$new_sha" ] || return 0
+  if ! git -C "$REPO" merge-base --is-ancestor "$old_sha" "$new_sha" >> "$LOG_PATH" 2>&1; then
+    echo "Auto-update skipped because origin/main is not ahead of local main ($old_sha -> $new_sha)." >> "$LOG_PATH"
+    return 0
+  fi
+
+  [ ! -e "$REQUEST_FILE" ] || return 0
+  [ ! -e "$RUNNING_FILE" ] || return 0
+  if ! (set -o noclobber; : > "$START_LOCK_FILE") 2>/dev/null; then
+    return 0
+  fi
+  if [ -e "$REQUEST_FILE" ] || [ -e "$RUNNING_FILE" ]; then
+    rm -f "$START_LOCK_FILE"
+    return 0
+  fi
+
+  requested_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  detail="origin/main advanced from $old_sha to $new_sha."
+  if ! json_write "$REQUEST_FILE" \
+    --arg requested_at "$requested_at" \
+    --arg requested_by "auto-update" \
+    --arg detail "$detail" \
+    '{requested_at: $requested_at, requested_by: $requested_by, detail: $detail}'; then
+    rm -f "$START_LOCK_FILE"
+    return 1
+  fi
+  if ! write_status "queued" "$detail" "$requested_at" "auto-update"; then
+    rm -f "$START_LOCK_FILE"
+    return 1
+  fi
+  rm -f "$START_LOCK_FILE"
+}
+
+initialize_auto_update_poll() {
+  local now_epoch="$1"
+  case "$AUTO_UPDATE_POLL_SECONDS" in
+    ''|*[!0-9]*|0) AUTO_UPDATE_POLL_SECONDS=300 ;;
+  esac
+  AUTO_UPDATE_NEXT_POLL_AT=$(( now_epoch + AUTO_UPDATE_POLL_SECONDS ))
+}
+
+poll_auto_update_if_due() {
+  local now_epoch="$1"
+  local exit_code=0
+  [ "$now_epoch" -ge "$AUTO_UPDATE_NEXT_POLL_AT" ] || return 0
+  maybe_queue_auto_update || exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    echo "Auto-update poll failed safely with exit code $exit_code; retrying next interval." >> "$LOG_PATH"
+  fi
+  AUTO_UPDATE_NEXT_POLL_AT=$(( now_epoch + AUTO_UPDATE_POLL_SECONDS ))
 }
 
 process_runtime_services_request() {
@@ -259,44 +334,56 @@ process_workspace_tools_request() {
   rm -f "$WORKSPACE_TOOLS_RUNNING_FILE"
 }
 
-prepare_shared_paths
-write_status "idle" "Compose updater sidecar is ready." "" ""
-write_runtime_services_status "idle" "Runtime service host controller is ready." "" "" "" "[]"
-write_workspace_tools_status "idle" "Workspace tool host controller is ready." "" "" "" "" ""
+main() {
+  local exit_code now_epoch
 
-while true; do
-  write_heartbeat
-  write_runtime_services_heartbeat
-  write_workspace_tools_heartbeat
-  if [ -f "$REQUEST_FILE" ]; then
-    set +e
-    process_request
-    exit_code=$?
-    set -e
-    if [ "$exit_code" -ne 0 ]; then
-      write_status "idle" "Illospace update failed with exit code $exit_code. Check the update log." "" "" "$exit_code"
-      rm -f "$RUNNING_FILE"
+  prepare_shared_paths
+  write_status "idle" "Compose updater sidecar is ready." "" ""
+  write_runtime_services_status "idle" "Runtime service host controller is ready." "" "" "" "[]"
+  write_workspace_tools_status "idle" "Workspace tool host controller is ready." "" "" "" "" ""
+  initialize_auto_update_poll "$(date +%s)"
+
+  while true; do
+    write_heartbeat
+    write_runtime_services_heartbeat
+    write_workspace_tools_heartbeat
+    if [ -f "$REQUEST_FILE" ]; then
+      set +e
+      process_request
+      exit_code=$?
+      set -e
+      if [ "$exit_code" -ne 0 ]; then
+        write_status "idle" "Illospace update failed with exit code $exit_code. Check the update log." "" "" "$exit_code"
+        rm -f "$RUNNING_FILE"
+      fi
     fi
-  fi
-  if [ -f "$RUNTIME_SERVICES_REQUEST_FILE" ]; then
-    set +e
-    process_runtime_services_request
-    exit_code=$?
-    set -e
-    if [ "$exit_code" -ne 0 ]; then
-      write_runtime_services_status "idle" "Runtime service restart failed with exit code $exit_code. Check the runtime service log." "" "" "$exit_code" "[]"
-      rm -f "$RUNTIME_SERVICES_RUNNING_FILE"
+    if [ -f "$RUNTIME_SERVICES_REQUEST_FILE" ]; then
+      set +e
+      process_runtime_services_request
+      exit_code=$?
+      set -e
+      if [ "$exit_code" -ne 0 ]; then
+        write_runtime_services_status "idle" "Runtime service restart failed with exit code $exit_code. Check the runtime service log." "" "" "$exit_code" "[]"
+        rm -f "$RUNTIME_SERVICES_RUNNING_FILE"
+      fi
     fi
-  fi
-  if [ -f "$WORKSPACE_TOOLS_REQUEST_FILE" ]; then
-    set +e
-    process_workspace_tools_request
-    exit_code=$?
-    set -e
-    if [ "$exit_code" -ne 0 ]; then
-      write_workspace_tools_status "idle" "Workspace tool operation failed with exit code $exit_code. Check the workspace tool log." "" "" "$exit_code" "" ""
-      rm -f "$WORKSPACE_TOOLS_RUNNING_FILE"
+    if [ -f "$WORKSPACE_TOOLS_REQUEST_FILE" ]; then
+      set +e
+      process_workspace_tools_request
+      exit_code=$?
+      set -e
+      if [ "$exit_code" -ne 0 ]; then
+        write_workspace_tools_status "idle" "Workspace tool operation failed with exit code $exit_code. Check the workspace tool log." "" "" "$exit_code" "" ""
+        rm -f "$WORKSPACE_TOOLS_RUNNING_FILE"
+      fi
     fi
-  fi
-  sleep "$POLL_SECONDS"
-done
+
+    now_epoch="$(date +%s)"
+    poll_auto_update_if_due "$now_epoch"
+    sleep "$POLL_SECONDS"
+  done
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

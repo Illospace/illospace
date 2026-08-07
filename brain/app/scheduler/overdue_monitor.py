@@ -19,17 +19,25 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.cold_start import scheduler_liveness_checkpoint
+from brain.app.scheduler.health_policy import (
+    scheduler_self_heal_after,
+    scheduler_self_heal_max_attempts,
+)
 from brain.app.scheduler.overdue_alert_state import (
     SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
     SchedulerOverdueAlertState,
+    SchedulerSelfHealState,
+    claim_scheduler_self_heal,
     claim_scheduler_overdue_alert,
     release_scheduler_overdue_alert,
+    release_scheduler_self_heal_claim,
 )
 from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
 )
 from brain.kernel.common.time import assume_utc
+from brain.platform.db.models.scheduler import SchedulerAlertLatch
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.slack_delivery import (
     FailureAlertPresentation,
@@ -38,6 +46,9 @@ from brain.systems.failure_guard.slack_delivery import (
     async_deliver_failure_alert,
 )
 from brain.systems.slack.client import slack_web_client_from_runtime
+from brain.systems.runtime_settings.runtime_services import (
+    async_try_restart_runtime_services,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +65,7 @@ class _SchedulerOverdueCheck:
     overdue_job_keys: tuple[str, ...]
     alert_sent: bool
     last_tick_at: datetime | None
+    self_heal_attempt: int | None = None
 
 
 CandidateProvider = Callable[
@@ -63,10 +75,72 @@ LivenessCheckpointProvider = Callable[[AsyncSession], Awaitable[datetime | None]
 AlertDelivery = Callable[..., Awaitable[None]]
 AlertClaim = Callable[..., Awaitable[bool]]
 AlertRelease = Callable[[], Awaitable[SchedulerOverdueAlertState | None]]
+SelfHealClaim = Callable[..., Awaitable[SchedulerSelfHealState]]
+SelfHealClaimRelease = Callable[..., Awaitable[None]]
+RuntimeServicesRestart = Callable[..., Awaitable[bool]]
+FreezeConfirmation = Callable[..., Awaitable[bool]]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _candidates_past_threshold(
+    candidates: tuple[SchedulerOverdueCandidate, ...],
+    *,
+    now: datetime,
+    overdue_after: timedelta,
+) -> tuple[SchedulerOverdueCandidate, ...]:
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.lag_seconds_at(now) > overdue_after.total_seconds()
+    )
+
+
+def _freeze_started_at(
+    candidates: tuple[SchedulerOverdueCandidate, ...],
+    *,
+    overdue_after: timedelta,
+) -> datetime:
+    return min(
+        assume_utc(candidate.next_run_at) + overdue_after
+        for candidate in candidates
+    )
+
+
+async def _async_scheduler_freeze_is_current(
+    *,
+    now: datetime,
+    overdue_after: timedelta,
+    freeze_started_at: datetime | None = None,
+) -> bool:
+    """Confirm overdue work and, when provided, its durable episode."""
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    async with UnitOfWork() as uow:
+        candidates = await async_scheduler_overdue_candidates(uow.session, now=now)
+        latch_freeze_started_at = None
+        if freeze_started_at is not None:
+            latch = await uow.session.get(
+                SchedulerAlertLatch,
+                SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+            )
+            latch_freeze_started_at = (
+                latch.freeze_started_at if latch is not None else None
+            )
+    overdue_candidates = _candidates_past_threshold(
+        candidates,
+        now=now,
+        overdue_after=overdue_after,
+    )
+    if freeze_started_at is None:
+        return bool(overdue_candidates)
+    return (
+        bool(overdue_candidates)
+        and latch_freeze_started_at is not None
+        and assume_utc(latch_freeze_started_at) == assume_utc(freeze_started_at)
+    )
 
 
 def _elapsed_text(*, started_at: datetime, ended_at: datetime) -> str:
@@ -90,6 +164,7 @@ def _alert_summary(
     *,
     now: datetime,
     last_tick_at: datetime | None,
+    failed_self_heal_attempts: int = 0,
 ) -> str:
     job_lines = [
         f"- {candidate.job_key}: {candidate.lag_seconds_at(now) // 60}m overdue "
@@ -105,7 +180,13 @@ def _alert_summary(
             f"{_elapsed_text(started_at=normalized_tick, ended_at=now)} "
             f"(last tick {normalized_tick.isoformat()})."
         )
-    return "\n".join(("Overdue jobs:", *job_lines, daemon_line))
+    lines = ["Overdue jobs:", *job_lines, daemon_line]
+    if failed_self_heal_attempts:
+        lines.append(
+            f"Self-heal failed after {failed_self_heal_attempts} attempts; "
+            "a human is needed."
+        )
+    return "\n".join(lines)
 
 
 class SchedulerOverdueMonitor:
@@ -128,13 +209,37 @@ class SchedulerOverdueMonitor:
         liveness_checkpoint: LivenessCheckpointProvider = scheduler_liveness_checkpoint,
         claim_alert: AlertClaim = claim_scheduler_overdue_alert,
         release_alert: AlertRelease = release_scheduler_overdue_alert,
+        claim_self_heal: SelfHealClaim = claim_scheduler_self_heal,
+        release_self_heal_claim: SelfHealClaimRelease = (
+            release_scheduler_self_heal_claim
+        ),
+        restart_runtime_services: RuntimeServicesRestart = (
+            async_try_restart_runtime_services
+        ),
+        confirm_freeze: FreezeConfirmation = _async_scheduler_freeze_is_current,
         deliver_alert: AlertDelivery = async_deliver_failure_alert,
+        self_heal_after: timedelta | None = None,
+        self_heal_max_attempts: int | None = None,
     ) -> None:
         self._candidate_provider = candidate_provider
         self._liveness_checkpoint = liveness_checkpoint
         self._claim_alert = claim_alert
         self._release_alert = release_alert
+        self._claim_self_heal = claim_self_heal
+        self._release_self_heal_claim = release_self_heal_claim
+        self._restart_runtime_services = restart_runtime_services
+        self._confirm_freeze = confirm_freeze
         self._deliver_alert = deliver_alert
+        self.self_heal_after = (
+            self_heal_after
+            if self_heal_after is not None
+            else scheduler_self_heal_after()
+        )
+        self.self_heal_max_attempts = (
+            self_heal_max_attempts
+            if self_heal_max_attempts is not None
+            else scheduler_self_heal_max_attempts()
+        )
 
     async def run(self) -> None:
         """Check scheduler progress on the independent API event loop."""
@@ -189,85 +294,208 @@ class SchedulerOverdueMonitor:
         *,
         now: datetime,
     ) -> _SchedulerOverdueCheck:
-        overdue_candidates = tuple(
-            candidate
-            for candidate in observation.candidates
-            if candidate.lag_seconds_at(now) > self.overdue_after.total_seconds()
+        overdue_candidates = _candidates_past_threshold(
+            observation.candidates,
+            now=now,
+            overdue_after=self.overdue_after,
         )
         overdue_job_keys = tuple(
             candidate.job_key for candidate in overdue_candidates
         )
         if not overdue_candidates:
+            try:
+                freeze_is_current = await self._confirm_freeze(
+                    now=now,
+                    overdue_after=self.overdue_after,
+                )
+            except Exception:  # noqa: BLE001 - preserve state on uncertainty
+                logger.exception("Failed to confirm scheduler recovery")
+                freeze_is_current = True
+            if freeze_is_current:
+                return _SchedulerOverdueCheck(
+                    overdue_job_keys=(),
+                    alert_sent=False,
+                    last_tick_at=observation.last_tick_at,
+                )
             released = await self._release_alert()
             if released is not None:
                 await self._deliver_recovery(
                     released,
                     recovered_at=observation.last_tick_at or now,
+                    self_heal_attempts=released.self_heal_attempts,
                 )
             return _SchedulerOverdueCheck(
                 overdue_job_keys=(),
                 alert_sent=False,
                 last_tick_at=observation.last_tick_at,
             )
-        freeze_started_at = assume_utc(observation.last_tick_at or now)
-        if not await self._claim_alert(
+        freeze_started_at = _freeze_started_at(
+            overdue_candidates,
+            overdue_after=self.overdue_after,
+        )
+        alert_claimed = await self._claim_alert(
             alerted_at=now,
             freeze_started_at=freeze_started_at,
             next_alert_at=self._next_escalation_at(
                 freeze_started_at=freeze_started_at,
                 now=now,
             ),
-        ):
-            return _SchedulerOverdueCheck(
-                overdue_job_keys=overdue_job_keys,
-                alert_sent=False,
-                last_tick_at=observation.last_tick_at,
+        )
+        self_heal = await self._maybe_self_heal(now=now)
+
+        if alert_claimed:
+            try:
+                await self._deliver_alert(
+                    policy=SlackFailureAlertPolicy(
+                        provide_client=slack_web_client_from_runtime,
+                        requested_by=self.name,
+                        reason="Deliver an overdue scheduler job alert to the team.",
+                        channel=self._alert_channel(),
+                        unknown_error_text="Scheduler jobs stopped advancing",
+                    ),
+                    subject=FailureAlertSubject(
+                        identity_label="Job key",
+                        identity=overdue_candidates[0].job_key,
+                        url_label="Scheduler",
+                        url=f"{public_app_base_url()}/api/system/scheduler",
+                        link_label="open scheduler state",
+                    ),
+                    presentation=FailureAlertPresentation(
+                        title="Scheduler jobs overdue",
+                        summary=_alert_summary(
+                            overdue_candidates,
+                            now=now,
+                            last_tick_at=observation.last_tick_at,
+                            failed_self_heal_attempts=(
+                                self_heal.attempts
+                                if self_heal.exhausted
+                                else 0
+                            ),
+                        ),
+                    ),
+                    error_text="Scheduler jobs stopped advancing past next_run_at.",
+                )
+            except Exception:  # noqa: BLE001 - release lets the next tick retry
+                try:
+                    await self._release_alert()
+                except Exception:  # noqa: BLE001 - preserve the delivery error
+                    logger.exception(
+                        "Failed to release scheduler overdue alert after delivery failure"
+                    )
+                raise
+        return _SchedulerOverdueCheck(
+            overdue_job_keys=overdue_job_keys,
+            alert_sent=alert_claimed,
+            last_tick_at=observation.last_tick_at,
+            self_heal_attempt=self_heal.attempt,
+        )
+
+    async def _maybe_self_heal(
+        self,
+        *,
+        now: datetime,
+    ) -> SchedulerSelfHealState:
+        state = await self._claim_self_heal(
+            attempted_at=now,
+            heal_after=self.self_heal_after,
+            max_attempts=self.self_heal_max_attempts,
+        )
+        if state.attempt is None or state.freeze_started_at is None:
+            return state
+
+        try:
+            freeze_is_current = await self._confirm_freeze(
+                freeze_started_at=state.freeze_started_at,
+                now=now,
+                overdue_after=self.overdue_after,
+            )
+        except Exception:  # noqa: BLE001 - do not restart on stale evidence
+            logger.exception("Failed to confirm scheduler freeze before self-heal")
+            freeze_is_current = False
+        if not freeze_is_current:
+            await self._refund_self_heal_claim(state, attempted_at=now)
+            return SchedulerSelfHealState(
+                attempt=None,
+                attempts=max(0, state.attempts - 1),
+                exhausted=False,
+                freeze_started_at=state.freeze_started_at,
             )
 
         try:
-            await self._deliver_alert(
-                policy=SlackFailureAlertPolicy(
-                    provide_client=slack_web_client_from_runtime,
-                    requested_by=self.name,
-                    reason="Deliver an overdue scheduler job alert to the team.",
-                    channel=(
-                        os.getenv(
-                            "ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL",
-                            "",
-                        ).strip()
-                        or "#alerts"
-                    ),
-                    unknown_error_text="Scheduler jobs stopped advancing",
-                ),
-                subject=FailureAlertSubject(
-                    identity_label="Job key",
-                    identity=overdue_candidates[0].job_key,
-                    url_label="Scheduler",
-                    url=f"{public_app_base_url()}/api/system/scheduler",
-                    link_label="open scheduler state",
-                ),
-                presentation=FailureAlertPresentation(
-                    title="Scheduler jobs overdue",
-                    summary=_alert_summary(
-                        overdue_candidates,
-                        now=now,
-                        last_tick_at=observation.last_tick_at,
-                    ),
-                ),
-                error_text="Scheduler jobs stopped advancing past next_run_at.",
+            queued = await self._restart_runtime_services(
+                ["scheduler"],
+                requested_by="scheduler-self-heal",
             )
-        except Exception:  # noqa: BLE001 - release lets the next tick retry
-            try:
-                await self._release_alert()
-            except Exception:  # noqa: BLE001 - preserve the delivery error
-                logger.exception(
-                    "Failed to release scheduler overdue alert after delivery failure"
-                )
-            raise
-        return _SchedulerOverdueCheck(
-            overdue_job_keys=overdue_job_keys,
-            alert_sent=True,
-            last_tick_at=observation.last_tick_at,
+        except Exception:  # noqa: BLE001 - alert escalation still proceeds
+            logger.exception("Failed to queue automatic scheduler restart")
+            return SchedulerSelfHealState(
+                attempt=None,
+                attempts=state.attempts,
+                exhausted=state.attempts >= self.self_heal_max_attempts,
+                freeze_started_at=state.freeze_started_at,
+            )
+        if not queued:
+            await self._refund_self_heal_claim(state, attempted_at=now)
+            return SchedulerSelfHealState(
+                attempt=None,
+                attempts=max(0, state.attempts - 1),
+                exhausted=False,
+                freeze_started_at=state.freeze_started_at,
+            )
+
+        try:
+            await self._deliver_self_heal_alert(state, attempted_at=now)
+        except Exception:  # noqa: BLE001 - the restart is already queued
+            logger.exception("Failed to deliver scheduler self-heal alert")
+        return state
+
+    async def _refund_self_heal_claim(
+        self,
+        state: SchedulerSelfHealState,
+        *,
+        attempted_at: datetime,
+    ) -> None:
+        try:
+            await self._release_self_heal_claim(
+                attempted_at=attempted_at,
+                freeze_started_at=state.freeze_started_at,
+                attempt=state.attempt,
+            )
+        except Exception:  # noqa: BLE001 - preserve the queue result
+            logger.exception("Failed to release unused scheduler self-heal claim")
+
+    async def _deliver_self_heal_alert(
+        self,
+        state: SchedulerSelfHealState,
+        *,
+        attempted_at: datetime,
+    ) -> None:
+        assert state.attempt is not None
+        assert state.freeze_started_at is not None
+        await self._deliver_alert(
+            policy=SlackFailureAlertPolicy(
+                provide_client=slack_web_client_from_runtime,
+                requested_by=self.name,
+                reason="Report an automatic scheduler restart to the team.",
+                channel=self._alert_channel(),
+                unknown_error_text="Scheduler restart queued automatically",
+            ),
+            subject=FailureAlertSubject(
+                identity_label="Service",
+                identity="scheduler",
+                url_label="Scheduler",
+                url=f"{public_app_base_url()}/api/system/scheduler",
+                link_label="open scheduler state",
+            ),
+            presentation=FailureAlertPresentation(
+                title="Scheduler self-heal",
+                summary=(
+                    "Restarting scheduler automatically, freeze "
+                    f"{_elapsed_text(started_at=state.freeze_started_at, ended_at=attempted_at)}, "
+                    f"attempt {state.attempt}/{self.self_heal_max_attempts}."
+                ),
+            ),
+            error_text="Scheduler jobs remain overdue.",
         )
 
     def _next_escalation_at(
@@ -292,6 +520,7 @@ class SchedulerOverdueMonitor:
         released: SchedulerOverdueAlertState,
         *,
         recovered_at: datetime,
+        self_heal_attempts: int,
     ) -> None:
         recovered_at = assume_utc(recovered_at)
         freeze_started_at = assume_utc(
@@ -303,13 +532,7 @@ class SchedulerOverdueMonitor:
                     provide_client=slack_web_client_from_runtime,
                     requested_by=self.name,
                     reason="Report that overdue scheduler jobs recovered.",
-                    channel=(
-                        os.getenv(
-                            "ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL",
-                            "",
-                        ).strip()
-                        or "#alerts"
-                    ),
+                    channel=self._alert_channel(),
                     unknown_error_text="Scheduler jobs recovered",
                 ),
                 subject=FailureAlertSubject(
@@ -322,10 +545,15 @@ class SchedulerOverdueMonitor:
                 presentation=FailureAlertPresentation(
                     title="Scheduler jobs recovered",
                     summary=(
-                        f"Daemon resumed ticking at {recovered_at.isoformat()} "
-                        "after "
-                        f"{_elapsed_text(started_at=freeze_started_at, ended_at=recovered_at)} "
-                        "without a tick."
+                        "Scheduler recovered after automatic restart, freeze "
+                        f"{_elapsed_text(started_at=freeze_started_at, ended_at=recovered_at)}, "
+                        f"attempts {self_heal_attempts}/{self.self_heal_max_attempts}."
+                        if self_heal_attempts
+                        else (
+                            f"Scheduler jobs advanced at {recovered_at.isoformat()} "
+                            "after an overdue freeze of "
+                            f"{_elapsed_text(started_at=freeze_started_at, ended_at=recovered_at)}."
+                        )
                     ),
                 ),
                 error_text="Scheduler jobs are advancing again.",
@@ -348,6 +576,13 @@ class SchedulerOverdueMonitor:
                     "Failed to restore scheduler overdue alert after recovery delivery failure"
                 )
             raise
+
+    @staticmethod
+    def _alert_channel() -> str:
+        return (
+            os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
+            or "#alerts"
+        )
 
     @staticmethod
     def _reference_time(now: datetime | None) -> datetime:

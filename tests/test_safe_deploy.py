@@ -337,6 +337,23 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "track_io_timing=on" in compose
     assert "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT_MS:-1000}" in compose
     assert "POSTGRES_LOG_MIN_DURATION_STATEMENT_MS=1000" in env_example
+    assert (
+        "SCHEDULER_SELF_HEAL_AFTER_MINUTES: "
+        "${SCHEDULER_SELF_HEAL_AFTER_MINUTES:-10}"
+    ) in compose
+    assert (
+        "SCHEDULER_SELF_HEAL_MAX_ATTEMPTS: "
+        "${SCHEDULER_SELF_HEAL_MAX_ATTEMPTS:-2}"
+    ) in compose
+    assert "SCHEDULER_SELF_HEAL_AFTER_MINUTES=10" in env_example
+    assert "SCHEDULER_SELF_HEAL_MAX_ATTEMPTS=2" in env_example
+    assert "ILLO_AUTO_UPDATE_ENABLED: ${ILLO_AUTO_UPDATE_ENABLED:-1}" in compose
+    assert (
+        "ILLO_AUTO_UPDATE_POLL_SECONDS: "
+        "${ILLO_AUTO_UPDATE_POLL_SECONDS:-300}"
+    ) in compose
+    assert "ILLO_AUTO_UPDATE_ENABLED=1" in env_example
+    assert "ILLO_AUTO_UPDATE_POLL_SECONDS=300" in env_example
     assert 'ILLO_DB_NULLPOOL: "1"' in compose
     assert 'ILLO_WORKER_ENABLE_CYCLE_SCHEDULER: "1"' in compose
     assert 'ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "0"' in compose
@@ -360,6 +377,10 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "chmod 0775" in self_update_daemon
     assert "safe.directory" in self_update_daemon
     assert "ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES=1" in self_update_daemon
+    assert "maybe_queue_auto_update" in self_update_daemon
+    assert 'timeout 60 git -C "$REPO" fetch origin main' in self_update_daemon
+    assert 'requested_by "auto-update"' in self_update_daemon
+    assert '[[ "${BASH_SOURCE[0]}" == "$0" ]]' in self_update_daemon
     assert "process_runtime_services_request" in self_update_daemon
     assert "RUNTIME_SERVICES_HEARTBEAT_FILE" in self_update_daemon
     assert "write_runtime_services_heartbeat" in self_update_daemon

@@ -101,3 +101,61 @@ def test_scheduler_alert_escalation_migration_preserves_live_rows(monkeypatch):
         assert connection.exec_driver_sql(
             "SELECT alert_key FROM scheduler_alert_latches"
         ).scalar_one() == "scheduler_overdue_freeze"
+
+
+def test_scheduler_self_heal_migration_preserves_live_rows(monkeypatch):
+    latch_migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0054_scheduler_alert_latches"
+    )
+    escalation_migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0055_scheduler_alert_escalation"
+    )
+    self_heal_migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0056_scheduler_self_heal_attempts"
+    )
+    assert self_heal_migration.revision == "0056_scheduler_self_heal_attempts"
+    assert self_heal_migration.down_revision == "0055_scheduler_alert_escalation"
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(latch_migration, "op", operations)
+        monkeypatch.setattr(escalation_migration, "op", operations)
+        monkeypatch.setattr(self_heal_migration, "op", operations)
+
+        latch_migration.upgrade()
+        escalation_migration.upgrade()
+        connection.exec_driver_sql(
+            "INSERT INTO scheduler_alert_latches "
+            "(alert_key, alerted_at, freeze_started_at, next_alert_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "scheduler_overdue_freeze",
+                "2026-08-07 04:05:04+00:00",
+                "2026-08-07 04:00:00+00:00",
+                "2026-08-07 05:00:00+00:00",
+            ),
+        )
+
+        self_heal_migration.upgrade()
+        self_heal_migration.upgrade()
+
+        columns = {
+            column["name"]: column
+            for column in sa.inspect(connection).get_columns(
+                "scheduler_alert_latches"
+            )
+        }
+        assert columns["attempt_count"]["nullable"] is False
+        assert connection.exec_driver_sql(
+            "SELECT alert_key, attempt_count FROM scheduler_alert_latches"
+        ).one() == ("scheduler_overdue_freeze", 0)
+
+        self_heal_migration.downgrade()
+        self_heal_migration.downgrade()
+        assert "attempt_count" not in {
+            column["name"]
+            for column in sa.inspect(connection).get_columns(
+                "scheduler_alert_latches"
+            )
+        }
