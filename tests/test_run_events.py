@@ -23,7 +23,7 @@ from brain.systems.runs.events import (
 from brain.systems.runs.tool_event_read_model import (
     parse_persisted_tool_side_effect,
 )
-from brain.systems.cortex.events import run_event_scope
+from brain.platform.events import run_event_scope
 from brain.platform.db.models.run import RunEvent
 
 
@@ -453,7 +453,7 @@ def test_public_tool_projection_keeps_legacy_read_non_write():
 
 
 def test_publish_live_fans_out_without_durable_storage(monkeypatch):
-    from brain.systems.cortex import events
+    from brain.platform import events
 
     published = []
 
@@ -466,7 +466,7 @@ def test_publish_live_fans_out_without_durable_storage(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatch):
-    from brain.systems.cortex import events
+    from brain.platform import events
 
     async_record = AsyncMock()
     publisher = MagicMock()
@@ -484,7 +484,7 @@ async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatc
 
 @pytest.mark.asyncio
 async def test_browser_run_events_live_publish_after_durable_record(monkeypatch):
-    import brain.systems.cortex.events as cortex_events
+    import brain.platform.events as cortex_events
 
     durable_records = []
     live_events = []
@@ -492,7 +492,6 @@ async def test_browser_run_events_live_publish_after_durable_record(monkeypatch)
     async def _record(*args, **kwargs):
         durable_records.append((args, kwargs))
 
-    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", _record)
     monkeypatch.setattr(
         cortex_events,
         "_publisher",
@@ -504,7 +503,7 @@ async def test_browser_run_events_live_publish_after_durable_record(monkeypatch)
         "session_id": "session-1",
         "state": {"id": "session-1", "run_id": 42},
     }
-    with run_event_scope(42, idea_id="idea-1", session=object()):
+    with run_event_scope(42, idea_id="idea-1", session=object(), recorder=_record):
         cortex_events.publish("browser_session_state", payload)
     await asyncio.sleep(0)
 
@@ -515,14 +514,13 @@ async def test_browser_run_events_live_publish_after_durable_record(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_non_browser_run_events_skip_live_publish_after_durable_record(monkeypatch):
-    import brain.systems.cortex.events as cortex_events
+    import brain.platform.events as cortex_events
 
     async_record = AsyncMock()
-    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", async_record)
     publisher = MagicMock()
     monkeypatch.setattr(cortex_events, "_publisher", publisher)
 
-    with run_event_scope(42, idea_id="idea-1", session=object()):
+    with run_event_scope(42, idea_id="idea-1", session=object(), recorder=async_record):
         cortex_events.publish("run.activity", {"idea_id": "idea-1", "activity": "Working"})
     await asyncio.sleep(0)
 
@@ -532,7 +530,7 @@ async def test_non_browser_run_events_skip_live_publish_after_durable_record(mon
 
 @pytest.mark.asyncio
 async def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypatch):
-    import brain.systems.cortex.events as cortex_events
+    import brain.platform.events as cortex_events
 
     durable_records = []
     live_events = []
@@ -540,7 +538,6 @@ async def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypat
     async def _record(*args, **kwargs):
         durable_records.append((args, kwargs))
 
-    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", _record)
     monkeypatch.setattr(
         cortex_events,
         "_publisher",
@@ -552,7 +549,7 @@ async def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypat
         "run_id": 42,
         "prompt": {"id": "prompt-1", "idea_id": "idea-1", "key_name": "GITHUB_TOKEN"},
     }
-    with run_event_scope(42, idea_id="idea-1", session=object()):
+    with run_event_scope(42, idea_id="idea-1", session=object(), recorder=_record):
         cortex_events.publish("vault_secret_prompt", payload)
     await asyncio.sleep(0)
 

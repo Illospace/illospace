@@ -596,7 +596,7 @@ async def _handle_manage_idea(
     if normalized_action in {"help", "schema"}:
         return _manage_tool_guide("manage_idea", operation)
 
-    from brain.systems.cortex.events import publish_safe
+    from brain.platform.events import publish_safe
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 

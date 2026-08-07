@@ -1317,7 +1317,7 @@ async def tool_vault_secret_prompt(
     requested_by: str = "agent",
 ) -> dict:
     """Open a guided Vault form for a user-supplied secret value."""
-    from brain.systems.cortex.events import publish_safe
+    from brain.platform.events import publish_safe
     from brain.systems.vault import record_missing_request
 
     if not user_id:

@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from brain.platform.events import publish_safe
+
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, datetime):
@@ -38,8 +40,6 @@ def _grant_prompt_response(
     normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
     prompt = None
     if normalized_idea_id:
-        from brain.systems.cortex.events import publish_safe
-
         prompt = {
             "id": f"vault-grant-{grant.get('id') or run_id or 'thread'}",
             "idea_id": normalized_idea_id,

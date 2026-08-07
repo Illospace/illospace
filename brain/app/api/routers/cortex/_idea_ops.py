@@ -528,7 +528,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
         raise HTTPException(status_code=400, detail="Content is required")
     if role not in ("user", "assistant", "illo"):
         raise HTTPException(status_code=400, detail="Role must be 'user', 'assistant', or 'illo'")
-    from brain.systems.cortex.events import publish
+    from brain.platform.events import publish
 
     attachments_data = data.get("attachments", [])
     if not isinstance(attachments_data, list):
@@ -658,7 +658,7 @@ async def update_presence(request: Request, user: dict[str, Any] = Depends(get_c
         _presence_leave(idea_id, user_id)
 
     viewers = _presence_get(idea_id)
-    from brain.systems.cortex.events import publish
+    from brain.platform.events import publish
     publish("presence", {"idea_id": idea_id, "viewers": viewers, "status": "online"})
     return {"viewers": viewers}
 

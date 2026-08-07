@@ -82,7 +82,7 @@ Illo already has most of the local collaboration machinery:
 - Cortex idea/thread persistence in `brain/platform/db/models/idea.py`.
 - Native chat persistence in `brain/platform/db/models/chat.py`.
 - AgentRun queue/events/artifacts in `brain/platform/db/models/agent_run.py` and `brain/systems/runs/store.py`.
-- Cortex websocket fanout and durable replay in `brain/systems/cortex/events.py` and `brain/app/api/routers/ws.py`.
+- Cortex websocket fanout and durable replay in `brain/platform/events.py` and `brain/app/api/routers/ws.py`.
 - Team chat service and agent-authored replies in `brain/app/api/services/chat.py`.
 - Workspace notifications and mentions in `brain/app/api/routers/cortex/_idea_ops.py`.
 - Vault secrets and task-scoped agent grants in `brain/platform/db/models/vault.py`.

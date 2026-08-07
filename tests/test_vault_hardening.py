@@ -239,7 +239,7 @@ async def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event()
     published = []
 
     with patch("brain.systems.vault.record_missing_request", new=AsyncMock()) as record_missing, \
-         patch("brain.systems.cortex.events.publish_safe", side_effect=lambda event, payload: published.append((event, payload))):
+         patch("brain.platform.events.publish_safe", side_effect=lambda event, payload: published.append((event, payload))):
         result = await tool_vault_secret_prompt(
             "example_api_key",
             description="Example API access for generated product workflows.",
@@ -483,7 +483,7 @@ async def test_brain_vault_publishes_grant_prompt_for_thread_approval():
         "grant": grant,
     })), \
          patch("brain.systems.vault.get_secret", new=AsyncMock()) as get_secret, \
-         patch("brain.systems.cortex.events.publish_safe") as publish:
+         patch("brain.systems.vault.agent_access.publish_safe") as publish:
         result = await tool_brain_vault(
             "GITHUB_TOKEN",
             reason="Need GitHub access for this run",

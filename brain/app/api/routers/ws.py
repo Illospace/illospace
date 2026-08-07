@@ -14,7 +14,7 @@ from brain.systems.runs.event_log import (
     run_event_to_message,
     list_run_events_after_for_principal_async,
 )
-from brain.systems.cortex.events import (
+from brain.platform.events import (
     cortex_event_to_message,
     list_cortex_events_after_for_principal_async,
 )

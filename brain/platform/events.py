@@ -1,13 +1,10 @@
-"""Event bus for cortex run.
-
-Compatibility shim for websocket fanout plus durable run-event storage.
-"""
+"""Event bus for websocket fanout plus durable event storage."""
 from __future__ import annotations
 
 import json
 import logging
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable
@@ -56,6 +53,7 @@ def run_event_scope(
     producer: str = "cortex",
     consumer_runtime: str | None = None,
     session: Any | None = None,
+    recorder: Callable[..., Awaitable[Any]] | None = None,
 ):
     """Scope publish() calls so they can also be durably recorded."""
     token = _run_event_scope.set(
@@ -65,6 +63,7 @@ def run_event_scope(
             "producer": producer,
             "consumer_runtime": consumer_runtime,
             "session": session,
+            "recorder": recorder,
         }
     )
     try:
@@ -414,38 +413,38 @@ def publish(event_type: str, data: dict[str, Any]) -> None:
     scope = _run_event_scope.get()
     recorded_durable = False
     if scope and scope.get("run_id") is not None:
-        try:
-            from brain.systems.runs.event_log import async_record_run_event
-
-            write = async_record_run_event(
-                int(scope["run_id"]),
-                event_type,
-                data,
-                idea_id=scope.get("idea_id") or data.get("idea_id"),
-                producer=scope.get("producer") or "cortex",
-                consumer_runtime=scope.get("consumer_runtime"),
-                session=scope.get("session"),
-            )
-            loop = _active_async_loop()
-            if loop is not None:
-                task = loop.create_task(write)
-                task.add_done_callback(
-                    lambda done_task, event_type=event_type: _log_async_event_write_failure(
-                        event_type,
-                        done_task,
-                        log_name="run_event_write_failed",
+        recorder = scope.get("recorder")
+        if recorder is not None:
+            try:
+                write = recorder(
+                    int(scope["run_id"]),
+                    event_type,
+                    data,
+                    idea_id=scope.get("idea_id") or data.get("idea_id"),
+                    producer=scope.get("producer") or "cortex",
+                    consumer_runtime=scope.get("consumer_runtime"),
+                    session=scope.get("session"),
+                )
+                loop = _active_async_loop()
+                if loop is not None:
+                    task = loop.create_task(write)
+                    task.add_done_callback(
+                        lambda done_task, event_type=event_type: _log_async_event_write_failure(
+                            event_type,
+                            done_task,
+                            log_name="run_event_write_failed",
+                        )
                     )
+                else:
+                    asyncio.run(write)
+            except Exception as exc:
+                logger.warning(
+                    "run_event_write_failed event_type=%s error=%s",
+                    event_type,
+                    exc,
                 )
             else:
-                asyncio.run(write)
-        except Exception as exc:
-            logger.warning(
-                "run_event_write_failed event_type=%s error=%s",
-                event_type,
-                exc,
-            )
-        else:
-            recorded_durable = True
+                recorded_durable = True
 
     if recorded_durable and event_type not in _LIVE_AFTER_DURABLE_EVENT_TYPES:
         # Durable run-scoped events are replayed by the API consumer.

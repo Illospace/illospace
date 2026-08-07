@@ -31,7 +31,7 @@ def publish_workspace_app_change(
             payload["key"] = str(key)
 
     try:
-        from brain.systems.cortex.events import publish_safe
+        from brain.platform.events import publish_safe
 
         publish_safe("workspace_apps_changed", payload)
     except Exception:
@@ -60,7 +60,7 @@ def publish_workspace_app_collaboration_event(
         payload["events"] = [dict(event) for event in events]
 
     try:
-        from brain.systems.cortex.events import publish_safe
+        from brain.platform.events import publish_safe
 
         publish_safe("workspace_app_collaboration_changed", payload)
     except Exception:

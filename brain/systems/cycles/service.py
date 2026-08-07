@@ -13,7 +13,7 @@ from brain.kernel.common.time import assume_utc_optional
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthBlockedPreflightResult,
 )
-from brain.systems.cortex.events import publish
+from brain.platform.events import publish
 from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.cycles.admission import (

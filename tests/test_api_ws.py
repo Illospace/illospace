@@ -107,7 +107,7 @@ def test_ws_replay_cursor_parser_reports_invalid_cursor():
 
 
 async def test_cortex_replay_query_scopes_human_principal_to_authenticated_org():
-    from brain.systems.cortex.events import list_cortex_events_after_for_principal_async
+    from brain.platform.events import list_cortex_events_after_for_principal_async
 
     session = MagicMock()
     session.scalars = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))

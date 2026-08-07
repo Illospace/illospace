@@ -141,7 +141,7 @@ async def _store_generated_display_title(
 
 
 def _publish_generated_display_title(idea_id: str, title: str, *, org_id: str | None) -> None:
-    from brain.systems.cortex.events import publish
+    from brain.platform.events import publish
 
     payload: dict[str, str] = {"idea_id": str(idea_id), "title": title}
     if org_id:
@@ -393,7 +393,7 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
     data = await request.json()
     branches = data.get("branches", [])
 
-    from brain.systems.cortex.events import publish
+    from brain.platform.events import publish
 
     async with UnitOfWork() as uow:
         parent = await _a_require_idea_for_user(uow.session, idea_id, user)

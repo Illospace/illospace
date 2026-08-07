@@ -76,7 +76,7 @@ async def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypa
 
     fake_events = SimpleNamespace(publish_safe=lambda event, payload: published.append((event, payload)))
     fake_uow_mod = SimpleNamespace(UnitOfWork=FakeUnitOfWork, open_unit_of_work=lambda factory: factory())
-    monkeypatch.setitem(sys.modules, "brain.systems.cortex.events", fake_events)
+    monkeypatch.setitem(sys.modules, "brain.platform.events", fake_events)
     monkeypatch.setitem(sys.modules, "brain.platform.db.repositories.unit_of_work", fake_uow_mod)
     monkeypatch.setattr(idea_models, "VisualBlock", FakeVisualBlock)
 

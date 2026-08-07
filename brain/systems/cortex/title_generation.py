@@ -344,7 +344,7 @@ def _publish_generated_display_title(
     *,
     org_id: str | None,
 ) -> None:
-    from brain.systems.cortex.events import publish
+    from brain.platform.events import publish
 
     payload: dict[str, str] = {"idea_id": str(idea_id), "title": title}
     if org_id:
