@@ -19,7 +19,6 @@ from brain.systems.vault.github_app_mint import (
     GitHubAppCredential,
     MintedInstallationToken,
     _build_app_jwt,
-    _exchange_installation_token,
     async_mint_installation_token,
 )
 from brain.systems.vault.installation_resolver import (
@@ -215,37 +214,6 @@ def test_build_app_jwt_uses_app_id_when_client_id_absent(rsa_keypair):
 
 
 @pytest.mark.asyncio
-async def test_exchange_returns_only_token_and_expiry(monkeypatch):
-    api_client = _FakeAPIClient([("minted-token", NOW + timedelta(hours=1))])
-    monkeypatch.setattr(mint, "github_app_api_client", api_client)
-
-    minted = await _exchange_installation_token(
-        installation_id="456",
-        repositories=["uwear-backend"],
-        permissions={"issues": "write"},
-        app_jwt="signed-app-jwt",
-        now=NOW,
-    )
-
-    assert [field.name for field in fields(MintedInstallationToken)] == [
-        "token",
-        "expires_at",
-    ]
-    assert minted == MintedInstallationToken(
-        token="minted-token",
-        expires_at=NOW + timedelta(hours=1),
-    )
-    assert api_client.calls == [
-        {
-            "installation_id": "456",
-            "repositories": ["uwear-backend"],
-            "permissions": {"issues": "write"},
-            "app_jwt": "signed-app-jwt",
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_mint_discovers_full_slug_then_exchanges_bare_name(
     monkeypatch,
     rsa_keypair,
@@ -356,7 +324,7 @@ async def test_mint_cache_reuses_until_expiry_window_then_remints(
 ):
     private_pem, _public_pem = rsa_keypair
     current = {"now": NOW}
-    _resolver, api_client = _install_fakes(
+    resolver, api_client = _install_fakes(
         monkeypatch,
         resolved=[_resolved("uwear-ai/uwear-backend")],
         outcomes=[
@@ -366,14 +334,30 @@ async def test_mint_cache_reuses_until_expiry_window_then_remints(
         clock=lambda: current["now"],
     )
     blob = _blob(private_pem)
+    permissions = {"issues": "write"}
+
+    assert [field.name for field in fields(MintedInstallationToken)] == [
+        "token",
+        "expires_at",
+    ]
 
     assert await async_mint_installation_token(
         blob,
         repositories=["uwear-ai/uwear-backend"],
+        permissions=permissions,
     ) == "token-1"
+    assert api_client.calls == [
+        {
+            "installation_id": "456",
+            "repositories": ["uwear-backend"],
+            "permissions": permissions,
+            "app_jwt": resolver.calls[0]["app_jwt"],
+        }
+    ]
     assert await async_mint_installation_token(
         blob,
         repositories=["uwear-ai/uwear-backend"],
+        permissions=permissions,
     ) == "token-1"
     assert len(api_client.calls) == 1
 
@@ -381,6 +365,7 @@ async def test_mint_cache_reuses_until_expiry_window_then_remints(
     assert await async_mint_installation_token(
         blob,
         repositories=["uwear-ai/uwear-backend"],
+        permissions=permissions,
     ) == "token-2"
     assert len(api_client.calls) == 2
 

@@ -211,26 +211,6 @@ def _cache_is_fresh(
     return minted.expires_at - now > _CACHE_FRESHNESS_WINDOW
 
 
-async def _exchange_installation_token(
-    *,
-    repositories: list[str],
-    permissions: dict[str, str],
-    installation_id: str,
-    app_jwt: str,
-    now: datetime,
-) -> MintedInstallationToken:
-    token, expires_at = await github_app_api_client.create_installation_token(
-        installation_id=installation_id,
-        repositories=repositories,
-        permissions=permissions,
-        app_jwt=app_jwt,
-    )
-    return MintedInstallationToken(
-        token=token,
-        expires_at=expires_at,
-    )
-
-
 async def _mint_for_installation(
     cred: GitHubAppCredential,
     *,
@@ -257,24 +237,34 @@ async def _mint_for_installation(
         if _cache_is_fresh(cached, now=current):
             return cached
         try:
-            minted = await _exchange_installation_token(
-                repositories=repositories,
-                permissions=permissions,
-                installation_id=installation_id,
-                app_jwt=app_jwt,
-                now=current,
+            token, expires_at = (
+                await github_app_api_client.create_installation_token(
+                    installation_id=installation_id,
+                    repositories=repositories,
+                    permissions=permissions,
+                    app_jwt=app_jwt,
+                )
+            )
+            minted = MintedInstallationToken(
+                token=token,
+                expires_at=expires_at,
             )
         except GitHubConnectorError as exc:
             if exc.status_code != 422 or permissions.get("pull_requests") != "write":
                 raise
             fallback_permissions = dict(permissions)
             fallback_permissions["pull_requests"] = "read"
-            minted = await _exchange_installation_token(
-                repositories=repositories,
-                permissions=fallback_permissions,
-                installation_id=installation_id,
-                app_jwt=app_jwt,
-                now=current,
+            token, expires_at = (
+                await github_app_api_client.create_installation_token(
+                    installation_id=installation_id,
+                    repositories=repositories,
+                    permissions=fallback_permissions,
+                    app_jwt=app_jwt,
+                )
+            )
+            minted = MintedInstallationToken(
+                token=token,
+                expires_at=expires_at,
             )
         _TOKEN_CACHE[scope_key] = minted
         return minted
@@ -332,6 +322,5 @@ __all__ = [
     "GitHubAppCredential",
     "MintedInstallationToken",
     "_build_app_jwt",
-    "_exchange_installation_token",
     "async_mint_installation_token",
 ]
