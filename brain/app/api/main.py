@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 from brain.app.api.config import CORS_ORIGINS, SECRET_KEY, validate_auth_config
 from brain.app.api.deps import get_db
 from brain.app.scheduler.overdue_monitor import SchedulerOverdueMonitor
+from brain.app.scheduler.stale_run_reaper import StaleRunReaper
 
 validate_auth_config()
 
@@ -45,6 +46,7 @@ _ops_pending = False
 _OPS_THROTTLE_SEC = 2.0
 _run_event_consumer_task: asyncio.Task | None = None
 _scheduler_overdue_monitor_task: asyncio.Task[None] | None = None
+_stale_run_reaper_task: asyncio.Task[None] | None = None
 _GLOBAL_WS_EVENT_ALLOWLIST: frozenset[str] = frozenset()
 
 # Reference to the main asyncio event loop, set during lifespan startup.
@@ -195,6 +197,7 @@ def _schedule_product_event_publish(event_type, data):
 async def lifespan(app):
     """Wire the brain event bus to WebSocket broadcasting on startup."""
     global _main_loop, _run_event_consumer_task, _scheduler_overdue_monitor_task
+    global _stale_run_reaper_task
     _main_loop = asyncio.get_running_loop()
     inline_runner_started = False
 
@@ -209,6 +212,16 @@ async def lifespan(app):
         "scheduler_overdue_monitor_started",
         host="api",
         monitor=scheduler_overdue_monitor.name,
+    )
+    stale_run_reaper = StaleRunReaper()
+    _stale_run_reaper_task = _main_loop.create_task(
+        stale_run_reaper.run(),
+        name=stale_run_reaper.name,
+    )
+    logger.info(
+        "stale_run_reaper_started",
+        host="api",
+        monitor=stale_run_reaper.name,
     )
     await _ensure_starting_skill_bundle()
     if _should_start_run_event_consumer():
@@ -244,6 +257,18 @@ async def lifespan(app):
     try:
         yield
     finally:
+        if _stale_run_reaper_task is not None:
+            _stale_run_reaper_task.cancel()
+            try:
+                await _stale_run_reaper_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "stale_run_reaper_stop_failed",
+                    error=str(exc),
+                )
+            _stale_run_reaper_task = None
         if _scheduler_overdue_monitor_task is not None:
             _scheduler_overdue_monitor_task.cancel()
             try:
