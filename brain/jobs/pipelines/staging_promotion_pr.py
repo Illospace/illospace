@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from brain.contracts.scheduler_outcomes import SchedulerSkipKind
 from brain.platform.db.models.org import User
 from brain.platform.db.models.vault import Secret, VaultProjectBinding
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -31,8 +32,8 @@ class PromotionActor:
     org_id: str
 
 
-class PromotionPullRequestError(RuntimeError):
-    """A settled per-repository failure that should fail the scheduler run."""
+class PromotionConfigurationError(RuntimeError):
+    """A repository cannot be reconciled until its configuration changes."""
 
 
 def _job_result(result: PromotionPullRequestResult) -> dict[str, Any]:
@@ -61,7 +62,7 @@ async def _promotion_actor(repo: str) -> PromotionActor:
             .limit(1)
         )
         if binding is None:
-            raise PromotionPullRequestError(
+            raise PromotionConfigurationError(
                 f"No GitHub App project binding is configured for {repo}"
             )
 
@@ -78,7 +79,7 @@ async def _promotion_actor(repo: str) -> PromotionActor:
                 )
             ).first()
         if actor is None:
-            raise PromotionPullRequestError(
+            raise PromotionConfigurationError(
                 f"No Illospace user is available for {repo}'s GitHub App binding"
             )
         return PromotionActor(user_id=str(actor.id), org_id=str(actor.org_id))
@@ -93,7 +94,7 @@ async def _repo_token(repo: str, actor: PromotionActor) -> str:
     )
     token = str(env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or "").strip()
     if not token:
-        raise PromotionPullRequestError(
+        raise PromotionConfigurationError(
             f"No project-bound GitHub App token is available for {repo}"
         )
     return token
@@ -112,6 +113,16 @@ async def run_promotion_job() -> dict[str, Any]:
                 token=token,
             )
             result = _job_result(promotion)
+        except PromotionConfigurationError as exc:
+            failures += 1
+            error = str(exc)
+            logger.error("Promotion PR reconciliation failed for %s: %s", repo, error)
+            result = {
+                "repo": repo,
+                "outcome": "skipped",
+                "skip_kind": SchedulerSkipKind.CONFIGURATION.value,
+                "reason": error,
+            }
         except Exception as exc:  # noqa: BLE001 - each repository must settle independently
             failures += 1
             error = str(getattr(exc, "message", None) or exc)

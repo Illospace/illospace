@@ -329,6 +329,33 @@ async def test_api_error_is_logged_and_other_repository_still_settles(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_missing_project_binding_is_an_explicit_configuration_skip(monkeypatch):
+    reason = f"No GitHub App project binding is configured for {REPO}"
+    monkeypatch.setattr(staging_promotion_pr, "CONFIGURED_REPOS", (REPO,))
+    monkeypatch.setattr(
+        staging_promotion_pr,
+        "_promotion_actor",
+        AsyncMock(side_effect=staging_promotion_pr.PromotionConfigurationError(reason)),
+    )
+
+    result = await staging_promotion_pr.run_promotion_job()
+
+    assert result == {
+        "job": "uwear_staging_promotion_pr",
+        "ok": False,
+        "failures": 1,
+        "results": [
+            {
+                "repo": REPO,
+                "outcome": "skipped",
+                "skip_kind": "configuration",
+                "reason": reason,
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_repo_token_uses_only_the_project_bound_github_app(monkeypatch):
     actor = staging_promotion_pr.PromotionActor(user_id="user-1", org_id="org-1")
     resolve = AsyncMock(return_value={"GITHUB_TOKEN": "minted-app-token"})

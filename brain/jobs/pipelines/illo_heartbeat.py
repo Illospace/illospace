@@ -14,6 +14,7 @@ from urllib.parse import quote
 import httpx
 from sqlalchemy import func, select
 
+from brain.contracts.scheduler_outcomes import SchedulerSkipKind, scheduler_skip_kind
 from brain.platform.async_io import async_http_client
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.org import User
@@ -313,6 +314,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
             "job": "illo_external_heartbeat",
             "ok": True,
             "outcome": "skipped",
+            "skip_kind": SchedulerSkipKind.CONFIGURATION.value,
             "reason": f"No GitHub App project binding is configured for {PROJECT_SLUG}",
         }
     token = await _heartbeat_token(actor)
@@ -321,6 +323,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
             "job": "illo_external_heartbeat",
             "ok": True,
             "outcome": "skipped",
+            "skip_kind": SchedulerSkipKind.CONFIGURATION.value,
             "reason": f"No project-bound GitHub token is available for {PROJECT_SLUG}",
         }
 
@@ -331,6 +334,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
             "job": "illo_external_heartbeat",
             "ok": True,
             "outcome": publish_result.outcome.value,
+            "skip_kind": SchedulerSkipKind.TRANSIENT.value,
             "reason": "GitHub compare-and-swap conflicts exhausted",
             "attempts": publish_result.attempts,
             "conflict_status": publish_result.conflict_status,
@@ -350,7 +354,11 @@ async def async_main() -> int:
         logger.error("External heartbeat failed: %s", exc)
         return 1
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return (
+        1
+        if scheduler_skip_kind(result) is SchedulerSkipKind.CONFIGURATION
+        else 0
+    )
 
 
 def main() -> int:
