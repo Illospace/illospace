@@ -8,9 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
 
-from brain.contracts.github import GitHubConnectorError
+from brain.contracts.github import GitHubConnectorError, parse_github_repo_slug
 from brain.platform.integrations.github_app import github_app_api_client
-from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
 _CACHE_FRESHNESS_WINDOW = timedelta(minutes=5)

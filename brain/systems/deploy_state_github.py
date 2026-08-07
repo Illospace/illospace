@@ -7,10 +7,8 @@ import logging
 import re
 from dataclasses import dataclass
 
-from brain.systems.cortex.project_context.github import (
-    async_compare_commits,
-    parse_github_repo_slug,
-)
+from brain.contracts.github import parse_github_repo_slug
+from brain.systems.cortex.project_context.github import async_compare_commits
 
 
 logger = logging.getLogger("illo.deploy_state.github")

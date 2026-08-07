@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.contracts.github import parse_github_repo_slug
 from brain.kernel.config import (
     KNOWLEDGE_CONNECTOR_BATCH_SIZE,
     KNOWLEDGE_GITHUB_REPOSITORIES,
@@ -23,7 +24,6 @@ from brain.systems.cortex.project_context.github import (
     GithubIssueClosure,
     async_get_issue_closure_info,
     async_list_repo_issues,
-    parse_github_repo_slug,
 )
 from brain.systems.github_read_failures import (
     GITHUB_READ_ACCESS_FORBIDDEN,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brain.systems.cortex.project_context.github import parse_github_repo_slug
+from brain.contracts.github import parse_github_repo_slug
 from brain.systems.knowledge.connectors.github import _resource_repositories
 
 
