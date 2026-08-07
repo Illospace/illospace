@@ -122,7 +122,7 @@ async def test_missing_project_binding_is_an_explicit_configuration_skip(monkeyp
     assert result["outcome"] == "skipped"
     assert result["skip_kind"] == "configuration"
     assert result["reason"] == (
-        "No GitHub App project binding is configured for illospace/illospace"
+        "No GitHub credential project binding is configured for illospace/illospace"
     )
     publish.assert_not_awaited()
 
@@ -182,6 +182,27 @@ async def test_emitter_requests_existing_app_token_with_contents_write(monkeypat
         project_slug="illospace/illospace",
         github_app_only=True,
         github_app_permissions={"contents": "write"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_emitter_falls_back_to_static_project_token_without_an_app(monkeypatch):
+    resolver = AsyncMock(side_effect=[{}, {"GH_TOKEN": "static-project-token"}])
+    monkeypatch.setattr(
+        illo_heartbeat,
+        "async_resolve_project_bound_env_tokens",
+        resolver,
+    )
+    actor = illo_heartbeat.HeartbeatActor(user_id="user-1", org_id="org-1")
+
+    token = await illo_heartbeat._heartbeat_token(actor)
+
+    assert token == "static-project-token"
+    assert resolver.await_count == 2
+    resolver.assert_awaited_with(
+        actor_user_id="user-1",
+        org_id="org-1",
+        project_slug="illospace/illospace",
     )
 
 

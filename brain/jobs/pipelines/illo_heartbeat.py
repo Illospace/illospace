@@ -35,6 +35,10 @@ PROJECT_SLUG = REPO_SLUG.lower()
 HEARTBEAT_BRANCH = "ops/heartbeat"
 HEARTBEAT_PATH = "heartbeat.json"
 HEARTBEAT_INSTALLATION_PERMISSIONS = {"contents": "write"}
+# No App is installed on the Illospace org (deliberate: the repo is public and
+# the private illo-bot App stays uwear-ai-only), so a static "github" binding
+# is an accepted credential for this one publish path.
+HEARTBEAT_SECRET_CATEGORIES = ("github_app", "github")
 HeartbeatPayload = LivenessSnapshot
 build_heartbeat_payload = build_liveness_snapshot
 
@@ -73,9 +77,12 @@ async def _heartbeat_actor() -> HeartbeatActor | None:
             .where(
                 func.lower(VaultProjectBinding.project_slug) == PROJECT_SLUG,
                 VaultProjectBinding.active.is_(True),
-                Secret.category == "github_app",
+                Secret.category.in_(HEARTBEAT_SECRET_CATEGORIES),
             )
-            .order_by(VaultProjectBinding.id.asc())
+            .order_by(
+                (Secret.category == "github_app").desc(),
+                VaultProjectBinding.id.asc(),
+            )
             .limit(1)
         )
         if binding is None:
@@ -105,6 +112,14 @@ async def _heartbeat_token(actor: HeartbeatActor) -> str | None:
         project_slug=PROJECT_SLUG,
         github_app_only=True,
         github_app_permissions=HEARTBEAT_INSTALLATION_PERMISSIONS,
+    )
+    token = str(env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or "").strip()
+    if token:
+        return token
+    env = await async_resolve_project_bound_env_tokens(
+        actor_user_id=actor.user_id,
+        org_id=actor.org_id,
+        project_slug=PROJECT_SLUG,
     )
     return str(env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or "").strip() or None
 
@@ -315,7 +330,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
             "ok": False,
             "outcome": "skipped",
             "skip_kind": SchedulerSkipKind.CONFIGURATION.value,
-            "reason": f"No GitHub App project binding is configured for {PROJECT_SLUG}",
+            "reason": f"No GitHub credential project binding is configured for {PROJECT_SLUG}",
         }
     token = await _heartbeat_token(actor)
     if token is None:
