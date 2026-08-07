@@ -135,6 +135,135 @@ async def test_command_failure_prefers_structured_exception_over_log_tail():
     assert "HTTP/1.1 201 Created" in summary["stderr_tail"]
 
 
+async def test_configuration_skip_settles_failed_without_retry_and_alerts(session, monkeypatch):
+    reason = "No GitHub App project binding is configured for illospace/illospace"
+    job = _make_scheduler_job(
+        job_key="configuration_skip_job",
+        family="configuration_skip_job",
+        program_key="configuration_skip_job",
+        handler_kind="scheduler_builtin",
+        handler_ref="brain.app.scheduler.programs:configuration_skip_job",
+        retry_policy={"max_attempts": 3, "backoff_seconds": 30},
+        default_payload={
+            "name": "Configuration Skip Job",
+            "step_plan": [
+                {
+                    "step_key": "configuration_skip_job",
+                    "sequence_no": 1,
+                    "command": ["python3", "-m", "configuration_skip_job"],
+                }
+            ],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+            allowed_owner_modes=("scheduler",),
+        )
+    )[0]
+    alert = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_alert_first_configuration_skip",
+        alert,
+    )
+
+    executed = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="tester",
+        runner=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "outcome": "skipped",
+                    "skip_kind": "configuration",
+                    "reason": reason,
+                }
+            ),
+            stderr="",
+        ),
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    step = await session.scalar(
+        select(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id)
+    )
+
+    assert executed.status == "settled_failure"
+    assert executed.error_text == reason
+    assert "next_retry_at" not in executed.result_summary
+    assert step.status == "settled_failure"
+    assert step.error_text == reason
+    alert.assert_awaited_once_with(
+        job_key="configuration_skip_job",
+        run_id=run.id,
+        reason=reason,
+        alerted_at=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+
+
+async def test_transient_skip_still_settles_successfully(session, monkeypatch):
+    job = _make_scheduler_job(
+        job_key="transient_skip_job",
+        family="transient_skip_job",
+        program_key="transient_skip_job",
+        handler_kind="scheduler_builtin",
+        handler_ref="brain.app.scheduler.programs:transient_skip_job",
+        default_payload={
+            "name": "Transient Skip Job",
+            "step_plan": [
+                {
+                    "step_key": "transient_skip_job",
+                    "sequence_no": 1,
+                    "command": ["python3", "-m", "transient_skip_job"],
+                }
+            ],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+            allowed_owner_modes=("scheduler",),
+        )
+    )[0]
+    alert = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_alert_first_configuration_skip",
+        alert,
+    )
+
+    executed = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="tester",
+        runner=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "outcome": "conflict_skipped",
+                    "skip_kind": "transient",
+                    "reason": "GitHub compare-and-swap conflicts exhausted",
+                }
+            ),
+            stderr="",
+        ),
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+
+    assert executed.status == "settled_success"
+    assert executed.error_text is None
+    alert.assert_not_awaited()
+
+
 async def test_knowledge_index_sync_catalog_config(session):
     now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
 

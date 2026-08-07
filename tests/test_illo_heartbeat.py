@@ -111,7 +111,7 @@ async def test_publish_boundary_rejects_untyped_payload():
 
 
 @pytest.mark.asyncio
-async def test_missing_project_binding_is_a_clean_skip(monkeypatch):
+async def test_missing_project_binding_is_an_explicit_configuration_skip(monkeypatch):
     publish = AsyncMock()
     monkeypatch.setattr(illo_heartbeat, "_heartbeat_actor", AsyncMock(return_value=None))
     monkeypatch.setattr(illo_heartbeat, "publish_heartbeat", publish)
@@ -120,11 +120,15 @@ async def test_missing_project_binding_is_a_clean_skip(monkeypatch):
 
     assert result["ok"] is True
     assert result["outcome"] == "skipped"
+    assert result["skip_kind"] == "configuration"
+    assert result["reason"] == (
+        "No GitHub App project binding is configured for illospace/illospace"
+    )
     publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_missing_project_token_is_a_clean_skip(monkeypatch):
+async def test_missing_project_token_is_an_explicit_configuration_skip(monkeypatch):
     actor = illo_heartbeat.HeartbeatActor(user_id="user-1", org_id="org-1")
     publish = AsyncMock()
     monkeypatch.setattr(illo_heartbeat, "_heartbeat_actor", AsyncMock(return_value=actor))
@@ -135,7 +139,28 @@ async def test_missing_project_token_is_a_clean_skip(monkeypatch):
 
     assert result["ok"] is True
     assert result["outcome"] == "skipped"
+    assert result["skip_kind"] == "configuration"
     publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_configuration_skip_exits_nonzero(monkeypatch, capsys):
+    monkeypatch.setattr(
+        illo_heartbeat,
+        "run_heartbeat",
+        AsyncMock(
+            return_value={
+                "job": "illo_external_heartbeat",
+                "ok": True,
+                "outcome": "skipped",
+                "skip_kind": "configuration",
+                "reason": "binding missing",
+            }
+        ),
+    )
+
+    assert await illo_heartbeat.async_main() == 1
+    assert json.loads(capsys.readouterr().out)["reason"] == "binding missing"
 
 
 @pytest.mark.asyncio
@@ -381,6 +406,7 @@ async def test_conflict_skip_is_a_successful_job_outcome(monkeypatch):
         "job": "illo_external_heartbeat",
         "ok": True,
         "outcome": "conflict_skipped",
+        "skip_kind": "transient",
         "reason": "GitHub compare-and-swap conflicts exhausted",
         "attempts": 3,
         "conflict_status": 409,
