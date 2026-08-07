@@ -14,7 +14,8 @@ from urllib.parse import quote
 
 import httpx
 
-from brain.contracts.github import GitHubConnectorError, parse_github_repo_slug
+from brain.contracts.github import GitHubConnectorError
+from brain.contracts.github import parse_github_repo_slug as _parse_github_repo_slug
 from brain.kernel.common.pagination import InvalidPageToken, decode_page_token, encode_page_token
 from brain.platform.async_io import async_http_client, sync_http_client
 
@@ -1636,7 +1637,7 @@ def _graphql_parent_reference(data: Any) -> tuple[str, int] | None:
     if parent is None:
         return None
     repository = parent.get("repository") if isinstance(parent, dict) else None
-    parent_slug = parse_github_repo_slug(
+    parent_slug = _parse_github_repo_slug(
         str(repository.get("nameWithOwner") or "") if isinstance(repository, dict) else ""
     )
     parent_number = parent.get("number") if isinstance(parent, dict) else None
@@ -1746,7 +1747,7 @@ def _sub_issue_repository_slug(issue: dict[str, Any]) -> str | None:
             value,
             flags=re.IGNORECASE,
         )
-        parsed = parse_github_repo_slug(api_slug)
+        parsed = _parse_github_repo_slug(api_slug)
         if parsed:
             return parsed
     return None
@@ -1904,7 +1905,7 @@ async def async_get_repo_issue_parent(
                 if exc.status_code != 404:
                     raise
             if isinstance(parent, dict):
-                parent_slug = parse_github_repo_slug(str(parent.get("html_url") or ""))
+                parent_slug = _parse_github_repo_slug(str(parent.get("html_url") or ""))
                 parent_payload = _issue_payload(parent)
                 parent_payload["repo"] = parent_slug
     return {
@@ -2627,7 +2628,7 @@ def search_repos(query: str, *, token: str | None = None) -> dict[str, Any]:
     if not trimmed:
         raise GitHubConnectorError(status_code=422, message="Search query is required.")
 
-    slug = parse_github_repo_slug(trimmed)
+    slug = _parse_github_repo_slug(trimmed)
     if slug:
         token_candidates = [token, None] if token else [None]
         first_error: GitHubConnectorError | None = None
@@ -2670,7 +2671,7 @@ async def async_search_repos(query: str, *, token: str | None = None) -> dict[st
     if not trimmed:
         raise GitHubConnectorError(status_code=422, message="Search query is required.")
 
-    slug = parse_github_repo_slug(trimmed)
+    slug = _parse_github_repo_slug(trimmed)
     if slug:
         token_candidates = [token, None] if token else [None]
         first_error: GitHubConnectorError | None = None
