@@ -562,7 +562,7 @@ async def test_job_minted_token_requests_read_only_contents_permission(
 
     assert token == "minted-app-token"
     mint.assert_awaited_once()
-    assert mint.await_args.kwargs["repositories"] == ["uwear-backend"]
+    assert mint.await_args.kwargs["repositories"] == ["uwear-ai/uwear-backend"]
     assert mint.await_args.kwargs["permissions"]["contents"] == "read"
     assert mint.await_args.kwargs["permissions"]["contents"] != "write"
 

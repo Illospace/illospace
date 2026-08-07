@@ -666,10 +666,10 @@ async def async_resolve_project_bound_env_tokens(
 ) -> dict[str, str]:
     """Return env-name/token pairs for matching org project bindings.
 
-    Matching bindings for the same GitHub App and env name mint one token
-    down-scoped to their combined repository names. Cross-repository GitHub
-    operations can therefore use one installation identity without widening
-    its permissions or repository access beyond the supplied bindings.
+    Matching bindings for the same GitHub App, env name, and installation mint
+    one token down-scoped to their combined repository names. Repositories from
+    different installations fail closed because one env name cannot carry more
+    than one installation token.
     ``github_app_permissions`` lets read-only maintenance callers narrow the
     minted token below the runtime default.
     """
@@ -741,7 +741,7 @@ async def _async_resolve_project_bound_env_tokens(
             if github_app_only and getattr(secret, "category", None) != "github_app":
                 continue
             if getattr(secret, "category", None) == "github_app":
-                repo_name = binding.project_slug.split("/")[-1]
+                repo_name = binding.project_slug
                 assignment_key = (binding.env_name, int(secret.id))
                 assignment = github_app_assignments.get(assignment_key)
                 if assignment is None:

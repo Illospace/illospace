@@ -155,6 +155,8 @@ class _MockGitHubClient:
                     "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
                 },
             )
+        if method == "GET" and url.endswith("/app/installations/456"):
+            return httpx.Response(200, json={"account": {"login": "uwear-ai"}})
         if url.endswith("/repos/uwear-ai/uwear-backend/issues"):
             return httpx.Response(
                 201,
@@ -437,7 +439,7 @@ async def test_github_app_project_binding_mints_before_manual_skip(patch_uow, se
     assert mint_calls == [
         {
             "decrypted_blob": "github-app-blob",
-            "repositories": ["uwear-backend"],
+            "repositories": ["uwear-ai/uwear-backend"],
             "permissions": {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"},
             "transaction_open": False,
         }
@@ -491,7 +493,7 @@ async def test_resolve_project_bound_env_tokens_can_filter_to_github_app_only(pa
 
     async def async_mint_installation_token(decrypted_blob, *, repositories, permissions):
         assert decrypted_blob == "github-app-blob"
-        assert repositories == ["uwear-backend"]
+        assert repositories == ["uwear-ai/uwear-backend"]
         assert permissions == {"issues": "write", "contents": "read", "pull_requests": "write", "checks": "read"}
         return "minted-installation-token"
 
@@ -557,7 +559,7 @@ async def test_backfill_can_narrow_github_app_token_to_read_only_pr_access(
     assert env == {"GITHUB_TOKEN": "read-only-installation-token"}
     mint.assert_awaited_once_with(
         "github-app-blob",
-        repositories=["uwear-backend"],
+        repositories=["uwear-ai/uwear-backend"],
         permissions={"pull_requests": "read"},
     )
 
@@ -615,7 +617,10 @@ async def test_github_app_binding_mints_one_token_for_cross_repo_operation(
     assert env == {"GITHUB_TOKEN": "cross-repo-installation-token"}
     assert mint_calls == [{
         "decrypted_blob": "github-app-blob",
-        "repositories": ["uwear-backend", "uwear-coordination"],
+        "repositories": [
+            "uwear-ai/uwear-backend",
+            "uwear-ai/uwear-coordination",
+        ],
         "permissions": {
             "issues": "write",
             "contents": "read",
@@ -638,6 +643,8 @@ async def test_create_github_issue_uses_minted_github_app_project_binding(
 
     github_app_mint._TOKEN_CACHE.clear()
     github_app_mint._MINT_LOCKS.clear()
+    github_app_mint._INSTALLATION_CACHE.clear()
+    github_app_mint._INSTALLATION_LOCKS.clear()
     app_blob = json.dumps({
         "app_id": "123",
         "client_id": "Iv23.client",

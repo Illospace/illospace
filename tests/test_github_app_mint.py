@@ -27,9 +27,13 @@ NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
 def clear_mint_cache():
     mint._TOKEN_CACHE.clear()
     mint._MINT_LOCKS.clear()
+    mint._INSTALLATION_CACHE.clear()
+    mint._INSTALLATION_LOCKS.clear()
     yield
     mint._TOKEN_CACHE.clear()
     mint._MINT_LOCKS.clear()
+    mint._INSTALLATION_CACHE.clear()
+    mint._INSTALLATION_LOCKS.clear()
 
 
 @pytest.fixture
@@ -87,6 +91,14 @@ def _token_response(token: str, expires_at: datetime) -> httpx.Response:
         201,
         json={"token": token, "expires_at": expires_at.isoformat().replace("+00:00", "Z")},
     )
+
+
+def _installation_response(installation_id: int) -> httpx.Response:
+    return httpx.Response(200, json={"id": installation_id})
+
+
+def _installation_owner_response(owner: str) -> httpx.Response:
+    return httpx.Response(200, json={"account": {"login": owner}})
 
 
 def _patch_http(monkeypatch, responses: list[httpx.Response], *, delay: float = 0) -> list[dict]:
@@ -159,6 +171,230 @@ async def test_exchange_installation_token_request_shape(monkeypatch, rsa_keypai
     }
     app_jwt = request["headers"]["Authorization"].removeprefix("Bearer ")
     assert _decode(app_jwt, public_pem)["iss"] == "Iv23.client"
+
+
+@pytest.mark.asyncio
+async def test_mint_discovers_repository_installation_before_exchange(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            _installation_response(789),
+            _token_response("illospace-token", NOW + timedelta(hours=1)),
+        ],
+    )
+
+    token = await async_mint_installation_token(
+        _blob(private_pem),
+        repositories=["illospace/illospace"],
+        permissions={"contents": "write"},
+    )
+
+    assert token == "illospace-token"
+    assert [(request["method"], request["url"]) for request in requests] == [
+        ("GET", f"{GITHUB_API_BASE}/repos/illospace/illospace/installation"),
+        ("POST", f"{GITHUB_API_BASE}/app/installations/789/access_tokens"),
+    ]
+    assert requests[1]["json"] == {
+        "repositories": ["illospace"],
+        "permissions": {"contents": "write"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_mint_falls_back_to_stored_installation_and_caches_the_resolution(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            httpx.Response(404, json={"message": "Not Found"}),
+            _installation_owner_response("uwear-ai"),
+            _token_response("fallback-token", NOW + timedelta(hours=1)),
+            _token_response("fallback-write-token", NOW + timedelta(hours=1)),
+        ],
+    )
+
+    token = await async_mint_installation_token(
+        _blob(private_pem),
+        repositories=["uwear-ai/uwear-backend"],
+        permissions={"contents": "read"},
+    )
+
+    assert token == "fallback-token"
+    assert await async_mint_installation_token(
+        _blob(private_pem),
+        repositories=["uwear-ai/uwear-backend"],
+        permissions={"contents": "write"},
+    ) == "fallback-write-token"
+    assert [(request["method"], request["url"]) for request in requests] == [
+        (
+            "GET",
+            f"{GITHUB_API_BASE}/repos/uwear-ai/uwear-backend/installation",
+        ),
+        ("GET", f"{GITHUB_API_BASE}/app/installations/456"),
+        (
+            "POST",
+            f"{GITHUB_API_BASE}/app/installations/456/access_tokens",
+        ),
+        (
+            "POST",
+            f"{GITHUB_API_BASE}/app/installations/456/access_tokens",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mint_does_not_fallback_to_stored_installation_for_another_owner(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            httpx.Response(404, json={"message": "Not Found"}),
+            _installation_owner_response("uwear-ai"),
+        ],
+    )
+
+    with pytest.raises(
+        GitHubConnectorError,
+        match="installation was not found for the repository",
+    ) as exc_info:
+        await async_mint_installation_token(
+            _blob(private_pem),
+            repositories=["illospace/illospace"],
+            permissions={"contents": "write"},
+        )
+
+    assert exc_info.value.status_code == 404
+    assert [(request["method"], request["url"]) for request in requests] == [
+        ("GET", f"{GITHUB_API_BASE}/repos/illospace/illospace/installation"),
+        ("GET", f"{GITHUB_API_BASE}/app/installations/456"),
+    ]
+    assert not any(
+        request["url"].endswith("/access_tokens") for request in requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_mint_splits_repositories_across_installations(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            _installation_response(111),
+            _installation_response(222),
+            _token_response("first-token", NOW + timedelta(hours=1)),
+            _token_response("second-token", NOW + timedelta(hours=1)),
+        ],
+    )
+
+    with pytest.raises(GitHubConnectorError, match="span multiple installations"):
+        await async_mint_installation_token(
+            _blob(private_pem),
+            repositories=["first-org/backend", "second-org/frontend"],
+            permissions={"contents": "read"},
+        )
+
+    exchanges = [request for request in requests if request["method"] == "POST"]
+    assert [request["url"] for request in exchanges] == [
+        f"{GITHUB_API_BASE}/app/installations/111/access_tokens",
+        f"{GITHUB_API_BASE}/app/installations/222/access_tokens",
+    ]
+    assert [request["json"]["repositories"] for request in exchanges] == [
+        ["backend"],
+        ["frontend"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repository_installation_discovery_is_cached_across_token_scopes(
+    monkeypatch,
+    rsa_keypair,
+):
+    private_pem, _public_pem = rsa_keypair
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            _installation_response(789),
+            _token_response("read-token", NOW + timedelta(hours=1)),
+            _token_response("write-token", NOW + timedelta(hours=1)),
+        ],
+    )
+    blob = _blob(private_pem)
+
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["illospace/illospace"],
+        permissions={"contents": "read"},
+    ) == "read-token"
+    assert await async_mint_installation_token(
+        blob,
+        repositories=["illospace/illospace"],
+        permissions={"contents": "write"},
+    ) == "write-token"
+
+    assert [request["method"] for request in requests] == ["GET", "POST", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_repository_installation_cache_misses_after_pem_rotation(
+    monkeypatch,
+    rsa_keypair,
+):
+    first_private_pem, _public_pem = rsa_keypair
+    second_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    second_private_pem = second_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    monkeypatch.setattr(mint, "_now", lambda: NOW)
+    requests = _patch_http(
+        monkeypatch,
+        [
+            _installation_response(789),
+            _token_response("first-token", NOW + timedelta(hours=1)),
+            _installation_response(987),
+            _token_response("rotated-token", NOW + timedelta(hours=1)),
+        ],
+    )
+
+    assert await async_mint_installation_token(
+        _blob(first_private_pem),
+        repositories=["illospace/illospace"],
+        permissions={"contents": "read"},
+    ) == "first-token"
+    assert await async_mint_installation_token(
+        _blob(second_private_pem),
+        repositories=["illospace/illospace"],
+        permissions={"contents": "read"},
+    ) == "rotated-token"
+
+    assert [request["method"] for request in requests] == [
+        "GET",
+        "POST",
+        "GET",
+        "POST",
+    ]
+    assert requests[3]["url"] == (
+        f"{GITHUB_API_BASE}/app/installations/987/access_tokens"
+    )
 
 
 @pytest.mark.asyncio
