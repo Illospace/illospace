@@ -1,8 +1,9 @@
 # Illo Knowledge — North Star
 
-*The durable statement of what the knowledge base is and the principles that govern it.
-Evaluation (the retargeted R2 routine, golden questions) scores against THIS document.
-Implementation details live in the PRD and, once shipped, in the code.*
+*The durable statement of what the knowledge base is and the principles that
+govern it. Recall evaluation scores against this document. Design rationale
+lives in [`specs/done/knowledge-base/README.md`](../done/knowledge-base/README.md),
+and implementation details live in the code.*
 
 ## The one-sentence test
 
@@ -44,28 +45,30 @@ one table, many connectors, hybrid retrieval, agent as orchestrator.
    own model routing, so KB quality compounds with Illo's judgment. (Structural
    sources may distill mechanically; conversational sources need the LLM pass.)
 
-5. **Hybrid recall — weights, never gates.** Full-text search for exact tokens,
-   embeddings for paraphrase, recency decay for freshness, fused by reciprocal
+5. **Hybrid recall — weights, never gates.** Lexical search for exact tokens,
+   embeddings for paraphrase, recency ranking for freshness, fused by reciprocal
    rank fusion. No scorer is trusted alone, and nothing is ever excluded from the
    search space for being unlike the past: **history sets weights, never the
    search space.** This is how the KB indexes the past without blinding Illo to
    unknown unknowns.
 
-6. **Recall primitives are dumb and stable.** `kb.search` and friends are
-   LLM-free, narrow, cheap, exposed both internally and over MCP. Orchestration
+6. **Recall primitives are dumb and stable.** `search_knowledge` and the MCP
+   `knowledge.search` capability are LLM-free, narrow, and cheap. Orchestration
    — planning which primitives to call, synthesizing answers — lives in agents,
    not in the retrieval layer. Capability over recipes.
 
 7. **Scopes are queries, not containers.** No projects/bundles object. Scoping is
-   metadata filtering (`source`, `kind`, `domain`) at query time. If a named
-   bundle ever earns its existence, it is a saved filter (a domain_record), not
-   schema.
+   metadata filtering (`source`, `kind`, and access scope) at query time. If a
+   named bundle ever earns its existence, it is a saved filter (a
+   `domain_record`), not schema. `domain` is not a knowledge-base scoping term.
 
-8. **Strangler unification with the memory subsystem.** Day one, the memory
-   subsystem is untouched; consolidated memories mirror into the index as one
-   connector among many. When KB recall demonstrably beats memory's own recall
-   path, memory's consumers swap over and the duplicate path retires. One system
-   eventually, zero blast radius now.
+8. **Additive coexistence now; unification only if measured.** Workspace-visible
+   memory content mirrors into the index as one source among many. Memory retains
+   its own recall and mutation paths, and the mirror never widens private or
+   user-scoped visibility. Retiring that duplicate path remains the intended end
+   state, but it is gated on recall measured to be at least as good — and
+   permanent coexistence is a legitimate answer if the measurement never earns
+   the swap. Zero blast radius now; one system only on evidence.
 
 ## Consumers, in priority order
 
@@ -79,18 +82,20 @@ one table, many connectors, hybrid retrieval, agent as orchestrator.
 
 - Code embeddings (grep/ripgrep is the code-search tool; even Cerebras's
   `search_code` is ripgrep).
-- A dedicated reranker model (RRF + recency decay first).
+- A dedicated reranker model (RRF + recency ranking first).
 - Message-level "bursting" (thread-level distillation first).
 - Real-time socket ingestion (scheduler-cadence pulls; per-source freshness).
 - A projects/bundles schema object (principle 7).
 
 ## Evaluation contract
 
-- **Golden questions:** a maintained set (~10–15 to start) harvested from real
-  "Illo should have known" failures, each with known-best evidence. Recall is
-  measured against them before and after each connector lands.
-- **The R2 routine** (currently deactivated; sole purpose was illospace
-  evaluation) is retargeted after v1 ships to score the KB against this
-  document's one-sentence test, tracked over time.
+- **Golden questions:** a maintained set harvested from real "Illo should have
+  known" failures, each with known-best evidence. Recall is measured against
+  them after connector or ranking changes.
+- **Comparable evidence:** score artifacts identify the question set,
+  configuration, retrieval engine, and corpus. Evaluation must reject an arm
+  with no reachable expected evidence instead of treating that arm's misses as
+  a ranking result.
 - **Per-connector accounting:** each connector reports what it ingested, skipped,
-  and failed — silent truncation reads as "covered everything" when it didn't.
+  failed, and truncated — silent truncation reads as "covered everything" when
+  it didn't.
