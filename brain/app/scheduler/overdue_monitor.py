@@ -1,10 +1,11 @@
-"""Alert when scheduler-owned jobs stop advancing.
+"""Alert while scheduler-owned jobs stop advancing.
 
 The freeze latch is scheduler-global and durable. Each API monitor atomically
 claims the same stable database key in a short transaction, then delivers only
-after that claim commits. API restarts and concurrent replicas therefore share
-one alert per freeze without holding a database transaction across Slack. A
-healthy observation releases the key so a later freeze can alert again.
+after that claim commits. The row also records the freeze start and next alert
+time, so API restarts and concurrent replicas share one delivery at each
+duration threshold without holding a database transaction across Slack. A
+healthy observation releases the key and reports recovery.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.cold_start import scheduler_liveness_checkpoint
 from brain.app.scheduler.overdue_alert_state import (
+    SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+    SchedulerOverdueAlertState,
     claim_scheduler_overdue_alert,
     release_scheduler_overdue_alert,
 )
@@ -26,6 +29,7 @@ from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
 )
+from brain.kernel.common.time import assume_utc
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.slack_delivery import (
     FailureAlertPresentation,
@@ -36,13 +40,6 @@ from brain.systems.failure_guard.slack_delivery import (
 from brain.systems.slack.client import slack_web_client_from_runtime
 
 
-CandidateProvider = Callable[
-    ..., Awaitable[tuple[SchedulerOverdueCandidate, ...]]
-]
-LivenessCheckpointProvider = Callable[[AsyncSession], Awaitable[datetime | None]]
-AlertDelivery = Callable[..., Awaitable[None]]
-AlertClaim = Callable[..., Awaitable[bool]]
-AlertRelease = Callable[[], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 
@@ -59,8 +56,33 @@ class _SchedulerOverdueCheck:
     last_tick_at: datetime | None
 
 
+CandidateProvider = Callable[
+    ..., Awaitable[tuple[SchedulerOverdueCandidate, ...]]
+]
+LivenessCheckpointProvider = Callable[[AsyncSession], Awaitable[datetime | None]]
+AlertDelivery = Callable[..., Awaitable[None]]
+AlertClaim = Callable[..., Awaitable[bool]]
+AlertRelease = Callable[[], Awaitable[SchedulerOverdueAlertState | None]]
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _elapsed_text(*, started_at: datetime, ended_at: datetime) -> str:
+    elapsed_minutes = max(
+        0,
+        int(
+            (assume_utc(ended_at) - assume_utc(started_at)).total_seconds()
+            // 60
+        ),
+    )
+    hours, minutes = divmod(elapsed_minutes, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    return f"{minutes}m"
 
 
 def _alert_summary(
@@ -74,16 +96,30 @@ def _alert_summary(
         f"(due {candidate.next_run_at.isoformat()})"
         for candidate in candidates
     ]
-    tick_text = last_tick_at.isoformat() if last_tick_at else "unknown"
-    return "\n".join(("Overdue jobs:", *job_lines, f"Daemon last tick: {tick_text}"))
+    if last_tick_at is None:
+        daemon_line = "Daemon last tick and freeze duration are unknown."
+    else:
+        normalized_tick = assume_utc(last_tick_at)
+        daemon_line = (
+            "Daemon has not ticked for "
+            f"{_elapsed_text(started_at=normalized_tick, ended_at=now)} "
+            f"(last tick {normalized_tick.isoformat()})."
+        )
+    return "\n".join(("Overdue jobs:", *job_lines, daemon_line))
 
 
 class SchedulerOverdueMonitor:
-    """Monitor scheduler progress through one shared durable freeze latch."""
+    """Monitor progress through one shared, duration-aware freeze latch."""
 
     name = "scheduler_overdue_monitor"
     overdue_after = timedelta(minutes=15)
     check_interval_seconds = 60.0
+    escalation_thresholds = (
+        timedelta(hours=1),
+        timedelta(hours=4),
+        timedelta(hours=12),
+    )
+    repeat_escalation_interval = timedelta(hours=12)
 
     def __init__(
         self,
@@ -162,13 +198,26 @@ class SchedulerOverdueMonitor:
             candidate.job_key for candidate in overdue_candidates
         )
         if not overdue_candidates:
-            await self._release_alert()
+            released = await self._release_alert()
+            if released is not None:
+                await self._deliver_recovery(
+                    released,
+                    recovered_at=observation.last_tick_at or now,
+                )
             return _SchedulerOverdueCheck(
                 overdue_job_keys=(),
                 alert_sent=False,
                 last_tick_at=observation.last_tick_at,
             )
-        if not await self._claim_alert(alerted_at=now):
+        freeze_started_at = assume_utc(observation.last_tick_at or now)
+        if not await self._claim_alert(
+            alerted_at=now,
+            freeze_started_at=freeze_started_at,
+            next_alert_at=self._next_escalation_at(
+                freeze_started_at=freeze_started_at,
+                now=now,
+            ),
+        ):
             return _SchedulerOverdueCheck(
                 overdue_job_keys=overdue_job_keys,
                 alert_sent=False,
@@ -220,6 +269,85 @@ class SchedulerOverdueMonitor:
             alert_sent=True,
             last_tick_at=observation.last_tick_at,
         )
+
+    def _next_escalation_at(
+        self,
+        *,
+        freeze_started_at: datetime,
+        now: datetime,
+    ) -> datetime:
+        freeze_started_at = assume_utc(freeze_started_at)
+        elapsed = assume_utc(now) - freeze_started_at
+        for threshold in self.escalation_thresholds:
+            if elapsed < threshold:
+                return freeze_started_at + threshold
+
+        repeat_count = elapsed // self.repeat_escalation_interval
+        return freeze_started_at + (
+            (repeat_count + 1) * self.repeat_escalation_interval
+        )
+
+    async def _deliver_recovery(
+        self,
+        released: SchedulerOverdueAlertState,
+        *,
+        recovered_at: datetime,
+    ) -> None:
+        recovered_at = assume_utc(recovered_at)
+        freeze_started_at = assume_utc(
+            released.freeze_started_at or released.alerted_at
+        )
+        try:
+            await self._deliver_alert(
+                policy=SlackFailureAlertPolicy(
+                    provide_client=slack_web_client_from_runtime,
+                    requested_by=self.name,
+                    reason="Report that overdue scheduler jobs recovered.",
+                    channel=(
+                        os.getenv(
+                            "ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL",
+                            "",
+                        ).strip()
+                        or "#alerts"
+                    ),
+                    unknown_error_text="Scheduler jobs recovered",
+                ),
+                subject=FailureAlertSubject(
+                    identity_label="Alert",
+                    identity=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+                    url_label="Scheduler",
+                    url=f"{public_app_base_url()}/api/system/scheduler",
+                    link_label="open scheduler state",
+                ),
+                presentation=FailureAlertPresentation(
+                    title="Scheduler jobs recovered",
+                    summary=(
+                        f"Daemon resumed ticking at {recovered_at.isoformat()} "
+                        "after "
+                        f"{_elapsed_text(started_at=freeze_started_at, ended_at=recovered_at)} "
+                        "without a tick."
+                    ),
+                ),
+                error_text="Scheduler jobs are advancing again.",
+            )
+        except Exception:  # noqa: BLE001 - restore so recovery can retry
+            try:
+                await self._claim_alert(
+                    alerted_at=assume_utc(released.alerted_at),
+                    freeze_started_at=freeze_started_at,
+                    next_alert_at=assume_utc(
+                        released.next_alert_at
+                        or self._next_escalation_at(
+                            freeze_started_at=freeze_started_at,
+                            now=released.alerted_at,
+                        )
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - preserve the delivery error
+                logger.exception(
+                    "Failed to restore scheduler overdue alert after recovery delivery failure"
+                )
+            raise
 
     @staticmethod
     def _reference_time(now: datetime | None) -> datetime:

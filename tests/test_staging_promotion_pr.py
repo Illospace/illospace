@@ -329,6 +329,58 @@ async def test_api_error_is_logged_and_other_repository_still_settles(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_missing_project_binding_is_an_explicit_configuration_skip(monkeypatch):
+    reason = f"No GitHub App project binding is configured for {REPO}"
+    monkeypatch.setattr(staging_promotion_pr, "CONFIGURED_REPOS", (REPO,))
+    monkeypatch.setattr(
+        staging_promotion_pr,
+        "_promotion_actor",
+        AsyncMock(side_effect=staging_promotion_pr.PromotionConfigurationError(reason)),
+    )
+
+    result = await staging_promotion_pr.run_promotion_job()
+
+    assert result == {
+        "job": "uwear_staging_promotion_pr",
+        "ok": False,
+        "failures": 1,
+        "results": [
+            {
+                "repo": REPO,
+                "outcome": "skipped",
+                "skip_kind": "configuration",
+                "reason": reason,
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_multiple_repository_configuration_gaps_remain_classified(monkeypatch):
+    repos = tuple(staging_promotion_pr.CONFIGURED_REPOS[:2])
+    monkeypatch.setattr(staging_promotion_pr, "CONFIGURED_REPOS", repos)
+
+    async def missing_binding(repo):
+        raise staging_promotion_pr.PromotionConfigurationError(
+            f"No GitHub App project binding is configured for {repo}"
+        )
+
+    monkeypatch.setattr(staging_promotion_pr, "_promotion_actor", missing_binding)
+
+    result = await staging_promotion_pr.run_promotion_job()
+
+    assert result["ok"] is False
+    assert result["failures"] == 2
+    assert [item["repo"] for item in result["results"]] == list(repos)
+    assert all(
+        item["outcome"] == "skipped"
+        and item["skip_kind"] == "configuration"
+        and item["repo"] in item["reason"]
+        for item in result["results"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_repo_token_uses_only_the_project_bound_github_app(monkeypatch):
     actor = staging_promotion_pr.PromotionActor(user_id="user-1", org_id="org-1")
     resolve = AsyncMock(return_value={"GITHUB_TOKEN": "minted-app-token"})

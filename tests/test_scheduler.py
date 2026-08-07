@@ -135,6 +135,150 @@ async def test_command_failure_prefers_structured_exception_over_log_tail():
     assert "HTTP/1.1 201 Created" in summary["stderr_tail"]
 
 
+async def test_configuration_skip_json_precedes_exit_one_and_names_all_gaps(
+    session,
+    monkeypatch,
+):
+    first_reason = "No GitHub App project binding is configured"
+    second_reason = "No project-bound GitHub token is available"
+    error_text = (
+        "Configuration gaps:\n"
+        f"- Uwear-AI/uwear: {first_reason}\n"
+        f"- Uwear-AI/uwear-app: {second_reason}"
+    )
+    job = _make_scheduler_job(
+        job_key="configuration_skip_job",
+        family="configuration_skip_job",
+        program_key="configuration_skip_job",
+        handler_kind="scheduler_builtin",
+        handler_ref="brain.app.scheduler.programs:configuration_skip_job",
+        retry_policy={"max_attempts": 3, "backoff_seconds": 30},
+        default_payload={
+            "name": "Configuration Skip Job",
+            "step_plan": [
+                {
+                    "step_key": "configuration_skip_job",
+                    "sequence_no": 1,
+                    "command": ["python3", "-m", "configuration_skip_job"],
+                }
+            ],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+            allowed_owner_modes=("scheduler",),
+        )
+    )[0]
+    alert = AsyncMock()
+    monkeypatch.setattr(
+        scheduler_executor,
+        "async_deliver_scheduler_failure_alert",
+        alert,
+    )
+
+    executed = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="tester",
+        runner=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "ok": False,
+                    "results": [
+                        {
+                            "repo": "Uwear-AI/uwear",
+                            "outcome": "skipped",
+                            "skip_kind": "configuration",
+                            "reason": first_reason,
+                        },
+                        {
+                            "repo": "Uwear-AI/uwear-app",
+                            "outcome": "skipped",
+                            "skip_kind": "configuration",
+                            "reason": second_reason,
+                        },
+                    ],
+                }
+            ),
+            stderr="",
+        ),
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+    step = await session.scalar(
+        select(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id)
+    )
+
+    assert executed.status == "settled_failure"
+    assert executed.error_text == error_text
+    assert "next_retry_at" not in executed.result_summary
+    assert step.status == "settled_failure"
+    assert step.error_text == error_text
+    alert.assert_awaited_once()
+    alert_call = alert.await_args.kwargs
+    assert alert_call["job_key"] == "configuration_skip_job"
+    assert alert_call["run_id"] == run.id
+    assert alert_call["error_text"] == error_text
+    assert [
+        str(edge.kind)
+        for edge in alert_call["evaluation"].crossed_edges
+    ] == ["configuration"]
+
+
+async def test_transient_skip_still_settles_successfully(session):
+    job = _make_scheduler_job(
+        job_key="transient_skip_job",
+        family="transient_skip_job",
+        program_key="transient_skip_job",
+        handler_kind="scheduler_builtin",
+        handler_ref="brain.app.scheduler.programs:transient_skip_job",
+        default_payload={
+            "name": "Transient Skip Job",
+            "step_plan": [
+                {
+                    "step_key": "transient_skip_job",
+                    "sequence_no": 1,
+                    "command": ["python3", "-m", "transient_skip_job"],
+                }
+            ],
+        },
+    )
+    session.add(job)
+    await session.flush()
+    run = (
+        await async_materialize_due_runs(
+            session,
+            now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
+            allowed_owner_modes=("scheduler",),
+        )
+    )[0]
+    executed = await async_run_scheduler_run(
+        session,
+        run.id,
+        owner_id="tester",
+        runner=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "outcome": "skipped",
+                    "skip_kind": "transient",
+                    "reason": "GitHub compare-and-swap conflicts exhausted",
+                }
+            ),
+            stderr="",
+        ),
+        now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
+    )
+
+    assert executed.status == "settled_success"
+    assert executed.error_text is None
+
+
 async def test_knowledge_index_sync_catalog_config(session):
     now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
 
