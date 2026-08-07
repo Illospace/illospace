@@ -12,9 +12,13 @@ from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.overdue_alert_state import (
     SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
     SchedulerOverdueAlertState,
+    SchedulerSelfHealState,
+    claim_scheduler_self_heal,
     release_scheduler_alert,
+    release_scheduler_overdue_alert,
     try_claim_scheduler_alert,
     try_claim_scheduler_overdue_alert,
+    try_claim_scheduler_self_heal,
 )
 from brain.app.scheduler.overdue_monitor import (
     SchedulerOverdueMonitor,
@@ -82,8 +86,21 @@ def _monitor(
     **kwargs,
 ) -> SchedulerOverdueMonitor:
     latch = alert_latch or _FakeAlertLatch()
+
+    async def no_self_heal(**_kwargs):
+        return SchedulerSelfHealState(
+            attempt=None,
+            attempts=0,
+            exhausted=False,
+        )
+
+    async def release_self_heal(**_kwargs):
+        return None
+
     kwargs.setdefault("claim_alert", latch.claim)
     kwargs.setdefault("release_alert", latch.release)
+    kwargs.setdefault("claim_self_heal", no_self_heal)
+    kwargs.setdefault("release_self_heal", release_self_heal)
     return SchedulerOverdueMonitor(**kwargs)
 
 
@@ -110,6 +127,20 @@ def test_overdue_monitor_checks_well_inside_twenty_minute_window():
 
 def test_overdue_monitor_is_constructible_without_arguments():
     assert SchedulerOverdueMonitor().name == "scheduler_overdue_monitor"
+
+
+def test_self_heal_defaults_and_environment_overrides(monkeypatch):
+    monitor = SchedulerOverdueMonitor()
+
+    assert monitor.self_heal_after == timedelta(minutes=10)
+    assert monitor.self_heal_max_attempts == 2
+
+    monkeypatch.setenv("SCHEDULER_SELF_HEAL_AFTER_MINUTES", "7")
+    monkeypatch.setenv("SCHEDULER_SELF_HEAL_MAX_ATTEMPTS", "3")
+    configured = SchedulerOverdueMonitor()
+
+    assert configured.self_heal_after == timedelta(minutes=7)
+    assert configured.self_heal_max_attempts == 3
 
 
 @pytest.mark.parametrize(
@@ -173,7 +204,12 @@ async def test_five_hour_freeze_alerts_at_duration_thresholds():
     freeze_started_at = NOW
 
     async def candidates(_session, *, now):
-        return (_candidate(now=now, lag_seconds=16 * 60),)
+        return (
+            SchedulerOverdueCandidate(
+                job_key="uwear_aws_health_scan",
+                next_run_at=freeze_started_at - timedelta(minutes=15),
+            ),
+        )
 
     async def liveness_checkpoint(_session):
         return freeze_started_at
@@ -306,8 +342,8 @@ async def test_twenty_minute_freeze_has_one_alert_and_one_recovery():
     )
     assert (
         deliveries[1]["presentation"].summary
-        == f"Daemon resumed ticking at {last_tick_at.isoformat()} "
-        "after 20m without a tick."
+        == f"Scheduler jobs advanced at {last_tick_at.isoformat()} "
+        "after an overdue freeze of 5m."
     )
 
 
@@ -410,8 +446,8 @@ async def test_two_replicas_deliver_only_after_winning_the_atomic_claim():
         next_alert_at,
     ):
         assert alerted_at == NOW
-        assert freeze_started_at == NOW
-        assert next_alert_at == NOW + timedelta(hours=1)
+        assert freeze_started_at == NOW - timedelta(minutes=45)
+        assert next_alert_at == NOW + timedelta(minutes=15)
         return next(claim_results)
 
     async def release_alert():
@@ -523,6 +559,351 @@ async def test_scheduler_escalation_claim_advances_one_durable_row(
     ) == 1
 
 
+async def test_scheduler_self_heal_claim_caps_and_rearms_by_episode(
+    scheduler_session,
+):
+    first = await try_claim_scheduler_self_heal(
+        scheduler_session,
+        attempted_at=NOW,
+        freeze_started_at=NOW - timedelta(minutes=20),
+        next_attempt_at=NOW + timedelta(minutes=10),
+        max_attempts=2,
+    )
+    repeated = await try_claim_scheduler_self_heal(
+        scheduler_session,
+        attempted_at=NOW + timedelta(minutes=1),
+        freeze_started_at=NOW - timedelta(minutes=20),
+        next_attempt_at=NOW + timedelta(minutes=11),
+        max_attempts=2,
+    )
+    second = await try_claim_scheduler_self_heal(
+        scheduler_session,
+        attempted_at=NOW + timedelta(minutes=10),
+        freeze_started_at=NOW - timedelta(minutes=20),
+        next_attempt_at=NOW + timedelta(minutes=20),
+        max_attempts=2,
+    )
+    exhausted = await try_claim_scheduler_self_heal(
+        scheduler_session,
+        attempted_at=NOW + timedelta(minutes=20),
+        freeze_started_at=NOW - timedelta(minutes=20),
+        next_attempt_at=NOW + timedelta(minutes=30),
+        max_attempts=2,
+    )
+    next_episode = await try_claim_scheduler_self_heal(
+        scheduler_session,
+        attempted_at=NOW + timedelta(hours=2),
+        freeze_started_at=NOW + timedelta(hours=1),
+        next_attempt_at=NOW + timedelta(hours=2, minutes=10),
+        max_attempts=2,
+    )
+
+    assert first.attempt == 1
+    assert repeated == SchedulerSelfHealState(
+        attempt=None,
+        attempts=1,
+        exhausted=False,
+        freeze_started_at=NOW - timedelta(minutes=20),
+    )
+    assert second.attempt == 2
+    assert exhausted.attempt is None
+    assert exhausted.attempts == 2
+    assert exhausted.exhausted is True
+    assert next_episode.attempt == 1
+    assert next_episode.attempts == 1
+
+
+async def test_committed_self_heal_claim_uses_old_durable_freeze_latch(
+    scheduler_session,
+):
+    freeze_started_at = NOW - timedelta(minutes=20)
+    scheduler_session.add(
+        SchedulerAlertLatch(
+            alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+            alerted_at=freeze_started_at,
+            freeze_started_at=freeze_started_at,
+            next_alert_at=NOW + timedelta(hours=1),
+        )
+    )
+    await scheduler_session.flush()
+
+    class FakeUnitOfWork:
+        session = scheduler_session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    with patch(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        FakeUnitOfWork,
+    ):
+        claimed = await claim_scheduler_self_heal(
+            attempted_at=NOW,
+            heal_after=timedelta(minutes=10),
+            max_attempts=2,
+        )
+
+    assert claimed.attempt == 1
+    assert claimed.freeze_started_at == freeze_started_at
+
+
+async def test_releasing_overdue_latch_returns_durable_self_heal_attempts(
+    scheduler_session,
+):
+    freeze_started_at = NOW - timedelta(minutes=20)
+    scheduler_session.add_all(
+        [
+            SchedulerAlertLatch(
+                alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+                alerted_at=freeze_started_at,
+                freeze_started_at=freeze_started_at,
+                next_alert_at=NOW + timedelta(hours=1),
+            ),
+            SchedulerAlertLatch(
+                alert_key="scheduler_self_heal",
+                alerted_at=NOW - timedelta(minutes=10),
+                freeze_started_at=freeze_started_at,
+                next_alert_at=NOW,
+                attempt_count=2,
+            ),
+        ]
+    )
+    await scheduler_session.flush()
+
+    class FakeUnitOfWork:
+        session = scheduler_session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    with patch(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        FakeUnitOfWork,
+    ):
+        released = await release_scheduler_overdue_alert()
+
+    assert released is not None
+    assert released.self_heal_attempts == 2
+
+
+async def test_overdue_monitor_queues_one_self_heal_request_and_alert():
+    deliveries = []
+    restart_calls = []
+    claims = iter(
+        (
+            SchedulerSelfHealState(
+                attempt=1,
+                attempts=1,
+                exhausted=False,
+                freeze_started_at=NOW - timedelta(minutes=20),
+            ),
+            SchedulerSelfHealState(
+                attempt=None,
+                attempts=1,
+                exhausted=False,
+                freeze_started_at=NOW - timedelta(minutes=20),
+            ),
+        )
+    )
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def claim_self_heal(**_kwargs):
+        return next(claims)
+
+    async def restart_runtime_services(services, *, requested_by):
+        restart_calls.append((services, requested_by))
+        return True
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    monitor = _monitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        claim_self_heal=claim_self_heal,
+        restart_runtime_services=restart_runtime_services,
+        deliver_alert=deliver_alert,
+    )
+
+    first = await monitor._check(object(), now=NOW)
+    repeated = await monitor._check(object(), now=NOW + timedelta(minutes=1))
+
+    assert first.self_heal_attempt == 1
+    assert repeated.self_heal_attempt is None
+    assert restart_calls == [(["scheduler"], "scheduler-self-heal")]
+    self_heal_alert = next(
+        item
+        for item in deliveries
+        if item["presentation"].title == "Scheduler self-heal"
+    )
+    assert self_heal_alert["presentation"].summary == (
+        "Restarting scheduler automatically, freeze 20m, attempt 1/2."
+    )
+
+
+async def test_exhausted_self_heal_marks_next_escalation_for_a_human():
+    deliveries = []
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW - timedelta(hours=1)
+
+    async def exhausted_self_heal(**_kwargs):
+        return SchedulerSelfHealState(
+            attempt=None,
+            attempts=2,
+            exhausted=True,
+            freeze_started_at=NOW - timedelta(hours=1),
+        )
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    monitor = _monitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        claim_self_heal=exhausted_self_heal,
+        deliver_alert=deliver_alert,
+    )
+
+    await monitor._check(object(), now=NOW)
+
+    summary = deliveries[0]["presentation"].summary
+    assert "Self-heal failed after 2 attempts" in summary
+    assert "a human is needed" in summary
+
+
+async def test_failed_restart_write_consumes_attempt_and_preserves_escalation():
+    deliveries = []
+
+    async def candidates(_session, *, now):
+        return (_candidate(now=now, lag_seconds=60 * 60),)
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def final_self_heal_attempt(**_kwargs):
+        return SchedulerSelfHealState(
+            attempt=2,
+            attempts=2,
+            exhausted=False,
+            freeze_started_at=NOW - timedelta(minutes=20),
+        )
+
+    async def restart_runtime_services(_services, *, requested_by):
+        assert requested_by == "scheduler-self-heal"
+        raise OSError("runtime queue is unavailable")
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    monitor = _monitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        claim_self_heal=final_self_heal_attempt,
+        restart_runtime_services=restart_runtime_services,
+        deliver_alert=deliver_alert,
+    )
+
+    result = await monitor._check(object(), now=NOW)
+
+    assert result.self_heal_attempt is None
+    assert "Self-heal failed after 2 attempts" in (
+        deliveries[0]["presentation"].summary
+    )
+
+
+async def test_recovery_after_self_heal_resets_attempts_and_posts_one_line():
+    deliveries = []
+    released_self_heal = 0
+    alert_latch = _FakeAlertLatch()
+    alert_latch.state = SchedulerOverdueAlertState(
+        alerted_at=NOW - timedelta(minutes=20),
+        freeze_started_at=NOW - timedelta(minutes=20),
+        next_alert_at=NOW + timedelta(hours=1),
+        self_heal_attempts=1,
+    )
+
+    async def candidates(_session, *, now):
+        return ()
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def release_self_heal():
+        nonlocal released_self_heal
+        released_self_heal += 1
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    monitor = _monitor(
+        alert_latch=alert_latch,
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        release_self_heal=release_self_heal,
+        deliver_alert=deliver_alert,
+    )
+
+    await monitor._check(object(), now=NOW)
+
+    assert released_self_heal == 1
+    assert deliveries[0]["presentation"].summary == (
+        "Scheduler recovered after automatic restart, freeze 20m, attempts 1/2."
+    )
+
+
+async def test_recovery_resets_attempts_even_when_slack_delivery_fails():
+    released_self_heal = 0
+    alert_latch = _FakeAlertLatch()
+    alert_latch.state = SchedulerOverdueAlertState(
+        alerted_at=NOW - timedelta(minutes=20),
+        freeze_started_at=NOW - timedelta(minutes=20),
+        next_alert_at=NOW + timedelta(hours=1),
+        self_heal_attempts=2,
+    )
+
+    async def candidates(_session, *, now):
+        return ()
+
+    async def liveness_checkpoint(_session):
+        return NOW
+
+    async def release_self_heal():
+        nonlocal released_self_heal
+        released_self_heal += 1
+
+    async def deliver_alert(**_kwargs):
+        raise RuntimeError("Slack delivery failed")
+
+    monitor = _monitor(
+        alert_latch=alert_latch,
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        release_self_heal=release_self_heal,
+        deliver_alert=deliver_alert,
+    )
+
+    with pytest.raises(RuntimeError, match="Slack delivery failed"):
+        await monitor._check(object(), now=NOW)
+
+    assert released_self_heal == 1
+    assert alert_latch.claimed is True
+
+
 @pytest.mark.requires_db
 async def test_postgres_concurrent_scheduler_alert_claim_has_one_winner(db_engine):
     alert_key = f"scheduler_overdue_freeze_test_{uuid.uuid4().hex}"
@@ -590,6 +971,59 @@ async def test_postgres_concurrent_escalation_claim_has_one_winner(db_engine):
             await session.commit()
 
 
+@pytest.mark.requires_db
+async def test_postgres_concurrent_self_heal_claim_enforces_attempt_cap(
+    db_engine,
+):
+    freeze_started_at = NOW - timedelta(minutes=20)
+    async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+        await release_scheduler_alert(
+            session,
+            alert_key="scheduler_self_heal",
+        )
+        await session.commit()
+
+    async def claim(attempted_at: datetime) -> SchedulerSelfHealState:
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
+            state = await try_claim_scheduler_self_heal(
+                session,
+                attempted_at=attempted_at,
+                freeze_started_at=freeze_started_at,
+                next_attempt_at=attempted_at + timedelta(minutes=10),
+                max_attempts=2,
+            )
+            await session.commit()
+            return state
+
+    try:
+        first_wave = await asyncio.gather(claim(NOW), claim(NOW))
+        assert sorted(
+            state.attempt if state.attempt is not None else 0
+            for state in first_wave
+        ) == [0, 1]
+
+        second_wave = await asyncio.gather(
+            claim(NOW + timedelta(minutes=10)),
+            claim(NOW + timedelta(minutes=10)),
+        )
+        assert sorted(
+            state.attempt if state.attempt is not None else 0
+            for state in second_wave
+        ) == [0, 2]
+
+        exhausted = await claim(NOW + timedelta(minutes=20))
+        assert exhausted.attempt is None
+        assert exhausted.attempts == 2
+        assert exhausted.exhausted is True
+    finally:
+        async with AsyncSession(bind=db_engine) as session:
+            await release_scheduler_alert(
+                session,
+                alert_key="scheduler_self_heal",
+            )
+            await session.commit()
+
+
 def test_scheduler_alert_latch_has_no_job_owner_and_names_its_timestamp():
     table = SchedulerAlertLatch.__table__
 
@@ -598,11 +1032,13 @@ def test_scheduler_alert_latch_has_no_job_owner_and_names_its_timestamp():
         "alerted_at",
         "freeze_started_at",
         "next_alert_at",
+        "attempt_count",
     }
     assert table.columns["alert_key"].type.length == 80
     assert table.columns["alerted_at"].nullable is False
     assert table.columns["freeze_started_at"].nullable is True
     assert table.columns["next_alert_at"].nullable is True
+    assert table.columns["attempt_count"].nullable is False
     assert not table.foreign_keys
 
 
@@ -665,6 +1101,40 @@ async def test_fresh_daemon_heartbeat_does_not_hide_stale_next_run_at():
     assert len(deliveries) == 1
 
 
+async def test_advancing_heartbeat_does_not_reset_overdue_escalation_clock():
+    deliveries = []
+    check_time = NOW
+    next_run_at = NOW - timedelta(minutes=16)
+
+    async def candidates(_session, *, now):
+        return (
+            SchedulerOverdueCandidate(
+                job_key="uwear_aws_health_scan",
+                next_run_at=next_run_at,
+            ),
+        )
+
+    async def liveness_checkpoint(_session):
+        return check_time
+
+    async def deliver_alert(**kwargs):
+        deliveries.append(kwargs)
+
+    monitor = _monitor(
+        candidate_provider=candidates,
+        liveness_checkpoint=liveness_checkpoint,
+        deliver_alert=deliver_alert,
+    )
+
+    await monitor._check(object(), now=check_time)
+    check_time = NOW + timedelta(hours=1)
+    await monitor._check(object(), now=check_time)
+
+    assert [
+        delivery["presentation"].title for delivery in deliveries
+    ] == ["Scheduler jobs overdue", "Scheduler jobs overdue"]
+
+
 async def test_slack_delivery_starts_after_read_transaction_closes():
     transaction_open = False
 
@@ -696,18 +1166,26 @@ async def test_slack_delivery_starts_after_read_transaction_closes():
         next_alert_at,
     ):
         assert alerted_at == NOW
-        assert freeze_started_at == NOW
-        assert next_alert_at == NOW + timedelta(hours=1)
+        assert freeze_started_at == NOW - timedelta(minutes=45)
+        assert next_alert_at == NOW + timedelta(minutes=15)
         assert transaction_open is True
         return True
 
     async def deliver_alert(**_kwargs):
         assert transaction_open is False
 
+    async def no_self_heal(**_kwargs):
+        return SchedulerSelfHealState(
+            attempt=None,
+            attempts=0,
+            exhausted=False,
+        )
+
     monitor = SchedulerOverdueMonitor(
         candidate_provider=candidates,
         liveness_checkpoint=liveness_checkpoint,
         deliver_alert=deliver_alert,
+        claim_self_heal=no_self_heal,
     )
     with patch(
         "brain.platform.db.repositories.unit_of_work.UnitOfWork",

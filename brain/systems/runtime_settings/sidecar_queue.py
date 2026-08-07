@@ -77,10 +77,17 @@ class SidecarQueue:
     def status_is_running(self, request_file: Path, status_data: dict[str, Any] | None = None) -> bool:
         status_data = status_data if status_data is not None else self.status_data(request_file)
         raw_status = str(status_data.get("status") or "").strip().lower()
-        return raw_status in RUNNING_QUEUE_STATUSES or request_file.exists()
+        return (
+            raw_status in RUNNING_QUEUE_STATUSES
+            or request_file.exists()
+            or self.running_file(request_file).exists()
+        )
 
     def start_lock_path(self, request_file: Path) -> Path:
         return request_file.with_name(f".{request_file.name}.starting")
+
+    def running_file(self, request_file: Path) -> Path:
+        return Path(f"{request_file}.running")
 
     def write_json(self, path: Path, data: dict[str, Any]) -> None:
         write_json_atomic(path, data)
