@@ -178,6 +178,14 @@ async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
                     "alerted_at": None,
                     "crossed": False,
                 },
+                {
+                    "kind": "configuration",
+                    "count": 0,
+                    "threshold": 1,
+                    "window_hours": None,
+                    "alerted_at": None,
+                    "crossed": False,
+                },
             ],
         },
         "rolling_failure": {
@@ -208,6 +216,14 @@ async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
                     "alerted_at": rolling_alerted_at.replace(
                         tzinfo=None
                     ).isoformat(),
+                    "crossed": False,
+                },
+                {
+                    "kind": "configuration",
+                    "count": 0,
+                    "threshold": 1,
+                    "window_hours": None,
+                    "alerted_at": None,
                     "crossed": False,
                 },
             ],
@@ -294,7 +310,7 @@ async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
     assert len(single_job_projection) == 1
     assert len(several_job_projection) == 4
     assert all(
-        len(job["failure_guard"]["triggers"]) == 3
+        len(job["failure_guard"]["triggers"]) == 4
         for job in several_job_projection
     )
     assert single_job_statements == several_job_statements == 4
@@ -1126,6 +1142,7 @@ async def test_consecutive_and_rate_edges_coexist_without_duplicate_delivery(
         "consecutive",
         "standing_failure",
         "rolling_window",
+        "configuration",
     ]
     assert all(
         trigger["crossed"] is False
@@ -1287,6 +1304,7 @@ async def test_third_trigger_flows_through_production_apply_health_delivery_and_
         "consecutive",
         "standing_failure",
         "rolling_window",
+        "configuration",
         "runtime_duration",
     ]
 

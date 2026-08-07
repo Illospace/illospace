@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping
 
@@ -11,6 +12,15 @@ class SchedulerSkipKind(StrEnum):
 
     CONFIGURATION = "configuration"
     TRANSIENT = "transient"
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerConfigurationSkip:
+    """One configuration gap classified from a scheduler result."""
+
+    repository: str | None
+    reason: str
+    payload: Mapping[str, Any]
 
 
 def scheduler_skip_kind(result: Mapping[str, Any]) -> SchedulerSkipKind | None:
@@ -23,26 +33,58 @@ def scheduler_skip_kind(result: Mapping[str, Any]) -> SchedulerSkipKind | None:
         return None
 
 
-def find_configuration_skip(
+def find_configuration_skips(
     result: Mapping[str, Any],
-) -> Mapping[str, Any] | None:
-    """Find an explicitly classified configuration skip in an aggregate result."""
+) -> tuple[SchedulerConfigurationSkip, ...]:
+    """Return every explicitly classified configuration skip in result order."""
+    matches: list[SchedulerConfigurationSkip] = []
     if scheduler_skip_kind(result) is SchedulerSkipKind.CONFIGURATION:
-        return result
+        repository = str(
+            result.get("repo") or result.get("repository") or ""
+        ).strip()
+        matches.append(
+            SchedulerConfigurationSkip(
+                repository=repository or None,
+                reason=str(
+                    result.get("reason")
+                    or "Job is blocked by missing configuration"
+                ),
+                payload=result,
+            )
+        )
     nested_results = result.get("results")
     if not isinstance(nested_results, list):
-        return None
+        return tuple(matches)
     for nested_result in nested_results:
         if not isinstance(nested_result, Mapping):
             continue
-        match = find_configuration_skip(nested_result)
-        if match is not None:
-            return match
-    return None
+        matches.extend(find_configuration_skips(nested_result))
+    return tuple(matches)
+
+
+def configuration_skip_summary(
+    skips: tuple[SchedulerConfigurationSkip, ...],
+) -> str:
+    """Name every classified repository and reason for operator alerts."""
+    if not skips:
+        raise ValueError("configuration skip summary requires at least one gap")
+    if len(skips) == 1 and skips[0].repository is None:
+        return skips[0].reason
+    return "\n".join(
+        (
+            "Configuration gaps:",
+            *(
+                f"- {skip.repository or 'Job'}: {skip.reason}"
+                for skip in skips
+            ),
+        )
+    )
 
 
 __all__ = [
+    "SchedulerConfigurationSkip",
     "SchedulerSkipKind",
-    "find_configuration_skip",
+    "configuration_skip_summary",
+    "find_configuration_skips",
     "scheduler_skip_kind",
 ]

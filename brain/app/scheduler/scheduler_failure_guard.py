@@ -16,6 +16,7 @@ from typing import (
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.contracts.scheduler_outcomes import SchedulerSkipKind
 from brain.kernel.common.time import ensure_utc
 from brain.platform.db.models.scheduler import (
     SchedulerFailureGuardLatch,
@@ -53,6 +54,7 @@ SchedulerFailureGuardResetEvent = Literal["signature_change", "success"]
 CONSECUTIVE_TRIGGER_KIND = FailureGuardTriggerKind("consecutive")
 ROLLING_WINDOW_TRIGGER_KIND = FailureGuardTriggerKind("rolling_window")
 STANDING_FAILURE_TRIGGER_KIND = FailureGuardTriggerKind("standing_failure")
+CONFIGURATION_TRIGGER_KIND = FailureGuardTriggerKind("configuration")
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,7 @@ class SchedulerFailureGuardLifecycleContext:
     job: SchedulerJob
     now: datetime
     record: FailureRecord | None
+    failure_kind: SchedulerSkipKind | None = None
 
 
 def _positive_int_setting(name: str, default: int) -> int:
@@ -191,6 +194,67 @@ class StandingFailuresTrigger:
         if event == "success":
             return None
         return {"count": int(state.get("count", 0)) + 1}
+
+    async def should_reset(
+        self,
+        context: SchedulerFailureGuardLifecycleContext,
+        *,
+        event: SchedulerFailureGuardResetEvent,
+    ) -> bool:
+        del context
+        return event == "success"
+
+
+@dataclass(frozen=True)
+class ConfigurationFailureTrigger:
+    """Alert immediately while one job is blocked by configuration."""
+
+    kind: FailureGuardTriggerKind = field(
+        default=CONFIGURATION_TRIGGER_KIND,
+        init=False,
+    )
+
+    async def evaluate_with_state(
+        self,
+        context: SchedulerFailureGuardLifecycleContext,
+        *,
+        state: FailureGuardTriggerState,
+    ) -> FailureGuardTriggerResult:
+        del context
+        active = bool(state.get("active", False))
+        return FailureGuardTriggerResult(
+            kind=self.kind,
+            active=active,
+            public_details={
+                "count": 1 if active else 0,
+                "threshold": 1,
+                "window_hours": None,
+            },
+            alert_title="Scheduler job blocked by missing configuration",
+            alert_summary=str(
+                state.get("summary")
+                or "Job is blocked by missing configuration"
+            ),
+        )
+
+    async def transition_state(
+        self,
+        context: SchedulerFailureGuardLifecycleContext,
+        state: FailureGuardTriggerState,
+        *,
+        event: FailureGuardLifecycleEvent,
+    ) -> FailureGuardTriggerState | None:
+        del state
+        if event == "success":
+            return None
+        if context.failure_kind is not SchedulerSkipKind.CONFIGURATION:
+            return None
+        if context.record is None:
+            raise ValueError("configuration failure requires a failure record")
+        return {
+            "active": True,
+            "summary": context.record.error_text,
+        }
 
     async def should_reset(
         self,
@@ -361,6 +425,7 @@ _FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
     ConsecutiveFailuresTrigger.from_settings,
     StandingFailuresTrigger.from_settings,
     RollingWindowFailuresTrigger.from_settings,
+    ConfigurationFailureTrigger,
 )
 
 
@@ -622,6 +687,7 @@ async def async_record_scheduler_job_failure(
     failure_identity: str,
     error_text: str,
     now: datetime | None = None,
+    failure_kind: SchedulerSkipKind | None = None,
     registry: SchedulerFailureGuardRegistry | None = None,
 ) -> FailureGuardEvaluation:
     """Persist failure state and evaluate every trigger under one job lock."""
@@ -652,6 +718,7 @@ async def async_record_scheduler_job_failure(
         job=locked_job,
         now=now,
         record=record,
+        failure_kind=failure_kind,
     )
     signature = scheduler_failure_signature(record.signature_input)
     signature_changed = locked_job.failure_signature != signature

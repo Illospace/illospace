@@ -28,7 +28,12 @@ from brain.contracts.scheduler_handoff import (
     DetachedAgentRunHandoffError,
     parse_detached_agent_run_handoff,
 )
-from brain.contracts.scheduler_outcomes import find_configuration_skip
+from brain.contracts.scheduler_outcomes import (
+    SchedulerConfigurationSkip,
+    SchedulerSkipKind,
+    configuration_skip_summary,
+    find_configuration_skips,
+)
 from brain.platform.async_io import run_blocking, run_subprocess
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
@@ -40,9 +45,6 @@ from brain.platform.db.models.scheduler import (
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.app.scheduler.catalog import normalize_owner_mode
-from brain.app.scheduler.configuration_skip_alert import (
-    async_alert_first_configuration_skip,
-)
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
 from brain.app.scheduler.detached_agent_runs import (
     async_mark_detached_run_dispatched,
@@ -233,21 +235,14 @@ def _json_objects(text_value: str | None) -> list[dict[str, Any]]:
     return objects
 
 
-def _configuration_skip_from_command(
+def _configuration_skips_from_command(
     stdout: str | None,
-) -> dict[str, Any] | None:
+) -> tuple[SchedulerConfigurationSkip, ...]:
     for payload in _json_objects(stdout):
-        match = find_configuration_skip(payload)
-        if match is not None:
-            return dict(match)
-    return None
-
-
-def _configuration_skip_reason(result: dict[str, Any]) -> str | None:
-    match = find_configuration_skip(result)
-    if match is None:
-        return None
-    return str(match.get("reason") or "Job is blocked by missing configuration")
+        matches = find_configuration_skips(payload)
+        if matches:
+            return matches
+    return ()
 
 
 def _failed_result(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -344,8 +339,12 @@ def _normalize_handler_result(result: Any) -> dict[str, Any]:
     return {"status": "recorded", "value": result}
 
 
-def _final_status_from_handler_result(result: dict[str, Any]) -> str:
-    if find_configuration_skip(result) is not None:
+def _final_status_from_handler_result(
+    result: dict[str, Any],
+    *,
+    configuration_skips: tuple[SchedulerConfigurationSkip, ...],
+) -> str:
+    if configuration_skips:
         return RUN_STATUS_SETTLED_FAILURE
     handler_status = str(result.get("status") or "recorded").lower()
     if handler_status in _BLOCKED_HANDLER_STATUSES:
@@ -586,6 +585,7 @@ async def _async_apply_failure_guard(
     failure_key: str,
     error_text: str,
     now: datetime,
+    failure_kind: SchedulerSkipKind | None = None,
 ) -> None:
     guard = await async_record_scheduler_job_failure(
         session,
@@ -593,6 +593,7 @@ async def _async_apply_failure_guard(
         failure_identity=f"{failure_key}\n{error_text}",
         error_text=error_text,
         now=now,
+        failure_kind=failure_kind,
     )
     crossed_edges = guard.crossed_edges
     if crossed_edges:
@@ -637,28 +638,6 @@ async def _async_apply_failure_guard(
         "failure_guard": serialize_failure_guard(guard),
     }
     await session.flush()
-
-
-async def _async_alert_configuration_skip(
-    job: SchedulerJob,
-    run: SchedulerRun,
-    *,
-    reason: str,
-    now: datetime,
-) -> None:
-    try:
-        await async_alert_first_configuration_skip(
-            job_key=job.job_key,
-            run_id=run.id,
-            reason=reason,
-            alerted_at=now,
-        )
-    except Exception:
-        logger.exception(
-            "Scheduler configuration-skip Slack delivery failed: job_key=%s run_id=%s",
-            job.job_key,
-            run.id,
-        )
 
 
 async def _async_run_step(
@@ -741,15 +720,14 @@ async def _async_run_step(
             }
         summary = {"command": list(command), **_command_summary(proc)}
         results.append(summary)
-        configuration_skip = _configuration_skip_from_command(
+        configuration_skips = _configuration_skips_from_command(
             getattr(proc, "stdout", None)
         )
-        if configuration_skip is not None:
-            error_text = str(
-                configuration_skip.get("reason")
-                or "Job is blocked by missing configuration"
-            )
-            summary["configuration_skip"] = configuration_skip
+        if configuration_skips:
+            error_text = configuration_skip_summary(configuration_skips)
+            summary["configuration_skips"] = [
+                dict(skip.payload) for skip in configuration_skips
+            ]
             await async_update_run_step(
                 session,
                 step,
@@ -763,7 +741,7 @@ async def _async_run_step(
                 "step_key": step.step_key,
                 "results": results,
                 "error": error_text,
-                "failure_kind": "configuration_skip",
+                "failure_kind": SchedulerSkipKind.CONFIGURATION.value,
             }
         if int(getattr(proc, "returncode", 1)) != 0:
             error_text = _command_failure_error_text(summary)
@@ -914,7 +892,10 @@ async def async_run_scheduler_run(
                 "resume_available": True,
                 "steps": step_results,
             }
-            configuration_skip = result.get("failure_kind") == "configuration_skip"
+            configuration_skip = (
+                result.get("failure_kind")
+                == SchedulerSkipKind.CONFIGURATION.value
+            )
             if configuration_skip:
                 failure_status = RUN_STATUS_SETTLED_FAILURE
                 failure_summary = base_summary
@@ -941,14 +922,12 @@ async def async_run_scheduler_run(
                 failure_key=step_key,
                 error_text=result["error"],
                 now=now,
+                failure_kind=(
+                    SchedulerSkipKind.CONFIGURATION
+                    if configuration_skip
+                    else None
+                ),
             )
-            if configuration_skip:
-                await _async_alert_configuration_skip(
-                    job,
-                    run,
-                    reason=result["error"],
-                    now=now,
-                )
             return run
         if handoff is not None:
             detached_dispatch = (step, handoff, result)
@@ -1120,16 +1099,24 @@ async def async_execute_scheduler_run(
     job.last_started_at = now
 
     payload = run.payload or job.default_payload or {}
-    configuration_skip_reason: str | None = None
+    configuration_skip_error: str | None = None
     try:
         handler = _resolve_handler(job.handler_ref)
         raw_result = _invoke_handler(handler, payload, now=now)
         normalized_result = _normalize_handler_result(raw_result)
-        configuration_skip_reason = _configuration_skip_reason(normalized_result)
-        final_status = _final_status_from_handler_result(normalized_result)
+        configuration_skips = find_configuration_skips(normalized_result)
+        configuration_skip_error = (
+            configuration_skip_summary(configuration_skips)
+            if configuration_skips
+            else None
+        )
+        final_status = _final_status_from_handler_result(
+            normalized_result,
+            configuration_skips=configuration_skips,
+        )
         handler_failed = final_status == RUN_STATUS_SETTLED_FAILURE
         handler_error_text = str(
-            configuration_skip_reason
+            configuration_skip_error
             or normalized_result.get("error")
             or normalized_result.get("reason")
             or "handler failed"
@@ -1145,7 +1132,7 @@ async def async_execute_scheduler_run(
                 "lease_id": lease.id,
             },
         }
-        if handler_failed and configuration_skip_reason is None:
+        if handler_failed and configuration_skip_error is None:
             final_status, run.result_summary = _retryable_failure_summary(
                 job,
                 run,
@@ -1211,14 +1198,12 @@ async def async_execute_scheduler_run(
             failure_key=f"handler_execute:{job.handler_ref}",
             error_text=run.error_text or "handler failed",
             now=now,
+            failure_kind=(
+                SchedulerSkipKind.CONFIGURATION
+                if configuration_skip_error is not None
+                else None
+            ),
         )
-        if configuration_skip_reason is not None:
-            await _async_alert_configuration_skip(
-                job,
-                run,
-                reason=configuration_skip_reason,
-                now=now,
-            )
     elif run.status == RUN_STATUS_SETTLED_SUCCESS:
         await async_reset_scheduler_job_failure_guard(session, job, now=now)
 

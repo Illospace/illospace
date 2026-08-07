@@ -111,6 +111,58 @@ def test_reaper_checks_well_inside_stale_run_window():
     assert StaleRunReaper.deadline_sweep_limit == 25
 
 
+async def test_reaper_keeps_its_cadence_after_a_failed_tick(monkeypatch):
+    sleeps = []
+    checks = 0
+    reaper = _reaper()
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    async def run_once():
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise RuntimeError("first tick failed")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(reaper, "_run_once", run_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await reaper.run()
+
+    assert sleeps == [60.0, 60.0]
+    assert checks == 2
+
+
+async def test_one_maintenance_failure_does_not_block_the_other_owners():
+    calls = []
+
+    async def candidates(_session, **_kwargs):
+        calls.append("candidates")
+        raise RuntimeError("candidate query failed")
+
+    async def deadline_sweep(_session, **_kwargs):
+        calls.append("deadlines")
+        raise RuntimeError("deadline sweep failed")
+
+    async def reap_runs(**_kwargs):
+        calls.append("reap")
+        return 2
+
+    result = await _reaper(
+        candidate_provider=candidates,
+        deadline_sweep=deadline_sweep,
+        reap_runs=reap_runs,
+    )._run_once(now=NOW)
+
+    assert calls == ["candidates", "deadlines", "reap"]
+    assert result.reaped == 2
+    assert result.closeout_requested == 0
+    assert result.expired == 0
+
+
 async def test_api_reaper_requeues_stale_run_without_scheduler_daemon(
     agent_run_session,
     monkeypatch,
@@ -171,6 +223,72 @@ async def test_api_reaper_requeues_stale_run_without_scheduler_daemon(
     assert result.reaped == 1
     assert row.status == RunStatus.QUEUED.value
     assert row.execution_token is None
+
+
+async def test_scheduler_daemon_ticks_do_not_mutate_stale_overdue_agent_runs(
+    agent_run_session,
+    monkeypatch,
+):
+    import brain.app.scheduler.daemon as scheduler_daemon
+
+    store = AsyncAgentRunStore(agent_run_session)
+    run = await store.create_run(
+        AgentRunRequest(
+            org_id="org-1",
+            thread_id="daemon-boundary",
+            message="must be maintained by the API process",
+            deadline_at=NOW - timedelta(hours=2),
+        )
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    row = await agent_run_session.get(AgentRunRow, run.id)
+    assert row is not None
+    row.started_at = NOW - timedelta(hours=9)
+    row.updated_at = NOW - timedelta(hours=2)
+    row.execution_token = "frozen-agent-worker"
+    await agent_run_session.commit()
+
+    async def record_tick(_session, **_kwargs):
+        return None
+
+    async def reclaim(_session, **_kwargs):
+        return []
+
+    async def drain(_session, **_kwargs):
+        return {"ok": True, "executed": 0, "results": []}
+
+    monkeypatch.setattr(
+        scheduler_daemon,
+        "record_scheduler_liveness_checkpoint",
+        record_tick,
+    )
+    monkeypatch.setattr(scheduler_daemon, "async_reclaim_expired_leases", reclaim)
+    monkeypatch.setattr(scheduler_daemon, "async_drain_scheduler", drain)
+
+    before = (
+        row.status,
+        row.execution_token,
+        row.deadline_at,
+        row.closeout_expires_at,
+        row.expired_at,
+        dict(row.metadata_),
+    )
+    for minute in range(2):
+        await scheduler_daemon.async_scheduler_daemon_tick(
+            agent_run_session,
+            now=NOW + timedelta(minutes=minute),
+        )
+    await agent_run_session.refresh(row)
+
+    assert (
+        row.status,
+        row.execution_token,
+        row.deadline_at,
+        row.closeout_expires_at,
+        row.expired_at,
+        dict(row.metadata_),
+    ) == before
 
 
 async def test_overdue_candidate_names_run_age_and_origin(agent_run_session):
@@ -287,9 +405,17 @@ async def test_two_api_replicas_share_one_durable_alert_claim():
 async def test_api_reaper_enforces_deadlines_and_settles_expired_roots():
     calls = []
 
+    async def candidates(_session, *, now, overdue_after, limit):
+        calls.append(("candidates", now, overdue_after, limit))
+        return ()
+
     async def deadline_sweep(_session, *, now, limit):
         calls.append(("sweep", now, limit))
-        return DeadlineSweepResult(expired=1, expired_run_ids=(15266,))
+        return DeadlineSweepResult(
+            closeout_requested=1,
+            expired=1,
+            expired_run_ids=(15266,),
+        )
 
     async def settle_run(_session, run_id):
         calls.append(("settle", run_id))
@@ -297,15 +423,24 @@ async def test_api_reaper_enforces_deadlines_and_settles_expired_roots():
     async def finalize_run(run_id, *, status, error):
         calls.append(("finalize", run_id, status, error))
 
+    async def reap_runs(*, now, limit):
+        calls.append(("reap", now, limit))
+        return 0
+
     result = await _reaper(
+        candidate_provider=candidates,
         deadline_sweep=deadline_sweep,
         settle_run=settle_run,
         finalize_run=finalize_run,
+        reap_runs=reap_runs,
     )._run_once(now=NOW)
 
+    assert result.closeout_requested == 1
     assert result.expired == 1
     assert calls == [
+        ("candidates", NOW, timedelta(hours=1), 25),
         ("sweep", NOW, 25),
         ("settle", 15266),
         ("finalize", 15266, "expired", "Agent run deadline elapsed"),
+        ("reap", NOW, 25),
     ]

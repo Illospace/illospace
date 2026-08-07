@@ -16,20 +16,20 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 
-from sqlalchemy import and_, delete, or_
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.cold_start import scheduler_liveness_checkpoint
 from brain.app.scheduler.overdue_alert_state import (
     SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+    SchedulerOverdueAlertState,
+    claim_scheduler_overdue_alert,
+    release_scheduler_overdue_alert,
 )
 from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
     async_scheduler_overdue_candidates,
 )
-from brain.platform.db.models.scheduler import SchedulerAlertLatch
+from brain.kernel.common.time import assume_utc
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.slack_delivery import (
     FailureAlertPresentation,
@@ -56,37 +56,24 @@ class _SchedulerOverdueCheck:
     last_tick_at: datetime | None
 
 
-@dataclass(frozen=True, slots=True)
-class _SchedulerOverdueAlertState:
-    alerted_at: datetime
-    freeze_started_at: datetime | None
-    next_alert_at: datetime | None
-
-
 CandidateProvider = Callable[
     ..., Awaitable[tuple[SchedulerOverdueCandidate, ...]]
 ]
 LivenessCheckpointProvider = Callable[[AsyncSession], Awaitable[datetime | None]]
 AlertDelivery = Callable[..., Awaitable[None]]
 AlertClaim = Callable[..., Awaitable[bool]]
-AlertRelease = Callable[[], Awaitable[_SchedulerOverdueAlertState | None]]
+AlertRelease = Callable[[], Awaitable[SchedulerOverdueAlertState | None]]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def _elapsed_text(*, started_at: datetime, ended_at: datetime) -> str:
     elapsed_minutes = max(
         0,
         int(
-            (_aware_utc(ended_at) - _aware_utc(started_at)).total_seconds()
+            (assume_utc(ended_at) - assume_utc(started_at)).total_seconds()
             // 60
         ),
     )
@@ -112,104 +99,13 @@ def _alert_summary(
     if last_tick_at is None:
         daemon_line = "Daemon last tick and freeze duration are unknown."
     else:
-        normalized_tick = _aware_utc(last_tick_at)
+        normalized_tick = assume_utc(last_tick_at)
         daemon_line = (
             "Daemon has not ticked for "
             f"{_elapsed_text(started_at=normalized_tick, ended_at=now)} "
             f"(last tick {normalized_tick.isoformat()})."
         )
     return "\n".join(("Overdue jobs:", *job_lines, daemon_line))
-
-
-def _alert_latch_insert(session: AsyncSession):
-    if session.get_bind().dialect.name == "sqlite":
-        return sqlite_insert(SchedulerAlertLatch)
-    return postgresql_insert(SchedulerAlertLatch)
-
-
-async def _try_claim_scheduler_overdue_alert(
-    session: AsyncSession,
-    *,
-    alerted_at: datetime,
-    freeze_started_at: datetime,
-    next_alert_at: datetime,
-) -> bool:
-    """Atomically claim the first alert or one due escalation threshold."""
-    claim = (
-        _alert_latch_insert(session)
-        .values(
-            alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
-            alerted_at=alerted_at,
-            freeze_started_at=freeze_started_at,
-            next_alert_at=next_alert_at,
-        )
-        .on_conflict_do_update(
-            index_elements=[SchedulerAlertLatch.alert_key],
-            set_={
-                "alerted_at": alerted_at,
-                "freeze_started_at": freeze_started_at,
-                "next_alert_at": next_alert_at,
-            },
-            where=or_(
-                SchedulerAlertLatch.freeze_started_at.is_(None),
-                and_(
-                    SchedulerAlertLatch.freeze_started_at == freeze_started_at,
-                    or_(
-                        SchedulerAlertLatch.next_alert_at.is_(None),
-                        SchedulerAlertLatch.next_alert_at <= alerted_at,
-                    ),
-                ),
-            ),
-        )
-        .returning(SchedulerAlertLatch.alert_key)
-    )
-    result = await session.execute(claim)
-    return result.scalar_one_or_none() == SCHEDULER_OVERDUE_FREEZE_ALERT_KEY
-
-
-async def _claim_scheduler_overdue_alert(
-    *,
-    alerted_at: datetime,
-    freeze_started_at: datetime,
-    next_alert_at: datetime,
-) -> bool:
-    """Claim and commit one overdue alert threshold in a short transaction."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-    async with UnitOfWork() as uow:
-        return await _try_claim_scheduler_overdue_alert(
-            uow.session,
-            alerted_at=alerted_at,
-            freeze_started_at=freeze_started_at,
-            next_alert_at=next_alert_at,
-        )
-
-
-async def _release_scheduler_overdue_alert() -> _SchedulerOverdueAlertState | None:
-    """Release and return the overdue latch in one short transaction."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-    async with UnitOfWork() as uow:
-        released = await uow.session.execute(
-            delete(SchedulerAlertLatch)
-            .where(
-                SchedulerAlertLatch.alert_key
-                == SCHEDULER_OVERDUE_FREEZE_ALERT_KEY
-            )
-            .returning(
-                SchedulerAlertLatch.alerted_at,
-                SchedulerAlertLatch.freeze_started_at,
-                SchedulerAlertLatch.next_alert_at,
-            )
-        )
-        row = released.one_or_none()
-        if row is None:
-            return None
-        return _SchedulerOverdueAlertState(
-            alerted_at=row.alerted_at,
-            freeze_started_at=row.freeze_started_at,
-            next_alert_at=row.next_alert_at,
-        )
 
 
 class SchedulerOverdueMonitor:
@@ -230,8 +126,8 @@ class SchedulerOverdueMonitor:
         *,
         candidate_provider: CandidateProvider = async_scheduler_overdue_candidates,
         liveness_checkpoint: LivenessCheckpointProvider = scheduler_liveness_checkpoint,
-        claim_alert: AlertClaim = _claim_scheduler_overdue_alert,
-        release_alert: AlertRelease = _release_scheduler_overdue_alert,
+        claim_alert: AlertClaim = claim_scheduler_overdue_alert,
+        release_alert: AlertRelease = release_scheduler_overdue_alert,
         deliver_alert: AlertDelivery = async_deliver_failure_alert,
     ) -> None:
         self._candidate_provider = candidate_provider
@@ -313,7 +209,7 @@ class SchedulerOverdueMonitor:
                 alert_sent=False,
                 last_tick_at=observation.last_tick_at,
             )
-        freeze_started_at = _aware_utc(observation.last_tick_at or now)
+        freeze_started_at = assume_utc(observation.last_tick_at or now)
         if not await self._claim_alert(
             alerted_at=now,
             freeze_started_at=freeze_started_at,
@@ -380,8 +276,8 @@ class SchedulerOverdueMonitor:
         freeze_started_at: datetime,
         now: datetime,
     ) -> datetime:
-        freeze_started_at = _aware_utc(freeze_started_at)
-        elapsed = _aware_utc(now) - freeze_started_at
+        freeze_started_at = assume_utc(freeze_started_at)
+        elapsed = assume_utc(now) - freeze_started_at
         for threshold in self.escalation_thresholds:
             if elapsed < threshold:
                 return freeze_started_at + threshold
@@ -393,12 +289,12 @@ class SchedulerOverdueMonitor:
 
     async def _deliver_recovery(
         self,
-        released: _SchedulerOverdueAlertState,
+        released: SchedulerOverdueAlertState,
         *,
         recovered_at: datetime,
     ) -> None:
-        recovered_at = _aware_utc(recovered_at)
-        freeze_started_at = _aware_utc(
+        recovered_at = assume_utc(recovered_at)
+        freeze_started_at = assume_utc(
             released.freeze_started_at or released.alerted_at
         )
         try:
@@ -437,9 +333,9 @@ class SchedulerOverdueMonitor:
         except Exception:  # noqa: BLE001 - restore so recovery can retry
             try:
                 await self._claim_alert(
-                    alerted_at=_aware_utc(released.alerted_at),
+                    alerted_at=assume_utc(released.alerted_at),
                     freeze_started_at=freeze_started_at,
-                    next_alert_at=_aware_utc(
+                    next_alert_at=assume_utc(
                         released.next_alert_at
                         or self._next_escalation_at(
                             freeze_started_at=freeze_started_at,

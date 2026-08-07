@@ -135,8 +135,17 @@ async def test_command_failure_prefers_structured_exception_over_log_tail():
     assert "HTTP/1.1 201 Created" in summary["stderr_tail"]
 
 
-async def test_configuration_skip_settles_failed_without_retry_and_alerts(session, monkeypatch):
-    reason = "No GitHub App project binding is configured for illospace/illospace"
+async def test_configuration_skip_json_precedes_exit_one_and_names_all_gaps(
+    session,
+    monkeypatch,
+):
+    first_reason = "No GitHub App project binding is configured"
+    second_reason = "No project-bound GitHub token is available"
+    error_text = (
+        "Configuration gaps:\n"
+        f"- Uwear-AI/uwear: {first_reason}\n"
+        f"- Uwear-AI/uwear-app: {second_reason}"
+    )
     job = _make_scheduler_job(
         job_key="configuration_skip_job",
         family="configuration_skip_job",
@@ -164,10 +173,10 @@ async def test_configuration_skip_settles_failed_without_retry_and_alerts(sessio
             allowed_owner_modes=("scheduler",),
         )
     )[0]
-    alert = AsyncMock(return_value=True)
+    alert = AsyncMock()
     monkeypatch.setattr(
         scheduler_executor,
-        "async_alert_first_configuration_skip",
+        "async_deliver_scheduler_failure_alert",
         alert,
     )
 
@@ -176,13 +185,24 @@ async def test_configuration_skip_settles_failed_without_retry_and_alerts(sessio
         run.id,
         owner_id="tester",
         runner=lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
+            returncode=1,
             stdout=json.dumps(
                 {
-                    "ok": True,
-                    "outcome": "skipped",
-                    "skip_kind": "configuration",
-                    "reason": reason,
+                    "ok": False,
+                    "results": [
+                        {
+                            "repo": "Uwear-AI/uwear",
+                            "outcome": "skipped",
+                            "skip_kind": "configuration",
+                            "reason": first_reason,
+                        },
+                        {
+                            "repo": "Uwear-AI/uwear-app",
+                            "outcome": "skipped",
+                            "skip_kind": "configuration",
+                            "reason": second_reason,
+                        },
+                    ],
                 }
             ),
             stderr="",
@@ -194,19 +214,22 @@ async def test_configuration_skip_settles_failed_without_retry_and_alerts(sessio
     )
 
     assert executed.status == "settled_failure"
-    assert executed.error_text == reason
+    assert executed.error_text == error_text
     assert "next_retry_at" not in executed.result_summary
     assert step.status == "settled_failure"
-    assert step.error_text == reason
-    alert.assert_awaited_once_with(
-        job_key="configuration_skip_job",
-        run_id=run.id,
-        reason=reason,
-        alerted_at=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
-    )
+    assert step.error_text == error_text
+    alert.assert_awaited_once()
+    alert_call = alert.await_args.kwargs
+    assert alert_call["job_key"] == "configuration_skip_job"
+    assert alert_call["run_id"] == run.id
+    assert alert_call["error_text"] == error_text
+    assert [
+        str(edge.kind)
+        for edge in alert_call["evaluation"].crossed_edges
+    ] == ["configuration"]
 
 
-async def test_transient_skip_still_settles_successfully(session, monkeypatch):
+async def test_transient_skip_still_settles_successfully(session):
     job = _make_scheduler_job(
         job_key="transient_skip_job",
         family="transient_skip_job",
@@ -233,13 +256,6 @@ async def test_transient_skip_still_settles_successfully(session, monkeypatch):
             allowed_owner_modes=("scheduler",),
         )
     )[0]
-    alert = AsyncMock()
-    monkeypatch.setattr(
-        scheduler_executor,
-        "async_alert_first_configuration_skip",
-        alert,
-    )
-
     executed = await async_run_scheduler_run(
         session,
         run.id,
@@ -249,7 +265,7 @@ async def test_transient_skip_still_settles_successfully(session, monkeypatch):
             stdout=json.dumps(
                 {
                     "ok": True,
-                    "outcome": "conflict_skipped",
+                    "outcome": "skipped",
                     "skip_kind": "transient",
                     "reason": "GitHub compare-and-swap conflicts exhausted",
                 }
@@ -261,7 +277,6 @@ async def test_transient_skip_still_settles_successfully(session, monkeypatch):
 
     assert executed.status == "settled_success"
     assert executed.error_text is None
-    alert.assert_not_awaited()
 
 
 async def test_knowledge_index_sync_catalog_config(session):

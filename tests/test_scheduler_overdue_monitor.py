@@ -11,13 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.overdue_alert_state import (
     SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
+    SchedulerOverdueAlertState,
     release_scheduler_alert,
     try_claim_scheduler_alert,
+    try_claim_scheduler_overdue_alert,
 )
 from brain.app.scheduler.overdue_monitor import (
     SchedulerOverdueMonitor,
-    _SchedulerOverdueAlertState,
-    _try_claim_scheduler_overdue_alert,
 )
 from brain.app.scheduler.read_models import (
     SchedulerOverdueCandidate,
@@ -39,7 +39,7 @@ NOW = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
 
 class _FakeAlertLatch:
     def __init__(self) -> None:
-        self.state: _SchedulerOverdueAlertState | None = None
+        self.state: SchedulerOverdueAlertState | None = None
 
     @property
     def claimed(self) -> bool:
@@ -63,14 +63,14 @@ class _FakeAlertLatch:
             )
         ):
             return False
-        self.state = _SchedulerOverdueAlertState(
+        self.state = SchedulerOverdueAlertState(
             alerted_at=alerted_at,
             freeze_started_at=freeze_started_at,
             next_alert_at=next_alert_at,
         )
         return True
 
-    async def release(self) -> _SchedulerOverdueAlertState | None:
+    async def release(self) -> SchedulerOverdueAlertState | None:
         released = self.state
         self.state = None
         return released
@@ -477,25 +477,25 @@ async def test_scheduler_alert_claim_is_atomic_and_can_rearm(scheduler_session):
 async def test_scheduler_escalation_claim_advances_one_durable_row(
     scheduler_session,
 ):
-    first = await _try_claim_scheduler_overdue_alert(
+    first = await try_claim_scheduler_overdue_alert(
         scheduler_session,
         alerted_at=NOW + timedelta(minutes=18),
         freeze_started_at=NOW,
         next_alert_at=NOW + timedelta(hours=1),
     )
-    premature = await _try_claim_scheduler_overdue_alert(
+    premature = await try_claim_scheduler_overdue_alert(
         scheduler_session,
         alerted_at=NOW + timedelta(minutes=59),
         freeze_started_at=NOW,
         next_alert_at=NOW + timedelta(hours=1),
     )
-    escalation = await _try_claim_scheduler_overdue_alert(
+    escalation = await try_claim_scheduler_overdue_alert(
         scheduler_session,
         alerted_at=NOW + timedelta(hours=1),
         freeze_started_at=NOW,
         next_alert_at=NOW + timedelta(hours=4),
     )
-    repeated = await _try_claim_scheduler_overdue_alert(
+    repeated = await try_claim_scheduler_overdue_alert(
         scheduler_session,
         alerted_at=NOW + timedelta(hours=1),
         freeze_started_at=NOW,
@@ -552,7 +552,7 @@ async def test_postgres_concurrent_escalation_claim_has_one_winner(db_engine):
             session,
             alert_key=SCHEDULER_OVERDUE_FREEZE_ALERT_KEY,
         )
-        assert await _try_claim_scheduler_overdue_alert(
+        assert await try_claim_scheduler_overdue_alert(
             session,
             alerted_at=NOW + timedelta(minutes=18),
             freeze_started_at=NOW,
@@ -562,7 +562,7 @@ async def test_postgres_concurrent_escalation_claim_has_one_winner(db_engine):
 
     async def escalate() -> bool:
         async with AsyncSession(bind=db_engine, expire_on_commit=False) as session:
-            won = await _try_claim_scheduler_overdue_alert(
+            won = await try_claim_scheduler_overdue_alert(
                 session,
                 alerted_at=NOW + timedelta(hours=1),
                 freeze_started_at=NOW,
@@ -713,7 +713,7 @@ async def test_slack_delivery_starts_after_read_transaction_closes():
         "brain.platform.db.repositories.unit_of_work.UnitOfWork",
         FakeUnitOfWork,
     ), patch(
-        "brain.app.scheduler.overdue_monitor._try_claim_scheduler_overdue_alert",
+        "brain.app.scheduler.overdue_alert_state.try_claim_scheduler_overdue_alert",
         try_claim,
     ):
         result = await monitor._run_once(now=NOW)

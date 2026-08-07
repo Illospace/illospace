@@ -22,6 +22,7 @@ from brain.app.scheduler.overdue_alert_state import (
     try_claim_scheduler_alert,
 )
 from brain.contracts.statuses import PROCESSING_RUN_STATUS_VALUES
+from brain.kernel.common.time import assume_utc
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.cycles.service import async_finalize_cycle_run_from_run
@@ -53,12 +54,6 @@ AlertClaim = Callable[..., Awaitable[bool]]
 AlertRelease = Callable[..., Awaitable[None]]
 
 logger = logging.getLogger(__name__)
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _duration_label(seconds: float) -> str:
@@ -94,10 +89,16 @@ class OverdueAgentRun:
     origin: str
 
     def age_seconds_at(self, now: datetime) -> float:
-        return max(0.0, (_as_utc(now) - _as_utc(self.started_at)).total_seconds())
+        return max(
+            0.0,
+            (assume_utc(now) - assume_utc(self.started_at)).total_seconds(),
+        )
 
     def deadline_lag_seconds_at(self, now: datetime) -> float:
-        return max(0.0, (_as_utc(now) - _as_utc(self.deadline_at)).total_seconds())
+        return max(
+            0.0,
+            (assume_utc(now) - assume_utc(self.deadline_at)).total_seconds(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +118,7 @@ async def async_overdue_agent_runs(
     limit: int,
 ) -> tuple[OverdueAgentRun, ...]:
     """Return a bounded snapshot of processing runs far past their deadline."""
-    cutoff = _as_utc(now) - overdue_after
+    cutoff = assume_utc(now) - overdue_after
     rows = list(
         (
             await session.scalars(
@@ -135,8 +136,8 @@ async def async_overdue_agent_runs(
     return tuple(
         OverdueAgentRun(
             run_id=int(row.id),
-            started_at=_as_utc(row.started_at or row.created_at),
-            deadline_at=_as_utc(row.deadline_at),
+            started_at=assume_utc(row.started_at or row.created_at),
+            deadline_at=assume_utc(row.deadline_at),
             origin=_run_origin(row),
         )
         for row in rows

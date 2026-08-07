@@ -118,7 +118,7 @@ async def test_missing_project_binding_is_an_explicit_configuration_skip(monkeyp
 
     result = await illo_heartbeat.run_heartbeat(now=NOW)
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["outcome"] == "skipped"
     assert result["skip_kind"] == "configuration"
     assert result["reason"] == (
@@ -137,7 +137,7 @@ async def test_missing_project_token_is_an_explicit_configuration_skip(monkeypat
 
     result = await illo_heartbeat.run_heartbeat(now=NOW)
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["outcome"] == "skipped"
     assert result["skip_kind"] == "configuration"
     publish.assert_not_awaited()
@@ -151,7 +151,7 @@ async def test_configuration_skip_exits_nonzero(monkeypatch, capsys):
         AsyncMock(
             return_value={
                 "job": "illo_external_heartbeat",
-                "ok": True,
+                "ok": False,
                 "outcome": "skipped",
                 "skip_kind": "configuration",
                 "reason": "binding missing",
@@ -405,7 +405,7 @@ async def test_conflict_skip_is_a_successful_job_outcome(monkeypatch):
     assert result == {
         "job": "illo_external_heartbeat",
         "ok": True,
-        "outcome": "conflict_skipped",
+        "outcome": "skipped",
         "skip_kind": "transient",
         "reason": "GitHub compare-and-swap conflicts exhausted",
         "attempts": 3,

@@ -312,7 +312,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
     if actor is None:
         return {
             "job": "illo_external_heartbeat",
-            "ok": True,
+            "ok": False,
             "outcome": "skipped",
             "skip_kind": SchedulerSkipKind.CONFIGURATION.value,
             "reason": f"No GitHub App project binding is configured for {PROJECT_SLUG}",
@@ -321,7 +321,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
     if token is None:
         return {
             "job": "illo_external_heartbeat",
-            "ok": True,
+            "ok": False,
             "outcome": "skipped",
             "skip_kind": SchedulerSkipKind.CONFIGURATION.value,
             "reason": f"No project-bound GitHub token is available for {PROJECT_SLUG}",
@@ -333,7 +333,7 @@ async def run_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
         return {
             "job": "illo_external_heartbeat",
             "ok": True,
-            "outcome": publish_result.outcome.value,
+            "outcome": "skipped",
             "skip_kind": SchedulerSkipKind.TRANSIENT.value,
             "reason": "GitHub compare-and-swap conflicts exhausted",
             "attempts": publish_result.attempts,

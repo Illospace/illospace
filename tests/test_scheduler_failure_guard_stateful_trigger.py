@@ -123,6 +123,7 @@ async def test_stateful_third_trigger_flows_through_production_registry(
         "consecutive",
         "standing_failure",
         "rolling_window",
+        "configuration",
         "distinct_failure_classes",
     ]
 
