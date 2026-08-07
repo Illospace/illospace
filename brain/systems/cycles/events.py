@@ -27,7 +27,7 @@ def publish_cycle_change(
         payload["target_idea_id"] = str(target_idea_id)
 
     try:
-        from brain.systems.cortex.events import publish_safe
+        from brain.platform.events import publish_safe
 
         publish_safe("cycles_changed", payload)
     except Exception:

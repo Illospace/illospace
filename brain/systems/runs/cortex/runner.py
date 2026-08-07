@@ -58,7 +58,7 @@ from brain.systems.runs.cortex.queue_health import (
     runner_concurrency as _shared_runner_concurrency,
 )
 from brain.systems.runs.ui_events import run_event_to_ui_message
-from brain.systems.cortex.events import publish_live_safe, publish_safe
+from brain.platform.events import publish_live_safe, publish_safe
 from brain.systems.cortex.project_context.materializer import (
     materialize_project_context_workspaces,
     project_context_has_materializable_resources,

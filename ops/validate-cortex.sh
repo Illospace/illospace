@@ -28,7 +28,7 @@ PY_TARGETS=(
     brain/app/api/routers/cortex_intel.py
     brain/app/api/main.py
     brain/systems/runs/cortex
-    brain/systems/cortex/events.py
+    brain/platform/events.py
     brain/systems/cortex/encode.py
     brain/systems/cortex/intelligence.py
     brain/systems/cortex/worker.py

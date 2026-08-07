@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.cortex.events import publish_safe
+from brain.platform.events import publish_safe
 from brain.systems.cortex.thread_links import thread_link_payload
 
 THREAD_OBJECT_TYPE = "thread"

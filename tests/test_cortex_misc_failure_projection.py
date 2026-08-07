@@ -139,7 +139,7 @@ async def test_split_projects_legacy_failed_message_before_copying_it():
             "async_cancel_open_runs_for_thread",
             cancel_open_runs,
         ),
-        patch("brain.systems.cortex.events.publish"),
+        patch("brain.platform.events.publish"),
     ):
         result = await _misc.split_idea(
             "idea-1",

@@ -152,7 +152,7 @@ async def _handle_cortex_visual_reply(content_type: str, title: str, content: st
     display_mode = display or "inline"
 
     try:
-        from brain.systems.cortex.events import publish_safe as _ws_publish
+        from brain.platform.events import publish_safe as _ws_publish
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
         from brain.platform.db.models.idea import VisualBlock
         from sqlalchemy import text as sa_text

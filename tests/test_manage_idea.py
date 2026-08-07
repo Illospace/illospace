@@ -62,7 +62,7 @@ async def test_manage_idea_create_normalizes_emptyish_parent_id_to_null(
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+    monkeypatch.setattr("brain.platform.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_seed_created_idea_thread", AsyncMock(return_value=None))
     monkeypatch.setattr(
         idea_tools,
@@ -127,7 +127,7 @@ async def test_manage_idea_create_persists_emptyish_parent_as_null(
         return {"id": str(idea.id), "parent_id": idea.parent_id}
 
     install_unit_of_work(session, flush_on_exit=True)
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+    monkeypatch.setattr("brain.platform.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_seed_created_idea_thread", AsyncMock(return_value=None))
     monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
 

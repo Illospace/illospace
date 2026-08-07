@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from brain.kernel.common.time import utcnow as _shared_utcnow
 
-from brain.systems.cortex.events import publish_safe
+from brain.platform.events import publish_safe
 from brain.systems.cortex.resources.telemetry import build_browser_resource_summary
 from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
 from brain.platform.async_io import async_http_client, copy_file, ensure_dir, glob_paths, iter_dir, path_exists, path_is_file, path_stat

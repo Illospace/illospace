@@ -105,7 +105,7 @@ async def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
     with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-        "brain.systems.cortex.events.resolve_event_org_id_async",
+        "brain.platform.events.resolve_event_org_id_async",
         AsyncMock(return_value=None),
     ):
         api_main._schedule_product_event_publish("browser_session_frame", {"session_id": "session-1"})
@@ -132,7 +132,7 @@ async def test_product_event_publish_resolves_org_scope_before_fanout(monkeypatc
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
     with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-        "brain.systems.cortex.events.resolve_event_org_id_async",
+        "brain.platform.events.resolve_event_org_id_async",
         resolve_org,
     ):
         api_main._schedule_product_event_publish("browser_session_frame", {"idea_id": "idea-1"})
@@ -162,7 +162,7 @@ async def test_ensure_starting_skill_bundle_awaits_async_catalog():
 @pytest.mark.asyncio
 async def test_lifespan_skips_inline_runner_by_default():
     with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
-        with patch("brain.systems.cortex.events.set_publisher") as mock_set_publisher:
+        with patch("brain.platform.events.set_publisher") as mock_set_publisher:
             with patch("brain.systems.runs.cortex.start_runner") as mock_start_runner:
                 async with api_main.lifespan(app):
                     pass
@@ -174,7 +174,7 @@ async def test_lifespan_skips_inline_runner_by_default():
 @pytest.mark.asyncio
 async def test_lifespan_ensures_starting_skill_bundle():
     with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
-        with patch("brain.systems.cortex.events.set_publisher"):
+        with patch("brain.platform.events.set_publisher"):
             with patch("brain.app.api.main._ensure_starting_skill_bundle", new=AsyncMock()) as ensure_bundle:
                 async with api_main.lifespan(app):
                     pass
@@ -196,7 +196,7 @@ async def test_lifespan_hosts_scheduler_overdue_monitor_outside_daemon():
 
     with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
         with patch("brain.app.api.main._should_start_run_event_consumer", return_value=False):
-            with patch("brain.systems.cortex.events.set_publisher"):
+            with patch("brain.platform.events.set_publisher"):
                 with patch(
                     "brain.app.api.main._ensure_starting_skill_bundle",
                     new=AsyncMock(),
@@ -231,7 +231,7 @@ async def test_lifespan_hosts_stale_run_reaper_outside_daemon():
 
     with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
         with patch("brain.app.api.main._should_start_run_event_consumer", return_value=False):
-            with patch("brain.systems.cortex.events.set_publisher"):
+            with patch("brain.platform.events.set_publisher"):
                 with patch(
                     "brain.app.api.main._ensure_starting_skill_bundle",
                     new=AsyncMock(),
@@ -271,7 +271,7 @@ async def test_lifespan_can_start_inline_runner_when_enabled():
     from brain.systems.runs.cortex import DrainResult
 
     with patch("brain.app.api.main._should_start_inline_runner", return_value=True):
-        with patch("brain.systems.cortex.events.set_publisher") as mock_set_publisher:
+        with patch("brain.platform.events.set_publisher") as mock_set_publisher:
             with patch("brain.systems.runs.cortex.start_runner") as mock_start_runner:
                 with patch("brain.systems.cycles.start_cycle_scheduler"), patch(
                     "brain.systems.cycles.stop_cycle_scheduler",
@@ -303,7 +303,7 @@ async def test_lifespan_recovers_inline_runs_that_time_out_during_drain():
     )
     recover = AsyncMock(return_value=recovered)
     with patch("brain.app.api.main._should_start_inline_runner", return_value=True):
-        with patch("brain.systems.cortex.events.set_publisher"):
+        with patch("brain.platform.events.set_publisher"):
             with patch("brain.systems.runs.cortex.start_runner"):
                 with patch("brain.systems.cycles.start_cycle_scheduler"), patch(
                     "brain.systems.cycles.stop_cycle_scheduler",

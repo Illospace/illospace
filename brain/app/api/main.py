@@ -144,7 +144,7 @@ def _schedule_on_main_loop(coro, done_callback=None) -> bool:
 async def _publish_product_event(event_type, data):
     """Resolve product scope and broadcast a live event without sync DB access."""
     from brain.app.api.routers.ws import ws_manager
-    from brain.systems.cortex.events import resolve_event_org_id_async
+    from brain.platform.events import resolve_event_org_id_async
 
     payload = dict(data)
     org_id = str(payload.get("org_id") or "").strip()
@@ -201,7 +201,7 @@ async def lifespan(app):
     _main_loop = asyncio.get_running_loop()
     inline_runner_started = False
 
-    from brain.systems.cortex.events import set_publisher
+    from brain.platform.events import set_publisher
     set_publisher(_schedule_product_event_publish)
     scheduler_overdue_monitor = SchedulerOverdueMonitor()
     _scheduler_overdue_monitor_task = _main_loop.create_task(

@@ -278,7 +278,7 @@ async def _handle_post_thread_discussion_reply(
     """Post an Illo-authored reply to a Thread's Discussion surface."""
     from brain.platform.db.models.idea import Idea, ThreadDiscussionComment
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
-    from brain.systems.cortex.events import publish_safe
+    from brain.platform.events import publish_safe
 
     text = str(body or "").strip()
     if not text:
@@ -359,7 +359,7 @@ async def _handle_post_ai_timeline_message(
     """Post an Illo-authored message to a Thread's AI Timeline surface."""
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
-    from brain.systems.cortex.events import publish_safe
+    from brain.platform.events import publish_safe
     from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
 
     text = str(body or "").strip()

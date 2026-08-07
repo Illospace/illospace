@@ -8,7 +8,7 @@ from typing import Any
 
 from brain.kernel.common.time import utcnow as _shared_utcnow
 
-from brain.systems.cortex.events import publish_safe
+from brain.platform.events import publish_safe
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 

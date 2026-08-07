@@ -639,7 +639,7 @@ async def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
 
     monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
     monkeypatch.setattr(
-        "brain.systems.cortex.events.publish_safe",
+        "brain.platform.events.publish_safe",
         lambda event_type, data: published.append((event_type, data)),
     )
 
@@ -706,7 +706,7 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
 
     monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
     monkeypatch.setattr(
-        "brain.systems.cortex.events.publish_safe",
+        "brain.platform.events.publish_safe",
         lambda event_type, data: published.append((event_type, data)),
     )
 
@@ -778,7 +778,7 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     session.execute = AsyncMock(return_value=SimpleNamespace(one_or_none=lambda: None))
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
     monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+    monkeypatch.setattr("brain.platform.events.publish_safe", lambda *_: None)
 
     async def serialize_idea(idea_arg, session_arg):
         return {"id": str(idea_arg.id), "user_id": idea_arg.user_id}
@@ -852,7 +852,7 @@ async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monke
     session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
     monkeypatch.setattr(idea_tools, "_require_idea_for_actor", AsyncMock(return_value=SimpleNamespace(id=parent_id)))
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+    monkeypatch.setattr("brain.platform.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_admit_created_idea_run", admit)
 
     async def serialize_idea(idea_arg, session_arg):
@@ -2161,7 +2161,7 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
 
     published = Mock()
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+    monkeypatch.setattr("brain.platform.events.publish_safe", published)
 
     with bind_agent_context(
         {
@@ -2268,7 +2268,7 @@ async def test_post_thread_discussion_reply_tool_infers_upload_attachments(monke
 
     published = Mock()
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+    monkeypatch.setattr("brain.platform.events.publish_safe", published)
 
     with bind_agent_context(
         {
@@ -2344,7 +2344,7 @@ async def test_post_ai_timeline_message_tool_writes_linked_thread_message(monkey
 
     published = Mock()
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
-    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+    monkeypatch.setattr("brain.platform.events.publish_safe", published)
 
     with bind_agent_context(
         {
