@@ -291,8 +291,6 @@ async def cmd_retry_run(args: argparse.Namespace) -> int:
 
 async def cmd_daemon(args: argparse.Namespace) -> int:
     tick = 0
-    next_deadline_sweep_at = 0.0
-    next_stale_reap_at = 0.0
     try:
         async with UnitOfWork() as uow:
             startup = await async_scheduler_daemon_startup(
@@ -305,12 +303,6 @@ async def cmd_daemon(args: argparse.Namespace) -> int:
             )
         _emit({"event": "scheduler_startup", **startup})
         while True:
-            next_deadline_sweep_at = await _enforce_agent_run_deadlines_if_due(
-                next_sweep_at=next_deadline_sweep_at,
-            )
-            next_stale_reap_at = await _reap_stale_active_runs_if_due(
-                next_reap_at=next_stale_reap_at,
-            )
             async with UnitOfWork() as uow:
                 result = await async_scheduler_daemon_tick(
                     uow.session,

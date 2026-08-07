@@ -132,9 +132,8 @@ async def test_scheduler_enforces_agent_run_deadlines_without_a_worker(
     }
 
 
-async def test_stale_run_reaper_failure_emits_and_daemon_keeps_ticking(monkeypatch, capsys):
+async def test_daemon_does_not_host_agent_run_maintenance(monkeypatch):
     tick_calls = 0
-    sleep_calls = 0
 
     async def fake_startup(*_args, **_kwargs):
         return {"ok": True}
@@ -144,35 +143,22 @@ async def test_stale_run_reaper_failure_emits_and_daemon_keeps_ticking(monkeypat
         tick_calls += 1
         return {"ok": True}
 
-    async def fail_reap_stale_active_runs(*, limit):
-        assert limit == 25
-        raise RuntimeError("reaper unavailable")
+    async def maintenance_must_not_run(**_kwargs):
+        raise AssertionError("the scheduler daemon must not host agent-run maintenance")
 
-    async def skip_deadline_sweep(*, next_sweep_at):
-        return next_sweep_at
-
-    async def stop_after_second_tick(_seconds):
-        nonlocal sleep_calls
-        sleep_calls += 1
-        if sleep_calls == 2:
-            raise KeyboardInterrupt
-
-    monotonic_times = iter((100.0, 101.0))
     monkeypatch.setattr(scheduler_cli, "UnitOfWork", _FakeUnitOfWork)
     monkeypatch.setattr(scheduler_cli, "async_scheduler_daemon_startup", fake_startup)
     monkeypatch.setattr(scheduler_cli, "async_scheduler_daemon_tick", fake_tick)
-    monkeypatch.setattr(scheduler_cli, "reap_stale_active_runs", fail_reap_stale_active_runs)
-    monkeypatch.setattr(scheduler_cli, "_enforce_agent_run_deadlines_if_due", skip_deadline_sweep)
-    monkeypatch.setattr(scheduler_cli, "_monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(scheduler_cli.asyncio, "sleep", stop_after_second_tick)
-
-    assert await scheduler_cli.cmd_daemon(_daemon_args()) == 0
-    assert tick_calls == 2
-
-    output = capsys.readouterr().out
-    assert (
-        '{"event":"agent_run_stale_reap_failed","ok":false,"error":"reaper unavailable"}'
-        in output
+    monkeypatch.setattr(
+        scheduler_cli,
+        "_reap_stale_active_runs_if_due",
+        maintenance_must_not_run,
     )
-    assert '"stopped": "keyboard_interrupt"' in output
-    assert '"ticks": 2' in output
+    monkeypatch.setattr(
+        scheduler_cli,
+        "_enforce_agent_run_deadlines_if_due",
+        maintenance_must_not_run,
+    )
+
+    assert await scheduler_cli.cmd_daemon(_daemon_args(once=True)) == 0
+    assert tick_calls == 1
