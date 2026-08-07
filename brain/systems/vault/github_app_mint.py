@@ -16,7 +16,10 @@ from brain.systems.cortex.project_context.github import (
     GITHUB_API_BASE,
     GitHubConnectorError,
     _headers,
-    parse_github_repo_slug,
+)
+from brain.systems.vault.installation_resolver import (
+    RepositoryInstallationResolverInput,
+    repository_installation_resolver,
 )
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
@@ -39,19 +42,12 @@ DEFAULT_INSTALLATION_PERMISSIONS: dict[str, str] = {
     "checks": "read",
 }
 _CACHE_FRESHNESS_WINDOW = timedelta(minutes=5)
-_INSTALLATION_CACHE_LIFETIME = timedelta(hours=1)
 _PEM_HASH_PREFIX_LENGTH = 16
 _MINT_STATUS_MESSAGES = {
     401: "GitHub rejected the GitHub App JWT.",
     403: "GitHub denied the GitHub App installation token request.",
     404: "GitHub App installation was not found.",
     422: "GitHub could not mint an installation token for the requested repositories or permissions.",
-}
-_DISCOVERY_STATUS_MESSAGES = {
-    401: "GitHub rejected the GitHub App JWT while finding the repository installation.",
-    403: "GitHub denied the GitHub App repository installation request.",
-    404: "GitHub App installation was not found for the repository.",
-    422: "GitHub could not find an installation for the repository.",
 }
 
 
@@ -103,16 +99,8 @@ class MintedInstallationToken:
     scope_key: str
 
 
-@dataclass(frozen=True)
-class CachedRepositoryInstallation:
-    installation_id: str
-    expires_at: datetime
-
-
 _TOKEN_CACHE: dict[str, MintedInstallationToken] = {}
 _MINT_LOCKS: dict[str, asyncio.Lock] = {}
-_INSTALLATION_CACHE: dict[str, CachedRepositoryInstallation] = {}
-_INSTALLATION_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _now() -> datetime:
@@ -193,47 +181,6 @@ def _normalize_repositories(repositories: list[str] | tuple[str, ...]) -> list[s
     return cleaned
 
 
-def _normalize_repository_refs(
-    repositories: list[str] | tuple[str, ...],
-) -> list[tuple[str | None, str]]:
-    cleaned: list[tuple[str | None, str]] = []
-    seen: set[str] = set()
-    for repository in repositories:
-        value = str(repository or "").strip()
-        if not value:
-            continue
-        parts = value.split("/")
-        if len(parts) == 1:
-            canonical = parse_github_repo_slug(f"placeholder/{value}")
-            if canonical is None:
-                raise RuntimeSecretUnavailable(
-                    "GitHub App token field 'repositories' contained an invalid repository name"
-                )
-            owner = None
-            _placeholder, name = canonical.split("/", 1)
-        elif len(parts) == 2:
-            canonical = parse_github_repo_slug(value)
-            if canonical is None:
-                raise RuntimeSecretUnavailable(
-                    "GitHub App token field 'repositories' contained an invalid owner/repository name"
-                )
-            owner, name = canonical.split("/", 1)
-        else:
-            raise RuntimeSecretUnavailable(
-                "GitHub App token field 'repositories' must contain repository names or owner/repository names"
-            )
-        cache_identity = f"{owner}/{name}" if owner is not None else name
-        if cache_identity.lower() in seen:
-            continue
-        seen.add(cache_identity.lower())
-        cleaned.append((owner, name))
-    if not cleaned:
-        raise RuntimeSecretUnavailable(
-            "GitHub App token field 'repositories' is required"
-        )
-    return cleaned
-
-
 def _normalize_permissions(permissions: dict[str, str] | None) -> dict[str, str]:
     if permissions is None:
         raise RuntimeSecretUnavailable(
@@ -258,15 +205,18 @@ def _scope_key(
     repositories: list[str],
     permissions: dict[str, str],
 ) -> str:
-    private_key_hash = hashlib.sha256(cred.private_key_pem.encode("utf-8")).hexdigest()
     payload = {
         "installation_id": installation_id or cred.installation_id,
         "repositories": sorted(repositories),
         "permissions": sorted(permissions.items()),
-        "private_key_sha256": private_key_hash[:_PEM_HASH_PREFIX_LENGTH],
+        "private_key_sha256": _private_key_sha256(cred)[:_PEM_HASH_PREFIX_LENGTH],
     }
     serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _private_key_sha256(cred: GitHubAppCredential) -> str:
+    return hashlib.sha256(cred.private_key_pem.encode("utf-8")).hexdigest()
 
 
 def _lock_for_scope(scope_key: str) -> asyncio.Lock:
@@ -277,31 +227,10 @@ def _lock_for_scope(scope_key: str) -> asyncio.Lock:
     return lock
 
 
-def _installation_cache_key(
-    cred: GitHubAppCredential,
-    *,
-    owner: str,
-    repository: str,
-) -> str:
-    payload = {
-        "app_id": cred.app_id,
-        "client_id": cred.client_id,
-        "default_installation_id": cred.installation_id,
-        "private_key_sha256": hashlib.sha256(
-            cred.private_key_pem.encode("utf-8")
-        ).hexdigest(),
-        "repository": f"{owner}/{repository}".lower(),
-    }
-    serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _lock_for_installation(cache_key: str) -> asyncio.Lock:
-    lock = _INSTALLATION_LOCKS.get(cache_key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _INSTALLATION_LOCKS[cache_key] = lock
-    return lock
+def reset_cache() -> None:
+    """Clear minted tokens and their lock registry."""
+    _TOKEN_CACHE.clear()
+    _MINT_LOCKS.clear()
 
 
 def _cache_is_fresh(
@@ -332,170 +261,14 @@ def _parse_expires_at(value: Any) -> datetime:
     return expires_at.astimezone(timezone.utc)
 
 
-def _github_app_error(
-    response: httpx.Response,
-    *,
-    status_messages: dict[int, str],
-    default_action: str,
-) -> GitHubConnectorError:
+def _mint_error(response: httpx.Response) -> GitHubConnectorError:
     return GitHubConnectorError(
         status_code=response.status_code,
-        message=status_messages.get(
+        message=_MINT_STATUS_MESSAGES.get(
             response.status_code,
-            f"GitHub returned {response.status_code} while {default_action}.",
+            f"GitHub returned {response.status_code} while minting an installation token.",
         ),
     )
-
-
-def _mint_error(response: httpx.Response) -> GitHubConnectorError:
-    return _github_app_error(
-        response,
-        status_messages=_MINT_STATUS_MESSAGES,
-        default_action="minting an installation token",
-    )
-
-
-def _discovery_error(response: httpx.Response) -> GitHubConnectorError:
-    return _github_app_error(
-        response,
-        status_messages=_DISCOVERY_STATUS_MESSAGES,
-        default_action="finding the repository installation",
-    )
-
-
-async def _fetch_repository_installation(
-    *,
-    owner: str,
-    repository: str,
-    app_jwt: str,
-) -> str:
-    path = f"/repos/{owner}/{repository}/installation"
-    try:
-        async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-            response = await client.request(
-                "GET",
-                f"{GITHUB_API_BASE}{path}",
-                headers=_headers(app_jwt),
-            )
-    except httpx.HTTPError:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="Could not reach GitHub while finding the repository installation.",
-        ) from None
-
-    if response.status_code != 200:
-        raise _discovery_error(response)
-    try:
-        payload = response.json()
-    except Exception:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub repository installation response was not valid JSON.",
-        ) from None
-    installation_id = payload.get("id") if isinstance(payload, dict) else None
-    if (
-        installation_id is None
-        or installation_id is True
-        or installation_id is False
-        or not str(installation_id).strip()
-    ):
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub repository installation response was missing id.",
-        )
-    try:
-        return str(int(str(installation_id).strip()))
-    except (TypeError, ValueError):
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub repository installation response had an invalid id.",
-        ) from None
-
-
-async def _fetch_installation_owner(
-    *,
-    installation_id: str,
-    app_jwt: str,
-) -> str:
-    path = f"/app/installations/{installation_id}"
-    try:
-        async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-            response = await client.request(
-                "GET",
-                f"{GITHUB_API_BASE}{path}",
-                headers=_headers(app_jwt),
-            )
-    except httpx.HTTPError:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="Could not reach GitHub while verifying the fallback installation.",
-        ) from None
-
-    if response.status_code != 200:
-        raise _discovery_error(response)
-    try:
-        payload = response.json()
-    except Exception:
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub fallback installation response was not valid JSON.",
-        ) from None
-    account = payload.get("account") if isinstance(payload, dict) else None
-    owner = account.get("login") if isinstance(account, dict) else None
-    if not isinstance(owner, str) or not owner.strip():
-        raise GitHubConnectorError(
-            status_code=502,
-            message="GitHub fallback installation response was missing account login.",
-        )
-    return owner.strip()
-
-
-async def _resolve_repository_installation(
-    cred: GitHubAppCredential,
-    *,
-    owner: str | None,
-    repository: str,
-    app_jwt: str,
-    now: datetime,
-) -> str:
-    if owner is None:
-        return cred.installation_id
-
-    cache_key = _installation_cache_key(
-        cred,
-        owner=owner,
-        repository=repository,
-    )
-    cached = _INSTALLATION_CACHE.get(cache_key)
-    if cached is not None and cached.expires_at - now > _CACHE_FRESHNESS_WINDOW:
-        return cached.installation_id
-
-    async with _lock_for_installation(cache_key):
-        cached = _INSTALLATION_CACHE.get(cache_key)
-        if cached is not None and cached.expires_at - now > _CACHE_FRESHNESS_WINDOW:
-            return cached.installation_id
-        try:
-            installation_id = await _fetch_repository_installation(
-                owner=owner,
-                repository=repository,
-                app_jwt=app_jwt,
-            )
-        except GitHubConnectorError as discovery_error:
-            try:
-                fallback_owner = await _fetch_installation_owner(
-                    installation_id=cred.installation_id,
-                    app_jwt=app_jwt,
-                )
-            except GitHubConnectorError:
-                raise discovery_error
-            if fallback_owner.lower() != owner.lower():
-                raise discovery_error
-            installation_id = cred.installation_id
-        _INSTALLATION_CACHE[cache_key] = CachedRepositoryInstallation(
-            installation_id=installation_id,
-            expires_at=now + _INSTALLATION_CACHE_LIFETIME,
-        )
-        return installation_id
 
 
 async def _exchange_installation_token(
@@ -616,40 +389,23 @@ async def async_mint_installation_token(
     permissions: dict[str, str] = DEFAULT_INSTALLATION_PERMISSIONS,
 ) -> str:
     cred = GitHubAppCredential.from_blob(decrypted_blob)
-    repository_refs = _normalize_repository_refs(repositories)
     clean_permissions = _normalize_permissions(permissions)
     current = _utc_datetime(None)
     app_jwt = _build_app_jwt(cred, now=current)
-    repositories_by_installation: dict[str, list[tuple[str, str]]] = {}
-    for owner, repository in repository_refs:
-        installation_id = await _resolve_repository_installation(
-            cred,
-            owner=owner,
-            repository=repository,
-            app_jwt=app_jwt,
-            now=current,
-        )
-        installation_repositories = repositories_by_installation.setdefault(
-            installation_id,
-            [],
-        )
-        repository_identity = f"{owner}/{repository}" if owner is not None else repository
-        if (repository, repository_identity) not in installation_repositories:
-            installation_repositories.append((repository, repository_identity))
-
-    minted_tokens = [
-        await _mint_for_installation(
-            cred,
-            installation_id=installation_id,
-            repositories=[repository for repository, _identity in repository_refs],
-            scope_repositories=[identity for _repository, identity in repository_refs],
-            permissions=clean_permissions,
-            app_jwt=app_jwt,
-            now=current,
-        )
-        for installation_id, repository_refs in repositories_by_installation.items()
-    ]
-    if len(minted_tokens) != 1:
+    resolved_repositories = await repository_installation_resolver.resolve_many(
+        RepositoryInstallationResolverInput(
+            app_id=cred.app_id,
+            client_id=cred.client_id,
+            default_installation_id=cred.installation_id,
+            private_key_sha256=_private_key_sha256(cred),
+        ),
+        repositories=repositories,
+        app_jwt=app_jwt,
+    )
+    installation_ids = {
+        resolved.installation_id for resolved in resolved_repositories
+    }
+    if len(installation_ids) != 1:
         raise GitHubConnectorError(
             status_code=422,
             message=(
@@ -657,12 +413,24 @@ async def async_mint_installation_token(
                 "one installation token."
             ),
         )
-    return minted_tokens[0].token
+    minted = await _mint_for_installation(
+        cred,
+        installation_id=installation_ids.pop(),
+        repositories=[
+            resolved.repository_name for resolved in resolved_repositories
+        ],
+        scope_repositories=[
+            resolved.repository_slug for resolved in resolved_repositories
+        ],
+        permissions=clean_permissions,
+        app_jwt=app_jwt,
+        now=current,
+    )
+    return minted.token
 
 
 __all__ = [
     "DEFAULT_INSTALLATION_PERMISSIONS",
-    "CachedRepositoryInstallation",
     "GitHubAppCredential",
     "MintedInstallationToken",
     "_build_app_jwt",
