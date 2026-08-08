@@ -370,7 +370,16 @@ def main() -> None:
             _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STOPPED)
             logger.info("agent-run worker stopped")
             logging.shutdown()
-            _terminate_process(exit_code)
+            try:
+                _terminate_process(exit_code)
+            finally:
+                # Production uses ``os._exit`` and never reaches this cleanup.
+                # Tests and embedded callers replace the terminator with a
+                # returning function; do not leave a daemon timer behind that
+                # can terminate the surrounding process later.
+                if _shutdown_watchdog is not None:
+                    _shutdown_watchdog.cancel()
+                    _shutdown_watchdog = None
 
 
 if __name__ == "__main__":
