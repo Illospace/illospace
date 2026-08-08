@@ -40,6 +40,7 @@
     treatment = 'bloom',
     icon = 'thread',
     attachmentCount = 0,
+    originCue = '',
     badge = false,
     animated = true,
     interactive = false,
@@ -68,6 +69,7 @@
     treatment?: ConstellationSignalTreatment;
     icon?: ConstellationSignalIcon;
     attachmentCount?: number;
+    originCue?: string;
     badge?: boolean;
     animated?: boolean;
     interactive?: boolean;
@@ -87,7 +89,7 @@
 
   const showHalo = $derived(presence === 'inside');
   const iconName = $derived(SIGNAL_ICON_MAP[icon] ?? SIGNAL_ICON_MAP.thread);
-  const fullLabel = $derived(label || text);
+  const fullLabel = $derived(`${label || text}${originCue ? ` — source ${originCue}` : ''}`);
   const showWorkingIndicator = $derived(state === 'working');
   const showUnreadNotification = $derived(cue === 'attention' && !showWorkingIndicator);
   const statusVariant = $derived.by<'owner' | 'inside' | 'attention' | 'risk' | null>(() => {
@@ -297,6 +299,9 @@
     {/if}
 
     <div class="constellation-signal-blob-surface">
+      {#if originCue}
+        <span class="constellation-signal-blob-origin" aria-hidden="true">{originCue}</span>
+      {/if}
       {#if treatment === 'seed'}
         <span class="constellation-signal-blob-owner-seed" aria-hidden="true"></span>
       {/if}
@@ -545,7 +550,8 @@
 
   .constellation-signal-blob-owner-seed,
   .constellation-signal-blob-status-anchor,
-  .constellation-signal-blob-attachment-badge {
+  .constellation-signal-blob-attachment-badge,
+  .constellation-signal-blob-origin {
     position: absolute;
     z-index: 2;
   }
@@ -561,6 +567,21 @@
       0 0 0 2px var(--constellation-color-badge-ring),
       0 0 16px color-mix(in srgb, var(--blob-seed) 56%, transparent);
     opacity: var(--blob-seed-opacity, 0.9);
+  }
+
+  .constellation-signal-blob-origin {
+    right: 18px;
+    bottom: 14px;
+    max-width: 48px;
+    overflow: hidden;
+    color: color-mix(in srgb, var(--blob-owner) 64%, transparent);
+    font-family: var(--constellation-font-mono);
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .constellation-signal-blob-owner-seed::after {
@@ -696,6 +717,14 @@
     gap: 0;
     padding: 0;
     border-radius: 999px;
+  }
+
+  .constellation-signal-blob-semantic-symbol .constellation-signal-blob-origin,
+  .constellation-signal-blob-semantic-glyph .constellation-signal-blob-origin {
+    right: 14px;
+    bottom: 11px;
+    max-width: 24px;
+    font-size: 6px;
   }
 
   .constellation-signal-blob-semantic-symbol .constellation-signal-blob-text,

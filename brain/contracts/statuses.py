@@ -23,6 +23,13 @@ IDEA_STATUS_VALUES = (
     "building",
     "testing",
 )
+CANVAS_OCCUPANCY_STATUS_VALUES = (
+    "active",
+    "failed",
+    "needs_input",
+    "unread_reply",
+    "working",
+)
 INBOUND_EVENT_STATUS_VALUES = (
     "received",
     "processed",

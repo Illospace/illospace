@@ -93,6 +93,11 @@ class SingleCommandProgram:
 
 # Programs whose plan and StepSpec projections share one representation.
 SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
+    "cortex_canvas_occupancy": SingleCommandProgram(
+        command=("python3", "-m", "brain.jobs.pipelines.cortex_occupancy"),
+        step_key="cortex_canvas_occupancy",
+        description="Move quiet emerged thoughts from the canvas into history",
+    ),
     "knowledge_index_sync": SingleCommandProgram(
         command=("python3", "-m", "brain.jobs.pipelines.knowledge_index_sync"),
         step_key="knowledge_index_sync",

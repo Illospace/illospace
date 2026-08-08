@@ -136,6 +136,7 @@
     withAlpha,
     wrapTextForBubble,
   } from '$lib/utils/cortexSvgVisuals';
+  import { canvasOriginCue } from '$lib/features/cortex/domain/canvasOccupancy';
 
   let {
     apps = [],
@@ -964,6 +965,7 @@
       treatment: primitiveBlobTreatment(d),
       icon: primitiveBlobIcon(d),
       attachmentCount,
+      originCue: canvasOriginCue(d.origin),
     };
   }
 

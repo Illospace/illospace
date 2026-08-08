@@ -4,6 +4,8 @@ export interface Idea {
   display_title?: string;
   description: string | null;
   status: string;
+  /** Canonical backend lifecycle state retained beside the visual status. */
+  lifecycle_status?: string | null;
   origin: string;
   origin_ref?: string | null;
   salience_score: number;

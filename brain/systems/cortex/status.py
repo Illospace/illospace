@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from brain.contracts.statuses import (
+    CANVAS_OCCUPANCY_STATUS_VALUES,
     IDEA_STATUS_VALUES,
     idea_status_pattern,
 )
 IDEA_STATUSES = frozenset(IDEA_STATUS_VALUES)
+CANVAS_OCCUPANCY_STATUSES = frozenset(CANVAS_OCCUPANCY_STATUS_VALUES)
 RUN_ADMISSION_CREATE_STATUSES = frozenset({"queued", "working"})
 PROTECTED_IDEA_STATUSES = frozenset({"archived", "resolved"})
 EXTERNAL_TASK_STARTABLE_IDEA_STATUSES = frozenset({

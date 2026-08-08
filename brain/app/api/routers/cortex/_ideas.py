@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -388,20 +388,25 @@ async def _apply_orbit_anchor(
 
 async def list_ideas_payload(
     status: str | None = None,
+    limit: int = 100,
     db: AsyncSession | None = None,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> list[IdeaRead]:
     assert db is not None, "list_ideas_payload requires an explicit async session"
     repo = IdeaRepository(db)
     if _caller_is_service_principal(user):
-        ideas = await repo.a_list_by_status(status) if status else await repo.a_list_active()
+        ideas = (
+            await repo.a_list_by_status(status, limit=limit)
+            if status
+            else await repo.a_list_canvas(limit=limit)
+        )
         return await _ideas_read_with_author(list(ideas), db)
 
     org_id = require_org_context(user)
     ideas = (
-        await repo.a_list_by_status_for_org(status, org_id)
+        await repo.a_list_by_status_for_org(status, org_id, limit=limit)
         if status
-        else await repo.a_list_active_for_org(org_id)
+        else await repo.a_list_canvas_for_org(org_id, limit=limit)
     )
     return await _ideas_read_with_author(list(ideas), db)
 
@@ -409,10 +414,11 @@ async def list_ideas_payload(
 @router.get("/ideas", response_model=list[IdeaRead])
 async def list_ideas(
     status: str | None = None,
+    limit: int = Query(default=100, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await list_ideas_payload(status=status, db=db, user=user)
+    return await list_ideas_payload(status=status, limit=limit, db=db, user=user)
 
 
 @router.get("/ideas/archived", response_model=list[IdeaRead])
@@ -699,7 +705,7 @@ async def restore_idea(
         db,
         idea=idea,
         command=ThoughtStatusCommand(
-            to_status="emerged" if str(getattr(idea, "status", "")) == "archived" else str(idea.status),
+            to_status="active" if str(getattr(idea, "status", "")) == "archived" else str(idea.status),
             trigger="user_restore",
             actor=user,
         ),

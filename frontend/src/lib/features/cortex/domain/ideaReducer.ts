@@ -22,11 +22,19 @@ export function normalizeIdea<T extends Idea>(
   idea: T,
   options: NormalizeIdeaOptions = {},
 ): NormalizedIdea<T> {
+  const sourceStatus = String(idea.status || '').trim().toLowerCase();
+  const lifecycleStatus = sourceStatus && sourceStatus !== 'idle' && sourceStatus !== 'done'
+    ? sourceStatus
+    : idea.lifecycle_status;
   const normalizedStatus = normalizeIdeaStatus(idea.status);
   const status = normalizedStatus === 'done' && options.isIdeaSeen?.(idea)
     ? 'idle'
     : normalizedStatus;
-  return { ...idea, status } as NormalizedIdea<T>;
+  return {
+    ...idea,
+    ...(lifecycleStatus ? { lifecycle_status: lifecycleStatus } : {}),
+    status,
+  } as NormalizedIdea<T>;
 }
 
 export function normalizeIdeas<T extends Idea>(
