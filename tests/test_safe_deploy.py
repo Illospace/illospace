@@ -375,6 +375,13 @@ def test_compose_self_update_sidecar_can_bootstrap_from_api_queue():
     assert "APP_UID" in self_update_daemon
     assert "chown \"$APP_UID:$APP_GID\"" in self_update_daemon
     assert "chmod 0775" in self_update_daemon
+    prepare_shared_paths = self_update_daemon.split("prepare_shared_paths() {", 1)[1].split("\n}", 1)[0]
+    chown_line = next(line for line in prepare_shared_paths.splitlines() if "chown " in line)
+    chmod_line = next(line for line in prepare_shared_paths.splitlines() if "chmod 0775" in line)
+    for log_path in ("LOG_PATH", "RUNTIME_SERVICES_LOG_PATH", "WORKSPACE_TOOLS_LOG_PATH"):
+        quoted_directory = f'"$(dirname "${log_path}")"'
+        assert quoted_directory in chown_line
+        assert quoted_directory in chmod_line
     assert "safe.directory" in self_update_daemon
     assert "ILLO_DOCTOR_SKIP_LOCAL_HTTP_PROBES=1" in self_update_daemon
     assert "maybe_queue_auto_update" in self_update_daemon
