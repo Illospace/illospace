@@ -25,6 +25,7 @@
   import MemoryCard from './MemoryCard.svelte';
   import ModelsCard from './ModelsCard.svelte';
   import ProviderConnections from './ProviderConnections.svelte';
+  import RuntimeStatusPanel from './RuntimeStatusPanel.svelte';
   import VoiceCard from './VoiceCard.svelte';
   import type {
     EmbedderKey,
@@ -34,6 +35,7 @@
     NoticeState,
     RuntimeOption,
     RuntimeSettings,
+    RuntimeStatusSnapshot,
     VoiceDraft,
   } from './types';
 
@@ -57,6 +59,9 @@
   let settings = $state<RuntimeSettings | null>(null);
   let loading = $state(true);
   let loadError = $state('');
+  let runtimeStatus = $state<RuntimeStatusSnapshot | null>(null);
+  let statusLoading = $state(true);
+  let statusError = $state('');
   let oauthCallback = $state('');
   let oauthUrl = $state('');
   let oauthState = $state('');
@@ -101,9 +106,9 @@
 
   $effect(() => {
     return workspacePageModalContext?.registerRefreshAction({
-      label: loading ? 'Loading settings' : 'Refresh settings',
-      disabled: loading,
-      onclick: loadSettings,
+      label: loading || statusLoading ? 'Refreshing system' : 'Refresh system',
+      disabled: loading || statusLoading,
+      onclick: refreshSystem,
     });
   });
 
@@ -144,7 +149,7 @@
   );
 
   onMount(() => {
-    loadSettings();
+    void refreshSystem();
     window.addEventListener('message', handleCodexSignInMessage);
     try {
       oauthChannel = new BroadcastChannel('illo:openai-oauth');
@@ -199,6 +204,26 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function loadRuntimeStatus() {
+    statusLoading = true;
+    statusError = '';
+    try {
+      runtimeStatus = await api.runtimeStatus();
+    } catch (error) {
+      statusError = error instanceof Error
+        ? error.message
+        : typeof error === 'object' && error !== null && 'detail' in error
+          ? String((error as { detail?: unknown }).detail || 'Runtime status failed to load.')
+          : 'Runtime status failed to load.';
+    } finally {
+      statusLoading = false;
+    }
+  }
+
+  async function refreshSystem() {
+    await Promise.all([loadSettings(), loadRuntimeStatus()]);
   }
 
   function normalizeCodexSignInCallbackMode(value: unknown): CodexSignInCallbackMode {
@@ -907,12 +932,19 @@
 
 <ConstellationPageFrame
   eyebrow="System"
-  title="AI Runtime"
-  subtitle="Configure providers, model routing, and memory."
+  title="System"
+  subtitle="Live runtime health and AI configuration."
   contentClassName="system-page"
 >
+  <RuntimeStatusPanel
+    status={runtimeStatus}
+    loading={statusLoading}
+    error={statusError}
+    onrefresh={loadRuntimeStatus}
+  />
+
   {#if loadError}
-    <ConstellationNotice title="System failed to load." description={loadError} tone="danger">
+    <ConstellationNotice title="AI configuration failed to load." description={loadError} tone="danger">
       {#snippet actions()}
         <ConstellationButton variant="secondary" size="sm" onclick={loadSettings}>Retry</ConstellationButton>
       {/snippet}
@@ -924,8 +956,12 @@
   {/if}
 
   {#if loading && !settings}
-    <div class="system-loading">Loading runtime...</div>
+    <div class="system-loading">Loading AI configuration...</div>
   {:else if settings}
+    <div class="runtime-config-heading">
+      <p>Configuration</p>
+      <h2>AI runtime</h2>
+    </div>
     <div class="runtime-config-layout">
       <div class="runtime-primary-column">
         <ProviderConnections
@@ -1042,6 +1078,33 @@
     box-sizing: border-box;
     margin: 0 auto;
     padding: 0 clamp(12px, 1.4vw, 22px);
+  }
+
+  .runtime-config-heading {
+    display: grid;
+    gap: 5px;
+    width: 100%;
+    max-width: 1540px;
+    margin: 14px auto 0;
+    padding: 0 clamp(12px, 1.4vw, 22px);
+    box-sizing: border-box;
+  }
+
+  .runtime-config-heading p {
+    margin: 0;
+    color: var(--constellation-color-text-tertiary);
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .runtime-config-heading h2 {
+    margin: 0;
+    color: var(--constellation-color-text-primary);
+    font-size: clamp(1.2rem, 1.6vw, 1.5rem);
+    font-weight: 560;
+    letter-spacing: -0.02em;
   }
 
   .runtime-primary-column,

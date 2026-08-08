@@ -29,6 +29,8 @@ export interface RuntimeUpdateStatus {
   detail?: string | null;
 }
 
+export type { RuntimeHealthState, RuntimeStatusSnapshot } from '$lib/types/runtimeStatus';
+
 export interface MemoryCheck {
   status: 'ok' | 'error';
   detail: string;

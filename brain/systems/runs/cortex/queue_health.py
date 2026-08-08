@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import DateTime, case, cast, func, or_, select, type_coerce
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.contracts.statuses import PROCESSING_RUN_STATUS_VALUES
 from brain.platform.db.models.agent_run import AgentRunRow
@@ -48,7 +49,9 @@ class QueueHealth:
 def _unit_of_work_factory():
     global UnitOfWork
     if UnitOfWork is None:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork as _UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import (
+            UnitOfWork as _UnitOfWork,
+        )
 
         UnitOfWork = _UnitOfWork
     return UnitOfWork
@@ -73,10 +76,13 @@ def _coerce_float(value: Any, *, default: float, minimum: float) -> float:
 
 
 def runner_concurrency() -> int:
-    return _coerce_concurrency(
-        os.getenv("ILLO_AGENT_RUNNER_CONCURRENCY"),
-        default=_DEFAULT_RUNNER_CONCURRENCY,
-    ) or _DEFAULT_RUNNER_CONCURRENCY
+    return (
+        _coerce_concurrency(
+            os.getenv("ILLO_AGENT_RUNNER_CONCURRENCY"),
+            default=_DEFAULT_RUNNER_CONCURRENCY,
+        )
+        or _DEFAULT_RUNNER_CONCURRENCY
+    )
 
 
 def queued_watchdog_after_seconds() -> float:
@@ -107,9 +113,9 @@ def _queued_since_expression(*, dialect_name: str):
         AgentRunRow.started_at.is_not(None),
         AgentRunRow.execution_attempt > 0,
     )
-    interrupted_at_text = (
-        AgentRunRow.metadata_["interruption"]["interrupted_at"].as_string()
-    )
+    interrupted_at_text = AgentRunRow.metadata_["interruption"][
+        "interrupted_at"
+    ].as_string()
     if dialect_name == "sqlite":
         interrupted_at = type_coerce(
             func.datetime(interrupted_at_text),
@@ -129,6 +135,8 @@ def _queued_since_expression(*, dialect_name: str):
 async def queued_backlog_snapshot_async(
     *,
     stale_after_seconds: float | None = None,
+    session: AsyncSession | None = None,
+    now: datetime | None = None,
 ) -> QueuedBacklogSnapshot:
     """Return queued count, oldest queued-since time, and recent active claims.
 
@@ -139,33 +147,44 @@ async def queued_backlog_snapshot_async(
     """
 
     threshold_seconds = _resolved_stale_after_seconds(stale_after_seconds)
-    active_cutoff = datetime.now(timezone.utc) - timedelta(
-        seconds=threshold_seconds
-    )
+    captured_at = now or datetime.now(timezone.utc)
+    active_cutoff = captured_at - timedelta(seconds=threshold_seconds)
+    if session is not None:
+        return await _queued_backlog_snapshot_from_session(
+            session,
+            active_cutoff=active_cutoff,
+        )
     async with _unit_of_work_factory()() as uow:
-        dialect_name = uow.session.get_bind().dialect.name
-        queued_result = await uow.session.execute(
-            select(
-                func.count(AgentRunRow.id),
-                func.min(
-                    _queued_since_expression(dialect_name=dialect_name)
-                ),
-            ).where(
-                AgentRunRow.status == RunStatus.QUEUED.value
-            )
+        return await _queued_backlog_snapshot_from_session(
+            uow.session,
+            active_cutoff=active_cutoff,
         )
-        queued_count, oldest_queued_at = queued_result.one()
-        active_count = await uow.session.scalar(
-            select(func.count(AgentRunRow.id)).where(
-                AgentRunRow.status.in_(PROCESSING_RUN_STATUS_VALUES),
-                func.coalesce(
-                    AgentRunRow.updated_at,
-                    AgentRunRow.started_at,
-                    AgentRunRow.created_at,
-                )
-                >= active_cutoff,
+
+
+async def _queued_backlog_snapshot_from_session(
+    session: AsyncSession,
+    *,
+    active_cutoff: datetime,
+) -> QueuedBacklogSnapshot:
+    dialect_name = session.get_bind().dialect.name
+    queued_result = await session.execute(
+        select(
+            func.count(AgentRunRow.id),
+            func.min(_queued_since_expression(dialect_name=dialect_name)),
+        ).where(AgentRunRow.status == RunStatus.QUEUED.value)
+    )
+    queued_count, oldest_queued_at = queued_result.one()
+    active_count = await session.scalar(
+        select(func.count(AgentRunRow.id)).where(
+            AgentRunRow.status.in_(PROCESSING_RUN_STATUS_VALUES),
+            func.coalesce(
+                AgentRunRow.updated_at,
+                AgentRunRow.started_at,
+                AgentRunRow.created_at,
             )
+            >= active_cutoff,
         )
+    )
     return QueuedBacklogSnapshot(
         queued=int(queued_count or 0),
         oldest_queued_at=_normalize_datetime(oldest_queued_at),
@@ -218,8 +237,7 @@ def evaluate_queue_health(
         ),
         watchdog_after_seconds=policy.watchdog_after_seconds,
         queue_moving_at_capacity=queue_moving_at_capacity,
-        stale_queued_backlog=queue_past_threshold
-        and not queue_moving_at_capacity,
+        stale_queued_backlog=queue_past_threshold and not queue_moving_at_capacity,
     )
 
 
@@ -227,11 +245,18 @@ async def queued_backlog_health_snapshot_async(
     *,
     stale_after_seconds: float | None = None,
     configured_concurrency: int | None = None,
+    session: AsyncSession | None = None,
+    now: datetime | None = None,
 ) -> QueueHealth:
     watchdog_after_seconds = _resolved_stale_after_seconds(stale_after_seconds)
-    snapshot = await queued_backlog_snapshot_async(
-        stale_after_seconds=watchdog_after_seconds,
-    )
+    snapshot_kwargs: dict[str, Any] = {
+        "stale_after_seconds": watchdog_after_seconds,
+    }
+    if session is not None:
+        snapshot_kwargs["session"] = session
+    if now is not None:
+        snapshot_kwargs["now"] = now
+    snapshot = await queued_backlog_snapshot_async(**snapshot_kwargs)
     if configured_concurrency is None:
         configured_concurrency = runner_concurrency()
     else:
@@ -248,7 +273,7 @@ async def queued_backlog_health_snapshot_async(
             watchdog_after_seconds=watchdog_after_seconds,
             configured_concurrency=configured_concurrency,
         ),
-        now=datetime.now(timezone.utc),
+        now=now or datetime.now(timezone.utc),
     )
 
 

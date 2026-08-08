@@ -45,6 +45,10 @@ EOF
   esac
 done
 
+export ILLO_BUILD_COMMIT="${ILLO_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+export ILLO_BUILD_TIME="${ILLO_BUILD_TIME:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+export ILLO_DEPLOY_TIME="${ILLO_DEPLOY_TIME_OVERRIDE:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "Missing $ENV_FILE; run deploy/scripts/init-secrets.sh first." >&2
   exit 1

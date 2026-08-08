@@ -1,6 +1,7 @@
 """Smoke tests for skills, vault, system, team, costs routers."""
+
 from contextlib import contextmanager
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,6 +53,7 @@ async def client():
 
 # ---- Skills ----
 
+
 @pytest.mark.asyncio
 async def test_list_skills(client, mock_session_factory):
     skill = _mock_obj(
@@ -89,7 +91,9 @@ async def test_list_skills(client, mock_session_factory):
         archived=False,
     )
     with patch("brain.app.api.routers.skills.SkillRepository") as MockRepo:
-        MockRepo.return_value.a_list_active_with_executions = AsyncMock(return_value=[skill])
+        MockRepo.return_value.a_list_active_with_executions = AsyncMock(
+            return_value=[skill]
+        )
         resp = await client.get("/api/skills/")
     assert resp.status_code == 200
     data = resp.json()
@@ -99,14 +103,20 @@ async def test_list_skills(client, mock_session_factory):
 
 # ---- Vault ----
 
+
 @pytest.mark.asyncio
 async def test_vault_pin_status(client, mock_session_factory):
-    with _vault_user(), \
-         patch("brain.systems.vault.async_get_pin_status", return_value={
-             "has_pin": False,
-             "failed_attempts": 0,
-             "locked_until": None,
-         }):
+    with (
+        _vault_user(),
+        patch(
+            "brain.systems.vault.async_get_pin_status",
+            return_value={
+                "has_pin": False,
+                "failed_attempts": 0,
+                "locked_until": None,
+            },
+        ),
+    ):
         resp = await client.get("/api/vault/pin-status")
     assert resp.status_code == 200
     assert resp.json()["has_pin"] is False
@@ -115,8 +125,13 @@ async def test_vault_pin_status(client, mock_session_factory):
 @pytest.mark.asyncio
 async def test_vault_unlock(client, mock_session_factory):
     expires = datetime.now(timezone.utc)
-    with _vault_user(), \
-         patch("brain.systems.vault.async_unlock_vault", return_value=("vault-token", expires)):
+    with (
+        _vault_user(),
+        patch(
+            "brain.systems.vault.async_unlock_vault",
+            return_value=("vault-token", expires),
+        ),
+    ):
         resp = await client.post("/api/vault/unlock", json={"pin": "1234"})
     assert resp.status_code == 200
     data = resp.json()
@@ -139,16 +154,23 @@ async def test_vault_list_secrets(client, mock_session_factory):
         "created_by_user_id": VAULT_USER["id"],
         "updated_by_user_id": VAULT_USER["id"],
     }
-    with _vault_user(), \
-         patch("brain.systems.vault.async_has_pin", return_value=False), \
-         patch("brain.systems.vault.async_list_secrets", return_value=[secret]) as list_secrets:
+    with (
+        _vault_user(),
+        patch("brain.systems.vault.async_has_pin", return_value=False),
+        patch(
+            "brain.systems.vault.async_list_secrets", return_value=[secret]
+        ) as list_secrets,
+    ):
         resp = await client.get("/api/vault/")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
-    list_secrets.assert_called_once_with(VAULT_USER["id"], category=None, org_id=VAULT_USER["org_id"])
+    list_secrets.assert_called_once_with(
+        VAULT_USER["id"], category=None, org_id=VAULT_USER["org_id"]
+    )
 
 
 # ---- System ----
+
 
 @pytest.mark.asyncio
 async def test_system_info(client, mock_session_factory):
@@ -157,6 +179,50 @@ async def test_system_info(client, mock_session_factory):
     data = resp.json()
     assert "version" in data
     assert data["version"] == "6.0.0"
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_returns_snapshot(client, mock_session_factory):
+    expected = {
+        "captured_at": "2026-08-08T20:00:00+00:00",
+        "overall": {"state": "good", "reason": "All evidence is current."},
+    }
+    with patch(
+        "brain.app.api.routers.system.async_runtime_status_snapshot",
+        AsyncMock(return_value=expected),
+    ):
+        response = await client.get("/api/system/runtime-status")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_rejects_member_without_system_permission(
+    client,
+    mock_session_factory,
+):
+    from brain.app.api.main import app
+    from brain.app.api.routers import system as system_router
+
+    snapshot = AsyncMock()
+    app.dependency_overrides[system_router.get_current_user] = lambda: {
+        "id": "member-1",
+        "org_id": "org-1",
+        "role": "member",
+        "permissions": [],
+    }
+    try:
+        with patch(
+            "brain.app.api.routers.system.async_runtime_status_snapshot",
+            snapshot,
+        ):
+            response = await client.get("/api/system/runtime-status")
+    finally:
+        app.dependency_overrides.pop(system_router.get_current_user, None)
+
+    assert response.status_code == 403
+    snapshot.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -178,6 +244,7 @@ async def test_list_metrics(client, mock_session_factory):
 
 
 # ---- Team ----
+
 
 @pytest.mark.asyncio
 async def test_list_team_members(client, mock_session_factory):
@@ -204,6 +271,7 @@ async def test_list_team_members(client, mock_session_factory):
 
 # ---- Costs ----
 
+
 @pytest.mark.asyncio
 async def test_list_costs(client, mock_session_factory):
     cost = _mock_obj(
@@ -217,7 +285,10 @@ async def test_list_costs(client, mock_session_factory):
         estimated_cost=0.01,
         created_at=datetime.now(timezone.utc),
     )
-    with patch("brain.app.api.routers.costs.async_summarize_recent_run_usage", return_value=[cost]):
+    with patch(
+        "brain.app.api.routers.costs.async_summarize_recent_run_usage",
+        return_value=[cost],
+    ):
         resp = await client.get("/api/costs/")
     assert resp.status_code == 200
     data = resp.json()
@@ -226,11 +297,18 @@ async def test_list_costs(client, mock_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_system_info_omits_cortex_concurrency_settings(client, mock_session_factory):
-    with patch("brain.app.api.routers.system._get_llm_info", new=AsyncMock(return_value={
-        "harvest_model": "gpt-5.6-luna",
-        "consolidation_model": "gpt-5.6-luna",
-    })):
+async def test_system_info_omits_cortex_concurrency_settings(
+    client, mock_session_factory
+):
+    with patch(
+        "brain.app.api.routers.system._get_llm_info",
+        new=AsyncMock(
+            return_value={
+                "harvest_model": "gpt-5.6-luna",
+                "consolidation_model": "gpt-5.6-luna",
+            }
+        ),
+    ):
         resp = await client.get("/api/system")
     assert resp.status_code == 200
     data = resp.json()
@@ -240,27 +318,36 @@ async def test_system_info_omits_cortex_concurrency_settings(client, mock_sessio
 
 @pytest.mark.asyncio
 async def test_scheduler_state_surface(client, mock_session_factory):
-    with patch("brain.app.api.routers.system.async_scheduler_health_snapshot", new=AsyncMock(return_value={
-        "now": "2026-04-21T03:01:00+00:00",
-        "daemon": {"owner_mode": "scheduler", "service_ready": True},
-        "summary": {
-            "jobs_total": 1,
-            "jobs_in_scope": 1,
-            "jobs_enabled": 1,
-            "jobs_paused": 0,
-            "jobs_by_owner_mode": {"scheduler": 1},
-            "runs_by_status": {},
-            "active_leases": 0,
-            "expired_leases": 0,
-            "lagging_jobs": 0,
-            "lag_seconds": 0,
-        },
-        "health": {"status": "healthy", "reasons": []},
-        "pause": {"paused_job_keys": [], "paused_jobs": [], "global_pause": False},
-        "lag": {"lag_seconds": 0, "oldest_due_at": None, "lagging_jobs": []},
-        "jobs": [],
-        "runs": [],
-    })):
+    with patch(
+        "brain.app.api.routers.system.async_scheduler_health_snapshot",
+        new=AsyncMock(
+            return_value={
+                "now": "2026-04-21T03:01:00+00:00",
+                "daemon": {"owner_mode": "scheduler", "service_ready": True},
+                "summary": {
+                    "jobs_total": 1,
+                    "jobs_in_scope": 1,
+                    "jobs_enabled": 1,
+                    "jobs_paused": 0,
+                    "jobs_by_owner_mode": {"scheduler": 1},
+                    "runs_by_status": {},
+                    "active_leases": 0,
+                    "expired_leases": 0,
+                    "lagging_jobs": 0,
+                    "lag_seconds": 0,
+                },
+                "health": {"status": "healthy", "reasons": []},
+                "pause": {
+                    "paused_job_keys": [],
+                    "paused_jobs": [],
+                    "global_pause": False,
+                },
+                "lag": {"lag_seconds": 0, "oldest_due_at": None, "lagging_jobs": []},
+                "jobs": [],
+                "runs": [],
+            }
+        ),
+    ):
         resp = await client.get("/api/system/scheduler")
 
     assert resp.status_code == 200
@@ -276,16 +363,26 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
 
     app.dependency_overrides[system_router.get_current_user] = lambda: {"role": "owner"}
     try:
-        with patch("brain.app.api.routers.system.async_scheduler_daemon_tick", new=AsyncMock(return_value={
-            "ok": True,
-            "owner_mode": "scheduler",
-            "reclaimed": 0,
-            "reclaimed_run_ids": [],
-            "drain": {"ok": True, "executed": 1, "results": []},
-        })) as mock_tick:
+        with patch(
+            "brain.app.api.routers.system.async_scheduler_daemon_tick",
+            new=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "owner_mode": "scheduler",
+                    "reclaimed": 0,
+                    "reclaimed_run_ids": [],
+                    "drain": {"ok": True, "executed": 1, "results": []},
+                }
+            ),
+        ) as mock_tick:
             resp = await client.post(
                 "/api/system/scheduler/drain",
-                json={"owner_mode": "scheduler", "job_key": "nightly_sleep", "max_runs": 2, "resume": True},
+                json={
+                    "owner_mode": "scheduler",
+                    "job_key": "nightly_sleep",
+                    "max_runs": 2,
+                    "resume": True,
+                },
             )
     finally:
         app.dependency_overrides.clear()

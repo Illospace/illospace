@@ -1,5 +1,8 @@
 FROM python:3.13-slim-bookworm
 
+ARG ILLO_BUILD_COMMIT=unknown
+ARG ILLO_BUILD_TIME=unknown
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -7,7 +10,12 @@ ENV PYTHONUNBUFFERED=1 \
     ILLO_PRIVATE_HOME=/data/private \
     WORKSPACE_ROOT=/workspaces \
     ILLO_BROWSER_RUNTIME_DIR=/opt/illo-browser \
-    ILLO_BROWSER_CHROME_BIN=/usr/bin/chromium
+    ILLO_BROWSER_CHROME_BIN=/usr/bin/chromium \
+    ILLO_BUILD_COMMIT=${ILLO_BUILD_COMMIT} \
+    ILLO_BUILD_TIME=${ILLO_BUILD_TIME}
+
+LABEL org.opencontainers.image.revision=${ILLO_BUILD_COMMIT} \
+      org.opencontainers.image.created=${ILLO_BUILD_TIME}
 
 WORKDIR /app
 
