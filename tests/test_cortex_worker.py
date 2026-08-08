@@ -393,6 +393,21 @@ def test_self_restart_drain_timeout_is_never_indefinite(monkeypatch):
     assert _self_restart_drain_timeout_seconds() == 60.0
 
 
+def test_self_restart_drain_timeout_is_capped(monkeypatch):
+    """A huge finite value defeats the drain and overflows ``threading.Timer``."""
+    from brain.systems.cortex.worker import (
+        _SELF_RESTART_DRAIN_TIMEOUT_MAX_SECONDS,
+        _self_restart_drain_timeout_seconds,
+    )
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "1e308")
+
+    timeout = _self_restart_drain_timeout_seconds()
+
+    assert timeout == _SELF_RESTART_DRAIN_TIMEOUT_MAX_SECONDS
+    threading.Timer(timeout, lambda: None).cancel()  # would raise OverflowError
+
+
 def _run_main_until_queue_stall(monkeypatch, *, stop_runner):
     """Drive ``main`` through the queue-stall watchdog with the deploy env set."""
     from brain.systems.cortex import worker
@@ -493,15 +508,22 @@ def test_deploy_sigterm_keeps_the_unbounded_drain(monkeypatch):
 
 
 def test_health_exit_terminates_even_when_the_shutdown_sequence_hangs(monkeypatch):
-    """Only the exit restores claiming capacity, so no step may hold it hostage."""
+    """Only the exit restores claiming capacity, so no step may hold it hostage.
+
+    The hang must be released by the watchdog and nothing else: if the timer
+    never fires, ``stop_runner`` blocks for its full wait and ``released_by``
+    records the timeout, so a missing watchdog cannot pass this test by
+    reaching the mocked terminator on its own.
+    """
     from brain.systems.cortex import worker
 
     terminated = threading.Event()
     terminate_calls = []
+    released_by = []
 
     def stop_runner(*, drain_timeout_seconds):
         # Stands in for a drain, requeue or scheduler stop that never returns.
-        terminated.wait(timeout=5.0)
+        released_by.append("watchdog" if terminated.wait(timeout=10.0) else "timeout")
         return worker.DrainResult()
 
     def terminate(code):
@@ -516,8 +538,49 @@ def test_health_exit_terminates_even_when_the_shutdown_sequence_hangs(monkeypatc
     with pytest.raises(SystemExit):
         worker_module.main()
 
-    assert terminated.is_set()
+    assert released_by == ["watchdog"]
     assert terminate_calls[0] == 1
+
+
+def test_an_unclassified_crash_also_drains_with_a_floor(monkeypatch):
+    """The deadlock does not care which exception carried the worker out.
+
+    The first fix keyed the bounded drain off three explicit health branches,
+    so a crash anywhere else in the loop — including inside the health checks
+    themselves — still inherited the deploy's unbounded drain and could repeat
+    the outage.
+    """
+    from brain.systems.cortex import worker
+
+    drain_timeouts = []
+    terminate_calls = []
+
+    def explode():
+        raise RuntimeError("health snapshot blew up")
+
+    def stop_runner(*, drain_timeout_seconds):
+        drain_timeouts.append(drain_timeout_seconds)
+        if drain_timeout_seconds is None:
+            raise AssertionError("unbounded drain would wait on the wedged run forever")
+        return worker.DrainResult()
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS", "infinity")
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", lambda _phase: None)
+    monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: False)
+    monkeypatch.setattr(worker, "start_runner", lambda: None)
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
+    monkeypatch.setattr(worker, "runner_health_snapshot", explode)
+    monkeypatch.setattr(worker, "stop_runner", stop_runner)
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", terminate_calls.append)
+
+    with pytest.raises(RuntimeError):
+        worker.main()
+
+    assert drain_timeouts == [60.0]
+    assert terminate_calls == [1]
 
 
 def test_signal_handler_requests_runner_stop(monkeypatch):

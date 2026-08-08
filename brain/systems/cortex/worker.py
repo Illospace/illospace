@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import asdict
 import logging
 import math
@@ -40,11 +41,13 @@ logging.basicConfig(
 logger = logging.getLogger("cortex.worker")
 
 _SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS = 60.0
-_SELF_RESTART_SHUTDOWN_GRACE_SECONDS = 30.0
+_SELF_RESTART_DRAIN_TIMEOUT_MAX_SECONDS = 3600.0
+_SELF_RESTART_SHUTDOWN_GRACE_SECONDS = 60.0
 
 _running = True
 _draining = False
-_restarting_for_health = False
+_draining_for_deploy = False
+_shutdown_watchdog: threading.Timer | None = None
 _terminate_process = os._exit
 
 
@@ -70,6 +73,12 @@ def _begin_draining() -> None:
 
 
 def _signal_handler(signum, _frame):
+    global _draining_for_deploy
+    # A signal is the only exit where a peer is already covering the queue: the
+    # deploy starts and verifies a claiming handoff worker before it signals.
+    # Every other exit leaves nobody claiming, so only this path may wait for
+    # in-flight runs without a floor.
+    _draining_for_deploy = True
     logger.info("received %s, draining agent-run worker", signal.Signals(signum).name)
     _begin_draining()
 
@@ -100,14 +109,13 @@ def _shutdown_drain_timeout_seconds() -> float | None:
 
 
 def _self_restart_drain_timeout_seconds() -> float:
-    """Bound the drain when the worker exits to restore its own claiming capacity.
+    """Bound the drain for every exit the deploy did not ask for.
 
-    A deploy drains indefinitely on purpose: the handoff worker is already
-    claiming, so in-flight runs may finish at leisure. A health self-exit has no
-    handoff — nothing else claims — and the run that wedged the worker is the
-    very thing the drain would wait on. Waiting without a floor turns the
-    restart that was meant to clear the queue into a permanent outage, so this
-    timeout never resolves to "forever".
+    The run that wedged the worker is the very thing the drain would wait on,
+    and no handoff worker is covering the queue, so waiting without a floor
+    turns the restart that was meant to clear the queue into a permanent
+    outage. The ceiling matters as much as rejecting "infinity": a large finite
+    value both defeats the drain and overflows the watchdog timer.
     """
     raw = os.getenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "").strip()
     if not raw:
@@ -125,42 +133,53 @@ def _self_restart_drain_timeout_seconds() -> float:
             _SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS,
         )
         return _SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS
-    return max(0.0, seconds)
+    return min(max(0.0, seconds), _SELF_RESTART_DRAIN_TIMEOUT_MAX_SECONDS)
+
+
+def _arm_shutdown_watchdog() -> None:
+    """Guarantee process exit even if the shutdown sequence itself wedges.
+
+    Only the exit restores claiming capacity, and every step on the way to it —
+    logging, draining, requeuing, stopping the cycle scheduler, joining the
+    supervisor — can block on the same wedged run, database or log pipe the
+    worker is escaping. Arming is idempotent so the earliest caller wins, and
+    the timer is never cancelled: it is a daemon thread that dies with the
+    process it exists to end.
+    """
+    global _shutdown_watchdog
+    if _shutdown_watchdog is not None:
+        return
+    timeout_seconds = (
+        _self_restart_drain_timeout_seconds() + _SELF_RESTART_SHUTDOWN_GRACE_SECONDS
+    )
+
+    def _force_exit() -> None:
+        # Deliberately not ``logger``: a blocked log pipe is one of the hangs
+        # this timer exists to survive, and taking the logging lock here would
+        # make the last-resort killer share the victim's fate.
+        with suppress(Exception):
+            os.write(
+                2,
+                f"agent-run worker shutdown exceeded {timeout_seconds}s; terminating\n".encode(),
+            )
+        _terminate_process(1)
+
+    _shutdown_watchdog = threading.Timer(timeout_seconds, _force_exit)
+    _shutdown_watchdog.daemon = True
+    _shutdown_watchdog.start()
 
 
 def _exit_for_restart(message: str, **extra: object) -> NoReturn:
     """Record why the worker is unhealthy and exit so the container restarts it.
 
-    Every caller has already established that this process can no longer do its
+    The caller has already established that this process can no longer do its
     job, so reaching ``_terminate_process`` is the point of the exit rather than
-    a detail of it. ``_restarting_for_health`` tells the shutdown path that no
-    other worker is covering the queue.
+    a detail of it. The watchdog is armed before the log line, because logging
+    is itself something that can block.
     """
-    global _restarting_for_health
-    _restarting_for_health = True
+    _arm_shutdown_watchdog()
     logger.error(message, extra=extra)
     raise SystemExit(1)
-
-
-def _arm_self_restart_watchdog(timeout_seconds: float) -> threading.Timer:
-    """Guarantee process exit even if the shutdown sequence itself wedges.
-
-    Only the exit restores claiming capacity, and every step between here and it
-    — draining, requeuing, stopping the cycle scheduler, joining the supervisor
-    — can block on the same wedged run or database the worker is escaping.
-    """
-
-    def _force_exit() -> None:
-        logger.error(
-            "agent-run worker shutdown exceeded %ss after a health exit; terminating",
-            timeout_seconds,
-        )
-        _terminate_process(1)
-
-    watchdog = threading.Timer(timeout_seconds, _force_exit)
-    watchdog.daemon = True
-    watchdog.start()
-    return watchdog
 
 
 def _runner_health_grace_seconds() -> float:
@@ -246,14 +265,15 @@ def _recover_timed_out_runs(drain_result: DrainResult) -> None:
 
 
 def main() -> None:
-    global _draining, _restarting_for_health
+    global _draining, _draining_for_deploy, _shutdown_watchdog
     exit_code = 0
     cycle_scheduler_enabled = False
     if _running:
         # ``main`` runs once in production. Resetting here also keeps direct
         # invocation in tests independent without erasing a pre-start signal.
         _draining = False
-        _restarting_for_health = False
+        _draining_for_deploy = False
+        _shutdown_watchdog = None
     try:
         _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STARTING)
         logger.info("starting agent-run worker")
@@ -330,15 +350,14 @@ def main() -> None:
         exit_code = 1
         raise
     finally:
-        watchdog = None
         try:
-            if _restarting_for_health:
-                drain_timeout_seconds = _self_restart_drain_timeout_seconds()
-                watchdog = _arm_self_restart_watchdog(
-                    drain_timeout_seconds + _SELF_RESTART_SHUTDOWN_GRACE_SECONDS
-                )
-            else:
+            if _draining_for_deploy:
                 drain_timeout_seconds = _shutdown_drain_timeout_seconds()
+            else:
+                # Health exits and crashes alike: nobody else is claiming, so
+                # the process must reach its exit whatever the runs are doing.
+                _arm_shutdown_watchdog()
+                drain_timeout_seconds = _self_restart_drain_timeout_seconds()
             _begin_draining()
             drain_result = stop_runner(drain_timeout_seconds=drain_timeout_seconds)
             _recover_timed_out_runs(drain_result)
@@ -348,8 +367,6 @@ def main() -> None:
             logger.exception("agent-run worker shutdown failed")
             exit_code = 1
         finally:
-            if watchdog is not None:
-                watchdog.cancel()
             _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STOPPED)
             logger.info("agent-run worker stopped")
             logging.shutdown()
