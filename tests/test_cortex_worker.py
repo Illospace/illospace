@@ -476,6 +476,28 @@ def test_health_exit_drains_with_a_floor_even_when_deploy_drain_is_infinite(monk
     assert terminate_calls == [1]
 
 
+def test_returning_terminator_cancels_the_shutdown_watchdog(monkeypatch):
+    """A test double must not leave a timer that later kills pytest."""
+    from brain.systems.cortex import worker
+
+    worker_module = _run_main_until_queue_stall(
+        monkeypatch,
+        stop_runner=lambda **_kwargs: worker.DrainResult(),
+    )
+    terminate_calls = []
+    monkeypatch.setattr(worker_module, "_SELF_RESTART_SHUTDOWN_GRACE_SECONDS", 0.05)
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "0")
+    monkeypatch.setattr(worker_module, "_terminate_process", terminate_calls.append)
+
+    with pytest.raises(SystemExit):
+        worker_module.main()
+
+    threading.Event().wait(0.1)
+
+    assert terminate_calls == [1]
+    assert worker_module._shutdown_watchdog is None
+
+
 def test_deploy_sigterm_keeps_the_unbounded_drain(monkeypatch):
     """The handoff worker is already claiming, so long runs may finish."""
     from brain.systems.cortex import worker
