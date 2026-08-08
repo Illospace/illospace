@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.authorization import can_manage_run, can_manage_scheduler
+from brain.app.api.authorization import can_manage_run, can_manage_scheduler, can_manage_system
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.routers.costs import _fetch_agent_api_call_rows, _provider_model_key
 from brain.app.api.schemas.system import ConsolidationRunRead, DailyMetricsRead
@@ -52,6 +52,7 @@ from brain.app.ops.health import (
     liveness_health_snapshot,
     readiness_health_snapshot,
 )
+from brain.app.ops.runtime_status import async_runtime_status_snapshot
 from brain.app.scheduler.catalog import (
     async_list_scheduler_jobs,
     async_retire_scheduler_job,
@@ -829,6 +830,18 @@ async def system_info(
         "llm": await _safe_async(_get_llm_info, user, db),
         "config": _safe(_get_config_info),
     }
+
+
+@router.get("/system/runtime-status")
+async def runtime_status(
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return operator health evidence without relying on container state."""
+
+    if not can_manage_system(user):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    return await async_runtime_status_snapshot(db)
 
 
 @router.get("/system/traces/by-run/{run_id}")

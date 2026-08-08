@@ -1,5 +1,6 @@
 import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } from '$lib/types/runtimeSettings';
 import type { StreamItem } from '$lib/types/cortex';
+import type { RuntimeStatusSnapshot } from '$lib/types/runtimeStatus';
 
 const BASE = '';
 const DEFAULT_API_TIMEOUT_MS = 20_000;
@@ -1744,6 +1745,7 @@ export const api = {
 
   // System
   systemInfo: () => fetchJson<any>('/api/system'),
+  runtimeStatus: () => fetchJson<RuntimeStatusSnapshot>('/api/system/runtime-status'),
   runtimeSettings: () => fetchJson<RuntimeSettings>('/api/runtime-settings'),
   runtimeUpdateStatus: () => fetchJson<any>('/api/runtime-settings/update'),
   startRuntimeUpdate: () =>

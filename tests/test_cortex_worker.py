@@ -1,9 +1,9 @@
 import signal
 import threading
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import patch
 
 
 def _queue_health(*, stale_queued_backlog: bool):
@@ -21,6 +21,30 @@ def _queue_health(*, stale_queued_backlog: bool):
     )
 
 
+@pytest.mark.asyncio
+async def test_queue_health_check_records_durable_worker_heartbeat():
+    from brain.systems.cortex import worker
+
+    queue_health = _queue_health(stale_queued_backlog=False)
+    with (
+        patch.object(
+            worker,
+            "queued_backlog_health_snapshot_async",
+            AsyncMock(return_value=queue_health),
+        ) as health_snapshot,
+        patch.object(
+            worker,
+            "record_worker_liveness_checkpoint_async",
+            AsyncMock(),
+        ) as record_heartbeat,
+    ):
+        result = await worker._queue_health_and_worker_heartbeat()
+
+    assert result is queue_health
+    health_snapshot.assert_awaited_once_with()
+    record_heartbeat.assert_awaited_once_with()
+
+
 def test_require_embedding_backend_ready_skips_non_gpu():
     from brain.systems.cortex.worker import _require_embedding_backend_ready
 
@@ -31,18 +55,33 @@ def test_require_embedding_backend_ready_skips_non_gpu():
 def test_require_embedding_backend_ready_passes_when_embedder_ready():
     from brain.systems.cortex.worker import _require_embedding_backend_ready
 
-    with patch("brain.kernel.config.EMBEDDING_BACKEND", "gpu"), \
-         patch("brain.systems.memory.embeddings.wait_for_embedding_backend_ready", return_value=True):
+    with (
+        patch("brain.kernel.config.EMBEDDING_BACKEND", "gpu"),
+        patch(
+            "brain.systems.memory.embeddings.wait_for_embedding_backend_ready",
+            return_value=True,
+        ),
+    ):
         _require_embedding_backend_ready()
 
 
 def test_require_embedding_backend_ready_raises_when_embedder_not_ready():
     from brain.systems.cortex.worker import _require_embedding_backend_ready
 
-    with patch("brain.kernel.config.EMBEDDING_BACKEND", "gpu"), \
-         patch("brain.systems.memory.embeddings.wait_for_embedding_backend_ready", return_value=False), \
-         patch("brain.systems.memory.embeddings.server_health", return_value={"workers": {"embedding": {"status": "loading"}}}):
-        with pytest.raises(RuntimeError, match="Embedding backend not ready before worker start"):
+    with (
+        patch("brain.kernel.config.EMBEDDING_BACKEND", "gpu"),
+        patch(
+            "brain.systems.memory.embeddings.wait_for_embedding_backend_ready",
+            return_value=False,
+        ),
+        patch(
+            "brain.systems.memory.embeddings.server_health",
+            return_value={"workers": {"embedding": {"status": "loading"}}},
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError, match="Embedding backend not ready before worker start"
+        ):
             _require_embedding_backend_ready()
 
 
@@ -183,8 +222,12 @@ def test_worker_exits_when_cycle_scheduler_heartbeat_is_stale(monkeypatch, caplo
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
     monkeypatch.setattr(worker, "start_runner", lambda: None)
-    monkeypatch.setattr(worker, "runner_health_snapshot", lambda: {"runner_running": True})
-    monkeypatch.setattr(worker, "QueueStallMonitor", lambda **_kwargs: QueueStallMonitorStub())
+    monkeypatch.setattr(
+        worker, "runner_health_snapshot", lambda: {"runner_running": True}
+    )
+    monkeypatch.setattr(
+        worker, "QueueStallMonitor", lambda **_kwargs: QueueStallMonitorStub()
+    )
     monkeypatch.setattr(worker, "seconds_since_last_cycle_tick", lambda: 301.0)
     monkeypatch.setattr(
         worker,
@@ -220,7 +263,9 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
     monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: True)
     monkeypatch.setattr(worker, "start_cycle_scheduler", lambda: None)
-    monkeypatch.setattr(worker, "start_runner", lambda: setattr(worker, "_running", False))
+    monkeypatch.setattr(
+        worker, "start_runner", lambda: setattr(worker, "_running", False)
+    )
     monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", lambda _phase: None)
     monkeypatch.setattr(
         worker,
@@ -232,9 +277,15 @@ def test_worker_term_path_calls_terminate_process_with_zero(monkeypatch):
         "stop_runner",
         lambda **_kwargs: calls.append("stop_runner") or worker.DrainResult(),
     )
-    monkeypatch.setattr(worker, "stop_cycle_scheduler", lambda: calls.append("stop_cycle_scheduler"))
-    monkeypatch.setattr(worker.logging, "shutdown", lambda: calls.append("logging.shutdown"))
-    monkeypatch.setattr(worker, "_terminate_process", lambda code: calls.append(("terminate", code)))
+    monkeypatch.setattr(
+        worker, "stop_cycle_scheduler", lambda: calls.append("stop_cycle_scheduler")
+    )
+    monkeypatch.setattr(
+        worker.logging, "shutdown", lambda: calls.append("logging.shutdown")
+    )
+    monkeypatch.setattr(
+        worker, "_terminate_process", lambda code: calls.append(("terminate", code))
+    )
 
     worker.main()
 
@@ -359,9 +410,7 @@ def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
 
     monkeypatch.setattr(worker, "interrupt_and_requeue_run_ids", interrupt)
 
-    worker._recover_timed_out_runs(
-        worker.DrainResult(timed_out_run_ids=(2330,))
-    )
+    worker._recover_timed_out_runs(worker.DrainResult(timed_out_run_ids=(2330,)))
 
     assert calls == [((2330,), "worker_shutdown_drain_timeout")]
     assert "interrupted and requeued run ids: [2330]" in caplog.text
@@ -388,7 +437,9 @@ def test_self_restart_drain_timeout_accepts_numeric_override(monkeypatch):
 def test_self_restart_drain_timeout_is_never_indefinite(monkeypatch):
     from brain.systems.cortex.worker import _self_restart_drain_timeout_seconds
 
-    monkeypatch.setenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "infinity")
+    monkeypatch.setenv(
+        "ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "infinity"
+    )
 
     assert _self_restart_drain_timeout_seconds() == 60.0
 
@@ -426,11 +477,15 @@ def _run_main_until_queue_stall(monkeypatch, *, stop_runner):
     monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: False)
     monkeypatch.setattr(worker, "start_runner", lambda: None)
     monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
-    monkeypatch.setattr(worker, "runner_health_snapshot", lambda: {"runner_running": True})
-    monkeypatch.setattr(worker, "QueueStallMonitor", lambda **_kwargs: StalledQueueMonitor())
+    monkeypatch.setattr(
+        worker, "runner_health_snapshot", lambda: {"runner_running": True}
+    )
+    monkeypatch.setattr(
+        worker, "QueueStallMonitor", lambda **_kwargs: StalledQueueMonitor()
+    )
     monkeypatch.setattr(
         worker,
-        "queued_backlog_health_snapshot_async",
+        "_queue_health_and_worker_heartbeat",
         lambda: _async_queue_health(),
     )
     monkeypatch.setattr(worker, "stop_runner", stop_runner)
@@ -442,7 +497,9 @@ async def _async_queue_health():
     return _queue_health(stale_queued_backlog=True)
 
 
-def test_health_exit_drains_with_a_floor_even_when_deploy_drain_is_infinite(monkeypatch):
+def test_health_exit_drains_with_a_floor_even_when_deploy_drain_is_infinite(
+    monkeypatch,
+):
     """A wedged run must not hold the process open when nothing else claims.
 
     On 2026-08-08 the queue-stall watchdog fired, the drain inherited the
@@ -518,8 +575,9 @@ def test_deploy_sigterm_keeps_the_unbounded_drain(monkeypatch):
     monkeypatch.setattr(
         worker,
         "stop_runner",
-        lambda *, drain_timeout_seconds: drain_timeouts.append(drain_timeout_seconds)
-        or worker.DrainResult(),
+        lambda *, drain_timeout_seconds: (
+            drain_timeouts.append(drain_timeout_seconds) or worker.DrainResult()
+        ),
     )
     monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
     monkeypatch.setattr(worker, "_terminate_process", lambda _code: None)
@@ -617,7 +675,9 @@ def test_signal_handler_requests_runner_stop(monkeypatch):
         "_publish_worker_lifecycle_phase",
         lambda phase: calls.append(("phase", phase)),
     )
-    monkeypatch.setattr(worker, "request_runner_stop", lambda: calls.append(("stop", True)))
+    monkeypatch.setattr(
+        worker, "request_runner_stop", lambda: calls.append(("stop", True))
+    )
     try:
         worker._running = True
         worker._draining = False

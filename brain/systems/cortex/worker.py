@@ -4,21 +4,29 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-from dataclasses import asdict
 import logging
 import math
 import os
 import signal
 import threading
 import time
+from contextlib import suppress
+from dataclasses import asdict
 from typing import NoReturn
 
 from brain.contracts.worker_lifecycle import (
     WorkerLifecyclePhase,
     publish_worker_lifecycle_phase,
 )
-from brain.systems.runs.cortex.queue_health import QueueStallMonitor, queued_backlog_health_snapshot_async
+from brain.systems.cycles import (
+    seconds_since_last_cycle_tick,
+    start_cycle_scheduler,
+    stop_cycle_scheduler,
+)
+from brain.systems.runs.cortex.queue_health import (
+    QueueStallMonitor,
+    queued_backlog_health_snapshot_async,
+)
 from brain.systems.runs.cortex.runner import (
     DrainResult,
     request_runner_stop,
@@ -26,12 +34,10 @@ from brain.systems.runs.cortex.runner import (
     start_runner,
     stop_runner,
 )
-from brain.systems.runs.interruption import interrupt_and_requeue_run_ids
-from brain.systems.cycles import (
-    seconds_since_last_cycle_tick,
-    start_cycle_scheduler,
-    stop_cycle_scheduler,
+from brain.systems.runs.cortex.worker_liveness import (
+    record_worker_liveness_checkpoint_async,
 )
+from brain.systems.runs.interruption import interrupt_and_requeue_run_ids
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,7 +101,9 @@ def _poll_interval() -> float:
 
 
 def _shutdown_drain_timeout_seconds() -> float | None:
-    raw = os.getenv("ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS", "infinity").strip().lower()
+    raw = (
+        os.getenv("ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS", "infinity").strip().lower()
+    )
     if raw in {"", "none", "infinite", "infinity", "forever"}:
         return None
     try:
@@ -184,21 +192,27 @@ def _exit_for_restart(message: str, **extra: object) -> NoReturn:
 
 def _runner_health_grace_seconds() -> float:
     try:
-        return max(1.0, float(os.getenv("ILLO_AGENT_RUNNER_HEALTH_GRACE_SECONDS", "15")))
+        return max(
+            1.0, float(os.getenv("ILLO_AGENT_RUNNER_HEALTH_GRACE_SECONDS", "15"))
+        )
     except Exception:
         return 15.0
 
 
 def _queue_health_check_interval_seconds() -> float:
     try:
-        return max(1.0, float(os.getenv("ILLO_AGENT_RUN_QUEUE_HEALTH_CHECK_SECONDS", "5")))
+        return max(
+            1.0, float(os.getenv("ILLO_AGENT_RUN_QUEUE_HEALTH_CHECK_SECONDS", "5"))
+        )
     except Exception:
         return 5.0
 
 
 def _queue_stall_grace_seconds() -> float:
     try:
-        return max(5.0, float(os.getenv("ILLO_AGENT_RUN_QUEUE_STALL_GRACE_SECONDS", "45")))
+        return max(
+            5.0, float(os.getenv("ILLO_AGENT_RUN_QUEUE_STALL_GRACE_SECONDS", "45"))
+        )
     except Exception:
         return 45.0
 
@@ -225,10 +239,7 @@ def _require_embedding_backend_ready() -> None:
     if embeddings.wait_for_embedding_backend_ready():
         return
     health = embeddings.server_health()
-    raise RuntimeError(
-        "Embedding backend not ready before worker start: "
-        f"{health}"
-    )
+    raise RuntimeError(f"Embedding backend not ready before worker start: {health}")
 
 
 def _cycle_scheduler_enabled() -> bool:
@@ -237,6 +248,12 @@ def _cycle_scheduler_enabled() -> bool:
         return False
     enabled = os.getenv("ILLO_WORKER_ENABLE_CYCLE_SCHEDULER", "").strip().lower()
     return enabled in {"1", "true", "yes", "on"}
+
+
+async def _queue_health_and_worker_heartbeat():
+    queue_health = await queued_backlog_health_snapshot_async()
+    await record_worker_liveness_checkpoint_async()
+    return queue_health
 
 
 def _recover_timed_out_runs(drain_result: DrainResult) -> None:
@@ -311,11 +328,15 @@ def main() -> None:
 
             if queue_stall_monitor.should_check(now=now):
                 try:
-                    queue_health = asyncio.run(queued_backlog_health_snapshot_async())
+                    queue_health = asyncio.run(_queue_health_and_worker_heartbeat())
                 except Exception as exc:
-                    logger.warning("agent-run worker queue health check failed: %s", exc)
+                    logger.warning(
+                        "agent-run worker queue health check failed: %s", exc
+                    )
                 else:
-                    stale_for_seconds = queue_stall_monitor.observe(queue_health, now=now)
+                    stale_for_seconds = queue_stall_monitor.observe(
+                        queue_health, now=now
+                    )
                     if stale_for_seconds is not None:
                         _exit_for_restart(
                             "agent-run worker queue stalled; exiting for restart",
