@@ -481,6 +481,17 @@ async def apply_reflection(reflection: dict, target_date: date, context: dict | 
     return applied
 
 
+async def _write_reflection_artifact(path: str, content: str, *, label: str) -> bool:
+    """Persist a reflection artifact without making diagnostics job-critical."""
+    try:
+        await ensure_dir(os.path.dirname(path))
+        await write_text_async(path, content)
+    except OSError as exc:
+        print(f"[reflect] Warning: could not write {label} artifact {path}: {exc}")
+        return False
+    return True
+
+
 async def run_reflection(target_date: date):
     """Main reflection flow: gather data → prompt LLM → apply results."""
     print(f"{'='*60}")
@@ -510,8 +521,7 @@ async def run_reflection(target_date: date):
 
     # 3. Write prompt to temp file for the LLM
     prompt_path = os.path.join(str(config.BRAIN_LOG_DIR), f"reflect-prompt-{target_date}.md")
-    await ensure_dir(str(config.BRAIN_LOG_DIR))
-    await write_text_async(prompt_path, prompt)
+    await _write_reflection_artifact(prompt_path, prompt, label="prompt")
 
     # 4. Call the configured provider for deep analysis
     print("[reflect] Calling configured LLM for deep analysis...")
@@ -529,11 +539,15 @@ async def run_reflection(target_date: date):
     if reflection is None:
         print("[reflect] Direct CLI failed. Saving prompt for main agent processing.")
         pending_path = os.path.join(str(config.BRAIN_LOG_DIR), f"reflect-pending-{target_date}.md")
-        await write_text_async(pending_path, prompt)
+        pending_written = await _write_reflection_artifact(
+            pending_path,
+            prompt,
+            label="pending prompt",
+        )
 
         # Also save a flag file for the main agent's wake-up
         flag_path = os.path.join(PRIVATE_HOME, "PENDING_REFLECTION.json")
-        await write_text_async(
+        flag_written = pending_written and await _write_reflection_artifact(
             flag_path,
             json.dumps({
                 "date": target_date.isoformat(),
@@ -541,10 +555,14 @@ async def run_reflection(target_date: date):
                 "output_path": output_path,
                 "created": datetime.now().isoformat()
             }, indent=2),
+            label="pending flag",
         )
 
-        print(f"[reflect] Flag file written: {flag_path}")
-        print("[reflect] Main agent will process this on next wake-up.")
+        if flag_written:
+            print(f"[reflect] Flag file written: {flag_path}")
+            print("[reflect] Main agent will process this on next wake-up.")
+        else:
+            print("[reflect] Pending reflection could not be persisted; nightly work will continue.")
         return
 
     # 5.5 Meta-skill analysis
@@ -558,10 +576,15 @@ async def run_reflection(target_date: date):
         meta_summary = None
 
     # 6. Save full reflection for review.
-    await write_text_async(output_path, json.dumps(reflection, indent=2, default=str))
+    output_written = await _write_reflection_artifact(
+        output_path,
+        json.dumps(reflection, indent=2, default=str),
+        label="output",
+    )
 
     print("\n[reflect] Complete.")
-    print(f"[reflect] Full reflection saved to {output_path}")
+    if output_written:
+        print(f"[reflect] Full reflection saved to {output_path}")
 
     # Memory quality sweep
     try:

@@ -180,6 +180,41 @@ class TestPhaseReflection:
         captured = capsys.readouterr()
         assert "No data to reflect on" in captured.out or "Skipping" in captured.out
 
+    async def test_reflection_continues_when_artifact_path_is_unwritable(
+        self,
+        target_date,
+        capsys,
+    ):
+        context = {
+            "skill_executions": [],
+            "tasks": [{"id": 1}],
+            "new_memories": [],
+            "agent_runses": [],
+        }
+        reflection = {"journal_entry": "Nightly work completed."}
+
+        with patch(
+            "brain.jobs.pipelines.nightly_reflect.gather_context",
+            new=AsyncMock(return_value=context),
+        ), patch(
+            "brain.jobs.pipelines.nightly_reflect.build_reflection_prompt",
+            return_value="prompt",
+        ), patch(
+            "brain.jobs.pipelines.nightly_reflect.write_text_async",
+            new=AsyncMock(side_effect=PermissionError("read-only logs")),
+        ), patch(
+            "brain.systems.runs.direct_agent.call_llm",
+            return_value=reflection,
+        ):
+            from brain.jobs.pipelines.nightly_reflect import run_reflection
+
+            await run_reflection(target_date)
+
+        captured = capsys.readouterr()
+        assert "could not write prompt artifact" in captured.out
+        assert "could not write output artifact" in captured.out
+        assert "[reflect] Complete." in captured.out
+
     def test_reflection_uses_direct_api_not_subprocess(self):
         """Regression: nightly_reflect must use core.agent.call_llm, not subprocess."""
         import inspect
