@@ -221,9 +221,6 @@ def _publish_effective_routing(
     _agent_context.execution_metadata = execution_metadata
 
 
-_AUTO_OPENAI_AUTH_MODE = object()
-
-
 # ── Constants ──────────────────────────────────────────────────
 
 _MAX_PERSISTED_MESSAGES = 40
@@ -444,16 +441,11 @@ async def _init_llm_async(
     *,
     org_id: str | None = None,
     resolved_llm=None,
-    auth_mode_override: str | None | object = _AUTO_OPENAI_AUTH_MODE,
 ):
     """Resolve LLM client from async runtime code without sync DB access."""
     if resolved_llm is None:
         requested_provider = infer_provider_from_model(model)
-        auth_mode = (
-            required_openai_auth_mode(model)
-            if auth_mode_override is _AUTO_OPENAI_AUTH_MODE
-            else auth_mode_override
-        )
+        auth_mode = required_openai_auth_mode(model)
         llm = await async_resolve_llm_client(
             user_id=user_id,
             org_id=org_id,
@@ -1496,7 +1488,6 @@ async def run_agent_async(
                 model,
                 org_id=effective_org_id,
                 resolved_llm=resolved_llm,
-                auth_mode_override=None,
             )
             model_fallback_used = True
             fallback_activity = f"{preferred_model} requires a personal Codex connection; using {model}"

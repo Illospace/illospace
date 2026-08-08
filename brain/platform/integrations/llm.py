@@ -584,6 +584,10 @@ def resolve_llm_client(
     if provider == "openai":
         resolved_auth = _resolve_openai_local_auth(auth_mode=auth_mode)
         if not resolved_auth:
+            if auth_mode == "chatgpt":
+                raise RuntimeError(
+                    "No user Codex subscription is connected. Connect one in Illo."
+                )
             shared_hint = (
                 "user Codex subscription credentials require async_resolve_llm_client."
                 if os.environ.get("ILLO_ENV", "development") == "production"
@@ -666,6 +670,10 @@ async def async_resolve_llm_client(
                 auth_mode=auth_mode,
             )
             if not resolved_auth:
+                if auth_mode == "chatgpt":
+                    raise RuntimeError(
+                        "No user Codex subscription is connected. Connect one in Illo."
+                    )
                 shared_hint = (
                     "Connect a Codex subscription or add an org OpenAI key in Illo."
                     if os.environ.get("ILLO_ENV", "development") == "production"
