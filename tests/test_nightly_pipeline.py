@@ -173,12 +173,27 @@ class TestPhaseReflection:
         """When all context sections are empty, reflection should skip."""
         with patch("brain.jobs.pipelines.nightly_reflect.UnitOfWork", return_value=mock_nightly_uow), \
              patch("brain.jobs.pipelines.nightly_reflect.WORKSPACE", "/nonexistent"), \
-            patch("brain.jobs.pipelines.nightly_reflect.config.JOURNAL_DIR", Path("/nonexistent/journal")):
+             patch("brain.jobs.pipelines.nightly_reflect.config.JOURNAL_DIR", Path("/nonexistent/journal")), \
+             patch(
+                 "brain.systems.memory.retrieval_feedback.analyze_missed_memories",
+                 new=AsyncMock(return_value=[]),
+             ):
             from brain.jobs.pipelines.nightly_reflect import run_reflection
             await run_reflection(target_date)
 
         captured = capsys.readouterr()
         assert "No data to reflect on" in captured.out or "Skipping" in captured.out
+        structured_lines = [
+            json.loads(line)
+            for line in captured.out.splitlines()
+            if line.startswith('{"scheduler_step_result"')
+        ]
+        assert structured_lines == [{
+            "scheduler_step_result": {
+                "status": "completed",
+                "warnings": [],
+            }
+        }]
 
     async def test_reflection_continues_when_artifact_path_is_unwritable(
         self,

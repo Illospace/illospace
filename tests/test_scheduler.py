@@ -135,6 +135,37 @@ async def test_command_failure_prefers_structured_exception_over_log_tail():
     assert "HTTP/1.1 201 Created" in summary["stderr_tail"]
 
 
+async def test_command_summary_records_structured_scheduler_step_result():
+    proc = SimpleNamespace(
+        returncode=0,
+        stdout="\n".join([
+            "[reflect] Warning: retrieval feedback analysis failed",
+            json.dumps({
+                "scheduler_step_result": {
+                    "status": "completed_with_warnings",
+                    "warnings": [{
+                        "kind": "retrieval_feedback_analysis_failed",
+                        "error_type": "TypeError",
+                        "message": "naive/aware mismatch",
+                    }],
+                }
+            }),
+        ]),
+        stderr="",
+    )
+
+    summary = scheduler_executor._command_summary(proc)
+
+    assert summary["scheduler_step_result"] == {
+        "status": "completed_with_warnings",
+        "warnings": [{
+            "kind": "retrieval_feedback_analysis_failed",
+            "error_type": "TypeError",
+            "message": "naive/aware mismatch",
+        }],
+    }
+
+
 async def test_configuration_skip_json_precedes_exit_one_and_names_all_gaps(
     session,
     monkeypatch,
