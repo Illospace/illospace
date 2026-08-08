@@ -54,6 +54,7 @@ CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND = {
         "answer_the_cycle_mission",
         "summarize_workspace_evidence_or_explicit_gaps",
         "report_evidence_health",
+        "short_self_review_summary",
     ),
 }
 VALID_CYCLE_RUN_KINDS = frozenset(CYCLE_RESULT_CONTRACT_REQUIRED_OUTPUTS_BY_RUN_KIND)

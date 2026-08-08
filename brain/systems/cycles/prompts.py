@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
 from brain.systems.cycles.common import (
+    OFF_SLOT_MATERIAL_ALERT_RUN_KIND,
     SCHEDULED_CYCLE_ORIGIN,
     SCHEDULED_DIGEST_RUN_KIND,
     cycle_run_launch_context,
@@ -146,14 +147,26 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
     degradation_instruction = _degradation_instruction(envelope["degradation_tracking"])
     open_ask_instruction = _open_ask_instruction(envelope["open_ask_stragglers"])
     exception_ping_instruction = _exception_ping_instruction(cycle)
-    completion_instruction = (
-        "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n"
-        if "short_self_review_summary" in json_list(result_contract.get("required_outputs"))
-        else (
+    requires_self_review = "short_self_review_summary" in json_list(
+        result_contract.get("required_outputs")
+    )
+    if (
+        requires_self_review
+        and result_contract.get("run_kind") == OFF_SLOT_MATERIAL_ALERT_RUN_KIND
+    ):
+        completion_instruction = (
+            "- End with a one-line self-review summary that states the Slack delivery decision "
+            "(posted or skipped) and the reason.\n"
+        )
+    elif requires_self_review:
+        completion_instruction = (
+            "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n"
+        )
+    else:
+        completion_instruction = (
             "- Keep the visible answer in the mission's concise alert format; do not add a "
             "digest-only next-action or self-review footer.\n"
         )
-    )
     evidence_gap_destination = (
         "your self-review"
         if "short_self_review_summary" in json_list(result_contract.get("required_outputs"))
@@ -236,9 +249,14 @@ def _required_output_sections(result_contract: dict) -> str:
     if "record_next_action_or_blocker" in required_outputs:
         example_lines.append("Next action: name the single next action.")
     if "short_self_review_summary" in required_outputs:
-        example_lines.append(
-            "Self-review summary: mission sweep and delivery completed; contract fields checked."
-        )
+        if result_contract.get("run_kind") == OFF_SLOT_MATERIAL_ALERT_RUN_KIND:
+            example_lines.append(
+                "Self-review summary: Slack posted — material change verified and sent once."
+            )
+        else:
+            example_lines.append(
+                "Self-review summary: mission sweep and delivery completed; contract fields checked."
+            )
     example = "\n".join(example_lines)
     return (
         "## Required Output Sections\n"

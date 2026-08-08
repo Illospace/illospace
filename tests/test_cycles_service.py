@@ -1703,6 +1703,7 @@ def test_scheduled_coordinator_prompt_preserves_both_open_ask_sections():
                 "answer_the_cycle_mission",
                 "summarize_workspace_evidence_or_explicit_gaps",
                 "report_evidence_health",
+                "short_self_review_summary",
             ],
         ),
     ],
@@ -1718,7 +1719,7 @@ def test_coordinator_run_kind_contracts_are_explicit(run_kind, expected_outputs)
     )
 
 
-def test_material_alert_contract_keeps_evidence_gate_without_digest_footer_fields():
+def test_material_alert_contract_requires_delivery_self_review_without_next_action():
     from brain.systems.cycles.contract_gate import evaluate_cycle_result_contract
 
     contract = cycle_result_contract(run_kind="off_slot_material_alert")
@@ -1728,6 +1729,7 @@ def test_material_alert_contract_keeps_evidence_gate_without_digest_footer_field
         "answer_the_cycle_mission",
         "summarize_workspace_evidence_or_explicit_gaps",
         "report_evidence_health",
+        "short_self_review_summary",
     ]
 
     alert = (
@@ -1735,26 +1737,53 @@ def test_material_alert_contract_keeps_evidence_gate_without_digest_footer_field
         "release per project. Evidence reviewed: workspace run receipts and the merged change. "
         "Evidence health: ok."
     )
-    reduced_review = evaluate_cycle_result_contract(
+    missing_review = evaluate_cycle_result_contract(
         candidate_answer=alert,
         result_contract=contract,
         mission="Post one concise material engineering change alert.",
     )
+    generic_review = evaluate_cycle_result_contract(
+        candidate_answer=f"{alert} Self-review summary: contract satisfied.",
+        result_contract=contract,
+        mission="Post one concise material engineering change alert.",
+    )
+    decision_without_reason = evaluate_cycle_result_contract(
+        candidate_answer=f"{alert} Self-review summary: Slack skipped.",
+        result_contract=contract,
+        mission="Post one concise material engineering change alert.",
+    )
+    reviewed_alert = (
+        f"{alert} Self-review summary: Slack posted — material change verified and sent once."
+    )
+    reduced_review = evaluate_cycle_result_contract(
+        candidate_answer=reviewed_alert,
+        result_contract=contract,
+        mission="Post one concise material engineering change alert.",
+    )
+    skipped_review = evaluate_cycle_result_contract(
+        candidate_answer=(
+            f"{alert} Self-review summary: Slack skipped — no material todo-list change."
+        ),
+        result_contract=contract,
+        mission="Post one concise material engineering change alert.",
+    )
     strict_review = evaluate_cycle_result_contract(
-        candidate_answer=alert,
+        candidate_answer=reviewed_alert,
         result_contract=cycle_result_contract(run_kind="scheduled_digest"),
         mission="Publish the coordinator digest.",
     )
 
+    assert missing_review["approved"] is False
+    assert missing_review["missing_outputs"] == ["short_self_review_summary"]
+    assert generic_review["missing_outputs"] == ["short_self_review_summary"]
+    assert decision_without_reason["missing_outputs"] == ["short_self_review_summary"]
     assert reduced_review["approved"] is True
+    assert skipped_review["approved"] is True
     assert strict_review["approved"] is False
-    assert strict_review["missing_outputs"] == [
-        "record_next_action_or_blocker",
-        "short_self_review_summary",
-    ]
+    assert strict_review["missing_outputs"] == ["record_next_action_or_blocker"]
 
 
-def test_material_alert_launch_prompt_does_not_request_digest_footer_fields():
+def test_material_alert_launch_prompt_requests_delivery_self_review_only():
     cycle = Cycle()
     cycle.id = 2
     cycle.name = "Uwear Ticket Coordinator Check-ins"
@@ -1790,10 +1819,11 @@ def test_material_alert_launch_prompt_does_not_request_digest_footer_fields():
     )[0]
 
     assert "`record_next_action_or_blocker`" not in output_section
-    assert "`short_self_review_summary`" not in output_section
+    assert "`short_self_review_summary`" in output_section
     assert "Next action:" not in output_section
-    assert "Self-review summary:" not in output_section
-    assert "End with a short self-review summary" not in message
+    assert "Self-review summary: Slack posted" in output_section
+    assert "one-line self-review summary" in message
+    assert "posted or skipped" in message
 
 
 @pytest.mark.asyncio
@@ -1878,7 +1908,7 @@ async def test_async_run_cycle_now_snapshots_off_slot_contract_after_admission(
     snapshot = created_runs[0].context_snapshot
     assert snapshot["launch_context"]["run_kind"] == "off_slot_material_alert"
     assert snapshot["result_contract"]["run_kind"] == "off_slot_material_alert"
-    assert "short_self_review_summary" not in snapshot["result_contract"]["required_outputs"]
+    assert "short_self_review_summary" in snapshot["result_contract"]["required_outputs"]
 
 
 @pytest.mark.asyncio
@@ -3748,19 +3778,20 @@ def test_promotion_unchanged_run_persists_skip_and_posting_verdict(monkeypatch):
             "Material engineering alert: deploy admission now preserves the active release "
             "when a duplicate trigger arrives. Evidence reviewed: merged change, deploy "
             "receipt, Slack post, and tracker update. Evidence health: ok. Next action: "
-            "monitor the next trigger.",
+            "monitor the next trigger. Self-review summary: Slack posted — material change "
+            "verified and sent once.",
         ),
         (
             1884,
             "Material engineering alert: chantier movement now records the newly blocked "
             "member and owner in the tracker. Evidence reviewed: current chantier, issue, "
             "Slack post, and tracker update. Evidence health: ok. Self-review summary: "
-            "single material change verified and posted once.",
+            "Slack posted — single material change verified and sent once.",
         ),
     ],
-    ids=["run-1857-no-self-review", "run-1884-no-next-action"],
+    ids=["run-1857-with-next-action", "run-1884-no-next-action"],
 )
-def test_off_slot_material_alert_settles_completed_without_digest_footer_fields(
+def test_off_slot_material_alert_settles_with_self_review_without_next_action(
     monkeypatch,
     run_id,
     answer,
@@ -4155,6 +4186,28 @@ def test_cycle_contract_repair_prompt_requests_only_missing_sections():
     assert "append only the missing section" in prompt.lower()
     assert "do not repeat or rewrite" in prompt.lower()
     assert candidate in prompt
+
+
+def test_off_slot_repair_prompt_requires_slack_decision_and_reason():
+    from brain.systems.cycles.contract_gate import _repair_prompt
+
+    messages = _repair_prompt(
+        mission="Post one concise material engineering change alert.",
+        result_contract={
+            "run_kind": "off_slot_material_alert",
+            "required_outputs": ["short_self_review_summary"],
+        },
+        evidence_packet={"side_effects_succeeded": True},
+        missing_outputs=["short_self_review_summary"],
+        candidate_answer="Evidence reviewed. Evidence health: ok.",
+        append_only=True,
+    )
+
+    prompt = "\n".join(message["content"] for message in messages)
+    assert "Slack posted" in prompt
+    assert "Slack skipped" in prompt
+    assert "then gives the reason" in prompt
+    assert "generic contract-compliance statement is invalid" in prompt
 
 
 def test_finalize_cycle_run_degrades_when_contract_repair_fails(monkeypatch):

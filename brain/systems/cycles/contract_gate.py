@@ -16,6 +16,7 @@ from brain.platform.integrations.provider_error_sentinel import (
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.systems.cycles.common import OFF_SLOT_MATERIAL_ALERT_RUN_KIND
 from brain.systems.cycles.contracts import (
     CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT,
     SELF_REVIEW_SUMMARY_MARKERS,
@@ -73,6 +74,11 @@ _SELF_REVIEW_SUMMARY_RES = tuple(
         re.IGNORECASE,
     )
     for marker in SELF_REVIEW_SUMMARY_MARKERS
+)
+_SLACK_DELIVERY_DECISION_RE = re.compile(
+    r"(?:\bslack\s+(?:was\s+)?(?:posted|skipped)\b|"
+    r"\b(?:posted|skipped)\s+(?:to\s+)?slack\b)",
+    re.IGNORECASE,
 )
 _NON_PRESERVABLE_OUTPUTS = frozenset(
     {
@@ -156,6 +162,16 @@ def extract_self_review_summary(candidate_answer: str | None) -> str | None:
     )
 
 
+def _off_slot_self_review_has_delivery_decision(summary: str | None) -> bool:
+    if not summary:
+        return False
+    match = _SLACK_DELIVERY_DECISION_RE.search(summary)
+    if match is None:
+        return False
+    reason = str(summary[match.end():]).strip(" \t:;,.—-–")
+    return bool(reason)
+
+
 def _satisfies_required_output(
     requirement: str,
     *,
@@ -205,6 +221,8 @@ def _satisfies_required_output(
     if requirement == "record_next_action_or_blocker":
         return _contains_any(normalized_candidate, ("next action", "next step", "blocker"))
     if requirement == "short_self_review_summary":
+        if result_contract.get("run_kind") == OFF_SLOT_MATERIAL_ALERT_RUN_KIND:
+            return _off_slot_self_review_has_delivery_decision(self_review_summary)
         return self_review_summary is not None
     if requirement == CLOSING_BLOCK_VERDICT_REQUIRED_OUTPUT:
         return closing_block_verdict is not None
@@ -497,6 +515,17 @@ def _repair_prompt(
         else "Candidate visible answer"
     )
     soul_section = soul_prompt_section()
+    off_slot_self_review_rule = (
+        "\n\nOff-slot self-review rule:\n"
+        "For `short_self_review_summary`, write one `Self-review summary:` line that "
+        "states the Slack decision (`Slack posted` or `Slack skipped`) and then gives "
+        "the reason. A generic contract-compliance statement is invalid."
+        if (
+            result_contract.get("run_kind") == OFF_SLOT_MATERIAL_ALERT_RUN_KIND
+            and "short_self_review_summary" in missing_outputs
+        )
+        else ""
+    )
     return [
         {
             "role": "system",
@@ -520,7 +549,8 @@ def _repair_prompt(
                 "Evidence packet:\n"
                 f"{json.dumps(evidence_packet, ensure_ascii=True, sort_keys=True, default=str)[:5000]}\n\n"
                 "Missing required outputs:\n"
-                f"{json.dumps(missing_outputs, ensure_ascii=True)}\n\n"
+                f"{json.dumps(missing_outputs, ensure_ascii=True)}"
+                f"{off_slot_self_review_rule}\n\n"
                 f"{candidate_label}:\n"
                 f"{candidate_answer[:4000]}"
             ),
