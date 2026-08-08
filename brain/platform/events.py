@@ -4,9 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
-from collections.abc import Awaitable, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from sqlalchemy import false, or_, select
@@ -23,53 +21,11 @@ _publisher: Callable[[str, dict[str, Any]], None] | None = None
 _idea_org_cache: dict[str, str | None] = {}
 _run_org_cache: dict[int, str | None] = {}
 
-_run_event_scope: ContextVar[dict[str, Any] | None] = ContextVar(
-    "run_event_scope",
-    default=None,
-)
-
-_LIVE_AFTER_DURABLE_EVENT_TYPES = {
-    "browser_session_state",
-    "browser_session_frame",
-    "browser_session_delta",
-    "browser_session_error",
-    "browser_session_closed",
-    "vault_secret_prompt",
-    "vault_agent_grant_prompt",
-}
-
 
 def set_publisher(fn: Callable[[str, dict[str, Any]], None]) -> None:
     """Register the websocket publisher (called once by the web layer)."""
     global _publisher
     _publisher = fn
-
-
-@contextmanager
-def run_event_scope(
-    run_id: int | None,
-    *,
-    idea_id: str | None = None,
-    producer: str = "cortex",
-    consumer_runtime: str | None = None,
-    session: Any | None = None,
-    recorder: Callable[..., Awaitable[Any]] | None = None,
-):
-    """Scope publish() calls so they can also be durably recorded."""
-    token = _run_event_scope.set(
-        {
-            "run_id": run_id,
-            "idea_id": idea_id,
-            "producer": producer,
-            "consumer_runtime": consumer_runtime,
-            "session": session,
-            "recorder": recorder,
-        }
-    )
-    try:
-        yield
-    finally:
-        _run_event_scope.reset(token)
 
 
 def _normalize_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -325,15 +281,12 @@ def _active_async_loop() -> asyncio.AbstractEventLoop | None:
 def _log_async_event_write_failure(
     event_type: str,
     task: asyncio.Task,
-    *,
-    log_name: str = "cortex_event_write_failed",
 ) -> None:
     try:
         task.result()
     except Exception as exc:
         logger.warning(
-            "%s event_type=%s error=%s",
-            log_name,
+            "cortex_event_write_failed event_type=%s error=%s",
             event_type,
             exc,
         )
@@ -409,49 +362,8 @@ async def list_cortex_events_after_for_principal_async(
 
 
 def publish(event_type: str, data: dict[str, Any]) -> None:
-    """Publish an event and, when scoped, persist it durably first."""
-    scope = _run_event_scope.get()
-    recorded_durable = False
-    if scope and scope.get("run_id") is not None:
-        recorder = scope.get("recorder")
-        if recorder is not None:
-            try:
-                write = recorder(
-                    int(scope["run_id"]),
-                    event_type,
-                    data,
-                    idea_id=scope.get("idea_id") or data.get("idea_id"),
-                    producer=scope.get("producer") or "cortex",
-                    consumer_runtime=scope.get("consumer_runtime"),
-                    session=scope.get("session"),
-                )
-                loop = _active_async_loop()
-                if loop is not None:
-                    task = loop.create_task(write)
-                    task.add_done_callback(
-                        lambda done_task, event_type=event_type: _log_async_event_write_failure(
-                            event_type,
-                            done_task,
-                            log_name="run_event_write_failed",
-                        )
-                    )
-                else:
-                    asyncio.run(write)
-            except Exception as exc:
-                logger.warning(
-                    "run_event_write_failed event_type=%s error=%s",
-                    event_type,
-                    exc,
-                )
-            else:
-                recorded_durable = True
-
-    if recorded_durable and event_type not in _LIVE_AFTER_DURABLE_EVENT_TYPES:
-        # Durable run-scoped events are replayed by the API consumer.
-        # Skip the live publisher here to avoid double fanout.
-        return
-
-    if not recorded_durable and _infer_idea_id(data) is not None:
+    """Record an idea-scoped event for replay, then fan it out live."""
+    if _infer_idea_id(data) is not None:
         loop = _active_async_loop()
         if loop is not None:
             task = loop.create_task(record_cortex_event_async(event_type, data))

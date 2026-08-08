@@ -23,7 +23,6 @@ from brain.systems.runs.events import (
 from brain.systems.runs.tool_event_read_model import (
     parse_persisted_tool_side_effect,
 )
-from brain.platform.events import run_event_scope
 from brain.platform.db.models.run import RunEvent
 
 
@@ -480,81 +479,6 @@ async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatc
 
     async_record.assert_awaited_once_with("status_change", payload)
     publisher.assert_called_once_with("status_change", payload)
-
-
-@pytest.mark.asyncio
-async def test_browser_run_events_live_publish_after_durable_record(monkeypatch):
-    import brain.platform.events as cortex_events
-
-    durable_records = []
-    live_events = []
-
-    async def _record(*args, **kwargs):
-        durable_records.append((args, kwargs))
-
-    monkeypatch.setattr(
-        cortex_events,
-        "_publisher",
-        lambda event_type, payload: live_events.append((event_type, payload)),
-    )
-
-    payload = {
-        "idea_id": "idea-1",
-        "session_id": "session-1",
-        "state": {"id": "session-1", "run_id": 42},
-    }
-    with run_event_scope(42, idea_id="idea-1", session=object(), recorder=_record):
-        cortex_events.publish("browser_session_state", payload)
-    await asyncio.sleep(0)
-
-    assert durable_records
-    assert durable_records[0][0][:3] == (42, "browser_session_state", payload)
-    assert live_events == [("browser_session_state", payload)]
-
-
-@pytest.mark.asyncio
-async def test_non_browser_run_events_skip_live_publish_after_durable_record(monkeypatch):
-    import brain.platform.events as cortex_events
-
-    async_record = AsyncMock()
-    publisher = MagicMock()
-    monkeypatch.setattr(cortex_events, "_publisher", publisher)
-
-    with run_event_scope(42, idea_id="idea-1", session=object(), recorder=async_record):
-        cortex_events.publish("run.activity", {"idea_id": "idea-1", "activity": "Working"})
-    await asyncio.sleep(0)
-
-    async_record.assert_awaited_once()
-    publisher.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypatch):
-    import brain.platform.events as cortex_events
-
-    durable_records = []
-    live_events = []
-
-    async def _record(*args, **kwargs):
-        durable_records.append((args, kwargs))
-
-    monkeypatch.setattr(
-        cortex_events,
-        "_publisher",
-        lambda event_type, payload: live_events.append((event_type, payload)),
-    )
-
-    payload = {
-        "idea_id": "idea-1",
-        "run_id": 42,
-        "prompt": {"id": "prompt-1", "idea_id": "idea-1", "key_name": "GITHUB_TOKEN"},
-    }
-    with run_event_scope(42, idea_id="idea-1", session=object(), recorder=_record):
-        cortex_events.publish("vault_secret_prompt", payload)
-    await asyncio.sleep(0)
-
-    assert durable_records
-    assert live_events == [("vault_secret_prompt", payload)]
 
 
 @pytest.mark.asyncio
