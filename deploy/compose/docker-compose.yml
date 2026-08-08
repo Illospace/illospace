@@ -208,6 +208,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/meetbot.Dockerfile
+      args:
+        ILLO_BUILD_COMMIT: ${ILLO_BUILD_COMMIT:-unknown}
     profiles: ["meetbot"]
     restart: unless-stopped
     environment:

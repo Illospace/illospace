@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import secrets
 from contextlib import asynccontextmanager
@@ -97,6 +98,7 @@ class ActionResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
+    commit: str
 
 
 def create_app(
@@ -108,6 +110,7 @@ def create_app(
     """Create an app with injectable browser and webhook boundaries."""
 
     resolved_config = config or MeetbotConfig.from_env()
+    build_commit = os.getenv("ILLO_BUILD_COMMIT", "unknown").strip() or "unknown"
     resolved_engine = engine or PlaywrightMeetEngine(resolved_config)
     resolved_sender = webhook_sender or MeetingWebhookCallback(resolved_config)
     manager = SessionManager(resolved_config, resolved_engine, resolved_sender)
@@ -141,7 +144,7 @@ def create_app(
 
     @application.get("/healthz", response_model=HealthResponse)
     async def healthz() -> HealthResponse:
-        return HealthResponse()
+        return HealthResponse(commit=build_commit)
 
     @application.post(
         "/join",

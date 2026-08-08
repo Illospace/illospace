@@ -128,14 +128,21 @@ def _wait_for_status(
     raise AssertionError(f"Session {session_id} did not reach {expected}")
 
 
-def test_health_is_public_but_session_routes_require_token(tmp_path: Path) -> None:
+def test_health_is_public_but_session_routes_require_token(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("ILLO_BUILD_COMMIT", "abc123")
     app = create_app(
         config=_config(tmp_path),
         engine=FakeEngine(),
         webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
-        assert client.get("/healthz").json() == {"status": "ok"}
+        assert client.get("/healthz").json() == {
+            "status": "ok",
+            "commit": "abc123",
+        }
         assert _join(client, token=False).status_code == 401
         assert client.get("/sessions/missing").status_code == 401
 

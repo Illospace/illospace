@@ -1,10 +1,16 @@
 FROM python:3.12-slim-bookworm
 
+ARG ILLO_BUILD_COMMIT=unknown
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+ENV ILLO_BUILD_COMMIT=${ILLO_BUILD_COMMIT}
+
+LABEL org.opencontainers.image.revision=${ILLO_BUILD_COMMIT}
 
 WORKDIR /app
 

@@ -235,7 +235,11 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       fi
     fi
 
-    for service in $DOCTOR_REQUIRED_SERVICES; do
+    services_to_check="$DOCTOR_REQUIRED_SERVICES"
+    if printf '%s\n' "$running" | grep -qx meetbot; then
+      services_to_check="$services_to_check meetbot"
+    fi
+    for service in $services_to_check; do
       printf '%s\n' "$running" | grep -qx "$service" || continue
       health="$(container_health "$service" || true)"
       case "$health" in
@@ -250,6 +254,22 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
           ;;
       esac
     done
+
+    if printf '%s\n' "$running" | grep -qx meetbot; then
+      meetbot_commit="$(
+        compose exec -T meetbot python3 -c \
+          'import os; print(os.environ.get("ILLO_BUILD_COMMIT", "unknown"))' \
+          2>/dev/null || true
+      )"
+      expected_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+      if [ -z "$meetbot_commit" ] || [ "$meetbot_commit" = "unknown" ]; then
+        fail "meetbot build commit is unknown"
+      elif [ "$meetbot_commit" != "$expected_commit" ]; then
+        fail "meetbot is stale: running commit $meetbot_commit, checkout commit $expected_commit"
+      else
+        pass "meetbot build commit matches the checkout: $meetbot_commit"
+      fi
+    fi
 
     queue_health_output=""
     queue_health_status=0

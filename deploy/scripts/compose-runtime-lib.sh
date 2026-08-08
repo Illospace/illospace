@@ -11,7 +11,50 @@ source "$COMPOSE_RUNTIME_LIB_DIR/worker-swap-lib.sh"
 source "$COMPOSE_RUNTIME_LIB_DIR/worker-lifecycle-lib.sh"
 
 compose() {
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  local build_commit
+  build_commit="${ILLO_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+  ILLO_BUILD_COMMIT="$build_commit" \
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+compose_env_value() {
+  local key="$1"
+  python3 - "$ENV_FILE" "$key" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+if not path.exists():
+    raise SystemExit(0)
+pattern = re.compile(rf"^{re.escape(key)}=(.*)$")
+for line in path.read_text(encoding="utf-8").splitlines():
+    match = pattern.match(line.strip())
+    if not match:
+        continue
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    print(value)
+    break
+PY
+}
+
+compose_profile_enabled() {
+  local profile="$1" profiles
+  profiles="$(compose_env_value COMPOSE_PROFILES)"
+  profiles=",${profiles// /,},"
+  case "$profiles" in
+    *",$profile,"*) return 0 ;;
+  esac
+  return 1
+}
+
+compose_service_enabled() {
+  local service="$1" profile="${2:-$1}"
+  compose_profile_enabled "$profile" && return 0
+  [ -n "$(compose ps -q "$service" 2>/dev/null || true)" ]
 }
 
 worker_swap_snapshot_acquire() {
