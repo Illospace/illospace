@@ -1771,13 +1771,21 @@ async def test_list_ideas(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
+        MockRepo.return_value.a_list_canvas_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas")
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
     assert len(data) == 1
     assert data[0]["title"] == "Test Idea"
+    MockRepo.return_value.a_list_canvas_for_org.assert_awaited_once_with(ANY, limit=100)
+
+
+@pytest.mark.asyncio
+async def test_list_ideas_enforces_canvas_page_limit(client, mock_session_factory):
+    with patch("brain.app.api.routers.cortex._ideas.IdeaRepository"):
+        assert (await client.get("/api/cortex/ideas?limit=0")).status_code == 422
+        assert (await client.get("/api/cortex/ideas?limit=201")).status_code == 422
 
 
 @pytest.mark.asyncio
@@ -1915,7 +1923,9 @@ async def test_list_ideas_with_status_filter(client, mock_session_factory):
         MockRepo.return_value.a_list_by_status_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas?status=working")
     assert resp.status_code == 200
-    MockRepo.return_value.a_list_by_status_for_org.assert_awaited_once_with("working", ANY)
+    MockRepo.return_value.a_list_by_status_for_org.assert_awaited_once_with(
+        "working", ANY, limit=100
+    )
 
 
 @pytest.mark.asyncio
@@ -2432,9 +2442,9 @@ async def test_restore_archived_idea(client, mock_session_factory):
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload["archived_at"] is None
-    assert payload["status"] == "emerged"
+    assert payload["status"] == "active"
     assert idea.archived_at is None
-    assert idea.status == "emerged"
+    assert idea.status == "active"
 
 
 @pytest.mark.asyncio
@@ -2578,7 +2588,7 @@ async def test_list_ideas_uses_last_human_thread_author_color(client, mock_sessi
     last_author.color = "#abcdef"
 
     with patch("brain.app.api.routers.cortex._ideas.IdeaRepository") as MockRepo:
-        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
+        MockRepo.return_value.a_list_canvas_for_org = AsyncMock(return_value=[idea])
         mock_session_factory.execute.return_value.all.return_value = [
             SimpleNamespace(
                 idea_id="color-id",

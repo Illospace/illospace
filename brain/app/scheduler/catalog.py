@@ -196,6 +196,32 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "retry_policy": {"max_attempts": 2, "backoff_seconds": 120},
         "misfire_policy": "skip",
     },
+    {
+        "job_key": "cortex_canvas_occupancy",
+        "family": "cortex_canvas_occupancy",
+        "program_key": "cortex_canvas_occupancy",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:cortex_canvas_occupancy",
+        "cron_expr": "17 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Cortex Canvas Occupancy",
+            "description": "Archive emerged thoughts after 24 quiet hours",
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run"],
+            "output_channel": "scheduler",
+            "success_criteria": [
+                "Quiet emerged thoughts move to history through an audited status transition"
+            ],
+        },
+        "priority": 70,
+        "max_concurrency": 1,
+        "timeout_seconds": 300,
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 60},
+        "misfire_policy": "skip",
+    },
 )
 
 

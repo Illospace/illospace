@@ -79,10 +79,11 @@ async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(se
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     await session.flush()
 
-    assert result == {"upserted": 6, "retired": 0}
+    assert result == {"upserted": 7, "retired": 0}
     jobs = {job["job_key"]: job for job in await async_list_scheduler_jobs(session)}
     assert set(jobs) == {
         "curiosity_cron",
+        "cortex_canvas_occupancy",
         "illo_external_heartbeat",
         "knowledge_index_sync",
         "nightly_sleep",
@@ -439,8 +440,8 @@ async def test_sync_scheduler_catalog_is_idempotent_and_reseeds_forward_on_resta
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=restart)
     jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
 
-    assert result == {"upserted": 6, "retired": 0}
-    assert await session.scalar(select(func.count()).select_from(SchedulerJob)) == 6
+    assert result == {"upserted": 7, "retired": 0}
+    assert await session.scalar(select(func.count()).select_from(SchedulerJob)) == 7
     assert {key: job.id for key, job in jobs.items()} == first_ids
     assert all(job.next_run_at > restart for job in jobs.values())
     assert await async_materialize_due_runs(session, now=restart) == []
@@ -472,7 +473,7 @@ async def test_sync_scheduler_catalog_retires_jobs_dropped_from_full_catalog(ses
     result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     jobs = {job.job_key: job for job in (await session.scalars(select(SchedulerJob))).all()}
 
-    assert result == {"upserted": 1, "retired": 5}
+    assert result == {"upserted": 1, "retired": 6}
     assert jobs["nightly_sleep"].enabled is True
     assert jobs["curiosity_cron"].enabled is False
     assert jobs["curiosity_cron"].pause_reason == "removed from scheduler catalog"
@@ -487,6 +488,8 @@ async def test_sync_scheduler_catalog_retires_jobs_dropped_from_full_catalog(ses
     assert jobs["illo_external_heartbeat"].pause_reason == "removed from scheduler catalog"
     assert jobs["knowledge_index_sync"].enabled is False
     assert jobs["knowledge_index_sync"].pause_reason == "removed from scheduler catalog"
+    assert jobs["cortex_canvas_occupancy"].enabled is False
+    assert jobs["cortex_canvas_occupancy"].pause_reason == "removed from scheduler catalog"
 
     repeated = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
     assert repeated == {"upserted": 1, "retired": 0}
@@ -504,9 +507,9 @@ async def test_scheduler_daemon_startup_syncs_catalog_before_snapshot(session):
         "checkpoint_at": now.isoformat(),
         "threshold_seconds": 3600,
     }
-    assert result["catalog"] == {"upserted": 6, "retired": 0}
-    assert result["snapshot"]["summary"]["jobs_total"] == 6
-    assert result["snapshot"]["summary"]["jobs_enabled"] == 6
+    assert result["catalog"] == {"upserted": 7, "retired": 0}
+    assert result["snapshot"]["summary"]["jobs_total"] == 7
+    assert result["snapshot"]["summary"]["jobs_enabled"] == 7
     assert all(job["next_run_at"] > now.isoformat() for job in result["snapshot"]["jobs"])
 
 

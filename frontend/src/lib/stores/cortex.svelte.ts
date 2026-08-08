@@ -26,6 +26,7 @@ import {
   type ArchiveCountState,
   type ArchiveIdeaIdentity,
 } from '$lib/features/cortex/domain/archiveReducer';
+import { isCanvasOccupant } from '$lib/features/cortex/domain/canvasOccupancy';
 import {
   SEEN_IDEA_REVISIONS_STORAGE_KEY,
   ideaRevision as cortexIdeaRevision,
@@ -1075,7 +1076,7 @@ class CortexStore {
   }
 
   get filteredIdeas(): Idea[] {
-    let result = this.ideas;
+    let result = this.ideas.filter(isCanvasOccupant);
     if (this.filters.statuses.size > 0) {
       result = result.filter((i) => this.filters.statuses.has(i.status));
     }

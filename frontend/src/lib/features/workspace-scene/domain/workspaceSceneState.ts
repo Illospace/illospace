@@ -11,6 +11,7 @@ export type WorkspaceSceneIdeaSnapshot = {
   display_title?: string;
   description?: string | null;
   status: string;
+  origin?: string | null;
   salience_score?: number | null;
   position_x: number | null;
   position_y: number | null;
@@ -36,6 +37,7 @@ export type WorkspaceSceneIdeaSnapshot = {
 
 export type WorkspaceSceneNodeSnapshot = {
   status: string;
+  origin?: string | null;
   title: string;
   display_title?: string;
   salience_score: number;
@@ -55,6 +57,7 @@ export type OrbitNode = {
   display_title?: string;
   description?: string | null;
   status: string;
+  origin?: string | null;
   salience_score: number;
   position_x: number | null;
   position_y: number | null;
@@ -101,6 +104,7 @@ export function orbitNodeCoords(source: Partial<OrbitNode>): ScenePoint | null {
 export function sceneNodeSnapshotFromIdea(idea: WorkspaceSceneIdeaSnapshot): WorkspaceSceneNodeSnapshot {
   return {
     status: idea.status,
+    origin: idea.origin ?? null,
     title: idea.title,
     display_title: idea.display_title,
     salience_score: idea.salience_score || 5,
@@ -119,7 +123,7 @@ export function sceneNodeSnapshotChanged(
   previous: WorkspaceSceneNodeSnapshot,
   next: WorkspaceSceneNodeSnapshot,
 ): boolean {
-  return previous.status !== next.status || previous.title !== next.title || previous.display_title !== next.display_title
+  return previous.status !== next.status || previous.origin !== next.origin || previous.title !== next.title || previous.display_title !== next.display_title
     || previous.salience_score !== next.salience_score
     || previous.attachments_count !== next.attachments_count
     || previous.thread_count !== next.thread_count || previous.user_id !== next.user_id
@@ -135,6 +139,7 @@ export function createOrbitNodeFromIdea(idea: WorkspaceSceneIdeaSnapshot, initia
     display_title: idea.display_title,
     description: idea.description,
     status: idea.status,
+    origin: idea.origin ?? null,
     salience_score: idea.salience_score || 5,
     position_x: idea.position_x,
     position_y: idea.position_y,
@@ -179,6 +184,7 @@ export function applyIdeaSnapshotToSceneNode(
   node.display_title = idea.display_title;
   node.description = idea.description;
   node.status = idea.status;
+  node.origin = idea.origin ?? null;
   node.salience_score = idea.salience_score || 5;
   node.position_x = idea.position_x;
   node.position_y = idea.position_y;

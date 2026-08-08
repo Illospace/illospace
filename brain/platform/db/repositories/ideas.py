@@ -9,6 +9,7 @@ from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased, load_only
 
+from brain.contracts.statuses import CANVAS_OCCUPANCY_STATUS_VALUES
 from brain.platform.db.models.idea import (
     Idea,
     IdeaConnection,
@@ -66,6 +67,19 @@ class IdeaRepository(BaseRepository[Idea]):
         return stmt
 
     @staticmethod
+    def _list_canvas_stmt(*, limit: int):
+        return (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(
+                Idea.archived_at.is_(None),
+                Idea.status.in_(CANVAS_OCCUPANCY_STATUS_VALUES),
+            )
+            .order_by(Idea.updated_at.desc())
+            .limit(limit)
+        )
+
+    @staticmethod
     def _get_for_org_stmt(idea_id: str, org_id: str):
         return select(Idea).where(Idea.id == idea_id, Idea.org_id == org_id)
 
@@ -80,6 +94,20 @@ class IdeaRepository(BaseRepository[Idea]):
         if limit:
             stmt = stmt.limit(limit)
         return stmt
+
+    @staticmethod
+    def _list_canvas_for_org_stmt(org_id: str, *, limit: int):
+        return (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(
+                Idea.org_id == org_id,
+                Idea.archived_at.is_(None),
+                Idea.status.in_(CANVAS_OCCUPANCY_STATUS_VALUES),
+            )
+            .order_by(Idea.updated_at.desc())
+            .limit(limit)
+        )
 
     @staticmethod
     def _list_archived_stmt(*, limit: int | None = None):
@@ -158,17 +186,20 @@ class IdeaRepository(BaseRepository[Idea]):
         return len(ids)
 
     @staticmethod
-    def _list_by_status_stmt(status: str):
-        return (
+    def _list_by_status_stmt(status: str, *, limit: int | None = None):
+        stmt = (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
             .where(Idea.status == status, Idea.archived_at.is_(None))
             .order_by(Idea.updated_at.desc())
         )
+        if limit:
+            stmt = stmt.limit(limit)
+        return stmt
 
     @staticmethod
-    def _list_by_status_for_org_stmt(status: str, org_id: str):
-        return (
+    def _list_by_status_for_org_stmt(status: str, org_id: str, *, limit: int | None = None):
+        stmt = (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
             .where(
@@ -178,10 +209,16 @@ class IdeaRepository(BaseRepository[Idea]):
             )
             .order_by(Idea.updated_at.desc())
         )
+        if limit:
+            stmt = stmt.limit(limit)
+        return stmt
 
     async def a_list_active(self, *, limit: int | None = None) -> Sequence[Idea]:
         stmt = self._list_active_stmt(limit=limit)
         return (await self._session.scalars(stmt)).all()
+
+    async def a_list_canvas(self, *, limit: int) -> Sequence[Idea]:
+        return (await self._session.scalars(self._list_canvas_stmt(limit=limit))).all()
 
     async def a_list_by_org(
         self, org_id: str, *, limit: int | None = None
@@ -204,6 +241,10 @@ class IdeaRepository(BaseRepository[Idea]):
         stmt = self._list_active_for_org_stmt(org_id, limit=limit)
         return (await self._session.scalars(stmt)).all()
 
+    async def a_list_canvas_for_org(self, org_id: str, *, limit: int) -> Sequence[Idea]:
+        stmt = self._list_canvas_for_org_stmt(org_id, limit=limit)
+        return (await self._session.scalars(stmt)).all()
+
     async def a_list_archived(self, *, limit: int | None = None) -> Sequence[Idea]:
         stmt = self._list_archived_stmt(limit=limit)
         return (await self._session.scalars(stmt)).all()
@@ -214,12 +255,14 @@ class IdeaRepository(BaseRepository[Idea]):
         stmt = self._list_archived_for_org_stmt(org_id, limit=limit)
         return (await self._session.scalars(stmt)).all()
 
-    async def a_list_by_status(self, status: str) -> Sequence[Idea]:
-        stmt = self._list_by_status_stmt(status)
+    async def a_list_by_status(self, status: str, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = self._list_by_status_stmt(status, limit=limit)
         return (await self._session.scalars(stmt)).all()
 
-    async def a_list_by_status_for_org(self, status: str, org_id: str) -> Sequence[Idea]:
-        stmt = self._list_by_status_for_org_stmt(status, org_id)
+    async def a_list_by_status_for_org(
+        self, status: str, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        stmt = self._list_by_status_for_org_stmt(status, org_id, limit=limit)
         return (await self._session.scalars(stmt)).all()
 
     async def a_update_status(

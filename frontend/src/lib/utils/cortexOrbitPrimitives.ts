@@ -36,6 +36,7 @@ export type PrimitiveBlobVisual = {
   treatment: ConstellationSignalTreatment;
   icon: ConstellationSignalIcon;
   attachmentCount: number;
+  originCue: string;
 };
 
 export type PrimitiveAstreVisual = {

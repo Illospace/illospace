@@ -307,6 +307,14 @@ Reading rules:
 
 The core layout is spatial first, panel second. Cortex is not a generic SaaS dashboard with a decorative canvas. The canvas is the product's main orientation surface.
 
+Canvas occupancy is an attention contract. The live canvas shows only work that
+is active or owes a person a response: `active`, `working`, `needs_input`,
+`unread_reply`, and `failed`. An `emerged` thought that has no update for 24
+hours is archived by the hourly occupancy job. Archiving removes it from the
+canvas but keeps it in thread history and search, with the transition recorded
+in `idea_state_log`. Origin never hides a thought; each visible blob carries a
+small source cue.
+
 Primary surfaces:
 
 - **Workspace**: orbit-first scene with astres, signal blobs, toolbar, nav rail, and persistent composer.

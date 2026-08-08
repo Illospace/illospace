@@ -1,10 +1,11 @@
 """IdeaRepository tests using in-memory SQLite."""
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import re
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler, SQLiteDDLCompiler
 
@@ -16,6 +17,7 @@ from brain.platform.db.repositories.ideas import (
     IdeaRepository,
     IdeaThreadRepository,
 )
+from brain.jobs.pipelines.cortex_occupancy import ARCHIVE_TRIGGER, archive_dormant_emerged
 
 ORG_1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"
 ORG_2 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2"
@@ -133,6 +135,52 @@ class TestIdeaRepository:
         await _make_idea(session, archived_at=datetime.now(timezone.utc))
         result = await repo.a_list_active()
         assert len(result) == 1
+
+    async def test_list_canvas_is_bounded_to_alive_or_owed_statuses(self, repo, session):
+        for status in ("working", "active", "needs_input", "unread_reply", "failed"):
+            await _make_idea(session, status=status)
+        await _make_idea(session, status="emerged")
+        await _make_idea(session, status="resolved")
+
+        result = await repo.a_list_canvas(limit=3)
+
+        assert len(result) == 3
+        assert {idea.status for idea in result} <= {
+            "working", "active", "needs_input", "unread_reply", "failed"
+        }
+
+    async def test_quiet_emerged_ideas_move_to_audited_history(self, session):
+        now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+        quiet = await _make_idea(
+            session,
+            status="emerged",
+            updated_at=now - timedelta(hours=25),
+        )
+        recent = await _make_idea(
+            session,
+            status="emerged",
+            updated_at=now - timedelta(hours=23),
+        )
+        working = await _make_idea(
+            session,
+            status="working",
+            updated_at=now - timedelta(days=3),
+        )
+
+        archived = await archive_dormant_emerged(session, now=now)
+
+        assert archived == 1
+        assert quiet.status == "archived"
+        assert quiet.archived_at == now
+        assert recent.status == "emerged"
+        assert working.status == "working"
+        log = await session.scalar(
+            select(IdeaStateLog).where(IdeaStateLog.idea_id == quiet.id)
+        )
+        assert log is not None
+        assert (log.from_state, log.to_state, log.trigger) == (
+            "emerged", "archived", ARCHIVE_TRIGGER
+        )
 
     async def test_list_by_org(self, repo, session):
         await _make_idea(session, org_id=ORG_1)

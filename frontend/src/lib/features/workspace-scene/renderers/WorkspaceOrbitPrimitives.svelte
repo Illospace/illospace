@@ -207,6 +207,7 @@
     treatment={blob.treatment}
     icon={blob.icon}
     attachmentCount={blob.attachmentCount}
+    originCue={blob.originCue}
     animated={true}
     interactive={true}
     dataId={blob.id}
