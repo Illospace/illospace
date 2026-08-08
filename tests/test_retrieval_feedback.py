@@ -150,6 +150,17 @@ class TestApplyRetrievalFeedback:
 
 @pytest.mark.requires_db
 class TestAnalyzeMissedMemories:
+    async def test_timestamp_column_is_timezone_aware(self, db_session):
+        data_type = await db_session.scalar(text("""
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'retrieval_log'
+              AND column_name = 'timestamp'
+        """))
+
+        assert data_type == "timestamp with time zone"
+
     async def test_identifies_consistently_missed(self, db_session, scoped_principal, unit_of_work_for_session):
         mid = await _ensure_test_memory(db_session, "always missed", salience=5.0)
         for _ in range(4):
@@ -199,6 +210,7 @@ class TestAnalyzeMissedMemoriesQuery:
             "cutoff": now - timedelta(days=30),
             "min_misses": 3,
         }
+        assert params["cutoff"].tzinfo is timezone.utc
 
 
 class TestAttentionUsefulnessAttribution:

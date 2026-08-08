@@ -79,6 +79,11 @@ async def gather_context(target_date: date, org_id: str | None = None) -> dict:
         except Exception as e:
             print(f"[reflect] Warning: retrieval feedback analysis failed: {e}")
             context["consistently_missed_memories"] = []
+            context.setdefault("scheduler_step_warnings", []).append({
+                "kind": "retrieval_feedback_analysis_failed",
+                "error_type": type(e).__name__,
+                "message": str(e)[:500],
+            })
 
         # 6. Today's task-like prompts, now sourced from agent_runs.input_message.
         result = await uow.session.execute(text("""
@@ -157,6 +162,22 @@ async def gather_context(target_date: date, org_id: str | None = None) -> dict:
             context["daily_log"] = (await read_text_async(daily_file))[:5000]
 
     return context
+
+
+def _emit_scheduler_step_result(context: dict) -> None:
+    """Emit one JSON line that the scheduler records in the step result."""
+    warnings = context.get("scheduler_step_warnings", [])
+    print(
+        json.dumps(
+            {
+                "scheduler_step_result": {
+                    "status": "completed_with_warnings" if warnings else "completed",
+                    "warnings": warnings,
+                }
+            },
+            default=str,
+        )
+    )
 
 
 def _format_failures_by_category(runs: list) -> str:
@@ -509,6 +530,7 @@ async def run_reflection(target_date: date):
 
     if total_data == 0:
         print("[reflect] No data to reflect on today. Skipping.")
+        _emit_scheduler_step_result(context)
         return
 
     print(f"[reflect] Data: {len(context['skill_executions'])} skill execs, "
@@ -563,6 +585,7 @@ async def run_reflection(target_date: date):
             print("[reflect] Main agent will process this on next wake-up.")
         else:
             print("[reflect] Pending reflection could not be persisted; nightly work will continue.")
+        _emit_scheduler_step_result(context)
         return
 
     # 5.5 Meta-skill analysis
@@ -601,6 +624,8 @@ async def run_reflection(target_date: date):
     except Exception as e:
         print(f"\n[quality] Sweep failed: {e}")
         reflection["quality_sweep_error"] = str(e)
+
+    _emit_scheduler_step_result(context)
 
 
 def main():

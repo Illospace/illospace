@@ -220,6 +220,9 @@ def _command_summary(proc: Any) -> dict[str, Any]:
     )
     if exception:
         summary["exception"] = exception
+    scheduler_step_result = _scheduler_step_result(getattr(proc, "stdout", None))
+    if scheduler_step_result is not None:
+        summary["scheduler_step_result"] = scheduler_step_result
     return summary
 
 
@@ -233,6 +236,14 @@ def _json_objects(text_value: str | None) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             objects.append(value)
     return objects
+
+
+def _scheduler_step_result(stdout: str | None) -> dict[str, Any] | None:
+    for payload in _json_objects(stdout):
+        result = payload.get("scheduler_step_result")
+        if isinstance(result, dict):
+            return result
+    return None
 
 
 def _configuration_skips_from_command(

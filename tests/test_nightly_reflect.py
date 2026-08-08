@@ -110,6 +110,27 @@ class TestGatherContextRegressions:
         assert "INTERVAL" not in str(statement)
         assert params == {"metrics_cutoff": date(2026, 7, 17)}
 
+    async def test_retrieval_feedback_failure_records_scheduler_warning(
+        self,
+        patch_reflect_uow,
+    ):
+        target = date(2026, 7, 24)
+
+        with patch("brain.kernel.config.JOURNAL_DIR", "/nonexistent/journal"), patch(
+            "brain.systems.memory.retrieval_feedback.analyze_missed_memories",
+            new=AsyncMock(side_effect=TypeError("naive/aware mismatch")),
+        ):
+            from brain.jobs.pipelines.nightly_reflect import gather_context
+
+            context = await gather_context(target)
+
+        assert context["consistently_missed_memories"] == []
+        assert context["scheduler_step_warnings"] == [{
+            "kind": "retrieval_feedback_analysis_failed",
+            "error_type": "TypeError",
+            "message": "naive/aware mismatch",
+        }]
+
     def test_connection_uses_context_manager(self):
         """Regression: must use a UnitOfWork/db connection context manager."""
         import inspect
