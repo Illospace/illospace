@@ -2391,12 +2391,34 @@ deploy_require_env_file() {
 
 deploy_meetbot_enabled() {
   local profiles
-  profiles="$(deploy_env_value COMPOSE_PROFILES)"
+  if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
+    profiles="$COMPOSE_PROFILES"
+  else
+    profiles="$(deploy_env_value COMPOSE_PROFILES)"
+  fi
   profiles=",${profiles// /,},"
   case "$profiles" in
+    *,\*,*) return 0 ;;
     *",meetbot,"*) return 0 ;;
   esac
-  [ -n "$(deploy_compose ps -q meetbot 2>/dev/null || true)" ]
+  [ -n "$(deploy_service_container_id meetbot)" ]
+}
+
+deploy_service_container_id() {
+  local service="$1" id oneoff
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    oneoff="$(
+      docker inspect --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' \
+        "$id" 2>/dev/null || true
+    )"
+    case "$oneoff" in
+      True|true|TRUE) continue ;;
+    esac
+    printf '%s\n' "$id"
+    return 0
+  done < <(deploy_compose ps --all -q "$service" 2>/dev/null || true)
+  return 0
 }
 
 deploy_ensure_env_file() {

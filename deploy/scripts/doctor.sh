@@ -22,6 +22,13 @@ runtime_checks=1
 tmp_running=""
 strict_credentials=0
 check_app_url=0
+compose_profiles_was_set=0
+compose_profiles_override=""
+
+if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
+  compose_profiles_was_set=1
+  compose_profiles_override="$COMPOSE_PROFILES"
+fi
 
 usage() {
   cat <<'EOF'
@@ -101,6 +108,11 @@ else
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
+  if [ "$compose_profiles_was_set" = "1" ]; then
+    export COMPOSE_PROFILES="$compose_profiles_override"
+  else
+    unset COMPOSE_PROFILES
+  fi
   [ "$check_app_url" = "0" ] || export ILLO_CHECK_APP_URL=1
 fi
 
@@ -235,12 +247,22 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       fi
     fi
 
+    meetbot_expected=0
+    if compose_service_enabled meetbot; then
+      meetbot_expected=1
+    fi
+
     services_to_check="$DOCTOR_REQUIRED_SERVICES"
-    if printf '%s\n' "$running" | grep -qx meetbot; then
+    if [ "$meetbot_expected" = "1" ]; then
       services_to_check="$services_to_check meetbot"
     fi
     for service in $services_to_check; do
-      printf '%s\n' "$running" | grep -qx "$service" || continue
+      if ! printf '%s\n' "$running" | grep -qx "$service"; then
+        if [ "$service" = "meetbot" ]; then
+          fail "configured meetbot is not running"
+        fi
+        continue
+      fi
       health="$(container_health "$service" || true)"
       case "$health" in
         healthy|running)
@@ -255,7 +277,7 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       esac
     done
 
-    if printf '%s\n' "$running" | grep -qx meetbot; then
+    if [ "$meetbot_expected" = "1" ] && printf '%s\n' "$running" | grep -qx meetbot; then
       meetbot_commit="$(
         compose exec -T meetbot python3 -c \
           'import os; print(os.environ.get("ILLO_BUILD_COMMIT", "unknown"))' \

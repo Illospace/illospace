@@ -469,7 +469,14 @@ def test_meetbot_changes_build_publish_update_and_report_the_running_commit():
     assert "pull_services+=(meetbot)" in upgrade
     assert "build_services+=(meetbot)" in upgrade
     assert "compose_profile_enabled" in runtime_lib
+    assert '${COMPOSE_PROFILES+x}' in runtime_lib
+    assert '*,\\*,*)' in runtime_lib
+    assert "ps --all -q" in runtime_lib
+    assert '${COMPOSE_PROFILES+x}' in launcher
+    assert 'com.docker.compose.oneoff' in runtime_lib
+    assert 'com.docker.compose.oneoff' in launcher
     assert "ILLO_BUILD_COMMIT" in runtime_lib
+    assert 'fail "configured meetbot is not running"' in doctor
     assert "meetbot build commit matches the checkout" in doctor
     assert "meetbot is stale" in doctor
     assert "ARG ILLO_BUILD_COMMIT=unknown" in dockerfile
@@ -477,6 +484,102 @@ def test_meetbot_changes_build_publish_update_and_report_the_running_commit():
     assert "ILLO_BUILD_COMMIT: ${ILLO_BUILD_COMMIT:-unknown}" in compose
     assert "COMPOSE_PROFILES=meetbot" in spec
     assert "./illo update --mode compose" in spec
+
+
+def test_meetbot_profile_detection_honors_shell_precedence_wildcard_and_stopped_container(tmp_path):
+    runtime_lib = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "scripts"
+        / "compose-runtime-lib.sh"
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("COMPOSE_PROFILES=slack\n")
+
+    shell_override = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{runtime_lib}"; compose_profile_enabled meetbot',
+        ],
+        env={**os.environ, "ENV_FILE": str(env_file), "COMPOSE_PROFILES": "meetbot"},
+        capture_output=True,
+        text=True,
+    )
+    assert shell_override.returncode == 0
+
+    env_file.write_text("COMPOSE_PROFILES=*\n")
+    wildcard = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'unset COMPOSE_PROFILES; source "{runtime_lib}"; compose_profile_enabled meetbot',
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {"ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+    assert wildcard.returncode == 0
+
+    env_file.write_text("COMPOSE_PROFILES=slack\n")
+    stopped_container = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'unset COMPOSE_PROFILES; source "{runtime_lib}"; '
+                'compose() { [ "$*" = "ps --all -q meetbot" ] && printf "stopped-id\\n"; }; '
+                "compose_service_enabled meetbot"
+            ),
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {"ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+    assert stopped_container.returncode == 0
+
+    oneoff_only = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'unset COMPOSE_PROFILES; source "{runtime_lib}"; '
+                'compose() { [ "$*" = "ps --all -q meetbot" ] && printf "oneoff-id\\n"; }; '
+                'docker() { [ "$1" = "inspect" ] && printf "true\\n"; }; '
+                "! compose_service_enabled meetbot"
+            ),
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {"ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+    assert oneoff_only.returncode == 0
+
+    launcher = (Path(__file__).resolve().parents[1] / "illo").read_text()
+    launcher_functions = []
+    for name in ("deploy_meetbot_enabled", "deploy_service_container_id"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", launcher, re.MULTILINE | re.DOTALL)
+        assert match is not None
+        launcher_functions.append(match.group(0))
+    launcher_oneoff_only = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(launcher_functions)
+            + "\n"
+            + 'deploy_env_value() { printf "slack\\n"; }\n'
+            + 'deploy_compose() { printf "oneoff-id\\n"; }\n'
+            + 'docker() { printf "true\\n"; }\n'
+            + "unset COMPOSE_PROFILES\n"
+            + "! deploy_meetbot_enabled\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert launcher_oneoff_only.returncode == 0
 
 
 def test_compose_worker_restart_asserts_exactly_one_running_worker():

@@ -43,9 +43,14 @@ PY
 
 compose_profile_enabled() {
   local profile="$1" profiles
-  profiles="$(compose_env_value COMPOSE_PROFILES)"
+  if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
+    profiles="$COMPOSE_PROFILES"
+  else
+    profiles="$(compose_env_value COMPOSE_PROFILES)"
+  fi
   profiles=",${profiles// /,},"
   case "$profiles" in
+    *,\*,*) return 0 ;;
     *",$profile,"*) return 0 ;;
   esac
   return 1
@@ -54,7 +59,7 @@ compose_profile_enabled() {
 compose_service_enabled() {
   local service="$1" profile="${2:-$1}"
   compose_profile_enabled "$profile" && return 0
-  [ -n "$(compose ps -q "$service" 2>/dev/null || true)" ]
+  [ -n "$(compose_service_container_id "$service")" ]
 }
 
 worker_swap_snapshot_acquire() {
@@ -131,6 +136,17 @@ container_is_oneoff() {
     True|true|TRUE) return 0 ;;
   esac
   return 1
+}
+
+compose_service_container_id() {
+  local service="$1" id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    container_is_oneoff "$id" && continue
+    printf '%s\n' "$id"
+    return 0
+  done < <(compose ps --all -q "$service" 2>/dev/null || true)
+  return 0
 }
 
 # `compose ps -q worker` lists the temporary `compose run` handoff workers next
