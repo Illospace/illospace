@@ -52,6 +52,37 @@ async def test_async_resolve_llm_client_rejects_anthropic_without_any_key():
     mock_build.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_async_resolve_subscription_only_openai_rejects_stored_org_api_key():
+    """ChatGPT-only models must not silently use an available org API key."""
+    from brain.platform.integrations.llm import async_resolve_llm_client
+
+    resolve_key = AsyncMock(return_value=("sk-org-openai-key", "org_openai"))
+    with patch(
+        "brain.platform.integrations.llm._async_resolve_key_from_db",
+        resolve_key,
+    ), patch(
+        "brain.platform.integrations.llm._allow_local_codex_auth_fallback",
+        return_value=False,
+    ), patch(
+        "brain.platform.integrations.llm._build_openai_client",
+    ) as build_api_key_client:
+        with pytest.raises(
+            RuntimeError,
+            match="No user Codex subscription is connected",
+        ):
+            await async_resolve_llm_client(
+                user_id="user-1",
+                org_id="org-1",
+                provider="openai",
+                auth_mode="chatgpt",
+                session=object(),
+            )
+
+    assert resolve_key.await_args.kwargs["auth_mode"] == "chatgpt"
+    build_api_key_client.assert_not_called()
+
+
 def test_resolve_llm_client_falls_back_to_env():
     """The sync resolver only uses local/env fallback auth."""
     from brain.platform.integrations.llm import resolve_llm_client

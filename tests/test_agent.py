@@ -330,39 +330,23 @@ async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(
 
 
 @pytest.mark.asyncio
-async def test_agent_uses_shared_key_fallback_when_personal_codex_connection_is_missing(monkeypatch):
-    from brain.platform.integrations.providers import LLMResponse, TextContentBlock, Usage
+async def test_agent_does_not_use_shared_key_for_subscription_only_fallback(monkeypatch):
     from brain.systems.runs.direct_agent import run_agent_async
 
-    llm = _mock_llm_client(MagicMock(), provider="openai")
     resolve = AsyncMock(
         side_effect=[
-            RuntimeError("No OpenAI auth found. Connect a Codex subscription or add an org OpenAI key in Illo."),
-            llm,
+            RuntimeError(
+                "No OpenAI auth found. Connect a Codex subscription or add an "
+                "org OpenAI key in Illo."
+            ),
+            RuntimeError("No user Codex subscription is connected."),
         ]
     )
-    seen_models = []
-
-    async def fake_api_call(_provider, request, *_args, **_kwargs):
-        seen_models.append(request.model)
-        return LLMResponse(
-            content=[TextContentBlock("Shared fallback succeeded")],
-            stop_reason="end_turn",
-            usage=Usage(input_tokens=3, output_tokens=2),
-            model="gpt-5.5",
-        )
 
     monkeypatch.setattr("brain.systems.runs.direct_agent.async_resolve_llm_client", resolve)
-    monkeypatch.setattr("brain.systems.runs.direct_agent.get_provider", lambda *_args: MagicMock())
-    monkeypatch.setattr("brain.systems.runs.direct_agent._api_call_with_retry_async", fake_api_call)
-    monkeypatch.setattr("brain.systems.runs.direct_agent._async_record_api_call", AsyncMock())
-    monkeypatch.setattr(
-        "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
-        AsyncMock(),
-    )
 
     result = await run_agent_async(
-        "Test shared fallback",
+        "Test subscription fallback",
         model="openai/gpt-5.6-sol",
         thinking="xhigh",
         tools=[],
@@ -373,15 +357,12 @@ async def test_agent_uses_shared_key_fallback_when_personal_codex_connection_is_
         org_id="org-1",
     )
 
-    assert result.success is True
-    assert seen_models == ["gpt-5.5"]
-    assert [call.kwargs["auth_mode"] for call in resolve.await_args_list] == ["chatgpt", None]
-    assert result.effective_routing == {
-        "model": "openai/gpt-5.5",
-        "effort": "xhigh",
-        "provider": "openai",
-        "auth_mode": "api_key",
-    }
+    assert result.success is False
+    assert result.error == "No user Codex subscription is connected."
+    assert [call.kwargs["auth_mode"] for call in resolve.await_args_list] == [
+        "chatgpt",
+        "chatgpt",
+    ]
 
 class TestLiveGuidance:
     async def test_append_live_guidance_adds_user_message(self):
