@@ -162,6 +162,20 @@ The UI locale and caption language are independent. Meet's controls stay in Engl
 the text-based DOM selectors remain deterministic, while captions use the meeting's
 spoken language (French by default) to prevent translation, garbage, or empty output.
 
+### Deployment path
+
+Changes under `meetbot/**` build and test `ghcr.io/illospace/meetbot` in the container
+image workflow. A merge to `main` publishes both the commit tag and `latest`.
+
+To enable the optional service, set `COMPOSE_PROFILES=meetbot` in
+`deploy/compose/.env`, configure the meetbot variables above, and run
+`./illo deploy up`. Normal `./illo update --mode compose` and
+`./illo deploy upgrade` calls then include meetbot whenever its profile is enabled or
+its container is already running. Local build paths pass the current Git commit into
+the image. `./illo deploy doctor` reports that commit and fails when the running
+meetbot does not match the checkout. The public `/healthz` response exposes the same
+commit without requiring the meetbot token.
+
 ## Slices
 
 - **S-A (meetbot service)**: everything under "Component 1" + Dockerfile + compose

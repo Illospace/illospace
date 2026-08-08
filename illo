@@ -2345,7 +2345,10 @@ deploy_ensure_docker() {
 }
 
 deploy_compose() {
-  docker compose --env-file "$(deploy_compose_env_file)" -f "$(deploy_compose_file)" "$@"
+  local build_commit
+  build_commit="${ILLO_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+  ILLO_BUILD_COMMIT="$build_commit" \
+    docker compose --env-file "$(deploy_compose_env_file)" -f "$(deploy_compose_file)" "$@"
 }
 
 deploy_env_value() {
@@ -2386,6 +2389,38 @@ deploy_require_env_file() {
   fi
 }
 
+deploy_meetbot_enabled() {
+  local profiles
+  if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
+    profiles="$COMPOSE_PROFILES"
+  else
+    profiles="$(deploy_env_value COMPOSE_PROFILES)"
+  fi
+  profiles=",${profiles// /,},"
+  case "$profiles" in
+    *,\*,*) return 0 ;;
+    *",meetbot,"*) return 0 ;;
+  esac
+  [ -n "$(deploy_service_container_id meetbot)" ]
+}
+
+deploy_service_container_id() {
+  local service="$1" id oneoff
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    oneoff="$(
+      docker inspect --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' \
+        "$id" 2>/dev/null || true
+    )"
+    case "$oneoff" in
+      True|true|TRUE) continue ;;
+    esac
+    printf '%s\n' "$id"
+    return 0
+  done < <(deploy_compose ps --all -q "$service" 2>/dev/null || true)
+  return 0
+}
+
 deploy_ensure_env_file() {
   if [ -f "$(deploy_compose_env_file)" ]; then
     return 0
@@ -2417,6 +2452,7 @@ deploy_up() {
   local build=0
   local pull=1
   local doctor=1
+  local meetbot_enabled=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2445,17 +2481,30 @@ deploy_up() {
 
   deploy_ensure_env_file || return 1
   deploy_ensure_docker || return 1
+  if deploy_meetbot_enabled; then
+    meetbot_enabled=1
+  fi
 
   if [ "$pull" = "1" ]; then
-    if ! deploy_compose pull; then
-      warn "Image pull failed; building API and web images locally instead."
+    local pull_status=0
+    deploy_compose pull || pull_status=$?
+    if [ "$meetbot_enabled" = "1" ]; then
+      deploy_compose pull meetbot || pull_status=$?
+    fi
+    if [ "$pull_status" -ne 0 ]; then
+      warn "Image pull failed; building selected images locally instead."
       build=1
     fi
   fi
   if [ "$build" = "1" ]; then
-    deploy_compose build api web updater || return 1
+    local build_services=(api web updater)
+    [ "$meetbot_enabled" = "0" ] || build_services+=(meetbot)
+    deploy_compose build "${build_services[@]}" || return 1
   fi
   deploy_compose up -d || return 1
+  if [ "$meetbot_enabled" = "1" ]; then
+    deploy_compose up -d --no-deps meetbot || return 1
+  fi
   if [ "$doctor" = "1" ]; then
     "$ROOT/deploy/scripts/doctor.sh"
   fi

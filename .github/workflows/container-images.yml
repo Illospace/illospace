@@ -19,6 +19,7 @@ on:
       - "pyproject.toml"
       - "alembic.ini"
       - "ops/install-browser-runtime.sh"
+      - "meetbot/**"
       - ".github/workflows/container-images.yml"
   workflow_dispatch:
 
@@ -39,6 +40,7 @@ jobs:
       api: ${{ steps.selected.outputs.api }}
       web: ${{ steps.selected.outputs.web }}
       updater: ${{ steps.selected.outputs.updater }}
+      meetbot: ${{ steps.selected.outputs.meetbot }}
 
     steps:
       - name: Check out repository
@@ -72,6 +74,12 @@ jobs:
               - "deploy/scripts/self-update-daemon.sh"
               - "deploy/scripts/self-update-healthcheck.sh"
               - ".github/workflows/container-images.yml"
+            meetbot:
+              - ".dockerignore"
+              - "meetbot/**"
+              - "deploy/docker/meetbot.Dockerfile"
+              - "deploy/docker/meetbot-entrypoint.sh"
+              - ".github/workflows/container-images.yml"
 
       - name: Select images
         id: selected
@@ -80,10 +88,12 @@ jobs:
             echo "api=${{ steps.filter.outputs.api }}" >> "$GITHUB_OUTPUT"
             echo "web=${{ steps.filter.outputs.web }}" >> "$GITHUB_OUTPUT"
             echo "updater=${{ steps.filter.outputs.updater }}" >> "$GITHUB_OUTPUT"
+            echo "meetbot=${{ steps.filter.outputs.meetbot }}" >> "$GITHUB_OUTPUT"
           else
             echo "api=true" >> "$GITHUB_OUTPUT"
             echo "web=true" >> "$GITHUB_OUTPUT"
             echo "updater=true" >> "$GITHUB_OUTPUT"
+            echo "meetbot=true" >> "$GITHUB_OUTPUT"
           fi
 
   build-api:
@@ -227,5 +237,55 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}
+
+  build-meetbot:
+    name: Build meetbot image
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.meetbot == 'true'
+    env:
+      IMAGE_NAME: meetbot
+      DOCKERFILE: deploy/docker/meetbot.Dockerfile
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/illospace/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ILLO_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=${{ env.IMAGE_NAME }}
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}

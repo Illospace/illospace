@@ -57,11 +57,18 @@ COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS="${ILLO_COMPOSE_WORKER_DRAIN_TIMEOU
 
 source "$SCRIPT_DIR/compose-runtime-lib.sh"
 
+MEETBOT_ENABLED=0
+if compose_service_enabled meetbot; then
+  MEETBOT_ENABLED=1
+fi
+
 non_worker_services() {
+  printf '%s\n' api scheduler web
+  [ "$MEETBOT_ENABLED" = "0" ] || printf '%s\n' meetbot
   if [ "$SKIP_UPDATER_RESTART" = "1" ]; then
-    printf '%s\n' api scheduler web
+    return 0
   else
-    printf '%s\n' api scheduler web updater
+    printf '%s\n' updater
   fi
 }
 
@@ -84,17 +91,21 @@ schedule_updater_refresh_after_self_update() {
 }
 
 if [ "$PULL" = "1" ]; then
-  compose pull postgres api web updater || {
+  pull_services=(postgres api web updater)
+  [ "$MEETBOT_ENABLED" = "0" ] || pull_services+=(meetbot)
+  compose pull "${pull_services[@]}" || {
     echo "Image pull failed. If release images are not published yet, rerun with --build." >&2
     exit 1
   }
 fi
 
 if [ "$BUILD" = "1" ]; then
+  build_services=(api web updater)
+  [ "$MEETBOT_ENABLED" = "0" ] || build_services+=(meetbot)
   if [ "$BUILD_NO_CACHE" = "1" ]; then
-    compose build --no-cache api web updater
+    compose build --no-cache "${build_services[@]}"
   else
-    compose build api web updater
+    compose build "${build_services[@]}"
   fi
 fi
 

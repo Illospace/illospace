@@ -22,6 +22,13 @@ runtime_checks=1
 tmp_running=""
 strict_credentials=0
 check_app_url=0
+compose_profiles_was_set=0
+compose_profiles_override=""
+
+if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
+  compose_profiles_was_set=1
+  compose_profiles_override="$COMPOSE_PROFILES"
+fi
 
 usage() {
   cat <<'EOF'
@@ -101,6 +108,11 @@ else
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
+  if [ "$compose_profiles_was_set" = "1" ]; then
+    export COMPOSE_PROFILES="$compose_profiles_override"
+  else
+    unset COMPOSE_PROFILES
+  fi
   [ "$check_app_url" = "0" ] || export ILLO_CHECK_APP_URL=1
 fi
 
@@ -235,8 +247,22 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       fi
     fi
 
-    for service in $DOCTOR_REQUIRED_SERVICES; do
-      printf '%s\n' "$running" | grep -qx "$service" || continue
+    meetbot_expected=0
+    if compose_service_enabled meetbot; then
+      meetbot_expected=1
+    fi
+
+    services_to_check="$DOCTOR_REQUIRED_SERVICES"
+    if [ "$meetbot_expected" = "1" ]; then
+      services_to_check="$services_to_check meetbot"
+    fi
+    for service in $services_to_check; do
+      if ! printf '%s\n' "$running" | grep -qx "$service"; then
+        if [ "$service" = "meetbot" ]; then
+          fail "configured meetbot is not running"
+        fi
+        continue
+      fi
       health="$(container_health "$service" || true)"
       case "$health" in
         healthy|running)
@@ -250,6 +276,22 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
           ;;
       esac
     done
+
+    if [ "$meetbot_expected" = "1" ] && printf '%s\n' "$running" | grep -qx meetbot; then
+      meetbot_commit="$(
+        compose exec -T meetbot python3 -c \
+          'import os; print(os.environ.get("ILLO_BUILD_COMMIT", "unknown"))' \
+          2>/dev/null || true
+      )"
+      expected_commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+      if [ -z "$meetbot_commit" ] || [ "$meetbot_commit" = "unknown" ]; then
+        fail "meetbot build commit is unknown"
+      elif [ "$meetbot_commit" != "$expected_commit" ]; then
+        fail "meetbot is stale: running commit $meetbot_commit, checkout commit $expected_commit"
+      else
+        pass "meetbot build commit matches the checkout: $meetbot_commit"
+      fi
+    fi
 
     queue_health_output=""
     queue_health_status=0

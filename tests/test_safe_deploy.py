@@ -276,7 +276,8 @@ def test_illo_exposes_native_default_dev_mode_and_compose_deploy():
     assert "deploy" in content
     assert 'deploy_command "${@:2}"' in content
     assert 'update_command "${@:2}"' in content
-    assert "deploy_compose build api web updater" in content
+    assert "local build_services=(api web updater)" in content
+    assert "build_services+=(meetbot)" in content
     assert "--no-next" in content
     assert "worker-status" not in content
     assert "worker-drain" not in content
@@ -424,7 +425,8 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert 'source "$COMPOSE_RUNTIME_LIB_DIR/worker-swap-lib.sh"' in runtime_lib
     assert "worker_swap_snapshot_acquire" in runtime_lib
     assert "non_worker_services" in upgrade
-    assert "api scheduler web updater" in upgrade
+    assert "printf '%s\\n' api scheduler web" in upgrade
+    assert 'printf \'%s\\n\' updater' in upgrade
     assert "ILLO_COMPOSE_SKIP_UPDATER_RESTART" in upgrade
     assert "schedule_updater_refresh_after_self_update" in upgrade
     assert "ILLO_COMPOSE_UPDATER_SELF_REFRESH_DELAY_SECONDS" in upgrade
@@ -449,6 +451,142 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "assert_single_running_worker" in upgrade
     assert "ILLO_COMPOSE_BUILD_NO_CACHE" in upgrade
     assert "ILLO_COMPOSE_WORKER_DRAIN_TIMEOUT_FILE" in upgrade
+
+
+def test_meetbot_changes_build_publish_update_and_report_the_running_commit():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "container-images.yml").read_text()
+    launcher = (root / "illo").read_text()
+    runtime_lib = (root / "deploy" / "scripts" / "compose-runtime-lib.sh").read_text()
+    upgrade = (root / "deploy" / "scripts" / "upgrade.sh").read_text()
+    doctor = (root / "deploy" / "scripts" / "doctor.sh").read_text()
+    dockerfile = (root / "deploy" / "docker" / "meetbot.Dockerfile").read_text()
+    compose = (root / "deploy" / "compose" / "docker-compose.yml").read_text()
+    spec = (root / "specs" / "meetbot" / "README.md").read_text()
+
+    assert '      meetbot: ${{ steps.selected.outputs.meetbot }}' in workflow
+    assert '              - "meetbot/**"' in workflow
+    assert "  build-meetbot:" in workflow
+    assert "IMAGE_NAME: meetbot" in workflow
+    assert "ILLO_BUILD_COMMIT=${{ github.sha }}" in workflow
+    assert "deploy_meetbot_enabled" in launcher
+    assert "build_services+=(meetbot)" in launcher
+    assert "up -d --no-deps meetbot" in launcher
+    assert "compose_service_enabled meetbot" in upgrade
+    assert "pull_services+=(meetbot)" in upgrade
+    assert "build_services+=(meetbot)" in upgrade
+    assert "compose_profile_enabled" in runtime_lib
+    assert '${COMPOSE_PROFILES+x}' in runtime_lib
+    assert '*,\\*,*)' in runtime_lib
+    assert "ps --all -q" in runtime_lib
+    assert '${COMPOSE_PROFILES+x}' in launcher
+    assert 'com.docker.compose.oneoff' in runtime_lib
+    assert 'com.docker.compose.oneoff' in launcher
+    assert "ILLO_BUILD_COMMIT" in runtime_lib
+    assert 'fail "configured meetbot is not running"' in doctor
+    assert "meetbot build commit matches the checkout" in doctor
+    assert "meetbot is stale" in doctor
+    assert "ARG ILLO_BUILD_COMMIT=unknown" in dockerfile
+    assert "org.opencontainers.image.revision" in dockerfile
+    assert "ILLO_BUILD_COMMIT: ${ILLO_BUILD_COMMIT:-unknown}" in compose
+    assert "COMPOSE_PROFILES=meetbot" in spec
+    assert "./illo update --mode compose" in spec
+
+
+def test_meetbot_profile_detection_honors_shell_precedence_wildcard_and_stopped_container(tmp_path):
+    runtime_lib = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "scripts"
+        / "compose-runtime-lib.sh"
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("COMPOSE_PROFILES=slack\n")
+
+    shell_override = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{runtime_lib}"; compose_profile_enabled meetbot',
+        ],
+        env={**os.environ, "ENV_FILE": str(env_file), "COMPOSE_PROFILES": "meetbot"},
+        capture_output=True,
+        text=True,
+    )
+    assert shell_override.returncode == 0
+
+    env_file.write_text("COMPOSE_PROFILES=*\n")
+    wildcard = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'unset COMPOSE_PROFILES; source "{runtime_lib}"; compose_profile_enabled meetbot',
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {"ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+    assert wildcard.returncode == 0
+
+    env_file.write_text("COMPOSE_PROFILES=slack\n")
+    stopped_container = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'unset COMPOSE_PROFILES; source "{runtime_lib}"; '
+                'compose() { [ "$*" = "ps --all -q meetbot" ] && printf "stopped-id\\n"; }; '
+                "compose_service_enabled meetbot"
+            ),
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {"ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+    assert stopped_container.returncode == 0
+
+    oneoff_only = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'unset COMPOSE_PROFILES; source "{runtime_lib}"; '
+                'compose() { [ "$*" = "ps --all -q meetbot" ] && printf "oneoff-id\\n"; }; '
+                'docker() { [ "$1" = "inspect" ] && printf "true\\n"; }; '
+                "! compose_service_enabled meetbot"
+            ),
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {"ENV_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+    )
+    assert oneoff_only.returncode == 0
+
+    launcher = (Path(__file__).resolve().parents[1] / "illo").read_text()
+    launcher_functions = []
+    for name in ("deploy_meetbot_enabled", "deploy_service_container_id"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", launcher, re.MULTILINE | re.DOTALL)
+        assert match is not None
+        launcher_functions.append(match.group(0))
+    launcher_oneoff_only = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(launcher_functions)
+            + "\n"
+            + 'deploy_env_value() { printf "slack\\n"; }\n'
+            + 'deploy_compose() { printf "oneoff-id\\n"; }\n'
+            + 'docker() { printf "true\\n"; }\n'
+            + "unset COMPOSE_PROFILES\n"
+            + "! deploy_meetbot_enabled\n",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert launcher_oneoff_only.returncode == 0
 
 
 def test_compose_worker_restart_asserts_exactly_one_running_worker():
