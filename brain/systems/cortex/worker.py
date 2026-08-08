@@ -6,9 +6,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 import logging
+import math
 import os
 import signal
+import threading
 import time
+from typing import NoReturn
 
 from brain.contracts.worker_lifecycle import (
     WorkerLifecyclePhase,
@@ -36,8 +39,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cortex.worker")
 
+_SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS = 60.0
+_SELF_RESTART_SHUTDOWN_GRACE_SECONDS = 30.0
+
 _running = True
 _draining = False
+_restarting_for_health = False
 _terminate_process = os._exit
 
 
@@ -90,6 +97,70 @@ def _shutdown_drain_timeout_seconds() -> float | None:
             raw,
         )
         return None
+
+
+def _self_restart_drain_timeout_seconds() -> float:
+    """Bound the drain when the worker exits to restore its own claiming capacity.
+
+    A deploy drains indefinitely on purpose: the handoff worker is already
+    claiming, so in-flight runs may finish at leisure. A health self-exit has no
+    handoff — nothing else claims — and the run that wedged the worker is the
+    very thing the drain would wait on. Waiting without a floor turns the
+    restart that was meant to clear the queue into a permanent outage, so this
+    timeout never resolves to "forever".
+    """
+    raw = os.getenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    # ``float`` accepts "infinity", the value the deploy path uses, so an
+    # operator copying that setting across would restore the deadlock.
+    if not math.isfinite(seconds):
+        logger.warning(
+            "invalid ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS=%r; draining for %ss",
+            raw,
+            _SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS,
+        )
+        return _SELF_RESTART_DRAIN_TIMEOUT_DEFAULT_SECONDS
+    return max(0.0, seconds)
+
+
+def _exit_for_restart(message: str, **extra: object) -> NoReturn:
+    """Record why the worker is unhealthy and exit so the container restarts it.
+
+    Every caller has already established that this process can no longer do its
+    job, so reaching ``_terminate_process`` is the point of the exit rather than
+    a detail of it. ``_restarting_for_health`` tells the shutdown path that no
+    other worker is covering the queue.
+    """
+    global _restarting_for_health
+    _restarting_for_health = True
+    logger.error(message, extra=extra)
+    raise SystemExit(1)
+
+
+def _arm_self_restart_watchdog(timeout_seconds: float) -> threading.Timer:
+    """Guarantee process exit even if the shutdown sequence itself wedges.
+
+    Only the exit restores claiming capacity, and every step between here and it
+    — draining, requeuing, stopping the cycle scheduler, joining the supervisor
+    — can block on the same wedged run or database the worker is escaping.
+    """
+
+    def _force_exit() -> None:
+        logger.error(
+            "agent-run worker shutdown exceeded %ss after a health exit; terminating",
+            timeout_seconds,
+        )
+        _terminate_process(1)
+
+    watchdog = threading.Timer(timeout_seconds, _force_exit)
+    watchdog.daemon = True
+    watchdog.start()
+    return watchdog
 
 
 def _runner_health_grace_seconds() -> float:
@@ -175,13 +246,14 @@ def _recover_timed_out_runs(drain_result: DrainResult) -> None:
 
 
 def main() -> None:
-    global _draining
+    global _draining, _restarting_for_health
     exit_code = 0
     cycle_scheduler_enabled = False
     if _running:
         # ``main`` runs once in production. Resetting here also keeps direct
         # invocation in tests independent without erasing a pre-start signal.
         _draining = False
+        _restarting_for_health = False
     try:
         _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STARTING)
         logger.info("starting agent-run worker")
@@ -212,11 +284,10 @@ def main() -> None:
             if health.get("runner_running"):
                 last_healthy = now
             elif now - last_healthy > health_grace_seconds:
-                logger.error(
+                _exit_for_restart(
                     "agent-run worker runner supervisor unhealthy; exiting for restart",
-                    extra={"runner_health": health},
+                    runner_health=health,
                 )
-                raise SystemExit(1)
 
             if queue_stall_monitor.should_check(now=now):
                 try:
@@ -226,21 +297,18 @@ def main() -> None:
                 else:
                     stale_for_seconds = queue_stall_monitor.observe(queue_health, now=now)
                     if stale_for_seconds is not None:
-                        logger.error(
+                        _exit_for_restart(
                             "agent-run worker queue stalled; exiting for restart",
-                            extra={
-                                "queue_health": {
-                                    **asdict(queue_health),
-                                    "oldest_queued_at": (
-                                        queue_health.oldest_queued_at.isoformat()
-                                        if queue_health.oldest_queued_at
-                                        else None
-                                    ),
-                                },
-                                "stale_for_seconds": stale_for_seconds,
+                            queue_health={
+                                **asdict(queue_health),
+                                "oldest_queued_at": (
+                                    queue_health.oldest_queued_at.isoformat()
+                                    if queue_health.oldest_queued_at
+                                    else None
+                                ),
                             },
+                            stale_for_seconds=stale_for_seconds,
                         )
-                        raise SystemExit(1)
 
             if cycle_scheduler_enabled:
                 seconds_since_last_tick = seconds_since_last_cycle_tick()
@@ -248,11 +316,10 @@ def main() -> None:
                     seconds_since_last_tick is not None
                     and seconds_since_last_tick > cycle_scheduler_stall_grace_seconds
                 ):
-                    logger.error(
+                    _exit_for_restart(
                         "cycle scheduler wedged; exiting for restart",
-                        extra={"seconds_since_last_tick": seconds_since_last_tick},
+                        seconds_since_last_tick=seconds_since_last_tick,
                     )
-                    raise SystemExit(1)
             time.sleep(_poll_interval())
     except SystemExit as exc:
         exit_code = exc.code if isinstance(exc.code, int) else 1
@@ -263,11 +330,17 @@ def main() -> None:
         exit_code = 1
         raise
     finally:
+        watchdog = None
         try:
+            if _restarting_for_health:
+                drain_timeout_seconds = _self_restart_drain_timeout_seconds()
+                watchdog = _arm_self_restart_watchdog(
+                    drain_timeout_seconds + _SELF_RESTART_SHUTDOWN_GRACE_SECONDS
+                )
+            else:
+                drain_timeout_seconds = _shutdown_drain_timeout_seconds()
             _begin_draining()
-            drain_result = stop_runner(
-                drain_timeout_seconds=_shutdown_drain_timeout_seconds()
-            )
+            drain_result = stop_runner(drain_timeout_seconds=drain_timeout_seconds)
             _recover_timed_out_runs(drain_result)
             if cycle_scheduler_enabled:
                 stop_cycle_scheduler()
@@ -275,6 +348,8 @@ def main() -> None:
             logger.exception("agent-run worker shutdown failed")
             exit_code = 1
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
             _publish_worker_lifecycle_phase(WorkerLifecyclePhase.STOPPED)
             logger.info("agent-run worker stopped")
             logging.shutdown()

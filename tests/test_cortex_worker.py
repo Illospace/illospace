@@ -1,4 +1,5 @@
 import signal
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -364,6 +365,159 @@ def test_worker_entry_point_recovers_timed_out_runs(monkeypatch, caplog):
 
     assert calls == [((2330,), "worker_shutdown_drain_timeout")]
     assert "interrupted and requeued run ids: [2330]" in caplog.text
+
+
+def test_self_restart_drain_timeout_defaults_to_one_minute(monkeypatch):
+    from brain.systems.cortex.worker import _self_restart_drain_timeout_seconds
+
+    monkeypatch.delenv(
+        "ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", raising=False
+    )
+
+    assert _self_restart_drain_timeout_seconds() == 60.0
+
+
+def test_self_restart_drain_timeout_accepts_numeric_override(monkeypatch):
+    from brain.systems.cortex.worker import _self_restart_drain_timeout_seconds
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "12.5")
+
+    assert _self_restart_drain_timeout_seconds() == 12.5
+
+
+def test_self_restart_drain_timeout_is_never_indefinite(monkeypatch):
+    from brain.systems.cortex.worker import _self_restart_drain_timeout_seconds
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "infinity")
+
+    assert _self_restart_drain_timeout_seconds() == 60.0
+
+
+def _run_main_until_queue_stall(monkeypatch, *, stop_runner):
+    """Drive ``main`` through the queue-stall watchdog with the deploy env set."""
+    from brain.systems.cortex import worker
+
+    class StalledQueueMonitor:
+        def should_check(self, *, now):
+            return True
+
+        def observe(self, _queue_health, *, now):
+            return 90
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS", "infinity")
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", lambda _phase: None)
+    monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: False)
+    monkeypatch.setattr(worker, "start_runner", lambda: None)
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
+    monkeypatch.setattr(worker, "runner_health_snapshot", lambda: {"runner_running": True})
+    monkeypatch.setattr(worker, "QueueStallMonitor", lambda **_kwargs: StalledQueueMonitor())
+    monkeypatch.setattr(
+        worker,
+        "queued_backlog_health_snapshot_async",
+        lambda: _async_queue_health(),
+    )
+    monkeypatch.setattr(worker, "stop_runner", stop_runner)
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    return worker
+
+
+async def _async_queue_health():
+    return _queue_health(stale_queued_backlog=True)
+
+
+def test_health_exit_drains_with_a_floor_even_when_deploy_drain_is_infinite(monkeypatch):
+    """A wedged run must not hold the process open when nothing else claims.
+
+    On 2026-08-08 the queue-stall watchdog fired, the drain inherited the
+    deploy's ``infinity`` setting, and the run that wedged the worker kept
+    ``runner_in_flight_count()`` above zero forever. The process never exited,
+    so ``restart: unless-stopped`` never fired and the queue stayed dead behind
+    a green ``docker ps``.
+    """
+    from brain.systems.cortex import worker
+
+    drain_timeouts = []
+    terminate_calls = []
+
+    def stop_runner(*, drain_timeout_seconds):
+        drain_timeouts.append(drain_timeout_seconds)
+        if drain_timeout_seconds is None:
+            raise AssertionError("unbounded drain would wait on the wedged run forever")
+        return worker.DrainResult(timed_out_run_ids=(15747,))
+
+    worker_module = _run_main_until_queue_stall(monkeypatch, stop_runner=stop_runner)
+    recovered = []
+    monkeypatch.setattr(worker_module, "_recover_timed_out_runs", recovered.append)
+    monkeypatch.setattr(worker_module, "_terminate_process", terminate_calls.append)
+
+    with pytest.raises(SystemExit) as exc_info:
+        worker_module.main()
+
+    assert exc_info.value.code == 1
+    assert drain_timeouts == [60.0]
+    assert [result.timed_out_run_ids for result in recovered] == [(15747,)]
+    assert terminate_calls == [1]
+
+
+def test_deploy_sigterm_keeps_the_unbounded_drain(monkeypatch):
+    """The handoff worker is already claiming, so long runs may finish."""
+    from brain.systems.cortex import worker
+
+    drain_timeouts = []
+
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS", "infinity")
+    monkeypatch.setattr(worker, "_running", True)
+    monkeypatch.setattr(worker, "_publish_worker_lifecycle_phase", lambda _phase: None)
+    monkeypatch.setattr(worker, "_require_embedding_backend_ready", lambda: None)
+    monkeypatch.setattr(worker, "_cycle_scheduler_enabled", lambda: False)
+    monkeypatch.setattr(
+        worker,
+        "start_runner",
+        lambda: worker._signal_handler(signal.SIGTERM, None),
+    )
+    monkeypatch.setattr(worker, "request_runner_stop", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "stop_runner",
+        lambda *, drain_timeout_seconds: drain_timeouts.append(drain_timeout_seconds)
+        or worker.DrainResult(),
+    )
+    monkeypatch.setattr(worker.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(worker, "_terminate_process", lambda _code: None)
+
+    worker.main()
+
+    assert drain_timeouts == [None]
+
+
+def test_health_exit_terminates_even_when_the_shutdown_sequence_hangs(monkeypatch):
+    """Only the exit restores claiming capacity, so no step may hold it hostage."""
+    from brain.systems.cortex import worker
+
+    terminated = threading.Event()
+    terminate_calls = []
+
+    def stop_runner(*, drain_timeout_seconds):
+        # Stands in for a drain, requeue or scheduler stop that never returns.
+        terminated.wait(timeout=5.0)
+        return worker.DrainResult()
+
+    def terminate(code):
+        terminate_calls.append(code)
+        terminated.set()
+
+    worker_module = _run_main_until_queue_stall(monkeypatch, stop_runner=stop_runner)
+    monkeypatch.setattr(worker_module, "_SELF_RESTART_SHUTDOWN_GRACE_SECONDS", 0.05)
+    monkeypatch.setenv("ILLO_AGENT_RUNNER_SELF_RESTART_DRAIN_TIMEOUT_SECONDS", "0")
+    monkeypatch.setattr(worker_module, "_terminate_process", terminate)
+
+    with pytest.raises(SystemExit):
+        worker_module.main()
+
+    assert terminated.is_set()
+    assert terminate_calls[0] == 1
 
 
 def test_signal_handler_requests_runner_stop(monkeypatch):
