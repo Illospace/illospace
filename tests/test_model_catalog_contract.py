@@ -110,5 +110,20 @@ def test_ollama_qwen_uses_free_local_catalog_contract():
     assert entry.availability_fallback == "openai/gpt-5.6-luna"
     assert entry.context_window_tokens == 32_768
     assert entry.supported_effort_tiers == ("none",)
-    assert contract["auth_requirement"] == "api_key"
+    assert contract["auth_requirement"] == "none"
     assert RuntimeModelCatalogEntry.model_validate(contract).provider == "ollama"
+
+
+def test_runtime_schema_validates_every_catalog_contract_entry():
+    from brain.platform.providers.model_policy import get_model_catalog_contract
+    from brain.systems.runtime_settings.schemas import RuntimeModelCatalogEntry
+
+    contract = get_model_catalog_contract()
+
+    validated_entries = [
+        RuntimeModelCatalogEntry.model_validate(item)
+        for item in contract
+    ]
+    assert [entry.id for entry in validated_entries] == [
+        item["id"] for item in contract
+    ]

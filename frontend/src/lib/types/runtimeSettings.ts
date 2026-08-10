@@ -18,7 +18,7 @@ export interface RuntimeModelCatalogEntry {
   provider: 'openai' | 'anthropic' | 'ollama';
   description: string;
   supported_effort_tiers: RuntimeThinking[];
-  auth_requirement: 'chatgpt' | 'api_key';
+  auth_requirement: 'chatgpt' | 'api_key' | 'none';
   availability_fallback?: string | null;
   default_provenance: {
     provider_default: boolean;

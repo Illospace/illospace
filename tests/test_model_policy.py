@@ -254,7 +254,7 @@ class TestModelPolicy:
         assert by_id["anthropic/claude-haiku-4-5"]["supported_effort_tiers"] == [
             "none"
         ]
-        assert by_id["ollama/qwen3.6-27b"]["auth_requirement"] == "api_key"
+        assert by_id["ollama/qwen3.6-27b"]["auth_requirement"] == "none"
         assert by_id["ollama/qwen3.6-27b"]["supported_effort_tiers"] == ["none"]
         assert not {
             "openai/o3-mini",
