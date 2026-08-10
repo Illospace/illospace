@@ -14,7 +14,7 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
+from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM, RAW_TEXT_MAX_CHARS
 from brain.platform.db.models.knowledge import (
     KnowledgeItem,
     KnowledgeItemEmbedding,
@@ -44,7 +44,6 @@ from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 
 logger = logging.getLogger(__name__)
 
-RAW_TEXT_MAX_CHARS = 20_000
 _ENUMERATION_ERRORS_KEY = "enumeration_errors"
 
 
