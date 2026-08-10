@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.schema import CreateIndex
 
 from brain.platform.db.models.storage_policy import StoragePolicy
 from brain.systems.storage_policy import (
@@ -17,12 +18,7 @@ async def session(async_sqlite_session_factory):
     session = await async_sqlite_session_factory([StoragePolicy.__table__])
     connection = await session.connection()
     for index in StoragePolicy.__table__.indexes:
-        await connection.run_sync(
-            lambda sync_connection, policy_index=index: policy_index.create(
-                sync_connection,
-                checkfirst=True,
-            )
-        )
+        await connection.execute(CreateIndex(index, if_not_exists=True))
     session.add(
         StoragePolicy(
             finished_workspace_retention_hours=48,
