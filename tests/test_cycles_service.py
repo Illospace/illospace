@@ -34,10 +34,12 @@ from brain.systems.cycles.promotion_readiness import (
 )
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import (
+    BehaviorChangeAudit,
     Cycle,
     CycleFailureGuardLatch,
     CycleFailureGuardObservation,
     CycleFailureGuardTriggerState,
+    CycleGuidance,
     CycleRevision,
     CycleRun,
     CycleRunEvaluation,
@@ -317,10 +319,46 @@ class _RouterCycleSession:
         self.committed = False
 
     async def scalars(self, statement):
+        sql = str(statement)
+        if "FROM cycle_guidance" in sql:
+            return _AllResult(
+                row
+                for row in self.added
+                if isinstance(row, CycleGuidance) and row.is_active
+            )
         return _RouterCycleResult(self._cycle)
 
     async def execute(self, statement):
+        if "max(cycle_revisions.revision_number)" in str(statement):
+            return _FirstResult(
+                max(
+                    (
+                        row.revision_number
+                        for row in self.added
+                        if isinstance(row, CycleRevision)
+                    ),
+                    default=0,
+                )
+            )
         return _FirstResult((self._cycle.target_idea_id,))
+
+    async def scalar(self, statement):
+        sql = str(statement)
+        if "max(behavior_change_audits.version)" in sql:
+            return max(
+                (
+                    row.version
+                    for row in self.added
+                    if isinstance(row, BehaviorChangeAudit)
+                ),
+                default=0,
+            )
+        if "FROM cycle_revisions" in sql:
+            revisions = [row for row in self.added if isinstance(row, CycleRevision)]
+            return revisions[-1].id if revisions else None
+        if "FROM ideas" in sql:
+            return self._cycle.target_idea_id
+        return None
 
     def add(self, value):
         self.added.append(value)
@@ -337,6 +375,9 @@ class _RouterCycleSession:
 
     async def commit(self):
         self.committed = True
+
+    def begin_nested(self):
+        return _AsyncNestedTransaction()
 
 
 class _ExecuteCycleSession:
@@ -1081,7 +1122,7 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
     monkeypatch.setattr(cycles_router, "command_create_cycle", fake_create_cycle)
     monkeypatch.setattr(
         cycles_router,
-        "publish_cycle_change",
+        "publish_cycle_change_safe",
         lambda **_kwargs: None,
     )
 
@@ -1131,6 +1172,12 @@ async def test_cycle_update_persists_and_serializes_max_concurrency():
 
     assert cycle.max_concurrency == 4
     assert response["max_concurrency"] == 4
+    audit = next(row for row in db.added if isinstance(row, BehaviorChangeAudit))
+    assert audit.before_snapshot["max_concurrency"] == 1
+    assert audit.after_snapshot["max_concurrency"] == 4
+    assert audit.cycle_revision_id == next(
+        row.id for row in db.added if isinstance(row, CycleRevision)
+    )
     CycleRead.model_validate(response)
 
 
@@ -3105,7 +3152,11 @@ async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch)
 
     monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
     monkeypatch.setattr(cycle_handlers, "async_run_cycle_now", fake_run_cycle_now)
-    monkeypatch.setattr(cycle_handlers, "publish_cycle_change", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cycle_handlers,
+        "publish_cycle_change_safe",
+        lambda **_kwargs: None,
+    )
 
     with bind_agent_context(
         {
@@ -3158,7 +3209,11 @@ async def test_manage_cycle_run_can_select_explicit_scheduled_digest_contract(mo
 
     monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
     monkeypatch.setattr(cycle_handlers, "async_run_cycle_now", fake_run_cycle_now)
-    monkeypatch.setattr(cycle_handlers, "publish_cycle_change", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cycle_handlers,
+        "publish_cycle_change_safe",
+        lambda **_kwargs: None,
+    )
 
     with bind_agent_context(
         {

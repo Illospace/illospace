@@ -3,8 +3,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from brain.platform.db.models.cycle import Cycle
+from sqlalchemy import select
+
+from brain.platform.db.models.cycle import Cycle, CycleGuidance
 from brain.systems.cycles.access import CycleActor
+from brain.systems.cycles.behavior_policy import (
+    CyclePolicyApplied,
+    CyclePolicyPatch,
+    UNSET_CYCLE_FIELD,
+    async_apply_cycle_policy_change,
+    async_preview_cycle_policy_change,
+)
 from brain.systems.cycles.common import (
     canonical_execution_mode,
     validate_cycle_timeout_seconds,
@@ -28,14 +37,6 @@ from brain.systems.cycles.schedules import (
     validate_schedule_expr,
     validate_timezone_name,
 )
-
-
-class _UnsetCycleField:
-    pass
-
-
-UNSET_CYCLE_FIELD = _UnsetCycleField()
-
 
 def _validated_max_concurrency(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -137,80 +138,51 @@ async def async_update_cycle(
     guidance: str | None = None,
     rationale: str | None = None,
 ) -> Cycle:
+    # Validate a stored key before any query or mutation. This preserves the
+    # existing fail-fast repair signal for legacy rows with invalid keys.
     if _is_patch_field_set(execution_policy_key):
-        next_execution_policy_key = validate_cycle_execution_policy_key(
+        validate_cycle_execution_policy_key(
             execution_policy_key
         )
     else:
         validate_cycle_execution_policy_key(
             getattr(cycle, "execution_policy_key", None)
         )
-        next_execution_policy_key = UNSET_CYCLE_FIELD
-    next_timezone = validate_timezone_name(timezone_name) if _has_patch_value(timezone_name) else cycle.timezone
-    next_schedule_expr = cycle.schedule_expr
-    next_model_override = (
-        validate_model_override(model_override)
-        if _is_patch_field_set(model_override)
-        else UNSET_CYCLE_FIELD
+    patch = CyclePolicyPatch(
+        name=_policy_field(name, ignore_none=True),
+        prompt=_policy_field(prompt, ignore_none=True),
+        timezone_name=_policy_field(timezone_name, ignore_none=True),
+        schedule_expr=_policy_field(schedule_expr, ignore_none=True),
+        run_at=_policy_field(run_at, ignore_none=True),
+        enabled=_policy_field(enabled, ignore_none=True),
+        max_concurrency=_policy_field(max_concurrency),
+        timeout_seconds=_policy_field(timeout_seconds),
+        model_override=_policy_field(model_override),
+        thinking_override=_policy_field(thinking_override),
+        execution_policy_key=_policy_field(execution_policy_key),
+        target_idea_id=_policy_field(target_idea_id),
+        guidance_additions=(
+            [guidance] if guidance else UNSET_CYCLE_FIELD
+        ),
     )
-    next_thinking_override = (
-        validate_thinking_override(thinking_override)
-        if _is_patch_field_set(thinking_override)
-        else UNSET_CYCLE_FIELD
-    )
-    next_timeout_seconds = (
-        validate_cycle_timeout_seconds(timeout_seconds)
-        if _is_patch_field_set(timeout_seconds)
-        else UNSET_CYCLE_FIELD
-    )
-    if _has_patch_value(run_at):
-        next_schedule_expr = build_one_time_schedule_expr(run_at, next_timezone)
-    elif _has_patch_value(schedule_expr):
-        next_schedule_expr = validate_schedule_expr(schedule_expr, next_timezone)
-
-    if _has_patch_value(name):
-        cycle.name = validate_nonempty_trimmed(name, "name")
-    if _has_patch_value(prompt):
-        cycle.prompt = validate_nonempty_trimmed(prompt, "prompt")
-    cycle.timezone = next_timezone
-    cycle.schedule_expr = next_schedule_expr
-    if _is_patch_field_set(enabled) and enabled is not None:
-        cycle.enabled = enabled
-    if _is_patch_field_set(max_concurrency):
-        cycle.max_concurrency = _validated_max_concurrency(max_concurrency)
-    if _is_patch_field_set(next_timeout_seconds):
-        cycle.timeout_seconds = next_timeout_seconds
-    if _is_patch_field_set(next_model_override):
-        cycle.model_override = next_model_override
-    if _is_patch_field_set(next_thinking_override):
-        cycle.thinking_override = next_thinking_override
-    if _is_patch_field_set(next_execution_policy_key):
-        cycle.execution_policy_key = next_execution_policy_key
-    if _is_patch_field_set(target_idea_id):
-        cycle.target_idea_id = target_idea_id
-
-    cycle.execution_mode = canonical_execution_mode()
-    cycle.reopen_archived = True
-    cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
-    cycle.updated_at = datetime.now(timezone.utc)
-
-    revision = await async_record_cycle_revision(
+    preview = await async_preview_cycle_policy_change(
         session,
-        cycle,
-        source_type=actor.source_type,
-        source_id=actor.revision_source_id,
-        rationale=rationale or "Cycle updated.",
+        actor=actor,
+        cycle_id=cycle.id,
+        proposal=patch,
     )
-    if guidance:
-        await async_add_cycle_guidance(
-            session,
-            cycle,
-            guidance=guidance,
-            source_type=actor.source_type,
-            source_id=actor.revision_source_id,
-            rationale=rationale,
-            revision_id=revision.id,
-        )
+    result = await async_apply_cycle_policy_change(
+        session,
+        actor=actor,
+        cycle_id=cycle.id,
+        proposal=patch,
+        expected_version=preview.before.version,
+        preview_digest=preview.preview_digest,
+        rationale=rationale or "Cycle updated.",
+        source_reference=_command_source_reference(actor),
+    )
+    if not isinstance(result, CyclePolicyApplied):
+        raise ValueError("Cycle policy changed while the update was being applied")
     return cycle
 
 
@@ -229,22 +201,35 @@ async def async_add_guidance_to_cycle(
     guidance: str,
     rationale: str | None = None,
 ):
-    revision = await async_record_cycle_revision(
+    clean_guidance = validate_nonempty_trimmed(guidance, "guidance")
+    patch = CyclePolicyPatch(guidance_additions=[clean_guidance])
+    preview = await async_preview_cycle_policy_change(
         session,
-        cycle,
-        source_type=actor.source_type,
-        source_id=actor.revision_source_id,
+        actor=actor,
+        cycle_id=cycle.id,
+        proposal=patch,
+    )
+    result = await async_apply_cycle_policy_change(
+        session,
+        actor=actor,
+        cycle_id=cycle.id,
+        proposal=patch,
+        expected_version=preview.before.version,
+        preview_digest=preview.preview_digest,
         rationale=rationale or "Cycle guidance added.",
+        source_reference=_command_source_reference(actor),
     )
-    return await async_add_cycle_guidance(
-        session,
-        cycle,
-        guidance=guidance,
-        source_type=actor.source_type,
-        source_id=actor.revision_source_id,
-        rationale=rationale,
-        revision_id=revision.id,
+    if not isinstance(result, CyclePolicyApplied):
+        raise ValueError("Cycle policy changed while guidance was being added")
+    rows = await session.scalars(
+        select(CycleGuidance).where(
+            CycleGuidance.cycle_id == cycle.id,
+            CycleGuidance.revision_id == result.revision.id,
+            CycleGuidance.guidance == clean_guidance,
+            CycleGuidance.is_active.is_(True),
+        )
     )
+    return rows.first()
 
 
 async def async_add_output_target_to_cycle(
@@ -326,8 +311,14 @@ def _is_patch_field_set(value) -> bool:
     return value is not UNSET_CYCLE_FIELD
 
 
-def _has_patch_value(value) -> bool:
-    return _is_patch_field_set(value) and value is not None
+def _policy_field(value, *, ignore_none: bool = False):
+    if value is UNSET_CYCLE_FIELD or (ignore_none and value is None):
+        return UNSET_CYCLE_FIELD
+    return value
+
+
+def _command_source_reference(actor: CycleActor) -> str:
+    return f"{actor.source_type}:{actor.revision_source_id}"
 
 
 async def _seed_default_output_targets(

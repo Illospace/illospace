@@ -11,6 +11,7 @@ EXPECTED_TABLES = {
     "agent_run_events",
     "agent_runs",
     "agent_sessions",
+    "behavior_change_audits",
     "browser_pool_entries",
     "browser_sessions",
     "chat_conversation_members",

@@ -44,7 +44,7 @@ from brain.systems.cycles.commands import (
     async_update_cycle as command_update_cycle,
     cycle_change_event,
 )
-from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.events import publish_cycle_change_safe
 from brain.systems.cycles.serializers import (
     serialize_cycle,
     serialize_cycle_guidance,
@@ -1203,7 +1203,10 @@ async def _act_manage_cycle(
         )
         await db.flush()
         await db.refresh(cycle)
-        return _cycle_mutation_payload("update", cycle, {"cycle": serialize_cycle(cycle)})
+        return {
+            "cycle": serialize_cycle(cycle),
+            "_mutates_cycle": True,
+        }
 
     if action == "delete":
         await command_delete_cycle(db, cycle)
@@ -1239,11 +1242,11 @@ async def _act_manage_cycle(
             guidance=_required_capability_string(arguments, "guidance", capability="cycle.manage"),
             rationale=rationale,
         )
-        return _cycle_mutation_payload(
-            "update",
-            cycle,
-            {"cycle": serialize_cycle(cycle), "guidance": serialize_cycle_guidance(guidance)},
-        )
+        return {
+            "cycle": serialize_cycle(cycle),
+            "guidance": serialize_cycle_guidance(guidance),
+            "_mutates_cycle": True,
+        }
 
     if action == "add_output_target":
         target = await command_add_cycle_output_target(
@@ -1500,7 +1503,7 @@ async def _handle_mcp_request(
             cycle_change = tool_payload.pop("_cycle_change", None)
             await db.commit()
             if isinstance(cycle_change, dict):
-                publish_cycle_change(
+                publish_cycle_change_safe(
                     action=str(cycle_change.get("action") or "update"),
                     **dict(cycle_change.get("event") or {}),
                 )

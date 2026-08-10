@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from brain.kernel.common.serialization import jsonable
 from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import (
+    BehaviorChangeAudit,
     Cycle,
     CycleGuidance,
     CycleOutputTarget,
@@ -47,6 +48,7 @@ from brain.systems.cycles.cycle_failure_guard import (
     async_apply_cycle_terminal_failure_guard,
 )
 from brain.systems.cycles.serializers import (
+    serialize_behavior_change,
     serialize_cycle_guidance,
     serialize_cycle_output_target,
     serialize_cycle_revision,
@@ -181,6 +183,10 @@ async def async_remove_cycle_output_target(
 
 async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: CycleRun) -> None:
     revision = await _async_latest_cycle_revision(session, cycle.id)
+    behavior_change = await _async_behavior_change_for_revision(
+        session,
+        revision.id if revision is not None else None,
+    )
     guidance_rows = await _async_active_cycle_guidance(session, cycle.id)
     target_rows = await _async_active_cycle_output_targets(session, cycle.id)
     degradation_tracking = degradation_tracking_for_run(
@@ -191,6 +197,7 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
         cycle,
         run=run,
         revision=revision,
+        behavior_change=behavior_change,
         guidance_rows=guidance_rows,
         target_rows=target_rows,
         degradation_tracking=degradation_tracking,
@@ -209,6 +216,7 @@ def _build_cycle_run_memory_snapshot(
     *,
     run: CycleRun | None = None,
     revision: CycleRevision | None,
+    behavior_change: BehaviorChangeAudit | None = None,
     guidance_rows: list[CycleGuidance],
     target_rows: list[CycleOutputTarget],
     degradation_tracking: dict | None = None,
@@ -229,6 +237,12 @@ def _build_cycle_run_memory_snapshot(
         ),
     )
 
+    revision_context = {"revision": serialize_cycle_revision(revision)}
+    if behavior_change is not None:
+        revision_context["behavior_change"] = serialize_behavior_change(
+            behavior_change
+        )
+
     return {
         "revision_id": revision.id if revision is not None else None,
         "guidance_snapshot": jsonable(
@@ -237,7 +251,7 @@ def _build_cycle_run_memory_snapshot(
         "output_targets_snapshot": jsonable(output_targets),
         "context_snapshot": jsonable(
             {
-                "revision": serialize_cycle_revision(revision),
+                **revision_context,
                 "workspace_id": string_or_none(cycle.org_id),
                 "owner_user_id": string_or_none(cycle.user_id),
                 "scheduled_review_window": cycle_scheduled_review_window(scheduled_for),
@@ -515,6 +529,19 @@ async def _async_latest_cycle_revision(session, cycle_id: int) -> CycleRevision 
         .limit(1)
     )
     return result.first()
+
+
+async def _async_behavior_change_for_revision(
+    session,
+    revision_id: int | None,
+) -> BehaviorChangeAudit | None:
+    if revision_id is None:
+        return None
+    return await session.scalar(
+        select(BehaviorChangeAudit).where(
+            BehaviorChangeAudit.cycle_revision_id == revision_id
+        )
+    )
 
 
 async def _async_active_cycle_guidance(session, cycle_id: int) -> list[CycleGuidance]:

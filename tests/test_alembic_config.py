@@ -57,6 +57,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0050_scheduler_cold_start_reconciliation.py",
     # Downgrade removes only the scheduler alert-latch table introduced here.
     "0054_scheduler_alert_latches.py",
+    # Downgrade removes only the behavior-change audit table introduced here.
+    "0059_behavior_change_audits.py",
 }
 
 
