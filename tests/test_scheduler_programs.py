@@ -20,6 +20,7 @@ from brain.app.scheduler.programs import (
 
 _SCHEDULED_FOR = datetime(2026, 7, 27, 3, 0, tzinfo=timezone.utc)
 _PINNED_PROJECTION_HASHES = {
+    "workspace_gc": "eb924b58441b1c94b2390f7f97f70f60da5d80d8001c8a9f245b97897a328891",
     "cortex_canvas_occupancy": "43cf7e0667228c054968df730d69c75a72ad7d30c1e2aaf66a4a5032f15453ba",
     "knowledge_index_sync": "7b180172f289f6769ef024b425a8978ee4f4c14c78e57fe98e94e7c151c7d4c6",
     "nightly_sleep": "0cb9173b9e0b71a094063bb867d644304f4c8b996fec6c9d1656b31dde060ee0",
@@ -76,6 +77,13 @@ def test_aws_health_scan_declares_detached_agent_run_completion():
     assert (
         SINGLE_COMMAND_PROGRAM_REGISTRY["uwear_aws_health_scan"].completion_mode
         == "agent_run"
+    )
+
+
+def test_workspace_gc_description_states_complete_deletion_policy():
+    assert SINGLE_COMMAND_PROGRAM_REGISTRY["workspace_gc"].description == (
+        "Reclaim headless-worker workspaces older than 48 hours when parent runs are "
+        "terminal or absent from the database"
     )
 
 

@@ -197,6 +197,33 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "misfire_policy": "skip",
     },
     {
+        "job_key": "workspace_gc",
+        "family": "workspace_gc",
+        "program_key": "workspace_gc",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:workspace_gc",
+        "cron_expr": "47 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Workspace GC",
+            "description": "Reclaim old workspaces left by finished headless workers",
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run"],
+            "output_channel": "scheduler",
+            "success_criteria": [
+                "Headless-worker workspaces older than 48 hours are reclaimed only when "
+                "the parent run is terminal or absent from the database"
+            ],
+        },
+        "priority": 70,
+        "max_concurrency": 1,
+        "timeout_seconds": 3600,
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 300},
+        "misfire_policy": "skip",
+    },
+    {
         "job_key": "cortex_canvas_occupancy",
         "family": "cortex_canvas_occupancy",
         "program_key": "cortex_canvas_occupancy",
