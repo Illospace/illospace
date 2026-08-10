@@ -13,11 +13,11 @@ from typing import (
     TypeAlias,
 )
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.contracts.scheduler_outcomes import SchedulerSkipKind
-from brain.kernel.common.time import ensure_utc
+from brain.kernel.common.time import assume_utc, ensure_utc
 from brain.platform.db.models.scheduler import (
     SchedulerFailureGuardLatch,
     SchedulerFailureGuardTriggerState,
@@ -163,14 +163,110 @@ class StandingFailuresTrigger:
             ),
         )
 
-    async def evaluate_with_state(
+    async def evaluate(
         self,
         context: SchedulerFailureGuardLifecycleContext,
-        *,
-        state: FailureGuardTriggerState,
     ) -> FailureGuardTriggerResult:
-        del context
-        count = int(state.get("count", 0))
+        return (await self.evaluate_many((context,)))[context.job.id]
+
+    async def evaluate_many(
+        self,
+        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+    ) -> Mapping[int, FailureGuardTriggerResult]:
+        """Project terminal failures since each job's last terminal success."""
+        if not contexts:
+            return {}
+        session = contexts[0].session
+        now = contexts[0].now
+        if any(
+            context.session is not session or context.now != now
+            for context in contexts
+        ):
+            raise ValueError(
+                "Bulk scheduler trigger contexts must share a session and time"
+            )
+        job_ids = [context.job.id for context in contexts]
+        last_successes = (
+            select(
+                SchedulerRun.job_id.label("job_id"),
+                func.max(SchedulerRun.created_at).label("last_success_at"),
+            )
+            .where(
+                SchedulerRun.job_id.in_(job_ids),
+                SchedulerRun.status == "settled_success",
+            )
+            .group_by(SchedulerRun.job_id)
+            .subquery()
+        )
+        result = await session.execute(
+            select(
+                SchedulerJob.id,
+                func.count(SchedulerRun.id),
+                func.min(SchedulerRun.created_at),
+                last_successes.c.last_success_at,
+            )
+            .select_from(SchedulerJob)
+            .outerjoin(
+                last_successes,
+                last_successes.c.job_id == SchedulerJob.id,
+            )
+            .outerjoin(
+                SchedulerRun,
+                and_(
+                    SchedulerRun.job_id == SchedulerJob.id,
+                    SchedulerRun.status == "settled_failure",
+                    or_(
+                        last_successes.c.last_success_at.is_(None),
+                        SchedulerRun.created_at
+                        > last_successes.c.last_success_at,
+                    ),
+                ),
+            )
+            .where(SchedulerJob.id.in_(job_ids))
+            .group_by(
+                SchedulerJob.id,
+                last_successes.c.last_success_at,
+            )
+        )
+        history_by_job = {
+            int(job_id): (
+                int(count),
+                first_failure_at,
+                last_success_at,
+            )
+            for job_id, count, first_failure_at, last_success_at in result.all()
+        }
+        return {
+            context.job.id: self._result(
+                *history_by_job.get(context.job.id, (0, None, None)),
+                now=now,
+            )
+            for context in contexts
+        }
+
+    def _result(
+        self,
+        count: int,
+        first_failure_at: datetime | None,
+        last_success_at: datetime | None,
+        *,
+        now: datetime,
+    ) -> FailureGuardTriggerResult:
+        failure_label = "failure" if count == 1 else "failures"
+        if last_success_at is not None:
+            alert_summary = (
+                f"{count} {failure_label} over "
+                f"{_standing_failure_elapsed_text(last_success_at, now)} "
+                "since last successful run"
+            )
+        elif first_failure_at is not None:
+            alert_summary = (
+                f"{count} {failure_label} over "
+                f"{_standing_failure_elapsed_text(first_failure_at, now)}; "
+                "job has never succeeded"
+            )
+        else:
+            alert_summary = "0 failures; job has never succeeded"
         return FailureGuardTriggerResult(
             kind=self.kind,
             active=count >= self.threshold,
@@ -180,20 +276,8 @@ class StandingFailuresTrigger:
                 "window_hours": None,
             },
             alert_title="Scheduler job standing failure",
-            alert_summary=f"Failures without a successful run: {count}",
+            alert_summary=alert_summary,
         )
-
-    async def transition_state(
-        self,
-        context: SchedulerFailureGuardLifecycleContext,
-        state: FailureGuardTriggerState,
-        *,
-        event: FailureGuardLifecycleEvent,
-    ) -> FailureGuardTriggerState | None:
-        del context
-        if event == "success":
-            return None
-        return {"count": int(state.get("count", 0)) + 1}
 
     async def should_reset(
         self,
@@ -203,6 +287,30 @@ class StandingFailuresTrigger:
     ) -> bool:
         del context
         return event == "success"
+
+
+def _standing_failure_elapsed_text(
+    started_at: datetime,
+    ended_at: datetime,
+) -> str:
+    elapsed_seconds = max(
+        0,
+        int(
+            (
+                assume_utc(ended_at) - assume_utc(started_at)
+            ).total_seconds()
+        ),
+    )
+    for unit, seconds in (
+        ("day", 24 * 60 * 60),
+        ("hour", 60 * 60),
+        ("minute", 60),
+    ):
+        amount = elapsed_seconds // seconds
+        if amount:
+            suffix = "" if amount == 1 else "s"
+            return f"{amount} {unit}{suffix}"
+    return "less than 1 minute"
 
 
 @dataclass(frozen=True)
