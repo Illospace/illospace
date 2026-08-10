@@ -432,6 +432,32 @@ def test_idle_deadline_is_abandoned_and_rearmed_when_active_runs_reappear(tmp_pa
     assert "did not drain within 300s" not in result.stderr
 
 
+def test_active_run_at_idle_deadline_requires_two_fresh_zero_snapshots(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "worker_swap_snapshot_count() { "
+            'case "$(ticks)" in 19) printf \'1\\n\' ;; *) printf \'0\\n\' ;; esac; }\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            "SECONDS=$((SECONDS + $1)); return 0; }\n"
+            "wait_for_worker_exit worker-1 ''"
+        ),
+        stub_drain_wait=False,
+        drain_timeout_seconds=300,
+        idle_exit_timeout_seconds=35,
+    )
+    result = _run(script)
+
+    assert "STATUS=3" in result.stdout
+    # Zero at 30s and 60s arms a deadline at 95s. The active run at that
+    # deadline abandons it. Zero at 120s and 150s re-arms a fresh deadline.
+    assert (state / "ticks").read_text().strip() == "37"
+    assert result.stderr.count("active AgentRuns reappeared") == 1
+    assert "idle exit deadline of 35s" in result.stderr
+    assert "did not drain within 300s" not in result.stderr
+
+
 def test_an_unanswered_handoff_inspect_does_not_end_the_drain_wait(tmp_path):
     """dockerd here is a snap that restarts itself, taking every inspect with it.
 

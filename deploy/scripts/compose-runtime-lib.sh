@@ -745,8 +745,8 @@ replace_idle_worker() {
   echo "Worker: no interactive AgentRuns; signaling a graceful replacement."
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
-  # No handoff exists on this path, so there is no cover to watch: only the clock
-  # can end this wait.
+  # No handoff exists on this path, so there is no cover to monitor. Both the
+  # full drain deadline and the shorter confirmed-idle deadline apply.
   drain_status=0
   wait_for_worker_exit "$worker_id" "" || drain_status=$?
   if [ "$drain_status" -ne 0 ]; then
