@@ -35,6 +35,7 @@ from brain.systems.runs.evidence_health import (
 )
 from brain.systems.runs.events import run_event
 from brain.systems.runs.execution_context import _agent_context
+from brain.systems.runs.headless_worker_identity import build_headless_worker_thread_id
 from brain.systems.runs.routing_metadata import effective_routing_snapshot
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_policy import normalize_tool_policy
@@ -368,7 +369,7 @@ def _step_key(role: str, objective: str, idempotency_key: str | None) -> str:
 
 def _headless_thread_id(parent_run_id: int, step_key: str) -> str:
     digest = sha256(step_key.encode("utf-8")).hexdigest()[:16]
-    return f"headless-worker:{parent_run_id}:{digest}"
+    return build_headless_worker_thread_id(parent_run_id, digest)
 
 
 def _merge_tool_policy(tool_policy: Any, *, headless: bool) -> dict[str, Any]:

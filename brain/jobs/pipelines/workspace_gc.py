@@ -19,6 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel import config as brain_config
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.headless_worker_identity import (
+    is_headless_worker_directory_candidate,
+    parse_headless_worker_identity,
+)
 from brain.systems.runs.status import (
     TERMINAL_RUN_STATUSES,
     coerce_run_status,
@@ -27,7 +31,6 @@ from brain.systems.runs.status import (
 
 log = logging.getLogger(__name__)
 
-HEADLESS_WORKER_PREFIX = "headless-worker-"
 HEADLESS_WORKER_WORKSPACE_RETENTION = timedelta(hours=48)
 
 
@@ -54,15 +57,8 @@ def _empty_result() -> WorkspaceGCResult:
 
 
 def _parent_run_id(path: Path) -> int | None:
-    if not path.name.startswith(HEADLESS_WORKER_PREFIX):
-        return None
-    parent_run_id, separator, digest = path.name.removeprefix(
-        HEADLESS_WORKER_PREFIX
-    ).partition("-")
-    if not separator or not parent_run_id.isdigit() or not digest:
-        return None
-    parsed = int(parent_run_id)
-    return parsed if parsed > 0 else None
+    identity = parse_headless_worker_identity(path.name)
+    return identity[0] if identity is not None else None
 
 
 _ValidationCounter = Literal[
@@ -190,7 +186,7 @@ async def reclaim_headless_worker_workspaces(
 
     candidates: list[tuple[Path, int]] = []
     for path in entries:
-        if not path.name.startswith(HEADLESS_WORKER_PREFIX):
+        if not is_headless_worker_directory_candidate(path.name):
             continue
         result["directories_scanned"] += 1
         validation = _validate_headless_worker_workspace(
