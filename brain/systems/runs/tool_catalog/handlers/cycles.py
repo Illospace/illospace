@@ -356,7 +356,6 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
             rationale=_optional_text(args.rationale),
         )
         payload = serialize_cycle(cycle)
-    publish_cycle_change(action="update", **_event_from_payload(payload))
     return {"updated": payload}
 
 

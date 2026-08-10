@@ -14,6 +14,7 @@ def publish_cycle_change(
     user_id: str | None = None,
     cycle_id: int | None = None,
     target_idea_id: str | None = None,
+    strict: bool = False,
 ) -> None:
     payload: dict[str, Any] = {"action": action}
     if org_id:
@@ -27,8 +28,11 @@ def publish_cycle_change(
         payload["target_idea_id"] = str(target_idea_id)
 
     try:
-        from brain.platform.events import publish_safe
+        from brain.platform.events import publish, publish_safe
 
-        publish_safe("cycles_changed", payload)
+        publisher = publish if strict else publish_safe
+        publisher("cycles_changed", payload)
     except Exception:
+        if strict:
+            raise
         logger.debug("cycle_change_publish_failed", exc_info=True)

@@ -169,12 +169,7 @@ async def update_cycle(
     await db.flush()
     await db.refresh(cycle)
     payload = serialize_cycle(cycle)
-    event = cycle_change_event(cycle)
     await db.commit()
-    publish_cycle_change(
-        action="update",
-        **event,
-    )
     return payload
 
 

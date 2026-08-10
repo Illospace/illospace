@@ -1203,7 +1203,10 @@ async def _act_manage_cycle(
         )
         await db.flush()
         await db.refresh(cycle)
-        return _cycle_mutation_payload("update", cycle, {"cycle": serialize_cycle(cycle)})
+        return {
+            "cycle": serialize_cycle(cycle),
+            "_mutates_cycle": True,
+        }
 
     if action == "delete":
         await command_delete_cycle(db, cycle)
@@ -1239,11 +1242,11 @@ async def _act_manage_cycle(
             guidance=_required_capability_string(arguments, "guidance", capability="cycle.manage"),
             rationale=rationale,
         )
-        return _cycle_mutation_payload(
-            "update",
-            cycle,
-            {"cycle": serialize_cycle(cycle), "guidance": serialize_cycle_guidance(guidance)},
-        )
+        return {
+            "cycle": serialize_cycle(cycle),
+            "guidance": serialize_cycle_guidance(guidance),
+            "_mutates_cycle": True,
+        }
 
     if action == "add_output_target":
         target = await command_add_cycle_output_target(

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
 
 __all__ = [
+    "BehaviorChangeAudit",
     "Cycle",
     "CycleFailureGuardLatch",
     "CycleFailureGuardObservation",
@@ -21,6 +22,67 @@ __all__ = [
     "CycleRun",
     "CycleRunEvaluation",
 ]
+
+
+class BehaviorChangeAudit(Base):
+    """Append-only, human-readable envelope for one behavior-policy apply."""
+
+    __tablename__ = "behavior_change_audits"
+    __table_args__ = (
+        UniqueConstraint(
+            "policy_kind",
+            "target_type",
+            "target_id",
+            "version",
+            name="uq_behavior_change_audits_target_version",
+        ),
+        UniqueConstraint(
+            "cycle_revision_id",
+            name="uq_behavior_change_audits_cycle_revision",
+        ),
+        Index(
+            "ix_behavior_change_audits_workspace_applied",
+            "workspace_id",
+            "applied_at",
+            "id",
+        ),
+        Index(
+            "ix_behavior_change_audits_target_history",
+            "policy_kind",
+            "target_type",
+            "target_id",
+            "version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_id: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_reference: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    before_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    after_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    changed_fields: Mapped[list] = mapped_column(JSONB, nullable=False)
+    cycle_revision_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("cycle_revisions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reverted_from_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("behavior_change_audits.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW()"),
+    )
 
 
 class Cycle(Base, TimestampMixin):
