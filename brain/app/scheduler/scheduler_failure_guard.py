@@ -11,7 +11,7 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
-    cast,
+    runtime_checkable,
 )
 
 from sqlalchemy import and_, delete, func, or_, select
@@ -31,10 +31,11 @@ from brain.systems.failure_guard.core import (
     FailureGuardLifecycleEvent,
     FailureGuardLatch,
     FailureGuardStatefulTrigger,
+    FailureGuardStatefulTriggerRegistration,
+    FailureGuardStatelessTriggerRegistration,
     FailureGuardTrigger,
     FailureGuardTriggerKind,
     FailureGuardTriggerMode,
-    FailureGuardTriggerRegistration,
     require_failure_guard_registrations,
     FailureGuardTriggerResult,
     FailureGuardTriggerState,
@@ -473,6 +474,7 @@ class RollingWindowFailuresTrigger:
         return not (await self.evaluate(context)).active
 
 
+@runtime_checkable
 class SchedulerFailureGuardResettableTrigger(Protocol):
     """Scheduler-owned latch-reset behavior shared by all trigger kinds."""
 
@@ -487,6 +489,7 @@ class SchedulerFailureGuardResettableTrigger(Protocol):
         """Return whether this trigger's latch should reset."""
 
 
+@runtime_checkable
 class SchedulerFailureGuardTrigger(
     SchedulerFailureGuardResettableTrigger,
     FailureGuardTrigger[SchedulerFailureGuardLifecycleContext],
@@ -504,6 +507,7 @@ class SchedulerFailureGuardTrigger(
         """Evaluate this trigger for every projected job."""
 
 
+@runtime_checkable
 class SchedulerFailureGuardStatefulTrigger(
     SchedulerFailureGuardResettableTrigger,
     FailureGuardStatefulTrigger[SchedulerFailureGuardLifecycleContext],
@@ -512,11 +516,11 @@ class SchedulerFailureGuardStatefulTrigger(
     """One state-owning scheduler failure trigger."""
 
 
-SchedulerFailureGuardTriggerImplementation: TypeAlias = (
-    SchedulerFailureGuardTrigger | SchedulerFailureGuardStatefulTrigger
-)
 SchedulerRegisteredFailureGuardTrigger: TypeAlias = (
-    FailureGuardTriggerRegistration[SchedulerFailureGuardLifecycleContext]
+    FailureGuardStatelessTriggerRegistration[SchedulerFailureGuardTrigger]
+    | FailureGuardStatefulTriggerRegistration[
+        SchedulerFailureGuardStatefulTrigger
+    ]
 )
 
 
@@ -528,6 +532,32 @@ class SchedulerFailureGuardRegistry:
 
     def __post_init__(self) -> None:
         require_failure_guard_registrations(self.triggers, owner="Scheduler")
+        for registration in self.triggers:
+            if registration.mode is FailureGuardTriggerMode.STATELESS:
+                trigger_protocol = SchedulerFailureGuardTrigger
+            else:
+                trigger_protocol = SchedulerFailureGuardStatefulTrigger
+            if not isinstance(registration.trigger, trigger_protocol):
+                missing_methods = sorted(
+                    method
+                    for method in trigger_protocol.__protocol_attrs__
+                    if callable(getattr(trigger_protocol, method, None))
+                    and not callable(
+                        getattr(registration.trigger, method, None)
+                    )
+                )
+                missing_detail = (
+                    "; missing required method(s): "
+                    + ", ".join(missing_methods)
+                    if missing_methods
+                    else ""
+                )
+                raise ValueError(
+                    "Scheduler failure-guard trigger "
+                    f"{type(registration.trigger).__name__} declared "
+                    f"{registration.mode.value} but does not satisfy "
+                    f"{trigger_protocol.__name__} protocol{missing_detail}"
+                )
         kinds = [str(trigger.kind) for trigger in self.triggers]
         if any(not kind for kind in kinds):
             raise ValueError(
@@ -541,20 +571,16 @@ _FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
     Callable[[], SchedulerRegisteredFailureGuardTrigger],
     ...,
 ] = (
-    lambda: FailureGuardTriggerRegistration(
-        mode=FailureGuardTriggerMode.STATEFUL,
+    lambda: FailureGuardStatefulTriggerRegistration(
         trigger=ConsecutiveFailuresTrigger.from_settings(),
     ),
-    lambda: FailureGuardTriggerRegistration(
-        mode=FailureGuardTriggerMode.STATELESS,
+    lambda: FailureGuardStatelessTriggerRegistration(
         trigger=StandingFailuresTrigger.from_settings(),
     ),
-    lambda: FailureGuardTriggerRegistration(
-        mode=FailureGuardTriggerMode.STATELESS,
+    lambda: FailureGuardStatelessTriggerRegistration(
         trigger=RollingWindowFailuresTrigger.from_settings(),
     ),
-    lambda: FailureGuardTriggerRegistration(
-        mode=FailureGuardTriggerMode.STATEFUL,
+    lambda: FailureGuardStatefulTriggerRegistration(
         trigger=ConfigurationFailureTrigger(),
     ),
 )
@@ -753,7 +779,7 @@ async def async_read_scheduler_failure_guards(
     for registration in registry.triggers:
         if registration.mode is FailureGuardTriggerMode.STATEFUL:
             continue
-        trigger = cast(SchedulerFailureGuardTrigger, registration.trigger)
+        trigger = registration.trigger
         trigger_results = dict(
             await trigger.evaluate_many(session, jobs, now=now)
         )
@@ -868,13 +894,12 @@ async def async_record_scheduler_job_failure(
         latches = dict(await latch_store.load_latches())
         reset_latch = False
         for registration in registry.triggers:
-            trigger = cast(
-                SchedulerFailureGuardResettableTrigger,
-                registration.trigger,
-            )
-            if registration.kind not in latches or not await trigger.should_reset(
-                context,
-                event="signature_change",
+            if (
+                registration.kind not in latches
+                or not await registration.trigger.should_reset(
+                    context,
+                    event="signature_change",
+                )
             ):
                 continue
             await latch_store.delete_latch(registration.kind)
@@ -951,13 +976,9 @@ async def async_reset_scheduler_job_failure_guard(
     )
     latches = dict(await latch_store.load_latches())
     for registration in registry.triggers:
-        trigger = cast(
-            SchedulerFailureGuardResettableTrigger,
-            registration.trigger,
-        )
         if registration.kind not in latches:
             continue
-        if await trigger.should_reset(
+        if await registration.trigger.should_reset(
             context,
             event="success",
         ):

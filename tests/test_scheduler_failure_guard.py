@@ -19,9 +19,8 @@ from brain.app.scheduler.daemon import (
 from brain.systems.failure_guard.core import (
     FailureGuardEdge,
     FailureGuardEvaluation,
+    FailureGuardStatelessTriggerRegistration,
     FailureGuardTriggerKind,
-    FailureGuardTriggerMode,
-    FailureGuardTriggerRegistration,
     FailureGuardTriggerResult,
     serialize_failure_guard,
 )
@@ -59,6 +58,42 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 async def session(async_sqlite_session_factory):
     return await make_scheduler_test_session(async_sqlite_session_factory)
+
+
+@dataclass(frozen=True)
+class _EvaluateOnlySchedulerTrigger:
+    kind: FailureGuardTriggerKind = field(
+        default=FailureGuardTriggerKind("evaluate_only"),
+        init=False,
+    )
+
+    async def evaluate(self, context) -> FailureGuardTriggerResult:
+        del context
+        return FailureGuardTriggerResult(
+            kind=self.kind,
+            active=False,
+            public_details={},
+            alert_title="Evaluate-only trigger",
+            alert_summary="Evaluate-only trigger",
+        )
+
+
+async def test_scheduler_registration_rejects_trigger_without_scheduler_contract():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "_EvaluateOnlySchedulerTrigger declared stateless.*"
+            "SchedulerFailureGuardTrigger protocol.*"
+            "evaluate_many, should_reset"
+        ),
+    ):
+        scheduler_failure_guard.SchedulerFailureGuardRegistry(
+            triggers=(
+                FailureGuardStatelessTriggerRegistration(
+                    trigger=_EvaluateOnlySchedulerTrigger(),
+                ),
+            )
+        )
 
 
 async def test_failure_signature_normalizes_volatile_runtime_identity():
@@ -332,8 +367,7 @@ async def test_registered_database_trigger_projects_once_across_jobs(
         "_FAILURE_GUARD_TRIGGER_PROVIDERS",
         (
             *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: FailureGuardTriggerRegistration(
-                mode=FailureGuardTriggerMode.STATELESS,
+            lambda: FailureGuardStatelessTriggerRegistration(
                 trigger=database_trigger,
             ),
         ),
@@ -1522,8 +1556,7 @@ async def test_third_trigger_flows_through_production_apply_health_delivery_and_
         "_FAILURE_GUARD_TRIGGER_PROVIDERS",
         (
             *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: FailureGuardTriggerRegistration(
-                mode=FailureGuardTriggerMode.STATELESS,
+            lambda: FailureGuardStatelessTriggerRegistration(
                 trigger=_RuntimeDurationTrigger(minimum_runtime_minutes=30),
             ),
         ),

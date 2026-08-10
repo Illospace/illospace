@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 import pytest
 
 from brain.systems.failure_guard.core import (
+    FailureGuardStatefulTriggerRegistration,
+    FailureGuardStatelessTriggerRegistration,
     FailureGuardTriggerKind,
-    FailureGuardTriggerMode,
-    FailureGuardTriggerRegistration,
     FailureGuardTriggerResult,
     async_evaluate_failure_guard_triggers,
     async_transition_failure_guard_trigger_states,
@@ -103,8 +103,7 @@ def test_registration_rejects_stateful_trigger_missing_transition_method():
             "transition_state"
         ),
     ):
-        FailureGuardTriggerRegistration(
-            mode=FailureGuardTriggerMode.STATEFUL,
+        FailureGuardStatefulTriggerRegistration(
             trigger=_StatefulTriggerMissingTransition(),
         )
 
@@ -117,20 +116,17 @@ def test_registration_rejects_stateless_trigger_with_stateful_methods():
             "evaluate_with_state.*transition_state"
         ),
     ):
-        FailureGuardTriggerRegistration(
-            mode=FailureGuardTriggerMode.STATELESS,
+        FailureGuardStatelessTriggerRegistration(
             trigger=_DualContractTrigger(),
         )
 
 
 @pytest.mark.asyncio
 async def test_declared_mode_controls_evaluation_and_persistence():
-    stateless_registration = FailureGuardTriggerRegistration(
-        mode=FailureGuardTriggerMode.STATELESS,
+    stateless_registration = FailureGuardStatelessTriggerRegistration(
         trigger=_StatelessTrigger(),
     )
-    stateful_registration = FailureGuardTriggerRegistration(
-        mode=FailureGuardTriggerMode.STATEFUL,
+    stateful_registration = FailureGuardStatefulTriggerRegistration(
         trigger=_DualContractTrigger(),
     )
     store = _MemoryStateStore(
@@ -167,15 +163,14 @@ async def test_declared_mode_controls_evaluation_and_persistence():
 def test_bare_trigger_is_refused_before_it_can_reach_dispatch():
     """A raw trigger has a ``kind``, so a consumer registry's own checks pass it.
 
-    It never runs ``FailureGuardTriggerRegistration.__post_init__``, so its mode
-    would only be missed at dispatch, far from the provider that omitted it.
+    It never runs a registration variant's validation, so its mode would only
+    be missed at dispatch, far from the provider that omitted it.
     """
 
     with pytest.raises(ValueError) as excinfo:
         require_failure_guard_registrations(
             (
-                FailureGuardTriggerRegistration(
-                    mode=FailureGuardTriggerMode.STATELESS,
+                FailureGuardStatelessTriggerRegistration(
                     trigger=_StatelessTrigger(),
                 ),
                 _StatelessTrigger(),
@@ -191,8 +186,7 @@ def test_bare_trigger_is_refused_before_it_can_reach_dispatch():
 def test_registrations_only_registry_is_accepted():
     require_failure_guard_registrations(
         (
-            FailureGuardTriggerRegistration(
-                mode=FailureGuardTriggerMode.STATELESS,
+            FailureGuardStatelessTriggerRegistration(
                 trigger=_StatelessTrigger(),
             ),
         ),
