@@ -16,6 +16,7 @@ from brain.contracts.github import parse_github_repo_slug
 from brain.kernel.config import (
     KNOWLEDGE_CONNECTOR_BATCH_SIZE,
     KNOWLEDGE_GITHUB_REPOSITORIES,
+    RAW_TEXT_MAX_CHARS,
 )
 from brain.platform.db.models.idea import ProjectProfile
 from brain.platform.db.models.vault import Secret, VaultProjectBinding
@@ -38,7 +39,6 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeEnumeration,
     KnowledgeScope,
 )
-from brain.systems.knowledge.service import RAW_TEXT_MAX_CHARS
 from brain.systems.vault import async_resolve_org_project_bound_env_tokens
 from brain.systems.vault.runtime_secrets import RuntimeSecretUnavailable
 
