@@ -498,12 +498,15 @@ record_worker_drain_timeout() {
 #
 # So the wait now ends on either condition, and the caller escalates for both:
 #   1 = the drain deadline passed          2 = the cover is gone
+#   3 = the confirmed-idle exit deadline passed
 wait_for_worker_exit() {
   local id="$1"
   local handoff_id="${2:-}"
   local wait_seconds="${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}"
+  local idle_wait_seconds="${COMPOSE_RUNTIME_WORKER_IDLE_EXIT_TIMEOUT_SECONDS:-120}"
   local started_at="$SECONDS"
   local deadline=$((started_at + wait_seconds))
+  local idle_deadline=""
   local wait_iterations=0
   local consecutive_zero_checks=0
   local hint_printed=0
@@ -533,6 +536,18 @@ wait_for_worker_exit() {
         *) ;;
       esac
     fi
+    if [ -n "$idle_deadline" ] && [ "$SECONDS" -ge "$idle_deadline" ]; then
+      snapshot="$(worker_swap_snapshot)"
+      active_runs="$(worker_swap_snapshot_count "$snapshot")"
+      if [ "$active_runs" = "0" ]; then
+        echo "Worker: canonical snapshot still has 0 active AgentRuns at the idle exit deadline of ${idle_wait_seconds}s. Ending the wait so the existing safe replacement path can continue. No interactive AgentRuns are affected." >&2
+        return 3
+      fi
+      echo "Worker: active AgentRuns reappeared before the idle exit deadline; abandoning that deadline and continuing the ${wait_seconds}s drain." >&2
+      consecutive_zero_checks=0
+      idle_deadline=""
+      hint_printed=0
+    fi
     sleep 5
     wait_iterations=$((wait_iterations + 1))
     if [ $((wait_iterations % 6)) -eq 0 ] && container_running "$id"; then
@@ -543,11 +558,21 @@ wait_for_worker_exit() {
         if [ "$consecutive_zero_checks" -ge 2 ] && [ "$hint_printed" = "0" ]; then
           elapsed=$((SECONDS - started_at))
           echo "Hint: worker has 0 active AgentRuns but its process has not exited after ${elapsed}s." >&2
-          echo "Leave it alone: it is already draining and the swap completes on its own. At the ${wait_seconds}s deadline this deploy force-replaces it rather than keeping a worker that can no longer claim." >&2
+          if [ -z "$handoff_id" ]; then
+            idle_deadline=$((SECONDS + idle_wait_seconds))
+            echo "Worker: two consecutive canonical snapshots confirm it is idle. Waiting at most ${idle_wait_seconds}s more before safe replacement; the shorter deadline will be abandoned if an active AgentRun appears." >&2
+          else
+            echo "Leave it alone: it is already draining and the swap completes on its own. At the ${wait_seconds}s deadline this deploy force-replaces it rather than keeping a worker that can no longer claim." >&2
+          fi
           hint_printed=1
         fi
       else
+        if [ -n "$idle_deadline" ]; then
+          echo "Worker: active AgentRuns reappeared before the idle exit deadline; abandoning that deadline and continuing the ${wait_seconds}s drain." >&2
+        fi
         consecutive_zero_checks=0
+        idle_deadline=""
+        hint_printed=0
       fi
     fi
   done
@@ -695,7 +720,7 @@ remove_worker_handoff_bounded() {
 }
 
 replace_idle_worker() {
-  local action affected_ids run_details snapshot worker_id
+  local action affected_ids run_details snapshot worker_id drain_status
   worker_id="$(worker_container_id)"
 
   if [ -z "$worker_id" ]; then
@@ -720,14 +745,20 @@ replace_idle_worker() {
   echo "Worker: no interactive AgentRuns; signaling a graceful replacement."
   suspend_worker_restart_policy "$worker_id"
   docker kill -s TERM "$worker_id" >/dev/null 2>&1 || true
-  # No handoff exists on this path, so there is no cover to watch: only the clock
-  # can end this wait.
-  if ! wait_for_worker_exit "$worker_id" ""; then
+  # No handoff exists on this path, so there is no cover to monitor. Both the
+  # full drain deadline and the shorter confirmed-idle deadline apply.
+  drain_status=0
+  wait_for_worker_exit "$worker_id" "" || drain_status=$?
+  if [ "$drain_status" -ne 0 ]; then
     # Returning here would leave a container that is running, healthy-looking and
     # permanently unable to claim -- and this path has no handoff worker to cover
     # for it. There are no interactive runs to protect, so nothing weighs against
     # replacing it.
-    echo "FORCED WORKER SWAP: idle worker $worker_id did not exit within ${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}s and will never claim another AgentRun; replacing it. No interactive AgentRuns are affected." >&2
+    if [ "$drain_status" = "3" ]; then
+      echo "FORCED WORKER SWAP: idle worker $worker_id did not exit within the ${COMPOSE_RUNTIME_WORKER_IDLE_EXIT_TIMEOUT_SECONDS:-120}s idle exit deadline after consecutive zero-active checks; replacing it. No interactive AgentRuns are affected." >&2
+    else
+      echo "FORCED WORKER SWAP: idle worker $worker_id did not exit within ${COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS:-86400}s and will never claim another AgentRun; replacing it. No interactive AgentRuns are affected." >&2
+    fi
     docker kill "$worker_id" >/dev/null 2>&1 || true
   fi
   # A failed recreate here IS the outage: the outgoing worker was already told to

@@ -29,6 +29,7 @@ def _simulator(
     handoff_dies_after_ticks: int | None = None,
     handoff_state_unknown: bool = False,
     drain_timeout_seconds: int = 1,
+    idle_exit_timeout_seconds: int = 120,
     claiming_timeout_seconds: int = 0,
 ) -> str:
     """Build a bash script whose `docker`/`compose` mutate simulated containers.
@@ -54,6 +55,7 @@ export HANDOFF_DIES_AFTER_TICKS={-1 if handoff_dies_after_ticks is None else han
 export HANDOFF_STATE_UNKNOWN={"1" if handoff_state_unknown else "0"}
 COMPOSE_RUNTIME_HANDOFF_REAP_TIMEOUT_SECONDS=0
 COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS={drain_timeout_seconds}
+COMPOSE_RUNTIME_WORKER_IDLE_EXIT_TIMEOUT_SECONDS={idle_exit_timeout_seconds}
 COMPOSE_RUNTIME_WORKER_CLAIMING_TIMEOUT_SECONDS={claiming_timeout_seconds}
 source "{RUNTIME_LIB}"
 
@@ -372,6 +374,88 @@ def test_the_drain_wait_ends_when_the_handoff_worker_dies(tmp_path):
     assert "restart=no" in result.stderr
     # The worker it was draining is untouched by the wait itself.
     assert (state / "worker-1.running").exists()
+
+
+def test_idle_worker_that_ignores_sigterm_is_replaced_at_idle_deadline(tmp_path):
+    """Regression for the 2026-08-08 deploy that waited on an idle worker for 24h."""
+
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "worker_swap_snapshot_decision() { printf 'replace\\n'; }\n"
+            "worker_swap_snapshot_count() { printf '0\\n'; }\n"
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            "SECONDS=$((SECONDS + $1)); return 0; }\n"
+            "replace_idle_worker"
+        ),
+        stub_drain_wait=False,
+        drain_timeout_seconds=86400,
+        idle_exit_timeout_seconds=10,
+    )
+    result = _run(script)
+
+    assert "STATUS=0" in result.stdout
+    assert result.stdout.split("RUNNING=")[1].strip() == "worker-2"
+    assert (state / "ticks").read_text().strip() == "14"
+    assert "idle exit deadline of 10s" in result.stderr
+    assert "86400s" not in result.stderr
+    assert "No interactive AgentRuns are affected" in result.stderr
+    calls = _calls(state)
+    assert "kill -s TERM worker-1" in calls
+    assert "kill worker-1" in calls
+
+
+def test_idle_deadline_is_abandoned_and_rearmed_when_active_runs_reappear(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "worker_swap_snapshot_count() { "
+            'case "$(ticks)" in 18) printf \'1\\n\' ;; *) printf \'0\\n\' ;; esac; }\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            "SECONDS=$((SECONDS + $1)); return 0; }\n"
+            "wait_for_worker_exit worker-1 ''"
+        ),
+        stub_drain_wait=False,
+        drain_timeout_seconds=300,
+        idle_exit_timeout_seconds=40,
+    )
+    result = _run(script)
+
+    assert "STATUS=3" in result.stdout
+    # Zero at 30s and 60s arms a deadline at 100s. The active run at 90s
+    # abandons it. Zero at 120s and 150s re-arms a new deadline at 190s.
+    assert (state / "ticks").read_text().strip() == "38"
+    assert "active AgentRuns reappeared" in result.stderr
+    assert "idle exit deadline of 40s" in result.stderr
+    assert "did not drain within 300s" not in result.stderr
+
+
+def test_active_run_at_idle_deadline_requires_two_fresh_zero_snapshots(tmp_path):
+    state = tmp_path / "s"
+    script = _simulator(
+        state,
+        body=(
+            "worker_swap_snapshot_count() { "
+            'case "$(ticks)" in 19) printf \'1\\n\' ;; *) printf \'0\\n\' ;; esac; }\n'
+            'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
+            "SECONDS=$((SECONDS + $1)); return 0; }\n"
+            "wait_for_worker_exit worker-1 ''"
+        ),
+        stub_drain_wait=False,
+        drain_timeout_seconds=300,
+        idle_exit_timeout_seconds=35,
+    )
+    result = _run(script)
+
+    assert "STATUS=3" in result.stdout
+    # Zero at 30s and 60s arms a deadline at 95s. The active run at that
+    # deadline abandons it. Zero at 120s and 150s re-arms a fresh deadline.
+    assert (state / "ticks").read_text().strip() == "37"
+    assert result.stderr.count("active AgentRuns reappeared") == 1
+    assert "idle exit deadline of 35s" in result.stderr
+    assert "did not drain within 300s" not in result.stderr
 
 
 def test_an_unanswered_handoff_inspect_does_not_end_the_drain_wait(tmp_path):
