@@ -383,3 +383,75 @@ def test_trigger_state_migration_backfills_and_round_trips(monkeypatch):
         assert connection.execute(
             sa.text("SELECT COUNT(*) FROM cycle_failure_guard_latches")
         ).scalar_one() == 0
+
+
+def _orphan_cleanup_migration(monkeypatch, connection):
+    migration = importlib.import_module(
+        "brain.platform.db.alembic.versions."
+        "0058_delete_orphaned_standing_failure_states"
+    )
+    monkeypatch.setattr(
+        migration,
+        "op",
+        Operations(MigrationContext.configure(connection)),
+    )
+    return migration
+
+
+def test_orphaned_standing_failure_state_is_deleted(monkeypatch):
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "CREATE TABLE scheduler_failure_guard_trigger_states ("
+                "job_id INTEGER NOT NULL, "
+                "trigger_kind VARCHAR(40) NOT NULL, "
+                "trigger_state BLOB NOT NULL, "
+                "PRIMARY KEY (job_id, trigger_kind))"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO scheduler_failure_guard_trigger_states "
+                "(job_id, trigger_kind, trigger_state) VALUES "
+                "(1, 'standing_failure', :orphaned_state), "
+                "(2, 'custom_state', :preserved_state)"
+            ),
+            {
+                "orphaned_state": b'{"count": 9}',
+                "preserved_state": b'{  "nested": [1, 2], "flag": true  }',
+            },
+        )
+        preserved_before = connection.execute(
+            sa.text(
+                "SELECT job_id, trigger_kind, trigger_state "
+                "FROM scheduler_failure_guard_trigger_states "
+                "WHERE trigger_kind = 'custom_state'"
+            )
+        ).one()
+
+        _orphan_cleanup_migration(monkeypatch, connection).upgrade()
+
+        assert connection.execute(
+            sa.text(
+                "SELECT COUNT(*) "
+                "FROM scheduler_failure_guard_trigger_states "
+                "WHERE trigger_kind = 'standing_failure'"
+            )
+        ).scalar_one() == 0
+        preserved_after = connection.execute(
+            sa.text(
+                "SELECT job_id, trigger_kind, trigger_state "
+                "FROM scheduler_failure_guard_trigger_states "
+                "WHERE trigger_kind = 'custom_state'"
+            )
+        ).one()
+        assert tuple(preserved_after) == tuple(preserved_before)
+
+
+def test_orphan_cleanup_is_noop_when_trigger_state_table_is_absent(monkeypatch):
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        _orphan_cleanup_migration(monkeypatch, connection).upgrade()
