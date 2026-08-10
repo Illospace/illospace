@@ -21,6 +21,18 @@ export interface RuntimeStatusSnapshot {
     max_lag_seconds: number;
     reason: string;
   };
+  maintenance: {
+    state: RuntimeHealthState;
+    last_interval_at: string | null;
+    interval_age_seconds: number | null;
+    reaped: number;
+    closeout_requested: number;
+    expired: number;
+    overdue_run_ids: number[];
+    alert_sent: boolean;
+    errors: string[];
+    reason: string;
+  };
   runs: {
     state: RuntimeHealthState;
     queued: number;

@@ -71,7 +71,7 @@ def test_deploy_evidence_requires_a_real_build_sha(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runtime_snapshot_contains_all_six_evidence_rows(monkeypatch):
+async def test_runtime_snapshot_contains_all_seven_evidence_rows(monkeypatch):
     now = datetime(2026, 8, 8, 20, 0, tzinfo=timezone.utc)
     session = MagicMock()
     session.scalar = AsyncMock(
@@ -135,6 +135,21 @@ async def test_runtime_snapshot_contains_all_six_evidence_rows(monkeypatch):
             AsyncMock(return_value=now - timedelta(seconds=30)),
         ),
         patch(
+            "brain.app.ops.runtime_status.agent_run_maintenance_snapshot",
+            return_value={
+                "state": "good",
+                "last_interval_at": (now - timedelta(seconds=10)).isoformat(),
+                "interval_age_seconds": 10,
+                "reaped": 1,
+                "closeout_requested": 2,
+                "expired": 3,
+                "overdue_run_ids": [15926],
+                "alert_sent": True,
+                "errors": [],
+                "reason": "Agent-run maintenance is reporting on time.",
+            },
+        ),
+        patch(
             "brain.app.ops.runtime_status.async_summarize_token_totals",
             usage_summary,
         ),
@@ -146,6 +161,7 @@ async def test_runtime_snapshot_contains_all_six_evidence_rows(monkeypatch):
         "overall",
         "worker",
         "scheduler",
+        "maintenance",
         "runs",
         "cycles",
         "spend",
@@ -154,6 +170,9 @@ async def test_runtime_snapshot_contains_all_six_evidence_rows(monkeypatch):
     assert snapshot["worker"]["state"] == "good"
     assert snapshot["worker"]["heartbeat_age_seconds"] == 20
     assert snapshot["scheduler"]["state"] == "late"
+    assert snapshot["maintenance"]["reaped"] == 1
+    assert snapshot["maintenance"]["expired"] == 3
+    assert snapshot["maintenance"]["overdue_run_ids"] == [15926]
     assert snapshot["runs"]["queued"] == 1
     assert snapshot["runs"]["running"] == 2
     assert snapshot["cycles"]["overdue"] == 1
@@ -205,3 +224,7 @@ def test_runtime_panel_keeps_stale_and_detailed_evidence_visible():
     assert "Showing the 20 most overdue cycles." in panel
     assert "status.deploy.built_at" in panel
     assert "status.deploy.process_started_at" in panel
+    assert "status.maintenance.reaped" in panel
+    assert "status.maintenance.expired" in panel
+    assert "status.maintenance.closeout_requested" in panel
+    assert "status.maintenance.overdue_run_ids" in panel
