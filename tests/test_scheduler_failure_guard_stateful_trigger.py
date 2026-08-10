@@ -15,6 +15,8 @@ from brain.app.scheduler.scheduler_failure_guard import (
 from brain.platform.db.models.scheduler import SchedulerRun
 from brain.systems.failure_guard.core import (
     FailureGuardTriggerKind,
+    FailureGuardTriggerMode,
+    FailureGuardTriggerRegistration,
     FailureGuardTriggerResult,
 )
 from tests.scheduler_test_support import (
@@ -111,7 +113,10 @@ async def test_stateful_third_trigger_flows_through_production_registry(
         "_FAILURE_GUARD_TRIGGER_PROVIDERS",
         (
             *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: _DistinctFailureClassesTrigger(threshold=2),
+            lambda: FailureGuardTriggerRegistration(
+                mode=FailureGuardTriggerMode.STATEFUL,
+                trigger=_DistinctFailureClassesTrigger(threshold=2),
+            ),
         ),
     )
     assert [

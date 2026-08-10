@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import StrEnum
 from hashlib import sha256
 import re
 from typing import (
     Any,
+    Generic,
     Literal,
     Mapping,
     NewType,
@@ -14,7 +16,7 @@ from typing import (
     Sequence,
     TypeAlias,
     TypeVar,
-    runtime_checkable,
+    cast,
 )
 
 
@@ -129,7 +131,6 @@ class FailureGuardStateStore(Protocol):
         """Delete one trigger's state while preserving any active latch."""
 
 
-@runtime_checkable
 class FailureGuardTrigger(Protocol[FailureGuardContextT]):
     """A stateless trigger evaluated from consumer-owned context."""
 
@@ -142,7 +143,6 @@ class FailureGuardTrigger(Protocol[FailureGuardContextT]):
         """Evaluate the trigger and construct its public presentation."""
 
 
-@runtime_checkable
 class FailureGuardStatefulTrigger(Protocol[FailureGuardContextT]):
     """Complete contract for a trigger that owns persisted JSON state."""
 
@@ -166,55 +166,124 @@ class FailureGuardStatefulTrigger(Protocol[FailureGuardContextT]):
         """Return replacement state, or ``None`` to clear persisted state."""
 
 
-async def async_evaluate_failure_guard_triggers(
-    *,
-    triggers: Sequence[
+class FailureGuardTriggerMode(StrEnum):
+    """A registered trigger's explicit evaluation and persistence mode."""
+
+    STATELESS = "stateless"
+    STATEFUL = "stateful"
+
+
+@dataclass(frozen=True)
+class FailureGuardTriggerRegistration(Generic[FailureGuardContextT]):
+    """Bind one trigger implementation to its declared dispatch mode."""
+
+    mode: FailureGuardTriggerMode
+    trigger: (
         FailureGuardTrigger[FailureGuardContextT]
         | FailureGuardStatefulTrigger[FailureGuardContextT]
-    ],
+    )
+
+    def __post_init__(self) -> None:
+        trigger_name = type(self.trigger).__name__
+        if not isinstance(self.mode, FailureGuardTriggerMode):
+            raise ValueError(
+                f"Failure-guard trigger {trigger_name} has invalid mode: "
+                f"{self.mode!r}"
+            )
+        stateless_method = "evaluate"
+        stateful_methods = ("evaluate_with_state", "transition_state")
+        if self.mode is FailureGuardTriggerMode.STATEFUL:
+            missing_methods = [
+                method
+                for method in stateful_methods
+                if not callable(getattr(self.trigger, method, None))
+            ]
+            if missing_methods:
+                raise ValueError(
+                    f"Failure-guard trigger {trigger_name} declared stateful "
+                    "but is missing required method(s): "
+                    + ", ".join(missing_methods)
+                )
+            return
+
+        if not callable(getattr(self.trigger, stateless_method, None)):
+            raise ValueError(
+                f"Failure-guard trigger {trigger_name} declared stateless "
+                f"but is missing required method: {stateless_method}"
+            )
+        surplus_methods = [
+            method
+            for method in stateful_methods
+            if callable(getattr(self.trigger, method, None))
+        ]
+        if surplus_methods:
+            raise ValueError(
+                f"Failure-guard trigger {trigger_name} declared stateless "
+                "but has surplus stateful method(s): "
+                + ", ".join(surplus_methods)
+            )
+
+    @property
+    def kind(self) -> FailureGuardTriggerKind:
+        return self.trigger.kind
+
+
+async def async_evaluate_failure_guard_triggers(
+    *,
+    triggers: Sequence[FailureGuardTriggerRegistration[FailureGuardContextT]],
     context: FailureGuardContextT,
     store: FailureGuardStateStore,
 ) -> tuple[FailureGuardTriggerResult, ...]:
     """Evaluate registered triggers through their declared public contract."""
     states = dict(await store.load_trigger_states())
     results: list[FailureGuardTriggerResult] = []
-    for trigger in triggers:
-        if isinstance(trigger, FailureGuardStatefulTrigger):
+    for registration in triggers:
+        trigger = registration.trigger
+        if registration.mode is FailureGuardTriggerMode.STATEFUL:
+            stateful_trigger = cast(
+                FailureGuardStatefulTrigger[FailureGuardContextT],
+                trigger,
+            )
             results.append(
-                await trigger.evaluate_with_state(
+                await stateful_trigger.evaluate_with_state(
                     context,
-                    state=dict(states.get(trigger.kind, {})),
+                    state=dict(states.get(registration.kind, {})),
                 )
             )
         else:
-            results.append(await trigger.evaluate(context))
+            stateless_trigger = cast(
+                FailureGuardTrigger[FailureGuardContextT],
+                trigger,
+            )
+            results.append(await stateless_trigger.evaluate(context))
     return tuple(results)
 
 
 async def async_transition_failure_guard_trigger_states(
     *,
-    triggers: Sequence[
-        FailureGuardTrigger[FailureGuardContextT]
-        | FailureGuardStatefulTrigger[FailureGuardContextT]
-    ],
+    triggers: Sequence[FailureGuardTriggerRegistration[FailureGuardContextT]],
     context: FailureGuardContextT,
     event: FailureGuardLifecycleEvent,
     store: FailureGuardStateStore,
 ) -> None:
     """Apply one lifecycle event to every registered state-owning trigger."""
     states = dict(await store.load_trigger_states())
-    for trigger in triggers:
-        if not isinstance(trigger, FailureGuardStatefulTrigger):
+    for registration in triggers:
+        if registration.mode is FailureGuardTriggerMode.STATELESS:
             continue
+        trigger = cast(
+            FailureGuardStatefulTrigger[FailureGuardContextT],
+            registration.trigger,
+        )
         next_state = await trigger.transition_state(
             context,
-            dict(states.get(trigger.kind, {})),
+            dict(states.get(registration.kind, {})),
             event=event,
         )
         if next_state is None:
-            await store.delete_trigger_state(trigger.kind)
+            await store.delete_trigger_state(registration.kind)
         else:
-            await store.save_trigger_state(trigger.kind, dict(next_state))
+            await store.save_trigger_state(registration.kind, dict(next_state))
 
 
 @dataclass(frozen=True)
