@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import delete, event, func, select
 
 import brain.app.scheduler.executor as scheduler_executor
 import brain.app.scheduler.scheduler_failure_guard as scheduler_failure_guard
@@ -28,6 +28,9 @@ from brain.app.scheduler.scheduler_failure_guard import (
     ROLLING_WINDOW_TRIGGER_KIND,
     STANDING_FAILURE_TRIGGER_KIND,
     SchedulerFailureGuardResetEvent,
+    async_latch_scheduler_failure_alerts,
+    async_read_scheduler_failure_guard,
+    async_record_scheduler_job_failure,
     scheduler_failure_signature,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
@@ -164,7 +167,7 @@ async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
                 },
                 {
                     "kind": "standing_failure",
-                    "count": 0,
+                    "count": 1,
                     "threshold": 3,
                     "window_hours": None,
                     "alerted_at": None,
@@ -202,7 +205,7 @@ async def test_health_projection_preserves_each_jobs_latches_and_trigger_output(
                 },
                 {
                     "kind": "standing_failure",
-                    "count": 0,
+                    "count": 2,
                     "threshold": 3,
                     "window_hours": None,
                     "alerted_at": None,
@@ -313,7 +316,7 @@ async def test_catalog_projection_batches_failure_guard_queries_across_jobs(
         len(job["failure_guard"]["triggers"]) == 4
         for job in several_job_projection
     )
-    assert single_job_statements == several_job_statements == 4
+    assert single_job_statements == several_job_statements == 5
 
 
 async def test_registered_database_trigger_projects_once_across_jobs(
@@ -357,7 +360,7 @@ async def test_registered_database_trigger_projects_once_across_jobs(
         await _list_scheduler_jobs_with_statement_count(session, now=now)
     )
 
-    assert single_job_statements == several_job_statements == 5
+    assert single_job_statements == several_job_statements == 6
     assert database_trigger.projected_job_counts == [1, 4]
 
 
@@ -588,6 +591,7 @@ async def _apply_standing_failure(
         idempotency_key=f"standing-failure:{job.id}:{index}",
         started_at=observed_at,
         finished_at=observed_at,
+        created_at=observed_at,
     )
     session.add(run)
     await session.flush()
@@ -600,6 +604,212 @@ async def _apply_standing_failure(
         now=observed_at,
     )
     return run
+
+
+def _standing_edge(evaluation: FailureGuardEvaluation) -> FailureGuardEdge:
+    return next(
+        edge
+        for edge in evaluation.edges
+        if edge.kind == STANDING_FAILURE_TRIGGER_KIND
+    )
+
+
+async def test_standing_failure_uses_lifetime_history_and_survives_latch_reset(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD", "3")
+    first_failure_at = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+    observed_at = first_failure_at + timedelta(days=23)
+    job = _make_scheduler_job(next_run_at=observed_at + timedelta(days=1))
+    session.add(job)
+    await session.flush()
+    for index in range(21):
+        failed_at = (
+            observed_at
+            if index == 20
+            else first_failure_at + timedelta(days=index)
+        )
+        session.add(
+            SchedulerRun(
+                job_id=job.id,
+                scheduled_for=failed_at,
+                window_start=failed_at,
+                window_end=failed_at + timedelta(hours=1),
+                status="settled_failure",
+                idempotency_key=f"lifetime-standing-failure:{index}",
+                started_at=failed_at,
+                finished_at=failed_at,
+                created_at=failed_at,
+            )
+        )
+    await session.flush()
+
+    evaluation = await async_record_scheduler_job_failure(
+        session,
+        job,
+        failure_identity="nightly_sleep:failure",
+        error_text="RuntimeError: nightly sleep failed",
+        now=observed_at,
+    )
+    standing_before_reset = _standing_edge(evaluation)
+    assert standing_before_reset.public_details["count"] == 21
+    assert standing_before_reset.alert_summary == (
+        "21 failures over 23 days; job has never succeeded"
+    )
+
+    await async_latch_scheduler_failure_alerts(
+        session,
+        job,
+        evaluation,
+        now=observed_at,
+    )
+    await session.execute(
+        delete(SchedulerFailureGuardLatch).where(
+            SchedulerFailureGuardLatch.job_id == job.id,
+            SchedulerFailureGuardLatch.trigger_kind == "standing_failure",
+        )
+    )
+    await session.execute(
+        delete(SchedulerFailureGuardTriggerState).where(
+            SchedulerFailureGuardTriggerState.job_id == job.id,
+            SchedulerFailureGuardTriggerState.trigger_kind == "standing_failure",
+        )
+    )
+    await session.flush()
+
+    reset_evaluation = await async_read_scheduler_failure_guard(
+        session,
+        job,
+        now=observed_at,
+    )
+    standing_after_reset = _standing_edge(reset_evaluation)
+    assert standing_after_reset.public_details["count"] == (
+        standing_before_reset.public_details["count"]
+    )
+
+    session.add(
+        SchedulerFailureGuardLatch(
+            job_id=job.id,
+            trigger_kind="standing_failure",
+            alerted_at=observed_at,
+        )
+    )
+    await session.flush()
+    recreated_evaluation = await async_read_scheduler_failure_guard(
+        session,
+        job,
+        now=observed_at,
+    )
+    assert _standing_edge(recreated_evaluation).public_details["count"] == 21
+
+
+async def test_standing_failure_counts_runs_since_last_success_and_reports_age(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD", "3")
+    last_success_at = datetime(2026, 8, 5, 3, 0, tzinfo=timezone.utc)
+    observed_at = last_success_at + timedelta(days=5)
+    job = _make_scheduler_job(next_run_at=observed_at + timedelta(days=1))
+    session.add(job)
+    await session.flush()
+    run_specs = (
+        ("settled_failure", last_success_at - timedelta(days=1)),
+        ("settled_success", last_success_at),
+        ("settled_failure", last_success_at + timedelta(days=1)),
+        ("settled_failure", last_success_at + timedelta(days=3)),
+        ("settled_failure", observed_at),
+    )
+    for index, (status, created_at) in enumerate(run_specs):
+        session.add(
+            SchedulerRun(
+                job_id=job.id,
+                scheduled_for=created_at,
+                window_start=created_at,
+                window_end=created_at + timedelta(hours=1),
+                status=status,
+                idempotency_key=f"success-bounded-standing-failure:{index}",
+                started_at=created_at,
+                finished_at=created_at,
+                created_at=created_at,
+            )
+        )
+    await session.flush()
+
+    expected_count = await session.scalar(
+        select(func.count())
+        .select_from(SchedulerRun)
+        .where(
+            SchedulerRun.job_id == job.id,
+            SchedulerRun.status == "settled_failure",
+            SchedulerRun.created_at > last_success_at,
+        )
+    )
+    evaluation = await async_record_scheduler_job_failure(
+        session,
+        job,
+        failure_identity="nightly_sleep:failure",
+        error_text="RuntimeError: nightly sleep failed",
+        now=observed_at,
+    )
+    standing = _standing_edge(evaluation)
+
+    assert standing.public_details["count"] == expected_count == 3
+    assert standing.alert_summary == (
+        "3 failures over 5 days since last successful run"
+    )
+
+
+async def test_standing_failure_counts_retried_attempts_as_one_scheduled_run(
+    session,
+    monkeypatch,
+):
+    monkeypatch.setenv("SCHEDULER_STANDING_FAILURE_ALERT_THRESHOLD", "1")
+    observed_at = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
+    job = _make_scheduler_job(
+        retry_policy={"max_attempts": 3, "backoff_seconds": 0},
+        next_run_at=observed_at + timedelta(days=1),
+    )
+    session.add(job)
+    await session.flush()
+    run = SchedulerRun(
+        job_id=job.id,
+        scheduled_for=observed_at,
+        window_start=observed_at,
+        window_end=observed_at + timedelta(hours=1),
+        status="retryable",
+        attempt=1,
+        idempotency_key="standing-failure-retried-run",
+        started_at=observed_at,
+        finished_at=observed_at,
+        created_at=observed_at,
+    )
+    session.add(run)
+    await session.flush()
+
+    for attempt in (1, 2):
+        run.attempt = attempt
+        retry_evaluation = await async_record_scheduler_job_failure(
+            session,
+            job,
+            failure_identity="nightly_sleep:failure",
+            error_text="RuntimeError: nightly sleep failed",
+            now=observed_at + timedelta(minutes=attempt),
+        )
+        assert _standing_edge(retry_evaluation).public_details["count"] == 0
+
+    run.attempt = 3
+    run.status = "settled_failure"
+    await session.flush()
+    settled_evaluation = await async_record_scheduler_job_failure(
+        session,
+        job,
+        failure_identity="nightly_sleep:failure",
+        error_text="RuntimeError: nightly sleep failed",
+        now=observed_at + timedelta(minutes=3),
+    )
+    assert _standing_edge(settled_evaluation).public_details["count"] == 1
 
 
 async def test_standing_failure_alerts_after_eighteen_on_schedule_failures(
