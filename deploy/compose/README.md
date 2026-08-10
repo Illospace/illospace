@@ -169,7 +169,11 @@ Two worker settings interact with shutdown and must stay consistent:
 - `ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS` (default `infinity`) bounds the
   *deploy-time* drain, not shutdown. The graceful handoff signals with `docker
   kill -s TERM`, which ignores `stop_grace_period` entirely, and enforces its own
-  bound via `COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS`.
+  bound via `COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS`. When two consecutive
+  canonical snapshots confirm zero active AgentRuns,
+  `COMPOSE_RUNTIME_WORKER_IDLE_EXIT_TIMEOUT_SECONDS` (default `120`) bounds the
+  remaining idle exit wait. Any later active AgentRun abandons that shorter
+  deadline until two consecutive zero-active snapshots re-arm it.
 
 ## Operations
 

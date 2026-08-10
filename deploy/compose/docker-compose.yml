@@ -145,9 +145,13 @@ services:
     # This does not shorten the deploy-time drain. The graceful handoff in
     # deploy/scripts/compose-runtime-lib.sh signals with `docker kill -s TERM`,
     # which ignores stop_grace_period entirely, and bounds the drain itself via
-    # COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS. The grace period only ever
-    # applied to daemon shutdown and to a naive `compose down` / `compose up
-    # --force-recreate`, where 24h was a hang, not a safeguard.
+    # COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS. Once two consecutive
+    # canonical snapshots confirm zero active AgentRuns, the remaining wait is
+    # bounded by COMPOSE_RUNTIME_WORKER_IDLE_EXIT_TIMEOUT_SECONDS (default 120s).
+    # A later active run abandons that shorter deadline until zero is confirmed
+    # twice again. The grace period only ever applied to daemon shutdown and to
+    # a naive `compose down` / `compose up --force-recreate`, where 24h was a
+    # hang, not a safeguard.
     stop_grace_period: ${ILLO_WORKER_STOP_GRACE_PERIOD:-10s}
     environment:
       <<: *illo-env
