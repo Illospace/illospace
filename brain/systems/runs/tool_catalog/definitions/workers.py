@@ -20,7 +20,7 @@ WORKER_SPAWN_TOOLS = [
             "openai/gpt-5.6-luna at xhigh. Luna caveats: quality collapses above ~200K context; "
             "xhigh pays a long first-token pause per turn — never use Luna xhigh for many-short-turn "
             "loops. Reserve non-OpenAI models for a cross-provider verifier. Free local lane: "
-            "`ollama/qwen3.6-27b` — zero cost, unlimited volume, ≤32k context, quality well below "
+            "`ollama/qwen3.6-27b` — zero cost, unlimited volume, ≤64k context, quality well below "
             "Luna; use for heartbeat-class, high-volume, low-stakes single-shot work; never for "
             "judgment or anything user-facing."
         ),

@@ -108,7 +108,7 @@ def test_ollama_qwen_uses_free_local_catalog_contract():
     assert entry.input_price_per_million == 0.0
     assert entry.output_price_per_million == 0.0
     assert entry.availability_fallback == "openai/gpt-5.6-luna"
-    assert entry.context_window_tokens == 32_768
+    assert entry.context_window_tokens == 65_536
     assert entry.supported_effort_tiers == ("none",)
     assert contract["auth_requirement"] == "none"
     assert RuntimeModelCatalogEntry.model_validate(contract).provider == "ollama"

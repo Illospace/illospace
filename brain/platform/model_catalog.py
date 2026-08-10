@@ -139,7 +139,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         ),
         supported_effort_tiers=_NO_NATIVE_EFFORT,
         availability_fallback="openai/gpt-5.6-luna",
-        context_window_tokens=32_768,
+        context_window_tokens=65_536,
         input_price_per_million=0.0,
         output_price_per_million=0.0,
         provider_default=True,
