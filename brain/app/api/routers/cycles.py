@@ -22,7 +22,7 @@ from brain.systems.cycles.commands import (
     async_update_cycle as command_update_cycle,
     cycle_change_event,
 )
-from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.events import publish_cycle_change_safe
 from brain.systems.cycles.common import SCHEDULED_DIGEST_RUN_KIND
 from brain.systems.cycles.serializers import serialize_cycle, serialize_cycle_run
 from brain.systems.cycles.service import async_run_cycle_now
@@ -114,7 +114,7 @@ async def create_cycle(
     payload = serialize_cycle(cycle)
     event = cycle_change_event(cycle)
     await db.commit()
-    publish_cycle_change(
+    publish_cycle_change_safe(
         action="create",
         **event,
     )
@@ -183,7 +183,7 @@ async def delete_cycle(
     await command_delete_cycle(db, cycle)
     event = cycle_change_event(cycle)
     await db.commit()
-    publish_cycle_change(
+    publish_cycle_change_safe(
         action="delete",
         **event,
     )
@@ -225,7 +225,7 @@ async def run_cycle(
         cycle_id,
         run_kind=SCHEDULED_DIGEST_RUN_KIND,
     )
-    publish_cycle_change(
+    publish_cycle_change_safe(
         action="run",
         **event,
     )

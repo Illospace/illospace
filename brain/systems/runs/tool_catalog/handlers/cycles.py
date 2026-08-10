@@ -32,7 +32,7 @@ from brain.systems.cycles.commands import (
     async_update_cycle,
     cycle_change_event,
 )
-from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.events import publish_cycle_change_safe
 from brain.systems.cycles.serializers import (
     serialize_cycle,
     serialize_cycle_guidance,
@@ -323,7 +323,7 @@ async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
             rationale=_optional_text(args.rationale),
         )
         payload = serialize_cycle(cycle)
-    publish_cycle_change(action="create", **_event_from_payload(payload))
+    publish_cycle_change_safe(action="create", **_event_from_payload(payload))
     return {"created": payload}
 
 
@@ -364,7 +364,7 @@ async def _action_delete(ctx: ManageCycleContext) -> dict[str, Any]:
         cycle = await _load_cycle(uow.session, ctx.actor, ctx.args.id)
         await async_delete_cycle(uow.session, cycle)
         event = cycle_change_event(cycle)
-    publish_cycle_change(action="delete", **event)
+    publish_cycle_change_safe(action="delete", **event)
     return {"deleted": {"id": ctx.args.id}}
 
 
@@ -387,7 +387,7 @@ async def _action_run(ctx: ManageCycleContext) -> dict[str, Any]:
             "rationale": _optional_text(ctx.args.rationale),
         },
     )
-    publish_cycle_change(action="run", **event)
+    publish_cycle_change_safe(action="run", **event)
     return {"run": payload}
 
 

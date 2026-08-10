@@ -159,7 +159,11 @@ async def policy_workspace(
     )
     session.add_all(guidance)
     await session.flush()
-    monkeypatch.setattr(behavior_policy, "publish_cycle_change", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        behavior_policy,
+        "publish_cycle_change_strict",
+        lambda **_kwargs: None,
+    )
     return _PolicyWorkspace(
         session=session,
         cycle=cycle,
@@ -216,7 +220,9 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     ]
 
     published = []
-    behavior_policy.publish_cycle_change = lambda **payload: published.append(payload)
+    behavior_policy.publish_cycle_change_strict = (
+        lambda **payload: published.append(payload)
+    )
     patch = CyclePolicyPatch(
         name="Morning policy review",
         guidance=["Keep this guidance", "New wording"],
@@ -239,7 +245,6 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
             "user_id": workspace.cycle.user_id,
             "cycle_id": workspace.cycle.id,
             "target_idea_id": None,
-            "strict": True,
         }
     ]
 
@@ -261,6 +266,9 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     assert change.rationale == "Use the reviewed wording."
     assert change.before_snapshot == preview.before.snapshot
     assert change.after_snapshot == preview.after_snapshot
+    stored_change = await workspace.session.get(BehaviorChangeAudit, change.id)
+    assert stored_change.before_snapshot["snapshot_version"] == 1
+    assert stored_change.after_snapshot["snapshot_version"] == 1
     assert change.changed_fields == preview.changed_fields
     assert change.cycle_revision_id == applied.revision.id
     assert isinstance(change.applied_at, datetime)
@@ -408,8 +416,8 @@ async def test_apply_failure_rolls_back_the_entire_policy_write_set(
 
     monkeypatch.setattr(
         behavior_policy,
-        "publish_cycle_change",
-        cycle_events.publish_cycle_change,
+        "publish_cycle_change_strict",
+        cycle_events.publish_cycle_change_strict,
     )
     monkeypatch.setattr(platform_events, "publish", fail_publish)
     with pytest.raises(RuntimeError, match="event publish failed"):
@@ -488,6 +496,60 @@ async def test_revert_uses_reviewed_apply_and_creates_a_new_version(policy_works
     )
     assert [change.version for change in history] == [2, 1]
     assert history[1].after_snapshot["name"] == "Changed policy"
+
+
+async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_workspace):
+    workspace = policy_workspace
+    _, first = await _preview_and_apply(
+        workspace,
+        CyclePolicyPatch(name="Changed policy"),
+    )
+    stored_change = await workspace.session.get(BehaviorChangeAudit, first.change.id)
+    stored_before = dict(stored_change.before_snapshot)
+    stored_before.pop("max_concurrency")
+    stored_before["retired_policy_field"] = "legacy value"
+    stored_change.before_snapshot = stored_before
+    await workspace.session.flush()
+
+    history = await async_list_cycle_policy_history(
+        workspace.session,
+        actor=workspace.owner,
+        cycle_id=workspace.cycle.id,
+    )
+    assert history[0].before_snapshot["max_concurrency"] == 1
+    assert "retired_policy_field" not in history[0].before_snapshot
+
+    revert_preview = await async_preview_cycle_policy_revert(
+        workspace.session,
+        actor=workspace.owner,
+        cycle_id=workspace.cycle.id,
+        change_id=first.change.id,
+    )
+    assert revert_preview.after_snapshot["name"] == "Morning review"
+    assert revert_preview.after_snapshot["max_concurrency"] == 1
+    assert "retired_policy_field" not in revert_preview.after_snapshot
+
+    reverted = await async_apply_cycle_policy_revert(
+        workspace.session,
+        actor=workspace.owner,
+        cycle_id=workspace.cycle.id,
+        change_id=first.change.id,
+        expected_version=revert_preview.before.version,
+        preview_digest=revert_preview.preview_digest,
+        rationale="Revert a snapshot written with an older schema.",
+        source_reference="api:compat-revert",
+    )
+    assert isinstance(reverted, CyclePolicyApplied)
+    assert reverted.effective_policy.version == 2
+    assert set(reverted.effective_policy.snapshot) == set(
+        revert_preview.before.snapshot
+    )
+    new_stored_change = await workspace.session.get(
+        BehaviorChangeAudit,
+        reverted.change.id,
+    )
+    assert new_stored_change.before_snapshot["snapshot_version"] == 1
+    assert new_stored_change.after_snapshot["snapshot_version"] == 1
 
 
 async def test_admitted_run_keeps_snapshot_and_next_run_gets_new_policy(policy_workspace):

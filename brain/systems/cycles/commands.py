@@ -10,7 +10,7 @@ from brain.systems.cycles.access import CycleActor
 from brain.systems.cycles.behavior_policy import (
     CyclePolicyApplied,
     CyclePolicyPatch,
-    UNSET_POLICY_FIELD,
+    UNSET_CYCLE_FIELD,
     async_apply_cycle_policy_change,
     async_preview_cycle_policy_change,
 )
@@ -37,14 +37,6 @@ from brain.systems.cycles.schedules import (
     validate_schedule_expr,
     validate_timezone_name,
 )
-
-
-class _UnsetCycleField:
-    pass
-
-
-UNSET_CYCLE_FIELD = _UnsetCycleField()
-
 
 def _validated_max_concurrency(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -170,7 +162,7 @@ async def async_update_cycle(
         execution_policy_key=_policy_field(execution_policy_key),
         target_idea_id=_policy_field(target_idea_id),
         guidance_additions=(
-            [guidance] if guidance else UNSET_POLICY_FIELD
+            [guidance] if guidance else UNSET_CYCLE_FIELD
         ),
     )
     preview = await async_preview_cycle_policy_change(
@@ -321,7 +313,7 @@ def _is_patch_field_set(value) -> bool:
 
 def _policy_field(value, *, ignore_none: bool = False):
     if value is UNSET_CYCLE_FIELD or (ignore_none and value is None):
-        return UNSET_POLICY_FIELD
+        return UNSET_CYCLE_FIELD
     return value
 
 

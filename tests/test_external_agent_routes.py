@@ -933,7 +933,7 @@ async def test_hosted_mcp_cycle_manage_create_commits_and_publishes_change():
         "brain.app.api.routers.agent_mcp._validate_cycle_target_idea",
         new=AsyncMock(),
     ), patch(
-        "brain.app.api.routers.agent_mcp.publish_cycle_change",
+        "brain.app.api.routers.agent_mcp.publish_cycle_change_safe",
         side_effect=publish_change,
     ):
         response = await _request(

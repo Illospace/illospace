@@ -35,7 +35,7 @@ from brain.systems.cycles.common import (
     validate_nonempty_trimmed,
     validate_thinking_override,
 )
-from brain.systems.cycles.events import publish_cycle_change
+from brain.systems.cycles.events import publish_cycle_change_strict
 from brain.systems.cycles.execution_policy_registry import (
     validate_cycle_execution_policy_key,
 )
@@ -55,6 +55,7 @@ __all__ = [
     "CyclePolicyPatch",
     "CyclePolicyPreview",
     "EffectiveCyclePolicy",
+    "UNSET_CYCLE_FIELD",
     "async_apply_cycle_policy_change",
     "async_apply_cycle_policy_revert",
     "async_list_cycle_policy_history",
@@ -65,34 +66,53 @@ __all__ = [
 
 CYCLE_POLICY_KIND = "cycle"
 CYCLE_TARGET_TYPE = "cycle"
+CYCLE_POLICY_SNAPSHOT_VERSION = 1
+_CYCLE_POLICY_SNAPSHOT_VERSION_FIELD = "snapshot_version"
+_CYCLE_POLICY_SNAPSHOT_FIELDS = frozenset(
+    {
+        "name",
+        "prompt",
+        "schedule_expr",
+        "timezone",
+        "enabled",
+        "max_concurrency",
+        "timeout_seconds",
+        "retry_policy",
+        "model_override",
+        "thinking_override",
+        "execution_policy_key",
+        "target_idea_id",
+        "guidance",
+    }
+)
 
 
-class _UnsetPolicyField:
+class _UnsetCycleField:
     pass
 
 
-UNSET_POLICY_FIELD = _UnsetPolicyField()
+UNSET_CYCLE_FIELD = _UnsetCycleField()
 
 
 @dataclass(frozen=True)
 class CyclePolicyPatch:
     """Typed changes to Cycle behavior, never arbitrary table columns."""
 
-    name: Any = UNSET_POLICY_FIELD
-    prompt: Any = UNSET_POLICY_FIELD
-    timezone_name: Any = UNSET_POLICY_FIELD
-    schedule_expr: Any = UNSET_POLICY_FIELD
-    run_at: Any = UNSET_POLICY_FIELD
-    enabled: Any = UNSET_POLICY_FIELD
-    max_concurrency: Any = UNSET_POLICY_FIELD
-    timeout_seconds: Any = UNSET_POLICY_FIELD
-    retry_policy: Any = UNSET_POLICY_FIELD
-    model_override: Any = UNSET_POLICY_FIELD
-    thinking_override: Any = UNSET_POLICY_FIELD
-    execution_policy_key: Any = UNSET_POLICY_FIELD
-    target_idea_id: Any = UNSET_POLICY_FIELD
-    guidance: Any = UNSET_POLICY_FIELD
-    guidance_additions: Any = UNSET_POLICY_FIELD
+    name: Any = UNSET_CYCLE_FIELD
+    prompt: Any = UNSET_CYCLE_FIELD
+    timezone_name: Any = UNSET_CYCLE_FIELD
+    schedule_expr: Any = UNSET_CYCLE_FIELD
+    run_at: Any = UNSET_CYCLE_FIELD
+    enabled: Any = UNSET_CYCLE_FIELD
+    max_concurrency: Any = UNSET_CYCLE_FIELD
+    timeout_seconds: Any = UNSET_CYCLE_FIELD
+    retry_policy: Any = UNSET_CYCLE_FIELD
+    model_override: Any = UNSET_CYCLE_FIELD
+    thinking_override: Any = UNSET_CYCLE_FIELD
+    execution_policy_key: Any = UNSET_CYCLE_FIELD
+    target_idea_id: Any = UNSET_CYCLE_FIELD
+    guidance: Any = UNSET_CYCLE_FIELD
+    guidance_additions: Any = UNSET_CYCLE_FIELD
 
 
 @dataclass(frozen=True)
@@ -280,8 +300,8 @@ async def async_apply_cycle_policy_change(
             actor_id=actor.revision_source_id,
             source_reference=clean_source_reference,
             rationale=clean_rationale,
-            before_snapshot=deepcopy(current.snapshot),
-            after_snapshot=deepcopy(preview.after_snapshot),
+            before_snapshot=_encode_stored_snapshot(current.snapshot),
+            after_snapshot=_encode_stored_snapshot(preview.after_snapshot),
             changed_fields=list(preview.changed_fields),
             cycle_revision_id=revision.id,
             reverted_from_id=reverted_from_id,
@@ -290,13 +310,12 @@ async def async_apply_cycle_policy_change(
         session.add(change)
         await session.flush()
 
-        publish_cycle_change(
+        publish_cycle_change_strict(
             action="update",
             org_id=cycle.org_id,
             user_id=cycle.user_id,
             cycle_id=cycle.id,
             target_idea_id=cycle.target_idea_id,
-            strict=True,
         )
 
         effective = EffectiveCyclePolicy(
@@ -310,7 +329,7 @@ async def async_apply_cycle_policy_change(
         )
         return CyclePolicyApplied(
             effective_policy=effective,
-            change=_record(change),
+            change=_record(change, current_snapshot=preview.after_snapshot),
             revision=revision,
         )
 
@@ -323,6 +342,7 @@ async def async_list_cycle_policy_history(
     limit: int = 100,
 ) -> list[BehaviorChangeRecord]:
     cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
+    current = await _effective_policy(session, cycle)
     clean_limit = max(1, min(int(limit), 500))
     rows = list(
         (
@@ -334,7 +354,10 @@ async def async_list_cycle_policy_history(
             )
         ).all()
     )
-    return [_record(row) for row in rows]
+    return [
+        _record(row, current_snapshot=current.snapshot)
+        for row in rows
+    ]
 
 
 async def async_preview_cycle_policy_revert(
@@ -452,7 +475,10 @@ async def _preview_for_cycle(
     reverted_from_id: int | None = None,
 ) -> CyclePolicyPreview:
     if isinstance(proposal, _CyclePolicyReplacement):
-        after = _validated_snapshot(proposal.snapshot)
+        after = _decode_stored_snapshot(
+            proposal.snapshot,
+            current_snapshot=current.snapshot,
+        )
     else:
         after = _project_patch(current.snapshot, proposal)
     if after["target_idea_id"] != current.snapshot["target_idea_id"]:
@@ -565,22 +591,7 @@ def _project_patch(
 
 
 def _validated_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
-    expected_fields = {
-        "name",
-        "prompt",
-        "schedule_expr",
-        "timezone",
-        "enabled",
-        "max_concurrency",
-        "timeout_seconds",
-        "retry_policy",
-        "model_override",
-        "thinking_override",
-        "execution_policy_key",
-        "target_idea_id",
-        "guidance",
-    }
-    if set(snapshot) != expected_fields:
+    if set(snapshot) != _CYCLE_POLICY_SNAPSHOT_FIELDS:
         raise ValueError("Cycle policy snapshot has an invalid field set")
     timezone_name = validate_timezone_name(snapshot["timezone"])
     if not isinstance(snapshot["enabled"], bool):
@@ -622,6 +633,39 @@ def _validated_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             for value in snapshot["guidance"]
         ),
     }
+
+
+def _encode_stored_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        _CYCLE_POLICY_SNAPSHOT_VERSION_FIELD: CYCLE_POLICY_SNAPSHOT_VERSION,
+        **_validated_snapshot(snapshot),
+    }
+
+
+def _decode_stored_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    current_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("Cycle policy snapshot must be an object")
+    snapshot_version = snapshot.get(_CYCLE_POLICY_SNAPSHOT_VERSION_FIELD)
+    if snapshot_version is not None and (
+        isinstance(snapshot_version, bool)
+        or not isinstance(snapshot_version, int)
+        or snapshot_version < 1
+    ):
+        raise ValueError("Cycle policy snapshot has an invalid version")
+
+    decoded = _validated_snapshot(current_snapshot)
+    decoded.update(
+        {
+            field: deepcopy(snapshot[field])
+            for field in _CYCLE_POLICY_SNAPSHOT_FIELDS
+            if field in snapshot
+        }
+    )
+    return _validated_snapshot(decoded)
 
 
 def _cycle_snapshot(cycle: Cycle, guidance_rows: list[CycleGuidance]) -> dict[str, Any]:
@@ -767,7 +811,11 @@ def _preview_digest(
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _record(row: BehaviorChangeAudit) -> BehaviorChangeRecord:
+def _record(
+    row: BehaviorChangeAudit,
+    *,
+    current_snapshot: Mapping[str, Any],
+) -> BehaviorChangeRecord:
     applied_at = row.applied_at
     if applied_at.tzinfo is None:
         applied_at = applied_at.replace(tzinfo=timezone.utc)
@@ -782,38 +830,19 @@ def _record(row: BehaviorChangeAudit) -> BehaviorChangeRecord:
         actor_id=row.actor_id,
         source_reference=row.source_reference,
         rationale=row.rationale,
-        before_snapshot=deepcopy(row.before_snapshot),
-        after_snapshot=deepcopy(row.after_snapshot),
+        before_snapshot=_decode_stored_snapshot(
+            row.before_snapshot,
+            current_snapshot=current_snapshot,
+        ),
+        after_snapshot=_decode_stored_snapshot(
+            row.after_snapshot,
+            current_snapshot=current_snapshot,
+        ),
         changed_fields=tuple(row.changed_fields or []),
         cycle_revision_id=row.cycle_revision_id,
         applied_at=applied_at,
         reverted_from_id=row.reverted_from_id,
     )
-
-
-def serialize_behavior_change(row: BehaviorChangeAudit | None) -> dict | None:
-    if row is None:
-        return None
-    record = _record(row)
-    return {
-        "id": record.id,
-        "workspace_id": record.workspace_id,
-        "policy_kind": record.policy_kind,
-        "target_type": record.target_type,
-        "target_id": record.target_id,
-        "version": record.version,
-        "actor_type": record.actor_type,
-        "actor_id": record.actor_id,
-        "source_reference": record.source_reference,
-        "rationale": record.rationale,
-        "before_snapshot": record.before_snapshot,
-        "after_snapshot": record.after_snapshot,
-        "changed_fields": list(record.changed_fields),
-        "cycle_revision_id": record.cycle_revision_id,
-        "applied_at": record.applied_at.isoformat(),
-        "reverted_from_id": record.reverted_from_id,
-    }
-
 
 def _audit_target_conditions(cycle: Cycle) -> tuple[Any, ...]:
     return (
@@ -834,4 +863,4 @@ def _validated_max_concurrency(value: Any) -> int:
 
 
 def _set(value: Any) -> bool:
-    return value is not UNSET_POLICY_FIELD
+    return value is not UNSET_CYCLE_FIELD

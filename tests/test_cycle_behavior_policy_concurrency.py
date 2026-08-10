@@ -112,7 +112,11 @@ async def postgres_policy_workspace(monkeypatch):
     org_id = str(uuid4())
     user_id = str(uuid4())
     cycle_id = None
-    monkeypatch.setattr(behavior_policy, "publish_cycle_change", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        behavior_policy,
+        "publish_cycle_change_strict",
+        lambda **_kwargs: None,
+    )
     try:
         async with engine.begin() as connection:
             for table in (

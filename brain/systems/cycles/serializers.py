@@ -1,7 +1,11 @@
 """Cycle read-model serializers."""
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import timezone
+
 from brain.platform.db.models.cycle import (
+    BehaviorChangeAudit,
     Cycle,
     CycleGuidance,
     CycleOutputTarget,
@@ -18,6 +22,32 @@ from brain.systems.cycles.common import (
     string_or_none,
 )
 from brain.systems.cycles.schedules import safe_humanize_schedule
+
+
+def serialize_behavior_change(row: BehaviorChangeAudit | None) -> dict | None:
+    if row is None:
+        return None
+    applied_at = row.applied_at
+    if applied_at.tzinfo is None:
+        applied_at = applied_at.replace(tzinfo=timezone.utc)
+    return {
+        "id": row.id,
+        "workspace_id": row.workspace_id,
+        "policy_kind": row.policy_kind,
+        "target_type": row.target_type,
+        "target_id": row.target_id,
+        "version": row.version,
+        "actor_type": row.actor_type,
+        "actor_id": row.actor_id,
+        "source_reference": row.source_reference,
+        "rationale": row.rationale,
+        "before_snapshot": deepcopy(row.before_snapshot),
+        "after_snapshot": deepcopy(row.after_snapshot),
+        "changed_fields": list(row.changed_fields or []),
+        "cycle_revision_id": row.cycle_revision_id,
+        "applied_at": applied_at.isoformat(),
+        "reverted_from_id": row.reverted_from_id,
+    }
 
 
 def serialize_cycle_revision(revision: CycleRevision | None) -> dict | None:

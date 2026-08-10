@@ -1122,7 +1122,7 @@ async def test_cycle_create_persists_and_serializes_max_concurrency(monkeypatch)
     monkeypatch.setattr(cycles_router, "command_create_cycle", fake_create_cycle)
     monkeypatch.setattr(
         cycles_router,
-        "publish_cycle_change",
+        "publish_cycle_change_safe",
         lambda **_kwargs: None,
     )
 
@@ -3152,7 +3152,11 @@ async def test_manage_cycle_run_propagates_agent_trigger_provenance(monkeypatch)
 
     monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
     monkeypatch.setattr(cycle_handlers, "async_run_cycle_now", fake_run_cycle_now)
-    monkeypatch.setattr(cycle_handlers, "publish_cycle_change", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cycle_handlers,
+        "publish_cycle_change_safe",
+        lambda **_kwargs: None,
+    )
 
     with bind_agent_context(
         {
@@ -3205,7 +3209,11 @@ async def test_manage_cycle_run_can_select_explicit_scheduled_digest_contract(mo
 
     monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
     monkeypatch.setattr(cycle_handlers, "async_run_cycle_now", fake_run_cycle_now)
-    monkeypatch.setattr(cycle_handlers, "publish_cycle_change", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cycle_handlers,
+        "publish_cycle_change_safe",
+        lambda **_kwargs: None,
+    )
 
     with bind_agent_context(
         {

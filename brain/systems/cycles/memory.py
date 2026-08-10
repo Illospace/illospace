@@ -48,6 +48,7 @@ from brain.systems.cycles.cycle_failure_guard import (
     async_apply_cycle_terminal_failure_guard,
 )
 from brain.systems.cycles.serializers import (
+    serialize_behavior_change,
     serialize_cycle_guidance,
     serialize_cycle_output_target,
     serialize_cycle_revision,
@@ -238,10 +239,6 @@ def _build_cycle_run_memory_snapshot(
 
     revision_context = {"revision": serialize_cycle_revision(revision)}
     if behavior_change is not None:
-        # Local import avoids a module cycle: behavior_policy uses the existing
-        # revision writer from this module.
-        from brain.systems.cycles.behavior_policy import serialize_behavior_change
-
         revision_context["behavior_change"] = serialize_behavior_change(
             behavior_change
         )
