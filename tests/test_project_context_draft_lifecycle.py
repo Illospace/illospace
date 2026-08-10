@@ -62,6 +62,7 @@ def test_archived_clean_project_draft_is_deleted_immediately(tmp_path):
 
     result = cleanup_project_draft_for_run(
         run,
+        workspace_retention=timedelta(hours=36),
         archived_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
     )
 
@@ -84,7 +85,11 @@ def test_archived_unpublished_project_draft_is_retained_with_grace_deadline(tmp_
     run = _run_with_local_project_draft(source_dir, draft_dir)
     archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
 
-    result = cleanup_project_draft_for_run(run, archived_at=archived_at)
+    result = cleanup_project_draft_for_run(
+        run,
+        workspace_retention=timedelta(hours=36),
+        archived_at=archived_at,
+    )
 
     assert result.status == "retained_unpublished"
     assert result.deleted_count == 0
@@ -92,7 +97,8 @@ def test_archived_unpublished_project_draft_is_retained_with_grace_deadline(tmp_
     assert (tmp_path / "thread" / ".illo-project-context").exists()
     cleanup = run.metadata_["project_draft_cleanup"]
     assert cleanup["has_unpublished_changes"] is True
-    assert cleanup["cleanup_after"] == (archived_at + timedelta(days=7)).isoformat()
+    assert cleanup["cleanup_after"] == (archived_at + timedelta(hours=36)).isoformat()
+    assert cleanup["retention"]["unpublished_seconds"] == 36 * 60 * 60
 
 
 def test_expired_unpublished_project_draft_is_deleted_after_grace_period(tmp_path):
@@ -107,10 +113,15 @@ def test_expired_unpublished_project_draft_is_deleted_after_grace_period(tmp_pat
     (draft_dir / "brief.md").write_text("Unpublished draft\n")
     run = _run_with_local_project_draft(source_dir, draft_dir)
     archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
-    cleanup_project_draft_for_run(run, archived_at=archived_at)
+    cleanup_project_draft_for_run(
+        run,
+        workspace_retention=timedelta(hours=36),
+        archived_at=archived_at,
+    )
 
     result = cleanup_project_draft_for_run(
         run,
+        workspace_retention=timedelta(hours=36),
         archived_at=archived_at,
         now=archived_at + timedelta(days=8),
         force_expired=True,
@@ -137,6 +148,9 @@ async def test_thread_cleanup_updates_all_project_runs(tmp_path):
     result = MagicMock()
     result.all.return_value = [run]
     session = MagicMock()
+    session.scalar = AsyncMock(
+        return_value=SimpleNamespace(project_draft_retention_hours=36)
+    )
     session.scalars = AsyncMock(return_value=result)
     session.flush = AsyncMock()
 
@@ -150,6 +164,44 @@ async def test_thread_cleanup_updates_all_project_runs(tmp_path):
     assert payload["deleted_count"] == 1
     assert run.metadata_["project_draft_cleanup"]["status"] == "deleted"
     session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_thread_cleanup_reads_runtime_workspace_retention(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import (
+        apply_project_draft_cleanup_for_thread,
+    )
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "root"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("Published\n")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    sync_draft_from_root(source_dir, draft_dir)
+    (draft_dir / "brief.md").write_text("Unpublished draft\n")
+    run = _run_with_local_project_draft(source_dir, draft_dir)
+    archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
+
+    result = MagicMock()
+    result.all.return_value = [run]
+    session = MagicMock()
+    session.scalar = AsyncMock(
+        return_value=SimpleNamespace(project_draft_retention_hours=60)
+    )
+    session.scalars = AsyncMock(return_value=result)
+    session.flush = AsyncMock()
+
+    await apply_project_draft_cleanup_for_thread(
+        session,
+        "idea-1",
+        archived_at=archived_at,
+    )
+
+    cleanup = run.metadata_["project_draft_cleanup"]
+    assert cleanup["cleanup_after"] == (
+        archived_at + timedelta(hours=60)
+    ).isoformat()
+    assert cleanup["retention"]["unpublished_seconds"] == 60 * 60 * 60
 
 
 @pytest.mark.asyncio
@@ -168,11 +220,18 @@ async def test_expired_cleanup_reaps_retained_unpublished_project_drafts(tmp_pat
     (draft_dir / "brief.md").write_text("Unpublished draft\n")
     run = _run_with_local_project_draft(source_dir, draft_dir)
     archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
-    cleanup_project_draft_for_run(run, archived_at=archived_at)
+    cleanup_project_draft_for_run(
+        run,
+        workspace_retention=timedelta(hours=36),
+        archived_at=archived_at,
+    )
 
     result = MagicMock()
     result.all.return_value = [run]
     session = MagicMock()
+    session.scalar = AsyncMock(
+        return_value=SimpleNamespace(project_draft_retention_hours=36)
+    )
     session.scalars = AsyncMock(return_value=result)
     session.flush = AsyncMock()
 

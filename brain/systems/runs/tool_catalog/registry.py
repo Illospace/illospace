@@ -223,6 +223,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "inspect or persist a supported workspace preference",
     },
+    "manage_storage_policy": {
+        "permission": "manage_runtime",
+        "risk_class": "medium",
+        "side_effect_class": "runtime_configuration",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "inspect or revise the installation-wide storage policy",
+    },
     "read_self_context": {
         "permission": "read_runtime",
         "side_effect_class": "read_only",
@@ -1153,6 +1161,14 @@ def action_policy_for_tool(
         0,
         "get",
     ) == "get":
+        return None
+    if tool_name == "manage_storage_policy" and _arg_at(
+        args_tuple,
+        kwargs_dict,
+        "action",
+        0,
+        "get",
+    ) in {"get", "history"}:
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None

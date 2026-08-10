@@ -98,6 +98,68 @@ RUNTIME_PREFERENCE_TOOLS = [
             },
         },
     },
+    {
+        "name": "manage_storage_policy",
+        "description": (
+            "Read or revise the installation-wide storage policy without a deploy. "
+            "Use get for the active retention windows, capacity thresholds, and automatic "
+            "reclamation permission; history for the audit trail; update with a rationale "
+            "to append a new active revision; and revert with a prior policy_id and rationale."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "update", "history", "revert"],
+                    "default": "get",
+                },
+                "policy_id": {
+                    "type": "integer",
+                    "description": "Prior policy revision id required for revert.",
+                },
+                "finished_workspace_retention_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Retention window for finished agent workspaces.",
+                },
+                "project_draft_retention_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Retention window for unpublished Project drafts.",
+                },
+                "canvas_quiet_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Quiet window before emerged canvas thoughts are archived.",
+                },
+                "capacity_warn_percent": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 99,
+                    "description": "Storage-use percentage that starts a warning state.",
+                },
+                "capacity_critical_percent": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 100,
+                    "description": "Storage-use percentage that starts a critical state.",
+                },
+                "automatic_reclamation_allowed": {"type": "boolean"},
+                "rationale": {
+                    "type": "string",
+                    "description": "Required reason for update and revert actions.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "Maximum revisions returned by history.",
+                },
+            },
+        },
+    },
 ]
 
 WORKSPACE_TOOL_TOOLS = [

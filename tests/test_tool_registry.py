@@ -369,6 +369,39 @@ def test_manage_runtime_preferences_tool_is_registered_and_audited():
     assert registration.action_manifest is True
 
 
+def test_manage_storage_policy_tool_is_registered_and_audited():
+    import inspect
+
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+
+    name = "manage_storage_policy"
+    assert name in _names(COORDINATOR_TOOLS)
+    assert name not in _names(WORKER_TOOLS)
+    handler = _get_tool_handlers()[name]
+    assert set(inspect.signature(handler).parameters) == {
+        "action",
+        "policy_id",
+        "finished_workspace_retention_hours",
+        "project_draft_retention_hours",
+        "canvas_quiet_hours",
+        "capacity_warn_percent",
+        "capacity_critical_percent",
+        "automatic_reclamation_allowed",
+        "rationale",
+        "limit",
+    }
+
+    registration = get_tool_registration(name)
+    assert registration is not None
+    assert [role.value for role in registration.availability] == ["coordinator"]
+    assert registration.permission == "manage_runtime"
+    assert registration.side_effect_class == "runtime_configuration"
+    assert registration.reversibility == "reversible"
+    assert registration.action_manifest is True
+
+
 def test_manage_workspace_tools_tool_is_coordinator_only_and_registered():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers
@@ -634,6 +667,10 @@ def test_action_policy_comes_from_registry_metadata():
         "manage_runtime_preferences",
         kwargs={"action": "get"},
     ) is None
+    assert action_policy_for_tool(
+        "manage_storage_policy",
+        kwargs={"action": "history"},
+    ) is None
 
     policy = action_policy_for_tool("manage_cycle", kwargs={"action": "create"})
     assert policy == {
@@ -653,6 +690,14 @@ def test_action_policy_comes_from_registry_metadata():
         "risk": "medium",
         "reversibility": "reversible",
         "expected_effect": "inspect or persist a supported workspace preference",
+    }
+    assert action_policy_for_tool(
+        "manage_storage_policy",
+        kwargs={"action": "update"},
+    ) == {
+        "risk": "medium",
+        "reversibility": "reversible",
+        "expected_effect": "inspect or revise the installation-wide storage policy",
     }
 
     assert action_policy_for_tool(

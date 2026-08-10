@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from brain.jobs.pipelines.workspace_gc import reclaim_headless_worker_workspaces
 from brain.systems.runs.headless_worker_identity import (
@@ -24,8 +25,19 @@ class _Rows:
 
 
 class _Session:
-    def __init__(self, statuses: dict[int, str]) -> None:
+    def __init__(
+        self,
+        statuses: dict[int, str],
+        *,
+        retention_hours: int = 48,
+    ) -> None:
         self._statuses = statuses
+        self._retention_hours = retention_hours
+
+    async def scalar(self, _statement):
+        return SimpleNamespace(
+            finished_workspace_retention_hours=self._retention_hours
+        )
 
     async def execute(self, _statement) -> _Rows:
         return _Rows(self._statuses)
@@ -80,6 +92,21 @@ async def test_terminal_workspace_inside_retention_is_kept(tmp_path):
 
     result = await reclaim_headless_worker_workspaces(
         _Session({102: "completed"}),
+        workspace_root=workspace_root,
+        now=NOW,
+    )
+
+    assert workspace.is_dir()
+    assert result["directories_recent"] == 1
+    assert result["directories_reclaimed"] == 0
+
+
+async def test_runtime_policy_can_extend_finished_workspace_retention(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    workspace = _worker_workspace(workspace_root, 108, age=timedelta(hours=49))
+
+    result = await reclaim_headless_worker_workspaces(
+        _Session({108: "completed"}, retention_hours=72),
         workspace_root=workspace_root,
         now=NOW,
     )

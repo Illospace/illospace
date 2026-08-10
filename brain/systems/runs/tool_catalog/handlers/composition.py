@@ -264,9 +264,43 @@ def _get_tool_handlers(
                 )
         return result
 
+    async def _manage_storage_policy(
+        action="get",
+        policy_id=None,
+        finished_workspace_retention_hours=None,
+        project_draft_retention_hours=None,
+        canvas_quiet_hours=None,
+        capacity_warn_percent=None,
+        capacity_critical_percent=None,
+        automatic_reclamation_allowed=None,
+        rationale=None,
+        limit=50,
+    ):
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.systems.storage_policy import async_manage_storage_policy
+
+        actor_id = _current_run_id() or _current_agent_value("user_id")
+        async with UnitOfWork() as uow:
+            return await async_manage_storage_policy(
+                uow.session,
+                action=action,
+                policy_id=policy_id,
+                finished_workspace_retention_hours=finished_workspace_retention_hours,
+                project_draft_retention_hours=project_draft_retention_hours,
+                canvas_quiet_hours=canvas_quiet_hours,
+                capacity_warn_percent=capacity_warn_percent,
+                capacity_critical_percent=capacity_critical_percent,
+                automatic_reclamation_allowed=automatic_reclamation_allowed,
+                rationale=rationale,
+                source_type="agent",
+                source_id=str(actor_id) if actor_id is not None else None,
+                limit=limit,
+            )
+
     _manage_deployment._illo_run_on_event_loop = True
     _manage_runtime_services._illo_run_on_event_loop = True
     _manage_runtime_preferences._illo_run_on_event_loop = True
+    _manage_storage_policy._illo_run_on_event_loop = True
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -322,6 +356,7 @@ def _get_tool_handlers(
             )
         ),
         "manage_runtime_preferences": _manage_runtime_preferences,
+        "manage_storage_policy": _manage_storage_policy,
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,

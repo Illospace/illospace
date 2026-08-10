@@ -15,10 +15,10 @@ from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.project_context.drafts import plan_draft_publish
 from brain.systems.cortex.project_context.repo_publish import repo_draft_status
 from brain.systems.cortex.project_context.workspace_manifest import PROJECT_CONTEXT_DIR
+from brain.systems.storage_policy import async_get_storage_policy
 
 
 PROJECT_DRAFT_CLEANUP_METADATA_KEY = "project_draft_cleanup"
-PROJECT_DRAFT_UNPUBLISHED_RETENTION = timedelta(days=7)
 PROJECT_DRAFT_CLEANUP_SCHEMA_VERSION = 1
 
 
@@ -50,6 +50,7 @@ class ProjectDraftCleanupPath:
 class ProjectDraftCleanupResult:
     status: str
     archived_at: str | None
+    retention_seconds: int
     cleanup_after: str | None = None
     deleted_count: int = 0
     retained_count: int = 0
@@ -72,7 +73,7 @@ class ProjectDraftCleanupResult:
             "has_unpublished_changes": self.has_unpublished_changes,
             "retention": {
                 "clean": "immediate",
-                "unpublished_seconds": int(PROJECT_DRAFT_UNPUBLISHED_RETENTION.total_seconds()),
+                "unpublished_seconds": self.retention_seconds,
             },
             "paths": [path.to_dict() for path in self.paths],
         }
@@ -328,6 +329,7 @@ def _project_context_dir_dirty_state(run: Any, project_context_dir: Path) -> tup
 def cleanup_project_draft_for_run(
     run: Any,
     *,
+    workspace_retention: timedelta,
     archived_at: datetime | None = None,
     now: datetime | None = None,
     force_expired: bool = False,
@@ -336,7 +338,10 @@ def cleanup_project_draft_for_run(
 
     now = _ensure_aware(now or _utc_now())
     archived_at = _ensure_aware(archived_at or now)
-    cleanup_after_dt = archived_at + PROJECT_DRAFT_UNPUBLISHED_RETENTION
+    retention_seconds = int(workspace_retention.total_seconds())
+    if retention_seconds <= 0:
+        raise ValueError("workspace_retention must be positive")
+    cleanup_after_dt = archived_at + workspace_retention
     cleanup_after = _iso_timestamp(cleanup_after_dt)
     paths: list[ProjectDraftCleanupPath] = []
     deleted_count = 0
@@ -348,6 +353,7 @@ def cleanup_project_draft_for_run(
         result = ProjectDraftCleanupResult(
             status="no_project_draft",
             archived_at=_iso_timestamp(archived_at),
+            retention_seconds=retention_seconds,
             skipped_count=1,
         )
         _set_run_cleanup_metadata(run, result)
@@ -401,6 +407,7 @@ def cleanup_project_draft_for_run(
     result = ProjectDraftCleanupResult(
         status=status,
         archived_at=_iso_timestamp(archived_at),
+        retention_seconds=retention_seconds,
         cleanup_after=cleanup_after if retained_count else None,
         deleted_count=deleted_count,
         retained_count=retained_count,
@@ -440,10 +447,17 @@ async def apply_project_draft_cleanup_for_thread(
 ) -> dict[str, Any]:
     """Delete clean archived-thread Project drafts and retain dirty drafts with a grace deadline."""
 
+    policy = await async_get_storage_policy(session)
+    workspace_retention = timedelta(hours=policy.project_draft_retention_hours)
     stmt = select(AgentRunRow).where(AgentRunRow.thread_id == str(thread_id))
     runs = (await session.scalars(stmt)).all()
     results = [
-        cleanup_project_draft_for_run(run, archived_at=archived_at, now=now)
+        cleanup_project_draft_for_run(
+            run,
+            workspace_retention=workspace_retention,
+            archived_at=archived_at,
+            now=now,
+        )
         for run in runs
     ]
     await session.flush()
@@ -459,6 +473,8 @@ async def cleanup_expired_project_draft_workspaces(
     """Delete retained Project drafts whose archived-thread grace period has expired."""
 
     now = _ensure_aware(now or _utc_now())
+    policy = await async_get_storage_policy(session)
+    workspace_retention = timedelta(hours=policy.project_draft_retention_hours)
     stmt = (
         select(AgentRunRow)
         .join(Idea, AgentRunRow.thread_id == Idea.id)
@@ -478,6 +494,7 @@ async def cleanup_expired_project_draft_workspaces(
         archived_at = _parse_timestamp(cleanup.get("archived_at")) or now
         results.append(cleanup_project_draft_for_run(
             run,
+            workspace_retention=workspace_retention,
             archived_at=archived_at,
             now=now,
             force_expired=True,
@@ -489,7 +506,6 @@ async def cleanup_expired_project_draft_workspaces(
 
 __all__ = [
     "PROJECT_DRAFT_CLEANUP_METADATA_KEY",
-    "PROJECT_DRAFT_UNPUBLISHED_RETENTION",
     "apply_project_draft_cleanup_for_thread",
     "cleanup_expired_project_draft_workspaces",
     "cleanup_project_draft_for_run",

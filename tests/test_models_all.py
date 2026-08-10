@@ -117,6 +117,7 @@ EXPECTED_TABLES = {
     "skill_run_evidence",
     "skill_versions",
     "skills",
+    "storage_policies",
     "target_registry",
     "thread_context_submissions",
     "thread_discussion_comments",

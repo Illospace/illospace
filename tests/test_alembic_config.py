@@ -59,6 +59,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0054_scheduler_alert_latches.py",
     # Downgrade removes only the behavior-change audit table introduced here.
     "0059_behavior_change_audits.py",
+    # Downgrade removes only the storage-policy table introduced here.
+    "0060_storage_policies.py",
 }
 
 
