@@ -228,6 +228,31 @@ class FailureGuardTriggerRegistration(Generic[FailureGuardContextT]):
         return self.trigger.kind
 
 
+def require_failure_guard_registrations(
+    triggers: Sequence[object], *, owner: str
+) -> None:
+    """Reject a registry entry that is a bare trigger rather than a registration.
+
+    Without this, a raw trigger passes a consumer registry's own checks — it has
+    a ``kind`` — and skips ``FailureGuardTriggerRegistration.__post_init__``
+    entirely. The declared mode would then be missing at dispatch time, far from
+    the provider that omitted it, which is exactly the late failure this module
+    exists to prevent.
+    """
+
+    unregistered = [
+        type(trigger).__name__
+        for trigger in triggers
+        if not isinstance(trigger, FailureGuardTriggerRegistration)
+    ]
+    if unregistered:
+        raise ValueError(
+            f"{owner} failure-guard triggers must be wrapped in "
+            "FailureGuardTriggerRegistration with an explicit mode; got bare "
+            "trigger(s): " + ", ".join(unregistered)
+        )
+
+
 async def async_evaluate_failure_guard_triggers(
     *,
     triggers: Sequence[FailureGuardTriggerRegistration[FailureGuardContextT]],

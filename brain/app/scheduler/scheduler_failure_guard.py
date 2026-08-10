@@ -35,6 +35,7 @@ from brain.systems.failure_guard.core import (
     FailureGuardTriggerKind,
     FailureGuardTriggerMode,
     FailureGuardTriggerRegistration,
+    require_failure_guard_registrations,
     FailureGuardTriggerResult,
     FailureGuardTriggerState,
     async_evaluate_failure_guard_triggers,
@@ -526,6 +527,7 @@ class SchedulerFailureGuardRegistry:
     triggers: tuple[SchedulerRegisteredFailureGuardTrigger, ...]
 
     def __post_init__(self) -> None:
+        require_failure_guard_registrations(self.triggers, owner="Scheduler")
         kinds = [str(trigger.kind) for trigger in self.triggers]
         if any(not kind for kind in kinds):
             raise ValueError(

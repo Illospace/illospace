@@ -30,6 +30,7 @@ from brain.systems.failure_guard.core import (
     FailureGuardTriggerKind,
     FailureGuardTriggerMode,
     FailureGuardTriggerRegistration,
+    require_failure_guard_registrations,
     FailureGuardTriggerResult,
     FailureGuardTriggerState,
     async_evaluate_failure_guard_triggers,
@@ -324,6 +325,7 @@ class CycleFailureGuardRegistry:
     triggers: tuple[CycleRegisteredFailureGuardTrigger, ...]
 
     def __post_init__(self) -> None:
+        require_failure_guard_registrations(self.triggers, owner="Cycle")
         kinds = [str(trigger.kind) for trigger in self.triggers]
         if any(not kind for kind in kinds):
             raise ValueError("Cycle failure-guard trigger kinds must not be empty")

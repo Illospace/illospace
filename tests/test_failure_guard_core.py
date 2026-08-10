@@ -12,6 +12,7 @@ from brain.systems.failure_guard.core import (
     FailureGuardTriggerResult,
     async_evaluate_failure_guard_triggers,
     async_transition_failure_guard_trigger_states,
+    require_failure_guard_registrations,
 )
 
 
@@ -161,3 +162,39 @@ async def test_declared_mode_controls_evaluation_and_persistence():
     assert store.states == {_STATELESS_KIND: {"orphaned": True}}
     assert store.saved == []
     assert store.deleted == [_STATEFUL_KIND]
+
+
+def test_bare_trigger_is_refused_before_it_can_reach_dispatch():
+    """A raw trigger has a ``kind``, so a consumer registry's own checks pass it.
+
+    It never runs ``FailureGuardTriggerRegistration.__post_init__``, so its mode
+    would only be missed at dispatch, far from the provider that omitted it.
+    """
+
+    with pytest.raises(ValueError) as excinfo:
+        require_failure_guard_registrations(
+            (
+                FailureGuardTriggerRegistration(
+                    mode=FailureGuardTriggerMode.STATELESS,
+                    trigger=_StatelessTrigger(),
+                ),
+                _StatelessTrigger(),
+            ),
+            owner="Scheduler",
+        )
+
+    message = str(excinfo.value)
+    assert "Scheduler" in message
+    assert "_StatelessTrigger" in message
+
+
+def test_registrations_only_registry_is_accepted():
+    require_failure_guard_registrations(
+        (
+            FailureGuardTriggerRegistration(
+                mode=FailureGuardTriggerMode.STATELESS,
+                trigger=_StatelessTrigger(),
+            ),
+        ),
+        owner="Cycle",
+    )
