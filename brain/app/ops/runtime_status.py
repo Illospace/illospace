@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.scheduler.cold_start import scheduler_liveness_checkpoint
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
+from brain.app.scheduler.stale_run_reaper import agent_run_maintenance_snapshot
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.cycle import Cycle
 from brain.systems.runs.cortex.queue_health import (
@@ -168,7 +169,7 @@ async def async_runtime_status_snapshot(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Return six compact health rows backed by durable runtime facts."""
+    """Return compact health rows backed by durable or process-local facts."""
 
     captured_at = _utc(now or datetime.now(timezone.utc))
     if captured_at is None:
@@ -233,6 +234,7 @@ async def async_runtime_status_snapshot(
         tick_age_seconds=tick_age,
         lag_seconds=lag_seconds,
     )
+    maintenance = agent_run_maintenance_snapshot(now=captured_at)
 
     enabled_cycle_count = int(
         await session.scalar(
@@ -322,6 +324,7 @@ async def async_runtime_status_snapshot(
             "max_lag_seconds": lag_seconds,
             "reason": scheduler_reason,
         },
+        "maintenance": maintenance,
         "runs": {
             "state": runs_state,
             "queued": queued,

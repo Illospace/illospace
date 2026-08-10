@@ -75,7 +75,7 @@
           </span>
         {/if}
       </div>
-      <p>Six signals from the running system. Container state is not used as health proof.</p>
+      <p>Seven signals from the running system. Container state is not used as health proof.</p>
     </div>
     <ConstellationButton variant="secondary" size="sm" onclick={onrefresh} {loading} loadingLabel="Refreshing">
       Refresh
@@ -129,6 +129,24 @@
           <span>oldest queue {duration(status.runs.oldest_queued_age_seconds)} · oldest active {duration(status.runs.oldest_running_age_seconds)}</span>
         </div>
         <p>{status.runs.reason}</p>
+      </article>
+
+      <article class="runtime-status-row">
+        <div class="runtime-status-name">
+          <span>Run maintenance</span>
+          <span class="runtime-row-state" data-state={status.maintenance.state}>{stateLabel[status.maintenance.state]}</span>
+        </div>
+        <div class="runtime-status-evidence">
+          <strong>Last interval {duration(status.maintenance.interval_age_seconds)} ago</strong>
+          <span>{status.maintenance.reaped} reaped · {status.maintenance.expired} expired · {status.maintenance.closeout_requested} close-outs</span>
+        </div>
+        <p>{status.maintenance.reason}</p>
+        <p>
+          Overdue runs:
+          {status.maintenance.overdue_run_ids.length
+            ? status.maintenance.overdue_run_ids.join(', ')
+            : 'none'}
+        </p>
       </article>
 
       <article class="runtime-status-row">

@@ -11,8 +11,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 import os
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +45,7 @@ from brain.systems.slack.client import slack_web_client_from_runtime
 AGENT_RUN_DEADLINE_OVERDUE_ALERT_KEY_PREFIX = "agent_run_deadline_overdue"
 _DEADLINE_ALERT_AFTER = timedelta(hours=1)
 _MAINTENANCE_LIMIT = 25
+_OPERATION_TIMEOUT_SECONDS = 10.0
 
 CandidateProvider = Callable[..., Awaitable[tuple["OverdueAgentRun", ...]]]
 ReapRuns = Callable[..., Awaitable[int]]
@@ -54,6 +57,18 @@ AlertClaim = Callable[..., Awaitable[bool]]
 AlertRelease = Callable[..., Awaitable[None]]
 
 logger = logging.getLogger(__name__)
+_latest_reaper_check: _StaleRunReaperCheck | None = None
+
+
+def _emit(payload: dict[str, Any]) -> None:
+    """Write compact runtime evidence to the container's stdout stream."""
+    print(json.dumps(payload, separators=(",", ":"), default=str), flush=True)
+
+
+def _error_text(exc: BaseException) -> str:
+    detail = str(exc).strip()
+    label = type(exc).__name__
+    return f"{label}: {detail}" if detail else label
 
 
 def _duration_label(seconds: float) -> str:
@@ -103,11 +118,64 @@ class OverdueAgentRun:
 
 @dataclass(frozen=True, slots=True)
 class _StaleRunReaperCheck:
+    checked_at: datetime
     reaped: int
     closeout_requested: int
     expired: int
     overdue_run_ids: tuple[int, ...]
     alert_sent: bool
+    errors: tuple[str, ...] = ()
+
+
+def agent_run_maintenance_snapshot(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return process-local evidence from the latest maintenance interval."""
+    reference_time = assume_utc(now or datetime.now(timezone.utc))
+    check = _latest_reaper_check
+    if check is None:
+        return {
+            "state": "stalled",
+            "last_interval_at": None,
+            "interval_age_seconds": None,
+            "reaped": 0,
+            "closeout_requested": 0,
+            "expired": 0,
+            "overdue_run_ids": [],
+            "alert_sent": False,
+            "errors": [],
+            "reason": "No agent-run maintenance interval has been recorded.",
+        }
+
+    age_seconds = max(
+        0,
+        int((reference_time - assume_utc(check.checked_at)).total_seconds()),
+    )
+    if check.errors:
+        state = "stalled"
+        reason = "The latest agent-run maintenance interval had an error."
+    elif age_seconds > int(StaleRunReaper.check_interval_seconds * 5):
+        state = "stalled"
+        reason = "Agent-run maintenance has not reported for five intervals."
+    elif age_seconds > int(StaleRunReaper.check_interval_seconds * 2):
+        state = "late"
+        reason = "The latest agent-run maintenance interval is late."
+    else:
+        state = "good"
+        reason = "Agent-run maintenance is reporting on time."
+    return {
+        "state": state,
+        "last_interval_at": assume_utc(check.checked_at).isoformat(),
+        "interval_age_seconds": age_seconds,
+        "reaped": check.reaped,
+        "closeout_requested": check.closeout_requested,
+        "expired": check.expired,
+        "overdue_run_ids": list(check.overdue_run_ids),
+        "alert_sent": check.alert_sent,
+        "errors": list(check.errors),
+        "reason": reason,
+    }
 
 
 async def async_overdue_agent_runs(
@@ -194,6 +262,7 @@ class StaleRunReaper:
     reap_limit = _MAINTENANCE_LIMIT
     deadline_sweep_limit = _MAINTENANCE_LIMIT
     deadline_alert_after = _DEADLINE_ALERT_AFTER
+    operation_timeout_seconds = _OPERATION_TIMEOUT_SECONDS
 
     def __init__(
         self,
@@ -219,13 +288,34 @@ class StaleRunReaper:
     async def run(self) -> None:
         """Run maintenance on the API event loop at a fixed cadence."""
         while True:
-            await asyncio.sleep(self.check_interval_seconds)
+            interval_started_at = asyncio.get_running_loop().time()
             try:
                 await self._run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - the next interval retries
+            except Exception as exc:  # noqa: BLE001 - the next interval retries
                 logger.exception("Agent-run stale reaper failed safely")
+                self._record_interval(
+                    _StaleRunReaperCheck(
+                        checked_at=datetime.now(timezone.utc),
+                        reaped=0,
+                        closeout_requested=0,
+                        expired=0,
+                        overdue_run_ids=(),
+                        alert_sent=False,
+                        errors=(_error_text(exc),),
+                    )
+                )
+                _emit(
+                    {
+                        "event": "stale_run_reaper_interval_failed",
+                        "host": "api",
+                        "ok": False,
+                        "error": _error_text(exc),
+                    }
+                )
+            elapsed = asyncio.get_running_loop().time() - interval_started_at
+            await asyncio.sleep(max(0.0, self.check_interval_seconds - elapsed))
 
     async def _run_once(
         self,
@@ -233,50 +323,121 @@ class StaleRunReaper:
         now: datetime | None = None,
     ) -> _StaleRunReaperCheck:
         reference_time = self._reference_time(now)
+        errors: list[str] = []
         candidates: tuple[OverdueAgentRun, ...] | None = None
         try:
-            candidates = await self._overdue_candidates(now=reference_time)
-        except Exception:  # noqa: BLE001 - maintenance must still run
+            candidates = await self._bounded(
+                self._overdue_candidates(now=reference_time)
+            )
+        except Exception as exc:  # noqa: BLE001 - maintenance must still run
             logger.exception("agent_run_deadline_overdue_observation_failed")
+            errors.append(f"overdue_observation={_error_text(exc)}")
+            self._emit_failure(
+                "agent_run_deadline_overdue_observation_failed",
+                exc,
+                checked_at=reference_time,
+            )
 
         deadline_result = DeadlineSweepResult()
         try:
-            deadline_result = await self._enforce_deadlines(now=reference_time)
-        except Exception:  # noqa: BLE001 - stale reaping must still run
+            deadline_result = await self._bounded(
+                self._enforce_deadlines(now=reference_time)
+            )
+        except Exception as exc:  # noqa: BLE001 - stale reaping must still run
             logger.exception("agent_run_deadline_sweep_failed")
-        else:
-            logger.info(
-                "agent_run_deadline_sweep",
-                extra={
-                    "host": "api",
-                    "closeout_requested": deadline_result.closeout_requested,
-                    "expired": deadline_result.expired,
-                },
+            errors.append(f"deadline_sweep={_error_text(exc)}")
+            self._emit_failure(
+                "agent_run_deadline_sweep_failed",
+                exc,
+                checked_at=reference_time,
             )
 
         reaped = 0
         try:
-            reaped = await self._reap_runs(
-                now=reference_time,
-                limit=self.reap_limit,
+            reaped = await self._bounded(
+                self._reap_runs(
+                    now=reference_time,
+                    limit=self.reap_limit,
+                )
             )
-        except Exception:  # noqa: BLE001 - the next interval retries
+        except Exception as exc:  # noqa: BLE001 - the next interval retries
             logger.exception("agent_run_stale_reap_failed")
-        else:
-            logger.info(
-                "agent_run_stale_reap",
-                extra={"host": "api", "reaped": reaped},
+            errors.append(f"stale_reap={_error_text(exc)}")
+            self._emit_failure(
+                "agent_run_stale_reap_failed",
+                exc,
+                checked_at=reference_time,
+                reaped=0,
             )
 
         alert_sent = False
         if candidates is not None:
-            alert_sent = await self._evaluate_alert(candidates, now=reference_time)
-        return _StaleRunReaperCheck(
+            try:
+                alert_sent = await self._bounded(
+                    self._evaluate_alert(candidates, now=reference_time)
+                )
+            except Exception as exc:  # noqa: BLE001 - the next interval retries
+                logger.exception("agent_run_deadline_overdue_alert_failed")
+                errors.append(f"overdue_alert={_error_text(exc)}")
+                self._emit_failure(
+                    "agent_run_deadline_overdue_alert_failed",
+                    exc,
+                    checked_at=reference_time,
+                )
+        check = _StaleRunReaperCheck(
+            checked_at=reference_time,
             reaped=reaped,
             closeout_requested=deadline_result.closeout_requested,
             expired=deadline_result.expired,
             overdue_run_ids=tuple(candidate.run_id for candidate in candidates or ()),
             alert_sent=alert_sent,
+            errors=tuple(errors),
+        )
+        self._record_interval(check)
+        return check
+
+    async def _bounded(self, operation: Awaitable[Any]) -> Any:
+        return await asyncio.wait_for(
+            operation,
+            timeout=max(0.01, float(self.operation_timeout_seconds)),
+        )
+
+    @staticmethod
+    def _emit_failure(
+        event: str,
+        exc: BaseException,
+        *,
+        checked_at: datetime,
+        **counters: Any,
+    ) -> None:
+        _emit(
+            {
+                "event": event,
+                "host": "api",
+                "ok": False,
+                "checked_at": assume_utc(checked_at).isoformat(),
+                **counters,
+                "error": _error_text(exc),
+            }
+        )
+
+    @staticmethod
+    def _record_interval(check: _StaleRunReaperCheck) -> None:
+        global _latest_reaper_check
+        _latest_reaper_check = check
+        _emit(
+            {
+                "event": "agent_run_stale_reap",
+                "host": "api",
+                "ok": not check.errors,
+                "checked_at": assume_utc(check.checked_at).isoformat(),
+                "reaped": check.reaped,
+                "expired": check.expired,
+                "closeout_requested": check.closeout_requested,
+                "overdue_run_ids": list(check.overdue_run_ids),
+                "alert_sent": check.alert_sent,
+                "errors": list(check.errors),
+            }
         )
 
     async def _overdue_candidates(
@@ -378,5 +539,6 @@ __all__ = [
     "AGENT_RUN_DEADLINE_OVERDUE_ALERT_KEY_PREFIX",
     "OverdueAgentRun",
     "StaleRunReaper",
+    "agent_run_maintenance_snapshot",
     "async_overdue_agent_runs",
 ]
