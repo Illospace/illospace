@@ -29,6 +29,7 @@ from brain.platform.db.models.cycle import (
     BehaviorChangeAudit,
     Cycle,
     CycleGuidance,
+    CycleOutputTarget,
     CycleRevision,
 )
 from brain.platform.db.models.idea import Idea
@@ -61,6 +62,7 @@ __all__ = [
     "CyclePolicyApplied",
     "CyclePolicyApplyResult",
     "CyclePolicyConflict",
+    "CyclePolicyFieldSource",
     "CyclePolicyPatch",
     "CyclePolicyPreview",
     "CyclePolicySnapshot",
@@ -180,6 +182,12 @@ class CyclePolicySnapshot:
             dict[str, JsonValue],
             jsonable(deepcopy(self.retry_policy)),
         )
+        guidance = [
+            validate_nonempty_trimmed(value, "guidance")
+            for value in self.guidance
+        ]
+        if len(guidance) != len(set(guidance)):
+            raise ValueError("guidance entries must be unique")
         return CyclePolicySnapshot(
             name=validate_nonempty_trimmed(self.name, "name"),
             prompt=validate_nonempty_trimmed(self.prompt, "prompt"),
@@ -202,10 +210,7 @@ class CyclePolicySnapshot:
                 if self.target_idea_id is not None
                 else None
             ),
-            guidance=sorted(
-                validate_nonempty_trimmed(value, "guidance")
-                for value in self.guidance
-            ),
+            guidance=sorted(guidance),
         )
 
     def encode(self) -> dict[str, Any]:
@@ -279,6 +284,19 @@ class _CyclePolicyRevert:
 
 
 @dataclass(frozen=True)
+class CyclePolicyFieldSource:
+    field_name: str
+    version: int
+    cycle_revision_id: int | None
+    actor_type: str | None
+    actor_id: str | None
+    source_reference: str | None
+    rationale: str | None
+    changed_at: datetime | None
+    change_id: int | None
+
+
+@dataclass(frozen=True)
 class EffectiveCyclePolicy:
     workspace_id: str
     policy_kind: str
@@ -287,6 +305,10 @@ class EffectiveCyclePolicy:
     version: int
     revision_id: int | None
     snapshot: CyclePolicySnapshot
+    output_targets: tuple[CycleOutputTarget, ...] = ()
+    source_revision: CycleRevision | None = None
+    latest_change: BehaviorChangeRecord | None = None
+    field_sources: tuple[CyclePolicyFieldSource, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -354,7 +376,7 @@ async def async_read_effective_cycle_policy(
     cycle_id: int,
 ) -> EffectiveCyclePolicy:
     cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
-    return await _effective_policy(session, cycle)
+    return await _effective_policy(session, cycle, include_metadata=True)
 
 
 async def async_preview_cycle_policy_change(
@@ -512,10 +534,12 @@ async def async_list_cycle_policy_history(
     actor: CycleActor,
     cycle_id: int,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[BehaviorChangeRecord]:
     cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
     current = await _effective_policy(session, cycle)
     clean_limit = max(1, min(int(limit), 500))
+    clean_offset = max(0, int(offset))
     rows = list(
         (
             await session.scalars(
@@ -523,6 +547,7 @@ async def async_list_cycle_policy_history(
                 .where(*_audit_target_conditions(cycle))
                 .order_by(BehaviorChangeAudit.version.desc())
                 .limit(clean_limit)
+                .offset(clean_offset)
             )
         ).all()
     )
@@ -594,7 +619,12 @@ async def _load_scoped_cycle(
     return cycle
 
 
-async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
+async def _effective_policy(
+    session,
+    cycle: Cycle,
+    *,
+    include_metadata: bool = False,
+) -> EffectiveCyclePolicy:
     guidance_rows = list(
         (
             await session.scalars(
@@ -607,6 +637,7 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
             )
         ).all()
     )
+    snapshot = CyclePolicySnapshot.from_cycle(cycle, guidance_rows)
     version = int(
         (
             await session.scalar(
@@ -617,20 +648,96 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
         )
         or 0
     )
-    revision_id = await session.scalar(
-        select(CycleRevision.id)
+    revision_statement = (
+        select(CycleRevision)
         .where(CycleRevision.cycle_id == cycle.id)
         .order_by(CycleRevision.revision_number.desc(), CycleRevision.id.desc())
         .limit(1)
     )
+    source_revision = None
+    revision_id = None
+    output_targets: tuple[CycleOutputTarget, ...] = ()
+    latest_change = None
+    field_sources: tuple[CyclePolicyFieldSource, ...] = ()
+    if include_metadata:
+        source_revision = await session.scalar(revision_statement)
+        output_targets = tuple(
+            (
+                await session.scalars(
+                    select(CycleOutputTarget)
+                    .where(
+                        CycleOutputTarget.cycle_id == cycle.id,
+                        CycleOutputTarget.is_active.is_(True),
+                    )
+                    .order_by(
+                        CycleOutputTarget.created_at.asc(),
+                        CycleOutputTarget.id.asc(),
+                    )
+                )
+            ).all()
+        )
+        change_rows = list(
+            (
+                await session.scalars(
+                    select(BehaviorChangeAudit)
+                    .where(*_audit_target_conditions(cycle))
+                    .order_by(
+                        BehaviorChangeAudit.version.desc(),
+                        BehaviorChangeAudit.id.desc(),
+                    )
+                )
+            ).all()
+        )
+        if change_rows:
+            latest_change = _record(
+                change_rows[0],
+                current_snapshot=snapshot,
+            )
+            first_policy_revision_number = (
+                select(CycleRevision.revision_number)
+                .where(
+                    CycleRevision.id == change_rows[-1].cycle_revision_id,
+                )
+                .scalar_subquery()
+            )
+            baseline_revision = await session.scalar(
+                select(CycleRevision)
+                .where(
+                    CycleRevision.cycle_id == cycle.id,
+                    CycleRevision.revision_number
+                    < first_policy_revision_number,
+                )
+                .order_by(
+                    CycleRevision.revision_number.desc(),
+                    CycleRevision.id.desc(),
+                )
+                .limit(1)
+            )
+        else:
+            baseline_revision = source_revision
+        field_sources = _field_sources(
+            snapshot=snapshot,
+            baseline_revision=baseline_revision,
+            change_rows=change_rows,
+        )
+    else:
+        revision_id = await session.scalar(
+            revision_statement.with_only_columns(CycleRevision.id)
+        )
     return EffectiveCyclePolicy(
         workspace_id=_workspace_id(cycle),
         policy_kind=CYCLE_POLICY_KIND,
         target_type=CYCLE_TARGET_TYPE,
         target_id=str(cycle.id),
         version=version,
-        revision_id=revision_id,
-        snapshot=CyclePolicySnapshot.from_cycle(cycle, guidance_rows),
+        revision_id=(
+            source_revision.id if source_revision is not None else revision_id
+        ),
+        snapshot=snapshot,
+        output_targets=output_targets,
+        source_revision=source_revision,
+        latest_change=latest_change,
+        field_sources=field_sources,
     )
 
 
@@ -915,14 +1022,87 @@ def _preview_digest(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _field_sources(
+    *,
+    snapshot: CyclePolicySnapshot,
+    baseline_revision: CycleRevision | None,
+    change_rows: list[BehaviorChangeAudit],
+) -> tuple[CyclePolicyFieldSource, ...]:
+    latest_by_field: dict[str, BehaviorChangeAudit] = {}
+    for row in change_rows:
+        for field_name in row.changed_fields or []:
+            latest_by_field.setdefault(str(field_name), row)
+
+    sources = []
+    for snapshot_field in fields(snapshot):
+        row = latest_by_field.get(snapshot_field.name)
+        if row is not None:
+            sources.append(
+                CyclePolicyFieldSource(
+                    field_name=snapshot_field.name,
+                    version=row.version,
+                    cycle_revision_id=row.cycle_revision_id,
+                    actor_type=row.actor_type,
+                    actor_id=row.actor_id,
+                    source_reference=row.source_reference,
+                    rationale=row.rationale,
+                    changed_at=_aware_utc(row.applied_at),
+                    change_id=row.id,
+                )
+            )
+            continue
+        sources.append(
+            CyclePolicyFieldSource(
+                field_name=snapshot_field.name,
+                version=0,
+                cycle_revision_id=(
+                    baseline_revision.id
+                    if baseline_revision is not None
+                    else None
+                ),
+                actor_type=(
+                    baseline_revision.source_type
+                    if baseline_revision is not None
+                    else None
+                ),
+                actor_id=(
+                    str(baseline_revision.source_id)
+                    if baseline_revision is not None
+                    and baseline_revision.source_id is not None
+                    else None
+                ),
+                source_reference=(
+                    f"cycle_revision:{baseline_revision.id}"
+                    if baseline_revision is not None
+                    else None
+                ),
+                rationale=(
+                    baseline_revision.rationale
+                    if baseline_revision is not None
+                    else None
+                ),
+                changed_at=(
+                    _aware_utc(baseline_revision.created_at)
+                    if baseline_revision is not None
+                    else None
+                ),
+                change_id=None,
+            )
+        )
+    return tuple(sources)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _record(
     row: BehaviorChangeAudit,
     *,
     current_snapshot: CyclePolicySnapshot,
 ) -> BehaviorChangeRecord:
-    applied_at = row.applied_at
-    if applied_at.tzinfo is None:
-        applied_at = applied_at.replace(tzinfo=timezone.utc)
     return BehaviorChangeRecord(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -944,7 +1124,7 @@ def _record(
         ),
         changed_fields=tuple(row.changed_fields or []),
         cycle_revision_id=row.cycle_revision_id,
-        applied_at=applied_at,
+        applied_at=_aware_utc(row.applied_at),
         reverted_from_id=row.reverted_from_id,
     )
 
