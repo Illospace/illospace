@@ -268,8 +268,42 @@ class TestProviderRegistry:
         assert isinstance(provider, OllamaProvider)
         assert kwargs["model"] == "qwen3.6:27b"
         assert "store" not in kwargs
+        assert kwargs["max_output_tokens"] == 2048
         assert "reasoning" not in kwargs
         assert "include" not in kwargs
+
+    def test_ollama_raises_small_output_budget_to_reasoning_floor(self):
+        provider = OllamaProvider(MagicMock())
+
+        kwargs = provider._translate_request(LLMRequest(
+            model="ollama/qwen3.6-27b",
+            messages=[{"role": "user", "content": "classify this"}],
+            max_output_tokens=512,
+        ))
+
+        assert kwargs["max_output_tokens"] == 2048
+
+    def test_ollama_preserves_output_budget_above_reasoning_floor(self):
+        provider = OllamaProvider(MagicMock())
+
+        kwargs = provider._translate_request(LLMRequest(
+            model="ollama/qwen3.6-27b",
+            messages=[{"role": "user", "content": "summarize this"}],
+            max_output_tokens=4096,
+        ))
+
+        assert kwargs["max_output_tokens"] == 4096
+
+    def test_openai_does_not_apply_ollama_output_budget_floor(self):
+        provider = OpenAIProvider(MagicMock())
+
+        kwargs = provider._translate_request(LLMRequest(
+            model="openai/gpt-5.6-luna",
+            messages=[{"role": "user", "content": "classify this"}],
+            max_output_tokens=512,
+        ))
+
+        assert kwargs["max_output_tokens"] == 512
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="Unknown provider"):

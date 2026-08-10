@@ -131,7 +131,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "Free local lane on illo-dev's RTX 5090; zero marginal cost and unlimited "
             "volume. Quality is well below Luna; use only for high-volume, low-stakes "
             "single-shot work such as heartbeat-class probes, classification, and "
-            "summarization. Never use it for judgment, review, or long context."
+            "summarization. Never use it for judgment, review, or long context. The model "
+            "always emits a reasoning block, so short output budgets are raised automatically."
         ),
         supported_effort_tiers=_NO_NATIVE_EFFORT,
         availability_fallback="openai/gpt-5.6-luna",

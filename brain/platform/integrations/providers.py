@@ -97,6 +97,9 @@ _TRANSIENT_TRANSPORT_DISCONNECT_TERMS = (
     "incomplete chunked read",
     "peer closed connection",
 )
+# Ollama reasoning consumes 185-506 output tokens before the message, and
+# thinking cannot be disabled on its Responses API.
+_OLLAMA_MIN_OUTPUT_TOKENS = 2048
 
 
 def _openai_stream_error_message(error: Any) -> str:
@@ -622,6 +625,8 @@ class OllamaProvider(OpenAIProvider):
     def _translate_request(self, request: LLMRequest) -> dict[str, Any]:
         kwargs = super()._translate_request(request)
         kwargs.pop("store", None)
+        if (kwargs.get("max_output_tokens") or 0) < _OLLAMA_MIN_OUTPUT_TOKENS:
+            kwargs["max_output_tokens"] = _OLLAMA_MIN_OUTPUT_TOKENS
         if kwargs["model"] == "qwen3.6-27b":
             kwargs["model"] = "qwen3.6:27b"
         return kwargs
