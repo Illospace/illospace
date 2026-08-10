@@ -179,6 +179,101 @@ def test_model_context_budget_is_model_and_provider_aware(monkeypatch):
     assert openai_budget.reserved_tool_tokens > 0
 
 
+def _clear_context_budget_overrides(monkeypatch):
+    for name in (
+        "AGENT_MODEL_CONTEXT_WINDOW_TOKENS",
+        "AGENT_AUTO_COMPACT_TOKEN_LIMIT",
+        "AGENT_AUTO_COMPACT_TARGET_TOKENS",
+        "AGENT_CONTEXT_RESERVED_OUTPUT_TOKENS",
+        "AGENT_CONTEXT_RESERVED_REASONING_TOKENS",
+        "AGENT_CONTEXT_RESERVED_TOOL_TOKENS",
+        "AGENT_CONTEXT_SAFETY_MARGIN_TOKENS",
+        "AGENT_EMERGENCY_COMPACT_TARGET_TOKENS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_no_native_effort_models_do_not_reserve_reasoning_tokens(monkeypatch):
+    from brain.systems.context.budget import resolve_model_context_budget
+
+    _clear_context_budget_overrides(monkeypatch)
+    tools = [{"name": f"tool-{index}"} for index in range(79)]
+
+    qwen_high = resolve_model_context_budget(
+        model="ollama/qwen3.6-27b",
+        reasoning_effort="high",
+        max_output_tokens=2_048,
+        tools=tools,
+    )
+    qwen_none = resolve_model_context_budget(
+        model="ollama/qwen3.6-27b",
+        reasoning_effort="none",
+        max_output_tokens=2_048,
+        tools=tools,
+    )
+    haiku_high = resolve_model_context_budget(
+        model="anthropic/claude-haiku-4-5",
+        reasoning_effort="high",
+        max_output_tokens=2_048,
+        tools=tools,
+    )
+    haiku_none = resolve_model_context_budget(
+        model="anthropic/claude-haiku-4-5",
+        reasoning_effort="none",
+        max_output_tokens=2_048,
+        tools=tools,
+    )
+
+    assert qwen_high.reserved_reasoning_tokens == 0
+    assert qwen_high.effective_input_limit_tokens == 49_440
+    assert qwen_high.effective_input_limit_tokens == qwen_none.effective_input_limit_tokens
+    assert haiku_high.reserved_reasoning_tokens == 0
+    assert haiku_high.effective_input_limit_tokens == 181_952
+    assert haiku_high.effective_input_limit_tokens == haiku_none.effective_input_limit_tokens
+
+
+def test_native_and_unknown_model_reasoning_budgets_are_unchanged(monkeypatch):
+    from brain.systems.context.budget import resolve_model_context_budget
+
+    _clear_context_budget_overrides(monkeypatch)
+    tools = [{"name": f"tool-{index}"} for index in range(79)]
+
+    sol = resolve_model_context_budget(
+        model="openai/gpt-5.6-sol",
+        reasoning_effort="high",
+        max_output_tokens=2_048,
+        tools=tools,
+    )
+    unknown = resolve_model_context_budget(
+        model="openai/not-in-catalog",
+        reasoning_effort="high",
+        max_output_tokens=2_048,
+        tools=tools,
+    )
+
+    assert sol.reserved_reasoning_tokens == 16_384
+    assert sol.effective_input_limit_tokens == 998_568
+    assert unknown.reserved_reasoning_tokens == 16_384
+    assert unknown.effective_input_limit_tokens == 95_008
+
+
+def test_reasoning_reserve_override_wins_for_no_effort_model(monkeypatch):
+    from brain.systems.context.budget import resolve_model_context_budget
+
+    _clear_context_budget_overrides(monkeypatch)
+    monkeypatch.setenv("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", "7777")
+
+    budget = resolve_model_context_budget(
+        model="ollama/qwen3.6-27b",
+        reasoning_effort="high",
+        max_output_tokens=2_048,
+        tools=[{"name": f"tool-{index}"} for index in range(79)],
+    )
+
+    assert budget.reserved_reasoning_tokens == 7_777
+    assert budget.effective_input_limit_tokens == 41_663
+
+
 def test_context_admission_floor_includes_canonical_checkpoint_and_healthy_path(monkeypatch):
     from brain.systems.context.compaction import estimate_session_tokens
     from brain.systems.context.window_policy import ContextWindowPolicy

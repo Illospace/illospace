@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
-from brain.platform.model_catalog import get_model_catalog_entry
+from brain.platform.model_catalog import get_model_catalog_entry, model_accepts_effort
 from brain.platform.providers.model_policy import EFFORT_TIER_SET, infer_provider_from_model
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
@@ -123,10 +123,15 @@ def _reserved_output_tokens(max_output_tokens: int | None) -> int:
     return 16_384
 
 
-def _reserved_reasoning_tokens(reasoning_effort: str | None) -> int:
+def _reserved_reasoning_tokens(
+    reasoning_effort: str | None,
+    model: str | None = None,
+) -> int:
     configured = os.environ.get("AGENT_CONTEXT_RESERVED_REASONING_TOKENS")
     if configured:
         return max(0, _env_int("AGENT_CONTEXT_RESERVED_REASONING_TOKENS", 0))
+    if not model_accepts_effort(model, reasoning_effort):
+        return 0
     effort = str(reasoning_effort or "none").strip().lower()
     return _REASONING_RESERVES.get(effort, _REASONING_RESERVES["medium"])
 
@@ -151,7 +156,7 @@ def resolve_model_context_budget(
     normalized_model = _strip_provider_prefix(model)
     context_window = _context_window_for(resolved_provider, normalized_model)
     output_reserve = _reserved_output_tokens(max_output_tokens)
-    reasoning_reserve = _reserved_reasoning_tokens(reasoning_effort)
+    reasoning_reserve = _reserved_reasoning_tokens(reasoning_effort, model=model)
     tool_reserve = _reserved_tool_tokens(tools)
     safety_margin = max(
         0,
