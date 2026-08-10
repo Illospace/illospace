@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -203,6 +203,45 @@ async def _preview_and_apply(
     )
     assert isinstance(result, CyclePolicyApplied)
     return preview, result
+
+
+async def test_snapshot_apply_covers_every_scalar_dataclass_field(
+    policy_workspace,
+    monkeypatch,
+):
+    workspace = policy_workspace
+    snapshot = CyclePolicySnapshot.from_cycle(
+        workspace.cycle,
+        list(workspace.initial_guidance),
+    )
+    monkeypatch.setattr(
+        behavior_policy,
+        "compute_next_run_at",
+        lambda *_args: None,
+    )
+
+    for snapshot_field in fields(snapshot):
+        # Guidance is deliberately excluded because the apply command writes it
+        # separately through _replace_active_guidance().
+        if snapshot_field.name == "guidance":
+            continue
+
+        marker = f"__snapshot_write_coverage__:{snapshot_field.name}"
+        current_value = getattr(snapshot, snapshot_field.name)
+        changed_value = (
+            {marker: True} if isinstance(current_value, dict) else marker
+        )
+        mutated = replace(
+            snapshot,
+            **{snapshot_field.name: changed_value},
+        )
+
+        mutated.apply_to(workspace.cycle)
+
+        assert getattr(workspace.cycle, snapshot_field.name, None) == changed_value, (
+            "CyclePolicySnapshot.apply_to() did not write snapshot field "
+            f"{snapshot_field.name!r}"
+        )
 
 
 async def test_read_preview_apply_history_and_human_audit_envelope(policy_workspace):
