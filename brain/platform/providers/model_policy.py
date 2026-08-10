@@ -16,6 +16,7 @@ from brain.platform.effort import (
 )
 from brain.platform.integrations.providers import get_active_provider
 from brain.platform.model_catalog import (
+    CREDENTIAL_FREE_PROVIDERS,
     MODEL_CATALOG,
     canonical_catalog_model_id,
 )
@@ -298,9 +299,13 @@ def get_model_catalog_contract(
             "description": entry.description,
             "supported_effort_tiers": list(entry.supported_effort_tiers),
             "auth_requirement": (
-                "chatgpt"
-                if required_openai_auth_mode(entry.id) == "chatgpt"
-                else "api_key"
+                "none"
+                if entry.provider in CREDENTIAL_FREE_PROVIDERS
+                else (
+                    "chatgpt"
+                    if required_openai_auth_mode(entry.id) == "chatgpt"
+                    else "api_key"
+                )
             ),
             "availability_fallback": entry.availability_fallback,
             "default_provenance": {

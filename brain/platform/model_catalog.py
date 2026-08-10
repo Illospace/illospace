@@ -35,6 +35,9 @@ class ModelCatalogEntry:
 _ALL_EFFORT_TIERS = EFFORT_TIERS
 _NO_NATIVE_EFFORT = ("none",)
 
+# These providers run locally and need no credentials.
+CREDENTIAL_FREE_PROVIDERS: frozenset[str] = frozenset({"ollama"})
+
 MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     ModelCatalogEntry(
         id="openai/gpt-5.6-sol",
