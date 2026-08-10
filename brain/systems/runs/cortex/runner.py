@@ -42,6 +42,7 @@ from brain.systems.runs.interruption import (
     interrupt_and_requeue_run,
     notify_run_interruption,
 )
+from brain.systems.runs.headless_worker_identity import headless_worker_directory_name
 from brain.systems.runs.slack_delivery import (
     SLACK_SURFACE as _SLACK_SURFACE,
     is_slack_origin as _run_is_slack_origin,
@@ -823,6 +824,9 @@ async def _record_spawned_worker_materialization_failure(
 def _project_context_root(run_id: int, *, thread_id: str | None = None) -> str:
     base = brain_config.resolve_workspace_root(default=Path(tempfile.gettempdir()) / "illo-agent-runs").expanduser()
     if thread_id:
+        worker_directory_name = headless_worker_directory_name(str(thread_id))
+        if worker_directory_name:
+            return str(base / "ideas" / worker_directory_name)
         safe_thread_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(thread_id))[:120]
         if safe_thread_id:
             return str(base / "ideas" / safe_thread_id)

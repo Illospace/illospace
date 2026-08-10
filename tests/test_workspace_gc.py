@@ -5,9 +5,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from brain.jobs.pipelines.workspace_gc import reclaim_headless_worker_workspaces
+from brain.systems.runs.headless_worker_identity import (
+    build_headless_worker_thread_id,
+    headless_worker_directory_name,
+)
 
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+DIGEST = "abcdef1234567890"
 
 
 class _Rows:
@@ -26,6 +31,13 @@ class _Session:
         return _Rows(self._statuses)
 
 
+def _worker_directory_name(parent_run_id: int) -> str:
+    thread_id = build_headless_worker_thread_id(parent_run_id, DIGEST)
+    directory_name = headless_worker_directory_name(thread_id)
+    assert directory_name is not None
+    return directory_name
+
+
 def _worker_workspace(
     workspace_root: Path,
     parent_run_id: int,
@@ -33,7 +45,7 @@ def _worker_workspace(
     age: timedelta,
     payload: bytes = b"workspace data",
 ) -> Path:
-    path = workspace_root / "ideas" / f"headless-worker-{parent_run_id}-abcdef1234567890"
+    path = workspace_root / "ideas" / _worker_directory_name(parent_run_id)
     path.mkdir(parents=True)
     (path / "payload.bin").write_bytes(payload)
     timestamp = (NOW - age).timestamp()
@@ -131,7 +143,7 @@ async def test_headless_worker_symlink_outside_root_is_refused(tmp_path):
     outside.mkdir()
     marker = outside / "keep.txt"
     marker.write_text("keep", encoding="utf-8")
-    link = ideas / "headless-worker-105-abcdef1234567890"
+    link = ideas / _worker_directory_name(105)
     link.symlink_to(outside, target_is_directory=True)
 
     result = await reclaim_headless_worker_workspaces(
@@ -150,10 +162,8 @@ async def test_project_roots_and_siblings_of_ideas_are_untouched(tmp_path):
     workspace_root = tmp_path / "workspaces"
     ideas = workspace_root / "ideas"
     ideas.mkdir(parents=True)
-    project_root = (
-        workspace_root / "project-roots" / "headless-worker-106-abcdef1234567890"
-    )
-    sibling = workspace_root / "other" / "headless-worker-107-abcdef1234567890"
+    project_root = workspace_root / "project-roots" / _worker_directory_name(106)
+    sibling = workspace_root / "other" / _worker_directory_name(107)
     project_root.mkdir(parents=True)
     sibling.mkdir(parents=True)
 
