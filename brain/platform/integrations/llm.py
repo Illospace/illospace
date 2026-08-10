@@ -237,6 +237,29 @@ def _build_openai_client(token: str, source: str = "") -> LLMClient:
     )
 
 
+def _build_ollama_client() -> LLMClient:
+    """Build an OpenAI-compatible client for the local Ollama runtime."""
+    openai = _import_openai_sdk()
+    base_url = (
+        os.environ.get("ILLO_OLLAMA_BASE_URL", "").strip()
+        or "http://172.17.0.1:11434/v1"
+    )
+    client = openai.OpenAI(
+        base_url=base_url,
+        api_key="ollama",
+        timeout=_llm_timeout_seconds(),
+    )
+    _wrap_openai_request_kwargs(client)
+    return LLMClient(
+        client=client,
+        provider="ollama",
+        source="ollama_local",
+        auth_mode=None,
+        is_oauth=False,
+        extra_headers={},
+    )
+
+
 def _wrap_openai_request_kwargs(client: Any) -> Any:
     """Normalize OpenAI request kwargs on raw SDK calls that bypass our provider layer."""
 
@@ -578,8 +601,11 @@ def resolve_llm_client(
 
     provider = normalize_default_provider(provider) if provider_from_default else normalize_runtime_provider(provider)
 
-    if provider not in ("anthropic", "openai"):
+    if provider not in ("anthropic", "ollama", "openai"):
         raise NotImplementedError(f"Provider '{provider}' not yet supported. Add it here.")
+
+    if provider == "ollama":
+        return _build_ollama_client()
 
     if provider == "openai":
         resolved_auth = _resolve_openai_local_auth(auth_mode=auth_mode)
@@ -659,8 +685,11 @@ async def async_resolve_llm_client(
             else normalize_runtime_provider(resolved_provider)
         )
 
-        if normalized_provider not in ("anthropic", "openai"):
+        if normalized_provider not in ("anthropic", "ollama", "openai"):
             raise NotImplementedError(f"Provider '{normalized_provider}' not yet supported. Add it here.")
+
+        if normalized_provider == "ollama":
+            return _build_ollama_client()
 
         if normalized_provider == "openai":
             resolved_auth = await _async_resolve_openai_auth(

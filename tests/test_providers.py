@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from brain.platform.integrations.openai_codex_client import OpenAICodexError, OpenAICodexRetryableError
 from brain.platform.integrations.providers import (
     AnthropicProvider,
+    OllamaProvider,
     OpenAIProvider,
     ContentBlock,
     LLMRequest,
@@ -252,6 +253,23 @@ class TestProviderRegistry:
         client = MagicMock()
         p = get_provider("openai", client)
         assert isinstance(p, OpenAIProvider)
+
+    def test_get_ollama_provider_maps_catalog_id_to_runtime_tag(self):
+        client = MagicMock()
+        provider = get_provider("ollama", client)
+        request = LLMRequest(
+            model="ollama/qwen3.6-27b",
+            messages=[{"role": "user", "content": "classify this"}],
+            reasoning_effort="xhigh",
+        )
+
+        kwargs = provider._translate_request(request)
+
+        assert isinstance(provider, OllamaProvider)
+        assert kwargs["model"] == "qwen3.6:27b"
+        assert "store" not in kwargs
+        assert "reasoning" not in kwargs
+        assert "include" not in kwargs
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="Unknown provider"):

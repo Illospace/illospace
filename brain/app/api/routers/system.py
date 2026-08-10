@@ -598,7 +598,14 @@ def _normalize_llm_model_value(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     trimmed = value.strip()
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if trimmed.startswith(prefix):
             return trimmed[len(prefix):]
     return trimmed

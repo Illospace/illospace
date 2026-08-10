@@ -38,7 +38,7 @@ from brain.systems.runs.status_questions import (
 )
 from brain.systems.runs.store import AsyncAgentRunStore
 
-_VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
+_VALID_MODEL_PROVIDERS = {"anthropic", "ollama", "openai"}
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
 THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"

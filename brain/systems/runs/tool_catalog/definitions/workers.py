@@ -19,7 +19,10 @@ WORKER_SPAWN_TOOLS = [
             "(xhigh judgment, high standard). Bulk/mechanical/single-shot/small-context execution: "
             "openai/gpt-5.6-luna at xhigh. Luna caveats: quality collapses above ~200K context; "
             "xhigh pays a long first-token pause per turn — never use Luna xhigh for many-short-turn "
-            "loops. Reserve non-OpenAI models for a cross-provider verifier."
+            "loops. Reserve non-OpenAI models for a cross-provider verifier. Free local lane: "
+            "`ollama/qwen3.6-27b` — zero cost, unlimited volume, ≤32k context, quality well below "
+            "Luna; use for heartbeat-class, high-volume, low-stakes single-shot work; never for "
+            "judgment or anything user-facing."
         ),
         "input_schema": {
             "type": "object",

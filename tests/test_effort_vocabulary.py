@@ -46,3 +46,11 @@ def test_spawn_worker_description_teaches_routing_patterns():
     assert "~200k context" in description
     assert "many-short-turn loops" in description
     assert "cross-provider verifier" in description
+    assert "ollama/qwen3.6-27b" in description
+    assert "zero cost" in description
+    assert "unlimited volume" in description
+    assert "≤32k context" in description
+    assert "quality well below luna" in description
+    assert "heartbeat-class" in description
+    assert "never for judgment" in description
+    assert "anything user-facing" in description

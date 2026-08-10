@@ -35,7 +35,7 @@ class RuntimeModelDefaultProvenance(BaseModel):
 class RuntimeModelCatalogEntry(BaseModel):
     id: str
     label: str
-    provider: Literal["openai", "anthropic"]
+    provider: Literal["openai", "anthropic", "ollama"]
     description: str
     supported_effort_tiers: list[Literal["none", "low", "medium", "high", "xhigh"]]
     auth_requirement: Literal["chatgpt", "api_key"]

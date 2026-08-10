@@ -33,6 +33,13 @@ PROVIDER_EFFORT_RENDERINGS: dict[str, dict[str, str | None]] = {
         # it so callers can ask for the ceiling without provider vocabulary.
         "xhigh": "max",
     },
+    "ollama": {
+        "none": None,
+        "low": None,
+        "medium": None,
+        "high": None,
+        "xhigh": None,
+    },
 }
 
 

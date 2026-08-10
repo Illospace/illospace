@@ -24,6 +24,14 @@ def test_anthropic_ceiling_renders_to_max():
     assert render_reasoning_effort("anthropic", "high") == "high"
 
 
+def test_ollama_omits_native_effort_for_every_tier():
+    assert set(PROVIDER_EFFORT_RENDERINGS["ollama"]) == EFFORT_TIER_SET
+    assert all(
+        value is None
+        for value in PROVIDER_EFFORT_RENDERINGS["ollama"].values()
+    )
+
+
 @pytest.mark.parametrize("provider", ["openai", "anthropic", "unknown-provider"])
 @pytest.mark.parametrize("tier", ["none", "", None, "  NONE  "])
 def test_none_and_empty_always_omit_reasoning(provider, tier):

@@ -1919,6 +1919,69 @@ async def test_spawn_worker_coerces_inherited_api_key_model(monkeypatch):
     assert payload["routing"]["auth_mode"] == "chatgpt"
 
 
+async def test_spawn_worker_admits_ollama_model_without_coercion(monkeypatch):
+    payload, captured, _events = await _captured_spawn_worker(
+        monkeypatch,
+        parent_model_policy={
+            "model": "openai/gpt-5.6-sol",
+            "thinking": "high",
+        },
+        model="ollama/qwen3.6-27b",
+        effort="none",
+    )
+
+    assert captured["model_policy"] == {
+        "model": "ollama/qwen3.6-27b",
+        "thinking": "none",
+    }
+    assert captured["preflight"]["model"] == "ollama/qwen3.6-27b"
+    assert captured["metadata"]["routing"]["requested"]["model"] == {
+        "value": "ollama/qwen3.6-27b",
+        "source": "spawn_worker.model",
+    }
+    assert payload["model"] == "ollama/qwen3.6-27b"
+    assert payload["routing"] == {
+        "model": "ollama/qwen3.6-27b",
+        "effort": "none",
+        "provider": "ollama",
+        "auth_mode": None,
+    }
+
+
+async def test_spawn_worker_ollama_auth_preflight_is_skipped(monkeypatch):
+    from brain.platform.integrations.provider_auth_preflight import (
+        ProviderAuthSkippedPreflightResult,
+    )
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    async def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("Ollama must not enter stored-credential auth probing")
+
+    monkeypatch.setattr(
+        worker_handlers,
+        "async_probe_provider_auth",
+        unexpected_probe,
+    )
+
+    result = await worker_handlers._preflight_spawn_worker_auth(
+        object(),
+        user_id="user-1",
+        org_id="org-1",
+        model="ollama/qwen3.6-27b",
+    )
+
+    assert isinstance(result, ProviderAuthSkippedPreflightResult)
+    assert result.to_dict() == {
+        "status": "skipped",
+        "provider": "ollama",
+        "model": "ollama/qwen3.6-27b",
+        "credential": None,
+        "error_code": None,
+        "repair_action": None,
+        "visible_message": None,
+    }
+
+
 async def test_spawn_worker_without_overrides_materializes_parent_effective_defaults(monkeypatch):
     import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
 
@@ -2233,6 +2296,10 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
         (
             {"model": "anthropic/not-a-real-model"},
             "model for provider 'anthropic' must be one of",
+        ),
+        (
+            {"model": "ollama/not-a-real-model"},
+            "model for provider 'ollama' must be one of",
         ),
         (
             {"model": "openai/gpt-4.1"},

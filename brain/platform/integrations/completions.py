@@ -25,7 +25,14 @@ DEFAULT_SIMPLE_COMPLETION_SYSTEM_PROMPT = (
 
 
 def _strip_provider_prefix(model: str) -> str:
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if model.startswith(prefix):
             return model[len(prefix):]
     return model

@@ -94,6 +94,13 @@ class TestModelPolicy:
         assert infer_provider_from_model("openai:gpt-5.6-luna") == "openai"
         assert infer_provider_from_model("gpt-5.5") == "openai"
 
+    def test_infer_provider_recognizes_ollama_model(self):
+        from brain.platform.providers.model_policy import infer_provider_from_model
+
+        assert infer_provider_from_model("ollama/qwen3.6-27b") == "ollama"
+        assert infer_provider_from_model("ollama:qwen3.6-27b") == "ollama"
+        assert infer_provider_from_model("qwen3.6-27b") == "ollama"
+
     def test_infer_provider_recognizes_claude_family_names(self):
         from brain.platform.providers.model_policy import infer_provider_from_model
 
@@ -108,6 +115,17 @@ class TestModelPolicy:
         assert normalize_model_name("gpt-5.6-luna") == "openai/gpt-5.6-luna"
         assert normalize_model_name("gpt-5.6") == "openai/gpt-5.6-sol"
         assert normalize_model_name("gpt-5.5") == "openai/gpt-5.5"
+
+    def test_ollama_normalization_preserves_catalog_and_unknown_ids(self):
+        from brain.platform.providers.model_policy import normalize_model_name
+
+        assert normalize_model_name("ollama/qwen3.6-27b") == "ollama/qwen3.6-27b"
+        assert normalize_model_name("ollama/not-a-real-model") == "ollama/not-a-real-model"
+
+    def test_ollama_is_not_an_implicit_default_provider(self):
+        from brain.platform.providers.model_policy import normalize_default_provider
+
+        assert normalize_default_provider("ollama") == "openai"
 
     def test_cost_uses_native_pricing_for_default_openai_models(self):
         from brain.platform.providers.model_policy import calculate_model_cost
@@ -202,6 +220,10 @@ class TestModelPolicy:
         assert catalogs["openai"]["default"] == "gpt-5.6-sol"
         assert "gpt-5.5" in catalogs["openai"]["options"]
         assert catalogs["anthropic"]["default"] == "claude-sonnet-5"
+        assert catalogs["ollama"] == {
+            "default": "qwen3.6-27b",
+            "options": ["qwen3.6-27b"],
+        }
 
     def test_model_catalog_contract_is_provider_aware_and_pruned(self):
         from brain.platform.providers.model_policy import get_model_catalog_contract
@@ -232,6 +254,8 @@ class TestModelPolicy:
         assert by_id["anthropic/claude-haiku-4-5"]["supported_effort_tiers"] == [
             "none"
         ]
+        assert by_id["ollama/qwen3.6-27b"]["auth_requirement"] == "api_key"
+        assert by_id["ollama/qwen3.6-27b"]["supported_effort_tiers"] == ["none"]
         assert not {
             "openai/o3-mini",
             "openai/gpt-4o",

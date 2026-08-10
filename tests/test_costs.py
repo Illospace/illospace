@@ -139,6 +139,22 @@ class TestGetCosts:
         assert models["openai/gpt-5.6-sol"]["runs"] == 3
 
     @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
+    def test_by_model_preserves_ollama_provider(self, mock_usage, client):
+        mock_usage.return_value = [
+            _fake_run(
+                id=1,
+                model_used="ollama/qwen3.6-27b",
+                estimated_cost=0.0,
+            ),
+        ]
+
+        result = client.get("/api/costs/")
+        models = {item["model"]: item for item in result.json()["by_model"]}
+
+        assert models["ollama/qwen3.6-27b"]["provider"] == "ollama"
+        assert models["ollama/qwen3.6-27b"]["normalized_model"] == "qwen3.6-27b"
+
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_skill_groups(self, mock_usage, client):
         runs = [
             _fake_run(id=1, skill_used="develop", estimated_cost=0.10),

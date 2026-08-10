@@ -123,6 +123,23 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         input_price_per_million=1.0,
         output_price_per_million=5.0,
     ),
+    ModelCatalogEntry(
+        id="ollama/qwen3.6-27b",
+        label="Qwen3.6 27B (local)",
+        provider="ollama",
+        description=(
+            "Free local lane on illo-dev's RTX 5090; zero marginal cost and unlimited "
+            "volume. Quality is well below Luna; use only for high-volume, low-stakes "
+            "single-shot work such as heartbeat-class probes, classification, and "
+            "summarization. Never use it for judgment, review, or long context."
+        ),
+        supported_effort_tiers=_NO_NATIVE_EFFORT,
+        availability_fallback="openai/gpt-5.6-luna",
+        context_window_tokens=32_768,
+        input_price_per_million=0.0,
+        output_price_per_million=0.0,
+        provider_default=True,
+    ),
 )
 
 MODEL_CATALOG_BY_ID = {entry.id: entry for entry in MODEL_CATALOG}

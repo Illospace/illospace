@@ -23,7 +23,14 @@ def test_subscription_only_models_require_chatgpt_auth(model):
 
 @pytest.mark.parametrize(
     "model",
-    ["gpt-4.1", "openai/gpt-4.1-mini", "anthropic/claude-sonnet-4-6", "", None],
+    [
+        "gpt-4.1",
+        "openai/gpt-4.1-mini",
+        "anthropic/claude-sonnet-4-6",
+        "ollama/qwen3.6-27b",
+        "",
+        None,
+    ],
 )
 def test_other_models_do_not_pin_an_auth_mode(model):
     assert required_openai_auth_mode(model) is None
