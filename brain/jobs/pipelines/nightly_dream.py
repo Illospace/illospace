@@ -60,7 +60,7 @@ async def gather_random_old_memories(target_date: date, limit: int = 10, org_id:
                    ARRAY_REMOVE(ARRAY[node_kind, content_kind], NULL) AS tags,
                    created_at::date as created_date
             FROM memory_nodes
-            WHERE created_at::date < :target_date - INTERVAL '7 days'
+            WHERE created_at::date < CAST(:target_date AS date) - INTERVAL '7 days'
               AND archived_at IS NULL
               AND confidence >= 0.4 {_org_filter}
             ORDER BY RANDOM()
