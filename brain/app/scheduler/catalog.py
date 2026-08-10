@@ -213,7 +213,8 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
             "allowed_actions": ["scheduler.run"],
             "output_channel": "scheduler",
             "success_criteria": [
-                "Old headless-worker workspaces are reclaimed only after parent runs finish"
+                "Headless-worker workspaces older than 48 hours are reclaimed only when "
+                "the parent run is terminal or absent from the database"
             ],
         },
         "priority": 70,

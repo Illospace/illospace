@@ -11,6 +11,7 @@ import shutil
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal, NamedTuple, TypedDict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +31,17 @@ HEADLESS_WORKER_PREFIX = "headless-worker-"
 HEADLESS_WORKER_WORKSPACE_RETENTION = timedelta(hours=48)
 
 
-def _empty_result() -> dict[str, int]:
+class WorkspaceGCResult(TypedDict):
+    directories_scanned: int
+    directories_reclaimed: int
+    bytes_reclaimed: int
+    directories_recent: int
+    directories_non_terminal: int
+    directories_refused: int
+    errors: int
+
+
+def _empty_result() -> WorkspaceGCResult:
     return {
         "directories_scanned": 0,
         "directories_reclaimed": 0,
@@ -54,12 +65,26 @@ def _parent_run_id(path: Path) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _path_is_safe_headless_worker_workspace(
+_ValidationCounter = Literal[
+    "directories_recent",
+    "directories_refused",
+    "errors",
+]
+
+
+class _WorkspaceValidation(NamedTuple):
+    parent_run_id: int | None
+    counter: _ValidationCounter | None
+    error: OSError | None = None
+
+
+def _validate_headless_worker_workspace(
     path: Path,
     *,
     workspace_root: Path,
-) -> bool:
-    """Accept only a real, direct child of the configured ideas directory."""
+    cutoff: datetime,
+) -> _WorkspaceValidation:
+    """Validate that a candidate is a safe, parseable, old workspace now."""
 
     try:
         root = workspace_root.expanduser().resolve(strict=True)
@@ -67,18 +92,31 @@ def _path_is_safe_headless_worker_workspace(
         if path.is_symlink() or not stat.S_ISDIR(
             path.stat(follow_symlinks=False).st_mode
         ):
-            return False
+            return _WorkspaceValidation(None, "directories_refused")
         resolved = path.resolve(strict=True)
-        return (
+        parent_run_id = _parent_run_id(path)
+        if not (
             ideas.is_relative_to(root)
             and ideas != root
             and path.parent.resolve(strict=True) == ideas
             and resolved.parent == ideas
             and resolved.is_relative_to(ideas)
-            and _parent_run_id(path) is not None
-        )
+            and parent_run_id is not None
+        ):
+            return _WorkspaceValidation(None, "directories_refused")
     except (OSError, RuntimeError):
-        return False
+        return _WorkspaceValidation(None, "directories_refused")
+
+    try:
+        modified_at = datetime.fromtimestamp(
+            path.stat(follow_symlinks=False).st_mtime,
+            tz=timezone.utc,
+        )
+    except OSError as exc:
+        return _WorkspaceValidation(None, "errors", exc)
+    if modified_at > cutoff:
+        return _WorkspaceValidation(parent_run_id, "directories_recent")
+    return _WorkspaceValidation(parent_run_id, None)
 
 
 def _directory_size_bytes(path: Path) -> int:
@@ -120,7 +158,7 @@ async def reclaim_headless_worker_workspaces(
     workspace_root: Path,
     now: datetime | None = None,
     retention: timedelta = HEADLESS_WORKER_WORKSPACE_RETENTION,
-) -> dict[str, int]:
+) -> WorkspaceGCResult:
     """Delete old worker workspaces whose parent run is terminal or absent."""
 
     result = _empty_result()
@@ -155,26 +193,20 @@ async def reclaim_headless_worker_workspaces(
         if not path.name.startswith(HEADLESS_WORKER_PREFIX):
             continue
         result["directories_scanned"] += 1
-        parent_run_id = _parent_run_id(path)
-        if parent_run_id is None or not _path_is_safe_headless_worker_workspace(
+        validation = _validate_headless_worker_workspace(
             path,
             workspace_root=workspace_root,
-        ):
-            result["directories_refused"] += 1
-            log.warning("Workspace GC refused unsafe candidate: %s", path)
+            cutoff=cutoff,
+        )
+        if validation.counter is not None:
+            result[validation.counter] += 1
+            if validation.counter == "directories_refused":
+                log.warning("Workspace GC refused unsafe candidate: %s", path)
+            elif validation.counter == "errors":
+                log.warning("Workspace GC could not stat %s: %s", path, validation.error)
             continue
-        try:
-            modified_at = datetime.fromtimestamp(
-                path.stat(follow_symlinks=False).st_mtime,
-                tz=timezone.utc,
-            )
-        except OSError as exc:
-            result["errors"] += 1
-            log.warning("Workspace GC could not stat %s: %s", path, exc)
-            continue
-        if modified_at > cutoff:
-            result["directories_recent"] += 1
-            continue
+        parent_run_id = validation.parent_run_id
+        assert parent_run_id is not None
         candidates.append((path, parent_run_id))
 
     statuses = await _parent_run_statuses(
@@ -190,19 +222,21 @@ async def reclaim_headless_worker_workspaces(
             continue
 
         try:
-            if not _path_is_safe_headless_worker_workspace(
+            validation = _validate_headless_worker_workspace(
                 path,
                 workspace_root=workspace_root,
-            ):
-                result["directories_refused"] += 1
-                log.warning("Workspace GC refused candidate before deletion: %s", path)
-                continue
-            modified_at = datetime.fromtimestamp(
-                path.stat(follow_symlinks=False).st_mtime,
-                tz=timezone.utc,
+                cutoff=cutoff,
             )
-            if modified_at > cutoff:
-                result["directories_recent"] += 1
+            if validation.counter is not None:
+                result[validation.counter] += 1
+                if validation.counter == "directories_refused":
+                    log.warning(
+                        "Workspace GC refused candidate before deletion: %s", path
+                    )
+                elif validation.counter == "errors":
+                    log.warning(
+                        "Workspace GC could not delete %s: %s", path, validation.error
+                    )
                 continue
             size = _directory_size_bytes(path)
             shutil.rmtree(path)
@@ -218,7 +252,7 @@ async def reclaim_headless_worker_workspaces(
     return result
 
 
-async def run() -> dict[str, int]:
+async def run() -> WorkspaceGCResult:
     async with UnitOfWork() as uow:
         return await reclaim_headless_worker_workspaces(
             uow.session,  # type: ignore[arg-type]

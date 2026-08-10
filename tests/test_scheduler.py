@@ -353,6 +353,10 @@ async def test_workspace_gc_catalog_config(session):
     assert job.timeout_seconds == 3600
     assert job.max_concurrency == 1
     assert job.retry_policy == {"max_attempts": 2, "backoff_seconds": 300}
+    assert job.task_contract["success_criteria"] == [
+        "Headless-worker workspaces older than 48 hours are reclaimed only when "
+        "the parent run is terminal or absent from the database"
+    ]
     assert build_scheduler_step_plan(job) == [
         {
             "step_key": "workspace_gc",
