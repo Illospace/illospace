@@ -21,7 +21,7 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runs.headless_worker_identity import (
     is_headless_worker_directory_candidate,
-    parse_headless_worker_identity,
+    parse_headless_worker_directory_name,
 )
 from brain.systems.runs.status import (
     TERMINAL_RUN_STATUSES,
@@ -57,7 +57,7 @@ def _empty_result() -> WorkspaceGCResult:
 
 
 def _parent_run_id(path: Path) -> int | None:
-    identity = parse_headless_worker_identity(path.name)
+    identity = parse_headless_worker_directory_name(path.name)
     return identity[0] if identity is not None else None
 
 

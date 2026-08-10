@@ -1368,6 +1368,27 @@ def test_project_context_root_is_scoped_by_thread(monkeypatch, tmp_path):
     assert _project_context_root(101, thread_id=None) == str(tmp_path / "run-101")
 
 
+def test_project_context_root_uses_the_headless_worker_codec(monkeypatch, tmp_path):
+    """The GC parses this directory name back to a run id and deletes it.
+
+    Pin the exact path here, at the caller, so a runner cleanup cannot bypass
+    the codec while the codec's own tests still pass.
+    """
+
+    from brain.systems.runs.cortex.runner import _project_context_root
+    from brain.systems.runs.headless_worker_identity import (
+        build_headless_worker_thread_id,
+    )
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+
+    thread_id = build_headless_worker_thread_id(16034, "0434cc5ed822d9f7")
+
+    assert _project_context_root(103, thread_id=thread_id) == str(
+        tmp_path / "ideas" / "headless-worker-16034-0434cc5ed822d9f7"
+    )
+
+
 def test_project_context_root_uses_workspace_root_in_deploy(monkeypatch, tmp_path):
     from brain.systems.runs.cortex.runner import _project_context_root
 
