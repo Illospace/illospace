@@ -109,6 +109,73 @@ def test_resolve_llm_client_raises_when_no_key():
             resolve_llm_client(user_id="user-1", provider="anthropic")
 
 
+def test_resolve_ollama_client_uses_safe_default_without_provider_auth(monkeypatch):
+    from brain.platform.integrations.llm import resolve_llm_client
+
+    mock_openai = MagicMock()
+    mock_openai.OpenAI.return_value = MagicMock()
+    monkeypatch.delenv("ILLO_OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("ILLO_LLM_TIMEOUT_SECONDS", raising=False)
+
+    with patch(
+        "brain.platform.integrations.llm._import_openai_sdk",
+        return_value=mock_openai,
+    ):
+        result = resolve_llm_client(user_id="user-1", provider="ollama")
+
+    assert result.provider == "ollama"
+    assert result.source == "ollama_local"
+    assert result.auth_mode is None
+    assert mock_openai.OpenAI.call_args.kwargs == {
+        "base_url": "http://172.17.0.1:11434/v1",
+        "api_key": "ollama",
+        "timeout": 240.0,
+    }
+
+
+def test_resolve_ollama_client_treats_empty_base_url_as_unset(monkeypatch):
+    from brain.platform.integrations.llm import resolve_llm_client
+
+    mock_openai = MagicMock()
+    mock_openai.OpenAI.return_value = MagicMock()
+    monkeypatch.setenv("ILLO_OLLAMA_BASE_URL", "  ")
+
+    with patch(
+        "brain.platform.integrations.llm._import_openai_sdk",
+        return_value=mock_openai,
+    ):
+        resolve_llm_client(provider="ollama")
+
+    assert mock_openai.OpenAI.call_args.kwargs["base_url"] == (
+        "http://172.17.0.1:11434/v1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_resolve_ollama_client_uses_configured_base_url(monkeypatch):
+    from brain.platform.integrations.llm import async_resolve_llm_client
+
+    mock_openai = MagicMock()
+    mock_openai.OpenAI.return_value = MagicMock()
+    monkeypatch.setenv("ILLO_OLLAMA_BASE_URL", "http://ollama.test:11434/v1")
+
+    with patch(
+        "brain.platform.integrations.llm._import_openai_sdk",
+        return_value=mock_openai,
+    ):
+        result = await async_resolve_llm_client(
+            user_id="user-1",
+            provider="ollama",
+            session=object(),
+        )
+
+    assert result.provider == "ollama"
+    assert mock_openai.OpenAI.call_args.kwargs["base_url"] == (
+        "http://ollama.test:11434/v1"
+    )
+    assert mock_openai.OpenAI.call_args.kwargs["api_key"] == "ollama"
+
+
 def test_resolve_llm_client_detects_oauth_token():
     """Setup tokens (sk-ant-oat*) are detected and get OAuth headers."""
     from brain.platform.integrations.llm import resolve_llm_client

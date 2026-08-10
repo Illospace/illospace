@@ -80,7 +80,14 @@ class LLMRequest:
     @property
     def normalized_model(self) -> str:
         """Strip provider prefixes for SDK calls."""
-        for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+        for prefix in (
+            "anthropic/",
+            "ollama/",
+            "openai/",
+            "anthropic:",
+            "ollama:",
+            "openai:",
+        ):
             if self.model.startswith(prefix):
                 return self.model[len(prefix):]
         return self.model

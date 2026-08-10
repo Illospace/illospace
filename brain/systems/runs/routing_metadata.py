@@ -26,7 +26,14 @@ def effective_routing_snapshot(
         provider or infer_provider_from_model(model)
     ).strip().lower()
     model_name = str(model or "").strip()
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if model_name.startswith(prefix):
             model_name = model_name[len(prefix):]
             break

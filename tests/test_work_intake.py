@@ -490,6 +490,22 @@ def test_invalid_high_priority_metadata_warns_before_valid_fallback(caplog):
     ) in caplog.messages
 
 
+def test_model_policy_metadata_accepts_explicit_ollama_route():
+    from brain.systems.runs.work_intake import model_policy_from_metadata
+
+    assert model_policy_from_metadata(
+        {
+            "model": "ollama/qwen3.6-27b",
+            "provider": "ollama",
+            "effort": "none",
+        }
+    ) == {
+        "model": "ollama/qwen3.6-27b",
+        "provider": "ollama",
+        "thinking": "none",
+    }
+
+
 def test_deep_profile_metadata_is_coerced_to_fast_with_structured_source_log(caplog):
     from brain.systems.runs.domain import RunProfile
     from brain.systems.runs.work_intake import profile_from_metadata

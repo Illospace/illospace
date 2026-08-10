@@ -204,7 +204,14 @@ from brain.systems.sessions.harvest import (  # noqa: F401
 
 def _normalize_model(model: str) -> str:
     """Strip provider prefix before passing a model name to the provider SDK."""
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if model.startswith(prefix):
             return model[len(prefix):]
     return model
@@ -1748,11 +1755,22 @@ async def run_agent_async(
                     if (
                         not model_fallback_used
                         and fallback
-                        and is_model_unavailable_error(exc)
+                        and is_model_unavailable_error(exc, model=model)
                     ):
                         preferred_model = model
+                        preferred_provider = infer_provider_from_model(preferred_model)
+                        fallback_provider = infer_provider_from_model(fallback)
                         model = _normalize_model(fallback)
                         model_fallback_used = True
+                        if preferred_provider != fallback_provider:
+                            llm, state.provider, _runtime_extra_headers = await _init_llm_async(
+                                effective_user_id,
+                                session_id,
+                                model,
+                                org_id=effective_org_id,
+                                resolved_llm=None,
+                            )
+                            state.provider_name = llm.provider
                         effective_routing = effective_routing_snapshot(
                             model,
                             thinking,

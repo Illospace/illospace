@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from brain.platform.model_catalog import availability_fallback_for
+from brain.platform.model_catalog import (
+    availability_fallback_for,
+    canonical_catalog_model_id,
+)
+from brain.platform.providers.model_policy import infer_provider_from_model
 
 _UNAVAILABLE_TERMS = (
     "model_not_found",
@@ -18,10 +22,19 @@ _UNAVAILABLE_TERMS = (
     "not available on this account",
     "do not have access to the model",
 )
+_CONNECTION_ERROR_CLASS_NAMES = frozenset({"APIConnectionError", "ConnectError"})
+_CONNECTION_ERROR_TERMS = (
+    "connection refused",
+    "connection error",
+    "timed out",
+)
 
 
 def _canonical_model(model: str | None) -> str:
     value = str(model or "").strip().lower().replace(":", "/", 1)
+    catalog_id = canonical_catalog_model_id(value)
+    if catalog_id:
+        return catalog_id
     return value if "/" in value else f"openai/{value}"
 
 
@@ -59,12 +72,34 @@ def _status_code(exc: Any) -> int | None:
         return None
 
 
-def is_model_unavailable_error(exc: Any) -> bool:
-    """Classify entitlement/model-catalog failures without hiding auth errors."""
-    if _status_code(exc) not in {400, 403, 404}:
-        return False
+def _is_connection_level_error(exc: Any) -> bool:
+    current = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if current.__class__.__name__ in _CONNECTION_ERROR_CLASS_NAMES:
+            return True
+        current = getattr(current, "__cause__", None) or getattr(
+            current,
+            "__context__",
+            None,
+        )
     text = _error_text(exc)
-    return any(term in text for term in _UNAVAILABLE_TERMS)
+    return any(term in text for term in _CONNECTION_ERROR_TERMS)
+
+
+def is_model_unavailable_error(exc: Any, *, model: str | None = None) -> bool:
+    """Classify model failures and Ollama-only connection unavailability."""
+    status_code = _status_code(exc)
+    if status_code in {400, 403, 404}:
+        text = _error_text(exc)
+        return any(term in text for term in _UNAVAILABLE_TERMS)
+    if status_code is not None or not model:
+        return False
+    return (
+        infer_provider_from_model(model) == "ollama"
+        and _is_connection_level_error(exc)
+    )
 
 
 def is_missing_required_model_auth(exc: Any) -> bool:

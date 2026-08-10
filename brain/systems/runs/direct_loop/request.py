@@ -18,7 +18,14 @@ _PROMPT_CACHE_KEY_PREFIX = "illo"
 def strip_provider_prefix(model: str) -> str:
     """Strip provider prefixes before passing model names to provider SDKs."""
 
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if model.startswith(prefix):
             return model[len(prefix):]
     return model

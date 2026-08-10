@@ -42,10 +42,12 @@ def test_composer_consumes_runtime_catalog_instead_of_owning_model_options():
     source = Path(
         "frontend/src/lib/features/composer/domain/runSettings.ts"
     ).read_text()
+    runtime_types = Path("frontend/src/lib/types/runtimeSettings.ts").read_text()
 
     assert "MODEL_OPTIONS" not in source
     assert "modelCatalog" in source
     assert "RuntimeModelCatalogEntry" in source
+    assert "'openai' | 'anthropic' | 'ollama'" in runtime_types
 
 
 def test_gpt_5_6_sol_uses_provider_context_contract(monkeypatch):
@@ -89,3 +91,24 @@ def test_gpt_5_6_luna_uses_subscription_catalog_contract():
     assert entry.input_price_per_million == 0.20
     assert entry.output_price_per_million == 1.20
     assert required_openai_auth_mode(entry.id) == "chatgpt"
+
+
+def test_ollama_qwen_uses_free_local_catalog_contract():
+    from brain.platform.model_catalog import get_model_catalog_entry
+    from brain.platform.providers.model_policy import get_model_catalog_contract
+    from brain.systems.runtime_settings.schemas import RuntimeModelCatalogEntry
+
+    entry = get_model_catalog_entry("ollama/qwen3.6-27b")
+    contract = {
+        item["id"]: item
+        for item in get_model_catalog_contract()
+    }["ollama/qwen3.6-27b"]
+
+    assert entry is not None
+    assert entry.input_price_per_million == 0.0
+    assert entry.output_price_per_million == 0.0
+    assert entry.availability_fallback == "openai/gpt-5.6-luna"
+    assert entry.context_window_tokens == 32_768
+    assert entry.supported_effort_tiers == ("none",)
+    assert contract["auth_requirement"] == "api_key"
+    assert RuntimeModelCatalogEntry.model_validate(contract).provider == "ollama"

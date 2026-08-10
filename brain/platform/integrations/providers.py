@@ -410,6 +410,8 @@ def _is_complete_openai_reasoning_summary_event(event_type: str) -> bool:
 class OpenAIProvider(LLMProvider):
     """OpenAI provider using the native Responses API."""
 
+    provider_name = "openai"
+
     def __init__(self, client):
         self._client = client
         self.transport = OpenAIResponsesTransport()
@@ -464,7 +466,7 @@ class OpenAIProvider(LLMProvider):
             recorded = True
             record_provider_success(
                 operation_type=request.operation_type,
-                provider="openai",
+                provider=self.provider_name,
                 model=request.normalized_model,
                 latency_ms=_latency_ms(),
             )
@@ -476,7 +478,7 @@ class OpenAIProvider(LLMProvider):
             recorded = True
             record_provider_failure(
                 operation_type=request.operation_type,
-                provider="openai",
+                provider=self.provider_name,
                 model=request.normalized_model,
                 exc=exc,
                 latency_ms=_latency_ms(),
@@ -612,10 +614,24 @@ class OpenAIProvider(LLMProvider):
         return exc.__class__.__module__.startswith("openai") or isinstance(exc, OpenAICodexError)
 
 
+class OllamaProvider(OpenAIProvider):
+    """Ollama provider using its OpenAI-compatible Responses API."""
+
+    provider_name = "ollama"
+
+    def _translate_request(self, request: LLMRequest) -> dict[str, Any]:
+        kwargs = super()._translate_request(request)
+        kwargs.pop("store", None)
+        if kwargs["model"] == "qwen3.6-27b":
+            kwargs["model"] = "qwen3.6:27b"
+        return kwargs
+
+
 # ── Provider Registry ─────────────────────────────────────────────
 
 _PROVIDERS: dict[str, type[LLMProvider]] = {
     "anthropic": AnthropicProvider,
+    "ollama": OllamaProvider,
     "openai": OpenAIProvider,
 }
 
@@ -624,8 +640,8 @@ def get_provider(name: str, client: Any) -> LLMProvider:
     """Create a provider instance wrapping the given client.
 
     Args:
-        name: Provider name ("anthropic" or "openai")
-        client: The SDK client (anthropic.Anthropic or openai.OpenAI)
+        name: Provider name ("anthropic", "ollama", or "openai")
+        client: The provider SDK client
 
     Returns:
         LLMProvider instance

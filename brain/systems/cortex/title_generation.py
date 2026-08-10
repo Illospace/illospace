@@ -69,7 +69,14 @@ def normalize_generated_title(title: str | None) -> str | None:
 
 def _strip_provider_prefix(model: str | None) -> str:
     value = (model or "").strip()
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if value.startswith(prefix):
             return value[len(prefix):]
     return value
@@ -88,12 +95,14 @@ def is_local_title_model(model: str | None) -> bool:
 
 def _provider_model_spec(provider: str, model: str) -> str:
     value = (model or "").strip()
-    if value.startswith(("anthropic/", "openai/")):
+    if value.startswith(("anthropic/", "ollama/", "openai/")):
         return value
     if value.startswith("anthropic:"):
         return f"anthropic/{value[len('anthropic:'):]}"
     if value.startswith("openai:"):
         return f"openai/{value[len('openai:'):]}"
+    if value.startswith("ollama:"):
+        return f"ollama/{value[len('ollama:'):]}"
     return f"{provider}/{value}"
 
 

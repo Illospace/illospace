@@ -15,7 +15,7 @@ export interface RuntimeOption {
 export interface RuntimeModelCatalogEntry {
   id: string;
   label: string;
-  provider: 'openai' | 'anthropic';
+  provider: 'openai' | 'anthropic' | 'ollama';
   description: string;
   supported_effort_tiers: RuntimeThinking[];
   auth_requirement: 'chatgpt' | 'api_key';

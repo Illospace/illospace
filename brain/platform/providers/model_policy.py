@@ -321,10 +321,14 @@ def infer_provider_from_model(model: str | None, default: str | None = None) -> 
             return "anthropic"
         if value.startswith("openai:"):
             return "openai"
+        if value.startswith("ollama:"):
+            return "ollama"
         if value.startswith("anthropic/"):
             return "anthropic"
         if value.startswith("openai/"):
             return "openai"
+        if value.startswith("ollama/"):
+            return "ollama"
         if lowered.startswith("claude-"):
             return "anthropic"
         if lowered.startswith(("gpt-", "o1", "o3", "o4")):
@@ -484,7 +488,7 @@ def normalize_model_name(model: str | None) -> str:
     if catalog_id:
         return catalog_id
     explicitly_prefixed = value.replace(":", "/", 1)
-    if explicitly_prefixed.startswith(("anthropic/", "openai/")):
+    if explicitly_prefixed.startswith(("anthropic/", "ollama/", "openai/")):
         return explicitly_prefixed
 
     if lower.startswith("claude-"):

@@ -77,7 +77,14 @@ def _env_int(name: str, default: int) -> int:
 
 def _strip_provider_prefix(model: str | None) -> str:
     value = str(model or "").strip()
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+    for prefix in (
+        "anthropic/",
+        "ollama/",
+        "openai/",
+        "anthropic:",
+        "ollama:",
+        "openai:",
+    ):
         if value.startswith(prefix):
             return value[len(prefix):]
     return value

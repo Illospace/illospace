@@ -40,7 +40,7 @@ def _provider_model_key(raw_model: Any) -> tuple[str, str, str]:
             prefix, model = value.split(separator, 1)
             provider = prefix.strip().lower()
             model = model.strip()
-            if provider in {"anthropic", "openai", "google", "local"} and model:
+            if provider in {"anthropic", "openai", "ollama", "google", "local"} and model:
                 return provider, model, f"{provider}/{model}"
 
     if lowered.startswith("claude-"):

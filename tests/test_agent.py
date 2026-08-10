@@ -70,6 +70,11 @@ class TestModelNormalization:
         from brain.systems.runs.direct_agent import _normalize_model
         assert _normalize_model("anthropic/claude-haiku-4-5") == "claude-haiku-4-5"
 
+    def test_strips_ollama_prefix(self):
+        from brain.systems.runs.direct_agent import _normalize_model
+
+        assert _normalize_model("ollama/qwen3.6-27b") == "qwen3.6-27b"
+
 
 class TestProviderInference:
     def test_direct_agent_requires_chatgpt_auth_for_subscription_models(self):
@@ -97,10 +102,54 @@ class TestProviderInference:
 
         assert fallback_model_for("openai/gpt-5.6-sol") == "openai/gpt-5.5"
         assert fallback_model_for("openai/gpt-5.6") == "openai/gpt-5.5"
+        assert fallback_model_for("qwen3.6-27b") == "openai/gpt-5.6-luna"
         assert fallback_model_for("gpt-5.5") is None
         assert is_model_unavailable_error(unsupported) is True
         assert is_model_unavailable_error(missing) is True
         assert is_model_unavailable_error(expired) is False
+
+    def test_ollama_connection_error_is_model_unavailable(self):
+        import httpx
+
+        from brain.systems.runs.direct_loop.model_fallback import (
+            is_model_unavailable_error,
+        )
+
+        error = httpx.ConnectError("Connection refused")
+
+        assert is_model_unavailable_error(
+            error,
+            model="ollama/qwen3.6-27b",
+        ) is True
+
+    def test_openai_connection_error_is_not_model_unavailable(self):
+        import httpx
+
+        from brain.systems.runs.direct_loop.model_fallback import (
+            is_model_unavailable_error,
+        )
+
+        error = httpx.ConnectError("Connection refused")
+
+        assert is_model_unavailable_error(
+            error,
+            model="openai/gpt-5.6-sol",
+        ) is False
+
+    def test_ollama_model_not_found_is_model_unavailable(self):
+        from brain.systems.runs.direct_loop.model_fallback import (
+            is_model_unavailable_error,
+        )
+
+        error = SimpleNamespace(
+            status_code=404,
+            body={"error": {"code": "model_not_found"}},
+        )
+
+        assert is_model_unavailable_error(
+            error,
+            model="ollama/qwen3.6-27b",
+        ) is True
 
     @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
     @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
@@ -231,6 +280,117 @@ async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(m
     assert result.effective_routing == {
         "model": "openai/gpt-5.5",
         "effort": "xhigh",
+        "provider": "openai",
+        "auth_mode": "chatgpt",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_reresolves_client_for_ollama_to_luna_fallback(monkeypatch):
+    import httpx
+
+    from brain.platform.integrations.providers import LLMResponse, TextContentBlock, Usage
+    from brain.systems.runs.direct_agent import run_agent_async
+
+    ollama_llm = _mock_llm_client(MagicMock(), provider="ollama")
+    ollama_llm.auth_mode = None
+    luna_llm = _mock_llm_client(MagicMock(), provider="openai")
+    luna_llm.auth_mode = "chatgpt"
+    luna_llm.is_oauth = True
+    ollama_provider = MagicMock(name="ollama_provider")
+    openai_provider = MagicMock(name="openai_provider")
+    init_llm = AsyncMock(
+        side_effect=[
+            (ollama_llm, ollama_provider, {}),
+            (luna_llm, openai_provider, {"session_id": "luna-session"}),
+        ]
+    )
+    checkpoint_compactor = MagicMock(side_effect=[MagicMock(), MagicMock()])
+    thread_handoff_compactor = MagicMock(side_effect=[MagicMock(), MagicMock()])
+    calls = []
+
+    async def fake_api_call(provider, request, active_llm, *_args, **_kwargs):
+        calls.append((provider, request, active_llm))
+        if len(calls) == 1:
+            raise httpx.ConnectError("Connection refused")
+        return LLMResponse(
+            content=[TextContentBlock("Luna fallback succeeded")],
+            stop_reason="end_turn",
+            usage=Usage(input_tokens=3, output_tokens=2),
+            model="gpt-5.6-luna",
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._init_llm_async",
+        init_llm,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._api_call_with_retry_async",
+        fake_api_call,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._llm_context_checkpoint_compactor",
+        checkpoint_compactor,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._llm_thread_handoff_compactor",
+        thread_handoff_compactor,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._async_record_api_call",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.direct_agent._runtime_async_apply_agent_session_side_effects",
+        AsyncMock(),
+    )
+
+    result = await run_agent_async(
+        "Test local provider fallback",
+        session_id="ollama-fallback-session",
+        model="ollama/qwen3.6-27b",
+        thinking="none",
+        tools=[],
+        tool_handlers={},
+        persist_session=False,
+        skip_harvest=True,
+        user_id="user-1",
+        org_id="org-1",
+    )
+
+    assert result.success is True
+    assert result.output == "Luna fallback succeeded"
+    assert [request.model for _, request, _ in calls] == [
+        "qwen3.6-27b",
+        "gpt-5.6-luna",
+    ]
+    assert calls[0][0] is ollama_provider
+    assert calls[0][2] is ollama_llm
+    assert calls[1][0] is openai_provider
+    assert calls[1][2] is luna_llm
+    assert calls[1][1].extra_headers == {"session_id": "luna-session"}
+    assert init_llm.await_count == 2
+    assert init_llm.await_args_list[1].args[:3] == (
+        "user-1",
+        "ollama-fallback-session",
+        "gpt-5.6-luna",
+    )
+    assert init_llm.await_args_list[1].kwargs == {
+        "org_id": "org-1",
+        "resolved_llm": None,
+    }
+    for factory in (checkpoint_compactor, thread_handoff_compactor):
+        assert factory.call_count == 2
+        assert factory.call_args_list[1].kwargs == {
+            "provider": openai_provider,
+            "llm": luna_llm,
+            "model": "gpt-5.6-luna",
+            "provider_name": "openai",
+            "session_id": "ollama-fallback-session",
+        }
+    assert result.effective_routing == {
+        "model": "openai/gpt-5.6-luna",
+        "effort": "none",
         "provider": "openai",
         "auth_mode": "chatgpt",
     }
