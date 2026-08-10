@@ -11,6 +11,7 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
+    runtime_checkable,
 )
 
 from sqlalchemy import and_, delete, func, or_, select
@@ -473,6 +474,7 @@ class RollingWindowFailuresTrigger:
         return not (await self.evaluate(context)).active
 
 
+@runtime_checkable
 class SchedulerFailureGuardResettableTrigger(Protocol):
     """Scheduler-owned latch-reset behavior shared by all trigger kinds."""
 
@@ -487,6 +489,7 @@ class SchedulerFailureGuardResettableTrigger(Protocol):
         """Return whether this trigger's latch should reset."""
 
 
+@runtime_checkable
 class SchedulerFailureGuardTrigger(
     SchedulerFailureGuardResettableTrigger,
     FailureGuardTrigger[SchedulerFailureGuardLifecycleContext],
@@ -504,6 +507,7 @@ class SchedulerFailureGuardTrigger(
         """Evaluate this trigger for every projected job."""
 
 
+@runtime_checkable
 class SchedulerFailureGuardStatefulTrigger(
     SchedulerFailureGuardResettableTrigger,
     FailureGuardStatefulTrigger[SchedulerFailureGuardLifecycleContext],
@@ -529,20 +533,30 @@ class SchedulerFailureGuardRegistry:
     def __post_init__(self) -> None:
         require_failure_guard_registrations(self.triggers, owner="Scheduler")
         for registration in self.triggers:
-            required_methods = ["should_reset"]
             if registration.mode is FailureGuardTriggerMode.STATELESS:
-                required_methods.insert(0, "evaluate_many")
-            missing_methods = [
-                method
-                for method in required_methods
-                if not callable(getattr(registration.trigger, method, None))
-            ]
-            if missing_methods:
+                trigger_protocol = SchedulerFailureGuardTrigger
+            else:
+                trigger_protocol = SchedulerFailureGuardStatefulTrigger
+            if not isinstance(registration.trigger, trigger_protocol):
+                missing_methods = sorted(
+                    method
+                    for method in trigger_protocol.__protocol_attrs__
+                    if callable(getattr(trigger_protocol, method, None))
+                    and not callable(
+                        getattr(registration.trigger, method, None)
+                    )
+                )
+                missing_detail = (
+                    "; missing required method(s): "
+                    + ", ".join(missing_methods)
+                    if missing_methods
+                    else ""
+                )
                 raise ValueError(
                     "Scheduler failure-guard trigger "
                     f"{type(registration.trigger).__name__} declared "
-                    f"{registration.mode.value} but is missing required "
-                    "method(s): " + ", ".join(missing_methods)
+                    f"{registration.mode.value} but does not satisfy "
+                    f"{trigger_protocol.__name__} protocol{missing_detail}"
                 )
         kinds = [str(trigger.kind) for trigger in self.triggers]
         if any(not kind for kind in kinds):

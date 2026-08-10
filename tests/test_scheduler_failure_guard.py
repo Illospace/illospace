@@ -83,6 +83,7 @@ async def test_scheduler_registration_rejects_trigger_without_scheduler_contract
         ValueError,
         match=(
             "_EvaluateOnlySchedulerTrigger declared stateless.*"
+            "SchedulerFailureGuardTrigger protocol.*"
             "evaluate_many, should_reset"
         ),
     ):
