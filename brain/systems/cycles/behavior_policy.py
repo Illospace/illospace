@@ -9,9 +9,18 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import (
+    Any,
+    ClassVar,
+    Final,
+    Mapping,
+    TypeAlias,
+    TypeGuard,
+    TypeVar,
+    cast,
+)
 
 from sqlalchemy import func, select
 
@@ -54,6 +63,7 @@ __all__ = [
     "CyclePolicyConflict",
     "CyclePolicyPatch",
     "CyclePolicyPreview",
+    "CyclePolicySnapshot",
     "EffectiveCyclePolicy",
     "UNSET_CYCLE_FIELD",
     "async_apply_cycle_policy_change",
@@ -66,60 +76,206 @@ __all__ = [
 
 CYCLE_POLICY_KIND = "cycle"
 CYCLE_TARGET_TYPE = "cycle"
-CYCLE_POLICY_SNAPSHOT_VERSION = 1
-_CYCLE_POLICY_SNAPSHOT_VERSION_FIELD = "snapshot_version"
-_CYCLE_POLICY_SNAPSHOT_FIELDS = frozenset(
-    {
-        "name",
-        "prompt",
-        "schedule_expr",
-        "timezone",
-        "enabled",
-        "max_concurrency",
-        "timeout_seconds",
-        "retry_policy",
-        "model_override",
-        "thinking_override",
-        "execution_policy_key",
-        "target_idea_id",
-        "guidance",
-    }
-)
+
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+CycleGuidanceValues: TypeAlias = list[str] | tuple[str, ...]
+_PatchValueT = TypeVar("_PatchValueT")
 
 
 class _UnsetCycleField:
-    pass
+    __slots__ = ()
 
 
-UNSET_CYCLE_FIELD = _UnsetCycleField()
+UNSET_CYCLE_FIELD: Final = _UnsetCycleField()
+_CyclePatchField: TypeAlias = _PatchValueT | _UnsetCycleField
+
+
+@dataclass(frozen=True)
+class CyclePolicySnapshot:
+    """One validated Cycle policy, with versioned JSON persistence.
+
+    Fields stay required so schema growth makes typed constructor sites fail
+    until their live-Cycle mapping and normalization are updated here.
+    """
+
+    SNAPSHOT_VERSION: ClassVar[int] = 1
+
+    name: str
+    prompt: str
+    schedule_expr: str
+    timezone: str
+    enabled: bool
+    max_concurrency: int
+    timeout_seconds: int | None
+    retry_policy: dict[str, JsonValue]
+    model_override: str | None
+    thinking_override: str | None
+    execution_policy_key: str | None
+    target_idea_id: str | None
+    guidance: list[str]
+
+    @classmethod
+    def from_cycle(
+        cls,
+        cycle: Cycle,
+        guidance_rows: list[CycleGuidance],
+    ) -> CyclePolicySnapshot:
+        """Build the effective policy from the live Cycle read model."""
+
+        return cls(
+            name=cycle.name,
+            prompt=cycle.prompt,
+            schedule_expr=cycle.schedule_expr,
+            timezone=cycle.timezone,
+            enabled=bool(cycle.enabled),
+            max_concurrency=max(int(cycle.max_concurrency or 1), 1),
+            timeout_seconds=cycle.timeout_seconds,
+            retry_policy=dict(cycle.retry_policy or {}),
+            model_override=cycle.model_override,
+            thinking_override=cycle.thinking_override,
+            execution_policy_key=cycle.execution_policy_key,
+            target_idea_id=(
+                str(cycle.target_idea_id)
+                if cycle.target_idea_id is not None
+                else None
+            ),
+            guidance=[row.guidance for row in guidance_rows],
+        ).validated()
+
+    def apply_to(self, cycle: Cycle) -> None:
+        """Apply this policy explicitly to its live Cycle fields."""
+
+        cycle.name = self.name
+        cycle.prompt = self.prompt
+        cycle.schedule_expr = self.schedule_expr
+        cycle.timezone = self.timezone
+        cycle.enabled = self.enabled
+        cycle.max_concurrency = self.max_concurrency
+        cycle.timeout_seconds = self.timeout_seconds
+        cycle.retry_policy = deepcopy(self.retry_policy)
+        cycle.model_override = self.model_override
+        cycle.thinking_override = self.thinking_override
+        cycle.execution_policy_key = self.execution_policy_key
+        cycle.target_idea_id = self.target_idea_id
+        cycle.execution_mode = canonical_execution_mode()
+        cycle.reopen_archived = True
+        cycle.next_run_at = compute_next_run_at(
+            cycle.schedule_expr,
+            cycle.timezone,
+        )
+        cycle.updated_at = datetime.now(timezone.utc)
+
+    def validated(self) -> CyclePolicySnapshot:
+        """Return a normalized snapshot or raise for an invalid policy."""
+
+        timezone_name = validate_timezone_name(self.timezone)
+        if not isinstance(self.enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        if not isinstance(self.retry_policy, dict):
+            raise ValueError("retry_policy must be an object")
+        if not isinstance(self.guidance, (list, tuple)):
+            raise ValueError("guidance must be a list of strings")
+        retry_policy = cast(
+            dict[str, JsonValue],
+            jsonable(deepcopy(self.retry_policy)),
+        )
+        return CyclePolicySnapshot(
+            name=validate_nonempty_trimmed(self.name, "name"),
+            prompt=validate_nonempty_trimmed(self.prompt, "prompt"),
+            schedule_expr=validate_schedule_expr(
+                self.schedule_expr,
+                timezone_name,
+            ),
+            timezone=timezone_name,
+            enabled=self.enabled,
+            max_concurrency=_validated_max_concurrency(self.max_concurrency),
+            timeout_seconds=validate_cycle_timeout_seconds(self.timeout_seconds),
+            retry_policy=retry_policy,
+            model_override=validate_model_override(self.model_override),
+            thinking_override=validate_thinking_override(self.thinking_override),
+            execution_policy_key=validate_cycle_execution_policy_key(
+                self.execution_policy_key
+            ),
+            target_idea_id=(
+                str(self.target_idea_id)
+                if self.target_idea_id is not None
+                else None
+            ),
+            guidance=sorted(
+                validate_nonempty_trimmed(value, "guidance")
+                for value in self.guidance
+            ),
+        )
+
+    def encode(self) -> dict[str, Any]:
+        """Encode the current schema for the JSON database boundary."""
+
+        encoded = {
+            field.name: jsonable(deepcopy(getattr(self, field.name)))
+            for field in fields(self)
+        }
+        return {"snapshot_version": self.SNAPSHOT_VERSION, **encoded}
+
+    @classmethod
+    def decode(
+        cls,
+        snapshot: Mapping[str, Any],
+        *,
+        current: CyclePolicySnapshot,
+    ) -> CyclePolicySnapshot:
+        """Decode a legacy or versioned shape against today's effective policy.
+
+        Positive versions remain readable for forward compatibility. Unknown
+        fields are ignored, and missing fields retain their current values.
+        """
+
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("Cycle policy snapshot must be an object")
+        snapshot_version = snapshot.get("snapshot_version")
+        if snapshot_version is not None and (
+            isinstance(snapshot_version, bool)
+            or not isinstance(snapshot_version, int)
+            or snapshot_version < 1
+        ):
+            raise ValueError("Cycle policy snapshot has an invalid version")
+
+        validated_current = current.validated()
+        decoded = {
+            field.name: deepcopy(
+                snapshot.get(field.name, getattr(validated_current, field.name))
+            )
+            for field in fields(cls)
+        }
+        return cls(**decoded).validated()
 
 
 @dataclass(frozen=True)
 class CyclePolicyPatch:
     """Typed changes to Cycle behavior, never arbitrary table columns."""
 
-    name: Any = UNSET_CYCLE_FIELD
-    prompt: Any = UNSET_CYCLE_FIELD
-    timezone_name: Any = UNSET_CYCLE_FIELD
-    schedule_expr: Any = UNSET_CYCLE_FIELD
-    run_at: Any = UNSET_CYCLE_FIELD
-    enabled: Any = UNSET_CYCLE_FIELD
-    max_concurrency: Any = UNSET_CYCLE_FIELD
-    timeout_seconds: Any = UNSET_CYCLE_FIELD
-    retry_policy: Any = UNSET_CYCLE_FIELD
-    model_override: Any = UNSET_CYCLE_FIELD
-    thinking_override: Any = UNSET_CYCLE_FIELD
-    execution_policy_key: Any = UNSET_CYCLE_FIELD
-    target_idea_id: Any = UNSET_CYCLE_FIELD
-    guidance: Any = UNSET_CYCLE_FIELD
-    guidance_additions: Any = UNSET_CYCLE_FIELD
+    name: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    prompt: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    timezone_name: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    schedule_expr: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    run_at: _CyclePatchField[str | datetime | None] = UNSET_CYCLE_FIELD
+    enabled: _CyclePatchField[bool | None] = UNSET_CYCLE_FIELD
+    max_concurrency: _CyclePatchField[int] = UNSET_CYCLE_FIELD
+    timeout_seconds: _CyclePatchField[int | None] = UNSET_CYCLE_FIELD
+    retry_policy: _CyclePatchField[dict[str, JsonValue]] = UNSET_CYCLE_FIELD
+    model_override: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    thinking_override: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    execution_policy_key: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    target_idea_id: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
+    guidance: _CyclePatchField[CycleGuidanceValues] = UNSET_CYCLE_FIELD
+    guidance_additions: _CyclePatchField[CycleGuidanceValues] = UNSET_CYCLE_FIELD
 
 
 @dataclass(frozen=True)
-class _CyclePolicyReplacement:
-    """Validated full replacement used only by the revert adapter."""
+class _CyclePolicyRevert:
+    """Typed adapter request used only by the revert path."""
 
-    snapshot: Mapping[str, Any]
+    change_id: int
 
 
 @dataclass(frozen=True)
@@ -130,16 +286,29 @@ class EffectiveCyclePolicy:
     target_id: str
     version: int
     revision_id: int | None
-    snapshot: dict[str, Any]
+    snapshot: CyclePolicySnapshot
 
 
 @dataclass(frozen=True)
 class CyclePolicyPreview:
     before: EffectiveCyclePolicy
-    after_snapshot: dict[str, Any]
+    after_snapshot: CyclePolicySnapshot
     changed_fields: tuple[str, ...]
     preview_digest: str
     reverted_from_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _CyclePolicyPreviewDigestPayload:
+    workspace_id: str
+    policy_kind: str
+    target_type: str
+    target_id: str
+    expected_version: int
+    before_snapshot: CyclePolicySnapshot
+    after_snapshot: CyclePolicySnapshot
+    changed_fields: tuple[str, ...]
+    reverted_from_id: int | None
 
 
 @dataclass(frozen=True)
@@ -154,8 +323,8 @@ class BehaviorChangeRecord:
     actor_id: str
     source_reference: str
     rationale: str
-    before_snapshot: dict[str, Any]
-    after_snapshot: dict[str, Any]
+    before_snapshot: CyclePolicySnapshot
+    after_snapshot: CyclePolicySnapshot
     changed_fields: tuple[str, ...]
     cycle_revision_id: int
     applied_at: datetime
@@ -211,7 +380,7 @@ async def async_apply_cycle_policy_change(
     *,
     actor: CycleActor,
     cycle_id: int,
-    proposal: CyclePolicyPatch | _CyclePolicyReplacement,
+    proposal: CyclePolicyPatch | _CyclePolicyRevert,
     expected_version: int,
     preview_digest: str,
     rationale: str,
@@ -248,7 +417,10 @@ async def async_apply_cycle_policy_change(
                 latest_effective_policy=current,
             )
 
-        if reverted_from_id is not None:
+        if reverted_from_id is not None and not isinstance(
+            proposal,
+            _CyclePolicyRevert,
+        ):
             await _load_revert_source(
                 session,
                 cycle=cycle,
@@ -271,7 +443,7 @@ async def async_apply_cycle_policy_change(
         if not preview.changed_fields:
             raise ValueError("proposed change does not change Cycle policy")
 
-        _apply_cycle_snapshot(cycle, preview.after_snapshot)
+        preview.after_snapshot.apply_to(cycle)
         cycle.maintainer_type = actor.source_type
         cycle.maintainer_id = actor.revision_source_id
         revision = await async_record_cycle_revision(
@@ -284,7 +456,7 @@ async def async_apply_cycle_policy_change(
         await _replace_active_guidance(
             session,
             cycle=cycle,
-            desired_guidance=preview.after_snapshot["guidance"],
+            desired_guidance=preview.after_snapshot.guidance,
             actor=actor,
             rationale=clean_rationale,
             revision_id=revision.id,
@@ -300,8 +472,8 @@ async def async_apply_cycle_policy_change(
             actor_id=actor.revision_source_id,
             source_reference=clean_source_reference,
             rationale=clean_rationale,
-            before_snapshot=_encode_stored_snapshot(current.snapshot),
-            after_snapshot=_encode_stored_snapshot(preview.after_snapshot),
+            before_snapshot=current.snapshot.encode(),
+            after_snapshot=preview.after_snapshot.encode(),
             changed_fields=list(preview.changed_fields),
             cycle_revision_id=revision.id,
             reverted_from_id=reverted_from_id,
@@ -368,15 +540,14 @@ async def async_preview_cycle_policy_revert(
     change_id: int,
 ) -> CyclePolicyPreview:
     cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
-    source = await _load_revert_source(session, cycle=cycle, change_id=change_id)
     current = await _effective_policy(session, cycle)
     return await _preview_for_cycle(
         session,
         actor=actor,
         cycle=cycle,
         current=current,
-        proposal=_CyclePolicyReplacement(source.before_snapshot),
-        reverted_from_id=source.id,
+        proposal=_CyclePolicyRevert(change_id),
+        reverted_from_id=change_id,
     )
 
 
@@ -391,18 +562,16 @@ async def async_apply_cycle_policy_revert(
     rationale: str,
     source_reference: str,
 ) -> CyclePolicyApplyResult:
-    cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
-    source = await _load_revert_source(session, cycle=cycle, change_id=change_id)
     return await async_apply_cycle_policy_change(
         session,
         actor=actor,
         cycle_id=cycle_id,
-        proposal=_CyclePolicyReplacement(source.before_snapshot),
+        proposal=_CyclePolicyRevert(change_id),
         expected_version=expected_version,
         preview_digest=preview_digest,
         rationale=rationale,
         source_reference=source_reference,
-        reverted_from_id=source.id,
+        reverted_from_id=change_id,
     )
 
 
@@ -461,7 +630,7 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
         target_id=str(cycle.id),
         version=version,
         revision_id=revision_id,
-        snapshot=_cycle_snapshot(cycle, guidance_rows),
+        snapshot=CyclePolicySnapshot.from_cycle(cycle, guidance_rows),
     )
 
 
@@ -471,24 +640,33 @@ async def _preview_for_cycle(
     actor: CycleActor,
     cycle: Cycle,
     current: EffectiveCyclePolicy,
-    proposal: CyclePolicyPatch | _CyclePolicyReplacement,
+    proposal: CyclePolicyPatch | _CyclePolicyRevert,
     reverted_from_id: int | None = None,
 ) -> CyclePolicyPreview:
-    if isinstance(proposal, _CyclePolicyReplacement):
-        after = _decode_stored_snapshot(
-            proposal.snapshot,
-            current_snapshot=current.snapshot,
+    if isinstance(proposal, _CyclePolicyRevert):
+        source = await _load_revert_source(
+            session,
+            cycle=cycle,
+            change_id=proposal.change_id,
+        )
+        after = CyclePolicySnapshot.decode(
+            source.before_snapshot,
+            current=current.snapshot,
         )
     else:
         after = _project_patch(current.snapshot, proposal)
-    if after["target_idea_id"] != current.snapshot["target_idea_id"]:
+    if after.target_idea_id != current.snapshot.target_idea_id:
         await _validate_target_idea(
             session,
             actor=actor,
-            target_idea_id=after["target_idea_id"],
+            target_idea_id=after.target_idea_id,
         )
     changed_fields = tuple(
-        key for key in sorted(after) if current.snapshot.get(key) != after.get(key)
+        sorted(
+            field.name
+            for field in fields(after)
+            if getattr(current.snapshot, field.name) != getattr(after, field.name)
+        )
     )
     digest = _preview_digest(
         current=current,
@@ -506,207 +684,133 @@ async def _preview_for_cycle(
 
 
 def _project_patch(
-    current_snapshot: Mapping[str, Any],
+    current_snapshot: CyclePolicySnapshot,
     patch: CyclePolicyPatch,
-) -> dict[str, Any]:
-    after = deepcopy(dict(current_snapshot))
-    timezone_name = after["timezone"]
+) -> CyclePolicySnapshot:
+    after = deepcopy(current_snapshot)
+    timezone_name = after.timezone
     if _set(patch.timezone_name) and patch.timezone_name is not None:
         timezone_name = validate_timezone_name(patch.timezone_name)
-        after["timezone"] = timezone_name
+        after = replace(after, timezone=timezone_name)
 
     if _set(patch.run_at) and patch.run_at is not None:
-        after["schedule_expr"] = build_one_time_schedule_expr(
-            patch.run_at,
-            timezone_name,
+        after = replace(
+            after,
+            schedule_expr=build_one_time_schedule_expr(
+                patch.run_at,
+                timezone_name,
+            ),
         )
     elif _set(patch.schedule_expr) and patch.schedule_expr is not None:
-        after["schedule_expr"] = validate_schedule_expr(
-            patch.schedule_expr,
-            timezone_name,
+        after = replace(
+            after,
+            schedule_expr=validate_schedule_expr(
+                patch.schedule_expr,
+                timezone_name,
+            ),
         )
-    elif after["timezone"] != current_snapshot["timezone"]:
-        after["schedule_expr"] = validate_schedule_expr(
-            after["schedule_expr"],
-            timezone_name,
+    elif after.timezone != current_snapshot.timezone:
+        after = replace(
+            after,
+            schedule_expr=validate_schedule_expr(
+                after.schedule_expr,
+                timezone_name,
+            ),
         )
 
-    for field in ("name", "prompt"):
-        value = getattr(patch, field)
-        if _set(value) and value is not None:
-            after[field] = validate_nonempty_trimmed(value, field)
+    if _set(patch.name) and patch.name is not None:
+        after = replace(
+            after,
+            name=validate_nonempty_trimmed(patch.name, "name"),
+        )
+    if _set(patch.prompt) and patch.prompt is not None:
+        after = replace(
+            after,
+            prompt=validate_nonempty_trimmed(patch.prompt, "prompt"),
+        )
 
     if _set(patch.enabled) and patch.enabled is not None:
         if not isinstance(patch.enabled, bool):
             raise ValueError("enabled must be a boolean")
-        after["enabled"] = patch.enabled
+        after = replace(after, enabled=patch.enabled)
     if _set(patch.max_concurrency):
-        after["max_concurrency"] = _validated_max_concurrency(patch.max_concurrency)
+        after = replace(
+            after,
+            max_concurrency=_validated_max_concurrency(patch.max_concurrency),
+        )
     if _set(patch.timeout_seconds):
-        after["timeout_seconds"] = validate_cycle_timeout_seconds(
-            patch.timeout_seconds
+        after = replace(
+            after,
+            timeout_seconds=validate_cycle_timeout_seconds(patch.timeout_seconds),
         )
     if _set(patch.retry_policy):
         if not isinstance(patch.retry_policy, dict):
             raise ValueError("retry_policy must be an object")
-        after["retry_policy"] = jsonable(deepcopy(patch.retry_policy))
+        after = replace(
+            after,
+            retry_policy=cast(
+                dict[str, JsonValue],
+                jsonable(deepcopy(patch.retry_policy)),
+            ),
+        )
     if _set(patch.model_override):
-        after["model_override"] = validate_model_override(patch.model_override)
+        after = replace(
+            after,
+            model_override=validate_model_override(patch.model_override),
+        )
     if _set(patch.thinking_override):
-        after["thinking_override"] = validate_thinking_override(
-            patch.thinking_override
+        after = replace(
+            after,
+            thinking_override=validate_thinking_override(
+                patch.thinking_override
+            ),
         )
     if _set(patch.execution_policy_key):
-        after["execution_policy_key"] = validate_cycle_execution_policy_key(
-            patch.execution_policy_key
+        after = replace(
+            after,
+            execution_policy_key=validate_cycle_execution_policy_key(
+                patch.execution_policy_key
+            ),
         )
     else:
-        validate_cycle_execution_policy_key(after["execution_policy_key"])
+        validate_cycle_execution_policy_key(after.execution_policy_key)
     if _set(patch.target_idea_id):
-        after["target_idea_id"] = (
-            str(patch.target_idea_id) if patch.target_idea_id is not None else None
+        after = replace(
+            after,
+            target_idea_id=(
+                str(patch.target_idea_id)
+                if patch.target_idea_id is not None
+                else None
+            ),
         )
     if _set(patch.guidance) and _set(patch.guidance_additions):
         raise ValueError("guidance and guidance_additions cannot be changed together")
     if _set(patch.guidance):
         if not isinstance(patch.guidance, (list, tuple)):
             raise ValueError("guidance must be a list of strings")
-        after["guidance"] = sorted(
-            validate_nonempty_trimmed(value, "guidance")
-            for value in patch.guidance
+        after = replace(
+            after,
+            guidance=sorted(
+                validate_nonempty_trimmed(value, "guidance")
+                for value in patch.guidance
+            ),
         )
     elif _set(patch.guidance_additions):
         if not isinstance(patch.guidance_additions, (list, tuple)):
             raise ValueError("guidance_additions must be a list of strings")
-        after["guidance"] = sorted(
-            [
-                *after["guidance"],
-                *(
-                    validate_nonempty_trimmed(value, "guidance")
-                    for value in patch.guidance_additions
-                ),
-            ]
-        )
-    return _validated_snapshot(after)
-
-
-def _validated_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
-    if set(snapshot) != _CYCLE_POLICY_SNAPSHOT_FIELDS:
-        raise ValueError("Cycle policy snapshot has an invalid field set")
-    timezone_name = validate_timezone_name(snapshot["timezone"])
-    if not isinstance(snapshot["enabled"], bool):
-        raise ValueError("enabled must be a boolean")
-    if not isinstance(snapshot["retry_policy"], dict):
-        raise ValueError("retry_policy must be an object")
-    if not isinstance(snapshot["guidance"], (list, tuple)):
-        raise ValueError("guidance must be a list of strings")
-    return {
-        "name": validate_nonempty_trimmed(snapshot["name"], "name"),
-        "prompt": validate_nonempty_trimmed(snapshot["prompt"], "prompt"),
-        "schedule_expr": validate_schedule_expr(
-            snapshot["schedule_expr"],
-            timezone_name,
-        ),
-        "timezone": timezone_name,
-        "enabled": snapshot["enabled"],
-        "max_concurrency": _validated_max_concurrency(
-            snapshot["max_concurrency"]
-        ),
-        "timeout_seconds": validate_cycle_timeout_seconds(
-            snapshot["timeout_seconds"]
-        ),
-        "retry_policy": jsonable(deepcopy(snapshot["retry_policy"])),
-        "model_override": validate_model_override(snapshot["model_override"]),
-        "thinking_override": validate_thinking_override(
-            snapshot["thinking_override"]
-        ),
-        "execution_policy_key": validate_cycle_execution_policy_key(
-            snapshot["execution_policy_key"]
-        ),
-        "target_idea_id": (
-            str(snapshot["target_idea_id"])
-            if snapshot["target_idea_id"] is not None
-            else None
-        ),
-        "guidance": sorted(
-            validate_nonempty_trimmed(value, "guidance")
-            for value in snapshot["guidance"]
-        ),
-    }
-
-
-def _encode_stored_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        _CYCLE_POLICY_SNAPSHOT_VERSION_FIELD: CYCLE_POLICY_SNAPSHOT_VERSION,
-        **_validated_snapshot(snapshot),
-    }
-
-
-def _decode_stored_snapshot(
-    snapshot: Mapping[str, Any],
-    *,
-    current_snapshot: Mapping[str, Any],
-) -> dict[str, Any]:
-    if not isinstance(snapshot, Mapping):
-        raise ValueError("Cycle policy snapshot must be an object")
-    snapshot_version = snapshot.get(_CYCLE_POLICY_SNAPSHOT_VERSION_FIELD)
-    if snapshot_version is not None and (
-        isinstance(snapshot_version, bool)
-        or not isinstance(snapshot_version, int)
-        or snapshot_version < 1
-    ):
-        raise ValueError("Cycle policy snapshot has an invalid version")
-
-    decoded = _validated_snapshot(current_snapshot)
-    decoded.update(
-        {
-            field: deepcopy(snapshot[field])
-            for field in _CYCLE_POLICY_SNAPSHOT_FIELDS
-            if field in snapshot
-        }
-    )
-    return _validated_snapshot(decoded)
-
-
-def _cycle_snapshot(cycle: Cycle, guidance_rows: list[CycleGuidance]) -> dict[str, Any]:
-    return _validated_snapshot(
-        {
-            "name": cycle.name,
-            "prompt": cycle.prompt,
-            "schedule_expr": cycle.schedule_expr,
-            "timezone": cycle.timezone,
-            "enabled": bool(cycle.enabled),
-            "max_concurrency": max(int(cycle.max_concurrency or 1), 1),
-            "timeout_seconds": cycle.timeout_seconds,
-            "retry_policy": dict(cycle.retry_policy or {}),
-            "model_override": cycle.model_override,
-            "thinking_override": cycle.thinking_override,
-            "execution_policy_key": cycle.execution_policy_key,
-            "target_idea_id": (
-                str(cycle.target_idea_id) if cycle.target_idea_id is not None else None
+        after = replace(
+            after,
+            guidance=sorted(
+                [
+                    *after.guidance,
+                    *(
+                        validate_nonempty_trimmed(value, "guidance")
+                        for value in patch.guidance_additions
+                    ),
+                ]
             ),
-            "guidance": [row.guidance for row in guidance_rows],
-        }
-    )
-
-
-def _apply_cycle_snapshot(cycle: Cycle, snapshot: Mapping[str, Any]) -> None:
-    cycle.name = snapshot["name"]
-    cycle.prompt = snapshot["prompt"]
-    cycle.schedule_expr = snapshot["schedule_expr"]
-    cycle.timezone = snapshot["timezone"]
-    cycle.enabled = snapshot["enabled"]
-    cycle.max_concurrency = snapshot["max_concurrency"]
-    cycle.timeout_seconds = snapshot["timeout_seconds"]
-    cycle.retry_policy = deepcopy(snapshot["retry_policy"])
-    cycle.model_override = snapshot["model_override"]
-    cycle.thinking_override = snapshot["thinking_override"]
-    cycle.execution_policy_key = snapshot["execution_policy_key"]
-    cycle.target_idea_id = snapshot["target_idea_id"]
-    cycle.execution_mode = canonical_execution_mode()
-    cycle.reopen_archived = True
-    cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
-    cycle.updated_at = datetime.now(timezone.utc)
+        )
+    return after.validated()
 
 
 async def _replace_active_guidance(
@@ -788,21 +892,21 @@ async def _load_revert_source(
 def _preview_digest(
     *,
     current: EffectiveCyclePolicy,
-    after_snapshot: Mapping[str, Any],
+    after_snapshot: CyclePolicySnapshot,
     changed_fields: tuple[str, ...],
     reverted_from_id: int | None,
 ) -> str:
-    payload = {
-        "workspace_id": current.workspace_id,
-        "policy_kind": current.policy_kind,
-        "target_type": current.target_type,
-        "target_id": current.target_id,
-        "expected_version": current.version,
-        "before_snapshot": current.snapshot,
-        "after_snapshot": after_snapshot,
-        "changed_fields": list(changed_fields),
-        "reverted_from_id": reverted_from_id,
-    }
+    payload = _CyclePolicyPreviewDigestPayload(
+        workspace_id=current.workspace_id,
+        policy_kind=current.policy_kind,
+        target_type=current.target_type,
+        target_id=current.target_id,
+        expected_version=current.version,
+        before_snapshot=current.snapshot,
+        after_snapshot=after_snapshot,
+        changed_fields=changed_fields,
+        reverted_from_id=reverted_from_id,
+    )
     canonical = json.dumps(
         jsonable(payload),
         sort_keys=True,
@@ -814,7 +918,7 @@ def _preview_digest(
 def _record(
     row: BehaviorChangeAudit,
     *,
-    current_snapshot: Mapping[str, Any],
+    current_snapshot: CyclePolicySnapshot,
 ) -> BehaviorChangeRecord:
     applied_at = row.applied_at
     if applied_at.tzinfo is None:
@@ -830,19 +934,20 @@ def _record(
         actor_id=row.actor_id,
         source_reference=row.source_reference,
         rationale=row.rationale,
-        before_snapshot=_decode_stored_snapshot(
+        before_snapshot=CyclePolicySnapshot.decode(
             row.before_snapshot,
-            current_snapshot=current_snapshot,
+            current=current_snapshot,
         ),
-        after_snapshot=_decode_stored_snapshot(
+        after_snapshot=CyclePolicySnapshot.decode(
             row.after_snapshot,
-            current_snapshot=current_snapshot,
+            current=current_snapshot,
         ),
         changed_fields=tuple(row.changed_fields or []),
         cycle_revision_id=row.cycle_revision_id,
         applied_at=applied_at,
         reverted_from_id=row.reverted_from_id,
     )
+
 
 def _audit_target_conditions(cycle: Cycle) -> tuple[Any, ...]:
     return (
@@ -856,11 +961,13 @@ def _workspace_id(cycle: Cycle) -> str:
     return str(cycle.org_id or cycle.user_id)
 
 
-def _validated_max_concurrency(value: Any) -> int:
+def _validated_max_concurrency(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("max_concurrency must be an integer >= 1")
     return value
 
 
-def _set(value: Any) -> bool:
+def _set(
+    value: _CyclePatchField[_PatchValueT],
+) -> TypeGuard[_PatchValueT]:
     return value is not UNSET_CYCLE_FIELD

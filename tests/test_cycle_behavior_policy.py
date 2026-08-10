@@ -24,6 +24,7 @@ from brain.systems.cycles.behavior_policy import (
     CyclePolicyApplied,
     CyclePolicyConflict,
     CyclePolicyPatch,
+    CyclePolicySnapshot,
     async_apply_cycle_policy_change,
     async_apply_cycle_policy_revert,
     async_list_cycle_policy_history,
@@ -213,8 +214,9 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     )
     assert effective.version == 0
     assert effective.revision_id == workspace.initial_revision.id
-    assert effective.snapshot["name"] == "Morning review"
-    assert effective.snapshot["guidance"] == [
+    assert isinstance(effective.snapshot, CyclePolicySnapshot)
+    assert effective.snapshot.name == "Morning review"
+    assert effective.snapshot.guidance == [
         "Keep this guidance",
         "Old wording",
     ]
@@ -234,6 +236,7 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
         source_reference="api:/cycles/1/behavior-policy",
     )
 
+    assert isinstance(preview.after_snapshot, CyclePolicySnapshot)
     assert preview.changed_fields == ("guidance", "name")
     assert len(preview.preview_digest) == 64
     assert applied.effective_policy.version == 1
@@ -264,6 +267,8 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     assert change.actor_id == workspace.owner.user_id
     assert change.source_reference == "api:/cycles/1/behavior-policy"
     assert change.rationale == "Use the reviewed wording."
+    assert isinstance(change.before_snapshot, CyclePolicySnapshot)
+    assert isinstance(change.after_snapshot, CyclePolicySnapshot)
     assert change.before_snapshot == preview.before.snapshot
     assert change.after_snapshot == preview.after_snapshot
     stored_change = await workspace.session.get(BehaviorChangeAudit, change.id)
@@ -318,7 +323,7 @@ async def test_stale_version_and_stale_digest_return_latest_policy(policy_worksp
     assert isinstance(stale_version, CyclePolicyConflict)
     assert stale_version.reason == "stale_version"
     assert stale_version.latest_effective_policy.version == 1
-    assert stale_version.latest_effective_policy.snapshot["name"] == "First editor"
+    assert stale_version.latest_effective_policy.snapshot.name == "First editor"
 
     fresh_preview = await async_preview_cycle_policy_change(
         workspace.session,
@@ -471,7 +476,7 @@ async def test_revert_uses_reviewed_apply_and_creates_a_new_version(policy_works
         cycle_id=workspace.cycle.id,
         change_id=first.change.id,
     )
-    assert revert_preview.after_snapshot["name"] == "Morning review"
+    assert revert_preview.after_snapshot.name == "Morning review"
     assert revert_preview.reverted_from_id == first.change.id
 
     reverted = await async_apply_cycle_policy_revert(
@@ -486,7 +491,7 @@ async def test_revert_uses_reviewed_apply_and_creates_a_new_version(policy_works
     )
     assert isinstance(reverted, CyclePolicyApplied)
     assert reverted.effective_policy.version == 2
-    assert reverted.effective_policy.snapshot["name"] == "Morning review"
+    assert reverted.effective_policy.snapshot.name == "Morning review"
     assert reverted.change.reverted_from_id == first.change.id
 
     history = await async_list_cycle_policy_history(
@@ -495,7 +500,7 @@ async def test_revert_uses_reviewed_apply_and_creates_a_new_version(policy_works
         cycle_id=workspace.cycle.id,
     )
     assert [change.version for change in history] == [2, 1]
-    assert history[1].after_snapshot["name"] == "Changed policy"
+    assert history[1].after_snapshot.name == "Changed policy"
 
 
 async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_workspace):
@@ -516,8 +521,8 @@ async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_works
         actor=workspace.owner,
         cycle_id=workspace.cycle.id,
     )
-    assert history[0].before_snapshot["max_concurrency"] == 1
-    assert "retired_policy_field" not in history[0].before_snapshot
+    assert history[0].before_snapshot.max_concurrency == 1
+    assert not hasattr(history[0].before_snapshot, "retired_policy_field")
 
     revert_preview = await async_preview_cycle_policy_revert(
         workspace.session,
@@ -525,9 +530,9 @@ async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_works
         cycle_id=workspace.cycle.id,
         change_id=first.change.id,
     )
-    assert revert_preview.after_snapshot["name"] == "Morning review"
-    assert revert_preview.after_snapshot["max_concurrency"] == 1
-    assert "retired_policy_field" not in revert_preview.after_snapshot
+    assert revert_preview.after_snapshot.name == "Morning review"
+    assert revert_preview.after_snapshot.max_concurrency == 1
+    assert not hasattr(revert_preview.after_snapshot, "retired_policy_field")
 
     reverted = await async_apply_cycle_policy_revert(
         workspace.session,
@@ -541,15 +546,71 @@ async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_works
     )
     assert isinstance(reverted, CyclePolicyApplied)
     assert reverted.effective_policy.version == 2
-    assert set(reverted.effective_policy.snapshot) == set(
-        revert_preview.before.snapshot
-    )
+    assert isinstance(reverted.effective_policy.snapshot, CyclePolicySnapshot)
     new_stored_change = await workspace.session.get(
         BehaviorChangeAudit,
         reverted.change.id,
     )
     assert new_stored_change.before_snapshot["snapshot_version"] == 1
     assert new_stored_change.after_snapshot["snapshot_version"] == 1
+
+
+async def test_revert_decodes_snapshot_written_before_versioning(policy_workspace):
+    workspace = policy_workspace
+    _, first = await _preview_and_apply(
+        workspace,
+        CyclePolicyPatch(name="Changed policy"),
+    )
+    stored_change = await workspace.session.get(BehaviorChangeAudit, first.change.id)
+    stored_before = dict(stored_change.before_snapshot)
+    stored_before.pop("snapshot_version")
+    stored_change.before_snapshot = stored_before
+    await workspace.session.flush()
+
+    history = await async_list_cycle_policy_history(
+        workspace.session,
+        actor=workspace.owner,
+        cycle_id=workspace.cycle.id,
+    )
+    assert history[0].before_snapshot.name == "Morning review"
+
+    revert_preview = await async_preview_cycle_policy_revert(
+        workspace.session,
+        actor=workspace.owner,
+        cycle_id=workspace.cycle.id,
+        change_id=first.change.id,
+    )
+    assert revert_preview.after_snapshot.name == "Morning review"
+
+    reverted = await async_apply_cycle_policy_revert(
+        workspace.session,
+        actor=workspace.owner,
+        cycle_id=workspace.cycle.id,
+        change_id=first.change.id,
+        expected_version=revert_preview.before.version,
+        preview_digest=revert_preview.preview_digest,
+        rationale="Revert a snapshot written before versioning.",
+        source_reference="api:legacy-revert",
+    )
+    assert isinstance(reverted, CyclePolicyApplied)
+    assert reverted.effective_policy.snapshot.name == "Morning review"
+
+
+@pytest.mark.parametrize("invalid_version", [False, 0, -1, "1"])
+async def test_snapshot_decode_rejects_invalid_versions(
+    policy_workspace,
+    invalid_version,
+):
+    current = await async_read_effective_cycle_policy(
+        policy_workspace.session,
+        actor=policy_workspace.owner,
+        cycle_id=policy_workspace.cycle.id,
+    )
+    encoded = current.snapshot.encode()
+    encoded["snapshot_version"] = invalid_version
+
+    with pytest.raises(ValueError, match="invalid version"):
+        CyclePolicySnapshot.decode(encoded, current=current.snapshot)
 
 
 async def test_admitted_run_keeps_snapshot_and_next_run_gets_new_policy(policy_workspace):
@@ -649,7 +710,7 @@ async def test_workspace_authorization_and_delegated_agent_attribution(policy_wo
     assert applied.change.actor_id == "agent-run-42"
     assert applied.change.source_reference == "agent_run:42"
     assert applied.change.rationale == "Agent applied a delegated reviewed change."
-    assert applied.change.before_snapshot["enabled"] is False
-    assert applied.change.after_snapshot["enabled"] is True
+    assert applied.change.before_snapshot.enabled is False
+    assert applied.change.after_snapshot.enabled is True
     assert applied.change.version == 2
     assert applied.change.applied_at.tzinfo is not None

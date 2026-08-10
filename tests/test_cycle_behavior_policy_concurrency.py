@@ -245,7 +245,7 @@ async def test_two_reviewed_editors_serialize_and_second_gets_latest_conflict(
     assert len(conflicts) == 1
     assert conflicts[0].reason == "stale_version"
     assert conflicts[0].latest_effective_policy.version == 1
-    assert conflicts[0].latest_effective_policy.snapshot["name"] in {
+    assert conflicts[0].latest_effective_policy.snapshot.name in {
         "First reviewed edit",
         "Second reviewed edit",
     }
