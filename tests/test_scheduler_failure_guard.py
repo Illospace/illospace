@@ -20,6 +20,8 @@ from brain.systems.failure_guard.core import (
     FailureGuardEdge,
     FailureGuardEvaluation,
     FailureGuardTriggerKind,
+    FailureGuardTriggerMode,
+    FailureGuardTriggerRegistration,
     FailureGuardTriggerResult,
     serialize_failure_guard,
 )
@@ -330,7 +332,10 @@ async def test_registered_database_trigger_projects_once_across_jobs(
         "_FAILURE_GUARD_TRIGGER_PROVIDERS",
         (
             *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: database_trigger,
+            lambda: FailureGuardTriggerRegistration(
+                mode=FailureGuardTriggerMode.STATELESS,
+                trigger=database_trigger,
+            ),
         ),
     )
     session.add(
@@ -1377,29 +1382,35 @@ class _DatabaseBackedTrigger:
     )
 
     async def evaluate(self, context) -> FailureGuardTriggerResult:
-        return (await self.evaluate_many((context,)))[context.job.id]
+        return (
+            await self.evaluate_many(
+                context.session,
+                (context.job,),
+                now=context.now,
+            )
+        )[context.job.id]
 
-    async def evaluate_many(self, contexts):
-        self.projected_job_counts.append(len(contexts))
-        if not contexts:
+    async def evaluate_many(self, session, jobs, *, now):
+        del now
+        self.projected_job_counts.append(len(jobs))
+        if not jobs:
             return {}
-        session = contexts[0].session
-        job_ids = [context.job.id for context in contexts]
+        job_ids = [job.id for job in jobs]
         result = await session.scalars(
             select(SchedulerJob.id).where(SchedulerJob.id.in_(job_ids))
         )
         loaded_job_ids = set(result.all())
         return {
-            context.job.id: FailureGuardTriggerResult(
+            job.id: FailureGuardTriggerResult(
                 kind=self.kind,
-                active=context.job.id in loaded_job_ids,
+                active=job.id in loaded_job_ids,
                 public_details={
-                    "database_row_loaded": context.job.id in loaded_job_ids,
+                    "database_row_loaded": job.id in loaded_job_ids,
                 },
                 alert_title="Scheduler job row loaded",
                 alert_summary="Scheduler job exists in the projection",
             )
-            for context in contexts
+            for job in jobs
         }
 
     async def should_reset(
@@ -1429,21 +1440,28 @@ class _RuntimeDurationTrigger:
         self,
         context,
     ) -> FailureGuardTriggerResult:
-        return (await self.evaluate_many((context,)))[context.job.id]
+        return (
+            await self.evaluate_many(
+                context.session,
+                (context.job,),
+                now=context.now,
+            )
+        )[context.job.id]
 
-    async def evaluate_many(self, contexts):
+    async def evaluate_many(self, session, jobs, *, now):
+        del session
         return {
-            context.job.id: self._result(context)
-            for context in contexts
+            job.id: self._result(job, now=now)
+            for job in jobs
         }
 
-    def _result(self, context) -> FailureGuardTriggerResult:
-        assert context.job.last_started_at is not None
-        started_at = context.job.last_started_at
+    def _result(self, job, *, now) -> FailureGuardTriggerResult:
+        assert job.last_started_at is not None
+        started_at = job.last_started_at
         if started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=timezone.utc)
         elapsed_minutes = int(
-            (context.now - started_at).total_seconds() // 60
+            (now - started_at).total_seconds() // 60
         )
         return FailureGuardTriggerResult(
             kind=self.kind,
@@ -1504,7 +1522,10 @@ async def test_third_trigger_flows_through_production_apply_health_delivery_and_
         "_FAILURE_GUARD_TRIGGER_PROVIDERS",
         (
             *scheduler_failure_guard._FAILURE_GUARD_TRIGGER_PROVIDERS,
-            lambda: _RuntimeDurationTrigger(minimum_runtime_minutes=30),
+            lambda: FailureGuardTriggerRegistration(
+                mode=FailureGuardTriggerMode.STATELESS,
+                trigger=_RuntimeDurationTrigger(minimum_runtime_minutes=30),
+            ),
         ),
     )
     assert [

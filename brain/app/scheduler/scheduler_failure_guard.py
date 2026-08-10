@@ -11,6 +11,7 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
+    cast,
 )
 
 from sqlalchemy import and_, delete, func, or_, select
@@ -32,6 +33,9 @@ from brain.systems.failure_guard.core import (
     FailureGuardStatefulTrigger,
     FailureGuardTrigger,
     FailureGuardTriggerKind,
+    FailureGuardTriggerMode,
+    FailureGuardTriggerRegistration,
+    require_failure_guard_registrations,
     FailureGuardTriggerResult,
     FailureGuardTriggerState,
     async_evaluate_failure_guard_triggers,
@@ -167,25 +171,25 @@ class StandingFailuresTrigger:
         self,
         context: SchedulerFailureGuardLifecycleContext,
     ) -> FailureGuardTriggerResult:
-        return (await self.evaluate_many((context,)))[context.job.id]
+        return (
+            await self.evaluate_many(
+                context.session,
+                (context.job,),
+                now=context.now,
+            )
+        )[context.job.id]
 
     async def evaluate_many(
         self,
-        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+        session: AsyncSession,
+        jobs: Sequence[SchedulerJob],
+        *,
+        now: datetime,
     ) -> Mapping[int, FailureGuardTriggerResult]:
         """Project terminal failures since each job's last terminal success."""
-        if not contexts:
+        if not jobs:
             return {}
-        session = contexts[0].session
-        now = contexts[0].now
-        if any(
-            context.session is not session or context.now != now
-            for context in contexts
-        ):
-            raise ValueError(
-                "Bulk scheduler trigger contexts must share a session and time"
-            )
-        job_ids = [context.job.id for context in contexts]
+        job_ids = [job.id for job in jobs]
         last_successes = (
             select(
                 SchedulerRun.job_id.label("job_id"),
@@ -237,11 +241,11 @@ class StandingFailuresTrigger:
             for job_id, count, first_failure_at, last_success_at in result.all()
         }
         return {
-            context.job.id: self._result(
-                *history_by_job.get(context.job.id, (0, None, None)),
+            job.id: self._result(
+                *history_by_job.get(job.id, (0, None, None)),
                 now=now,
             )
-            for context in contexts
+            for job in jobs
         }
 
     def _result(
@@ -402,25 +406,25 @@ class RollingWindowFailuresTrigger:
         self,
         context: SchedulerFailureGuardLifecycleContext,
     ) -> FailureGuardTriggerResult:
-        return (await self.evaluate_many((context,)))[context.job.id]
+        return (
+            await self.evaluate_many(
+                context.session,
+                (context.job,),
+                now=context.now,
+            )
+        )[context.job.id]
 
     async def evaluate_many(
         self,
-        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+        session: AsyncSession,
+        jobs: Sequence[SchedulerJob],
+        *,
+        now: datetime,
     ) -> Mapping[int, FailureGuardTriggerResult]:
         """Evaluate one rolling-window count query for a job projection."""
-        if not contexts:
+        if not jobs:
             return {}
-        session = contexts[0].session
-        now = contexts[0].now
-        if any(
-            context.session is not session or context.now != now
-            for context in contexts
-        ):
-            raise ValueError(
-                "Bulk scheduler trigger contexts must share a session and time"
-            )
-        job_ids = [context.job.id for context in contexts]
+        job_ids = [job.id for job in jobs]
         result = await session.execute(
             select(SchedulerRun.job_id, func.count())
             .where(
@@ -436,10 +440,10 @@ class RollingWindowFailuresTrigger:
             for job_id, count in result.all()
         }
         return {
-            context.job.id: self._result(
-                counts.get(context.job.id, 0)
+            job.id: self._result(
+                counts.get(job.id, 0)
             )
-            for context in contexts
+            for job in jobs
         }
 
     def _result(self, count: int) -> FailureGuardTriggerResult:
@@ -492,7 +496,10 @@ class SchedulerFailureGuardTrigger(
 
     async def evaluate_many(
         self,
-        contexts: Sequence[SchedulerFailureGuardLifecycleContext],
+        session: AsyncSession,
+        jobs: Sequence[SchedulerJob],
+        *,
+        now: datetime,
     ) -> Mapping[int, FailureGuardTriggerResult]:
         """Evaluate this trigger for every projected job."""
 
@@ -505,8 +512,11 @@ class SchedulerFailureGuardStatefulTrigger(
     """One state-owning scheduler failure trigger."""
 
 
-SchedulerRegisteredFailureGuardTrigger: TypeAlias = (
+SchedulerFailureGuardTriggerImplementation: TypeAlias = (
     SchedulerFailureGuardTrigger | SchedulerFailureGuardStatefulTrigger
+)
+SchedulerRegisteredFailureGuardTrigger: TypeAlias = (
+    FailureGuardTriggerRegistration[SchedulerFailureGuardLifecycleContext]
 )
 
 
@@ -517,6 +527,7 @@ class SchedulerFailureGuardRegistry:
     triggers: tuple[SchedulerRegisteredFailureGuardTrigger, ...]
 
     def __post_init__(self) -> None:
+        require_failure_guard_registrations(self.triggers, owner="Scheduler")
         kinds = [str(trigger.kind) for trigger in self.triggers]
         if any(not kind for kind in kinds):
             raise ValueError(
@@ -530,10 +541,22 @@ _FAILURE_GUARD_TRIGGER_PROVIDERS: tuple[
     Callable[[], SchedulerRegisteredFailureGuardTrigger],
     ...,
 ] = (
-    ConsecutiveFailuresTrigger.from_settings,
-    StandingFailuresTrigger.from_settings,
-    RollingWindowFailuresTrigger.from_settings,
-    ConfigurationFailureTrigger,
+    lambda: FailureGuardTriggerRegistration(
+        mode=FailureGuardTriggerMode.STATEFUL,
+        trigger=ConsecutiveFailuresTrigger.from_settings(),
+    ),
+    lambda: FailureGuardTriggerRegistration(
+        mode=FailureGuardTriggerMode.STATELESS,
+        trigger=StandingFailuresTrigger.from_settings(),
+    ),
+    lambda: FailureGuardTriggerRegistration(
+        mode=FailureGuardTriggerMode.STATELESS,
+        trigger=RollingWindowFailuresTrigger.from_settings(),
+    ),
+    lambda: FailureGuardTriggerRegistration(
+        mode=FailureGuardTriggerMode.STATEFUL,
+        trigger=ConfigurationFailureTrigger(),
+    ),
 )
 
 
@@ -541,8 +564,8 @@ def scheduler_failure_guard_registry() -> SchedulerFailureGuardRegistry:
     """Load the configured registry of independently owned triggers."""
     return SchedulerFailureGuardRegistry(
         triggers=tuple(
-            provide_trigger()
-            for provide_trigger in _FAILURE_GUARD_TRIGGER_PROVIDERS
+            provide_registration()
+            for provide_registration in _FAILURE_GUARD_TRIGGER_PROVIDERS
         )
     )
 
@@ -727,14 +750,17 @@ async def async_read_scheduler_failure_guards(
         job_id: {}
         for job_id in job_ids
     }
-    for trigger in registry.triggers:
-        if isinstance(trigger, FailureGuardStatefulTrigger):
+    for registration in registry.triggers:
+        if registration.mode is FailureGuardTriggerMode.STATEFUL:
             continue
-        trigger_results = dict(await trigger.evaluate_many(contexts))
+        trigger = cast(SchedulerFailureGuardTrigger, registration.trigger)
+        trigger_results = dict(
+            await trigger.evaluate_many(session, jobs, now=now)
+        )
         missing_job_ids = set(job_ids).difference(trigger_results)
         if missing_job_ids:
             raise ValueError(
-                f"Bulk scheduler trigger {trigger.kind} omitted jobs: "
+                f"Bulk scheduler trigger {registration.kind} omitted jobs: "
                 + ", ".join(
                     str(job_id)
                     for job_id in sorted(missing_job_ids)
@@ -744,9 +770,9 @@ async def async_read_scheduler_failure_guards(
             results_by_job[job_id][trigger.kind] = trigger_results[job_id]
 
     stateful_triggers = tuple(
-        trigger
-        for trigger in registry.triggers
-        if isinstance(trigger, FailureGuardStatefulTrigger)
+        registration
+        for registration in registry.triggers
+        if registration.mode is FailureGuardTriggerMode.STATEFUL
     )
     evaluations: dict[int, FailureGuardEvaluation] = {}
     for job, context in zip(jobs, contexts, strict=True):
@@ -757,8 +783,8 @@ async def async_read_scheduler_failure_guards(
         ):
             results_by_job[job.id][result.kind] = result
         ordered_results = tuple(
-            results_by_job[job.id][trigger.kind]
-            for trigger in registry.triggers
+            results_by_job[job.id][registration.kind]
+            for registration in registry.triggers
         )
         evaluations[job.id] = await async_evaluate_failure_edges(
             results=ordered_results,
@@ -841,13 +867,17 @@ async def async_record_scheduler_job_failure(
     if signature_changed:
         latches = dict(await latch_store.load_latches())
         reset_latch = False
-        for trigger in registry.triggers:
-            if trigger.kind not in latches or not await trigger.should_reset(
+        for registration in registry.triggers:
+            trigger = cast(
+                SchedulerFailureGuardResettableTrigger,
+                registration.trigger,
+            )
+            if registration.kind not in latches or not await trigger.should_reset(
                 context,
                 event="signature_change",
             ):
                 continue
-            await latch_store.delete_latch(trigger.kind)
+            await latch_store.delete_latch(registration.kind)
             reset_latch = True
         if reset_latch:
             await session.flush()
@@ -920,14 +950,18 @@ async def async_reset_scheduler_job_failure_guard(
         record=None,
     )
     latches = dict(await latch_store.load_latches())
-    for trigger in registry.triggers:
-        if trigger.kind not in latches:
+    for registration in registry.triggers:
+        trigger = cast(
+            SchedulerFailureGuardResettableTrigger,
+            registration.trigger,
+        )
+        if registration.kind not in latches:
             continue
         if await trigger.should_reset(
             context,
             event="success",
         ):
-            await latch_store.delete_latch(trigger.kind)
+            await latch_store.delete_latch(registration.kind)
 
     await async_transition_failure_guard_trigger_states(
         triggers=registry.triggers,

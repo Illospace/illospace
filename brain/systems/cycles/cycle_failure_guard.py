@@ -28,6 +28,9 @@ from brain.systems.failure_guard.core import (
     FailureGuardStatefulTrigger,
     FailureGuardTrigger,
     FailureGuardTriggerKind,
+    FailureGuardTriggerMode,
+    FailureGuardTriggerRegistration,
+    require_failure_guard_registrations,
     FailureGuardTriggerResult,
     FailureGuardTriggerState,
     async_evaluate_failure_guard_triggers,
@@ -307,8 +310,11 @@ class CycleFailureGuardStatefulTrigger(
     """One state-owning cycle failure trigger."""
 
 
-CycleRegisteredFailureGuardTrigger: TypeAlias = (
+CycleFailureGuardTriggerImplementation: TypeAlias = (
     CycleFailureGuardTrigger | CycleFailureGuardStatefulTrigger
+)
+CycleRegisteredFailureGuardTrigger: TypeAlias = (
+    FailureGuardTriggerRegistration[CycleFailureGuardLifecycleContext]
 )
 
 
@@ -319,6 +325,7 @@ class CycleFailureGuardRegistry:
     triggers: tuple[CycleRegisteredFailureGuardTrigger, ...]
 
     def __post_init__(self) -> None:
+        require_failure_guard_registrations(self.triggers, owner="Cycle")
         kinds = [str(trigger.kind) for trigger in self.triggers]
         if any(not kind for kind in kinds):
             raise ValueError("Cycle failure-guard trigger kinds must not be empty")
@@ -329,7 +336,12 @@ class CycleFailureGuardRegistry:
 def cycle_failure_guard_registry() -> CycleFailureGuardRegistry:
     """Return every trigger applied to cycle terminal observations."""
     return CycleFailureGuardRegistry(
-        triggers=(CycleConsecutiveFailuresTrigger(),)
+        triggers=(
+            FailureGuardTriggerRegistration(
+                mode=FailureGuardTriggerMode.STATEFUL,
+                trigger=CycleConsecutiveFailuresTrigger(),
+            ),
+        )
     )
 
 
@@ -416,9 +428,9 @@ async def async_apply_cycle_terminal_failure_guard(
     state_store = _cycle_failure_guard_state_store(session, locked_cycle.id)
     if isinstance(policy, ResetCycleTerminalPolicy):
         latches = dict(await latch_store.load_latches())
-        for trigger in registry.triggers:
-            if trigger.kind in latches:
-                await latch_store.delete_latch(trigger.kind)
+        for registration in registry.triggers:
+            if registration.kind in latches:
+                await latch_store.delete_latch(registration.kind)
         await async_transition_failure_guard_trigger_states(
             triggers=registry.triggers,
             context=CycleFailureGuardLifecycleContext(
@@ -450,9 +462,9 @@ async def async_apply_cycle_terminal_failure_guard(
     if signature_changed:
         latches = dict(await latch_store.load_latches())
         reset_latch = False
-        for trigger in registry.triggers:
-            if trigger.kind in latches:
-                await latch_store.delete_latch(trigger.kind)
+        for registration in registry.triggers:
+            if registration.kind in latches:
+                await latch_store.delete_latch(registration.kind)
                 reset_latch = True
         if reset_latch:
             await session.flush()
