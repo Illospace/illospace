@@ -8,7 +8,39 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
-from brain.jobs.pipelines.nightly_dream import build_dream_prompt, store_dream_memories
+from brain.jobs.pipelines.nightly_dream import (
+    build_dream_prompt,
+    gather_random_old_memories,
+    store_dream_memories,
+)
+
+
+@pytest.mark.requires_db
+async def test_random_old_memories_accepts_date_bound_parameter(
+    unit_of_work_for_session,
+    monkeypatch,
+):
+    """The dream query must resolve against real PostgreSQL with a `date` bind.
+
+    The parameter is sent untyped, so Postgres infers its type from the
+    expression it appears in. Before the fix the query read
+    `created_at::date < :target_date - INTERVAL '7 days'`, which inferred
+    `:target_date` as `interval` and failed with
+    `operator does not exist: date < interval` — every night for 23 days.
+
+    `:target_date - 7` fails the same way one type over
+    (`date < integer`), so only an explicit `CAST(... AS date)` is correct.
+    SQLite accepts all three spellings, which is why this test must run
+    against PostgreSQL to mean anything.
+    """
+    monkeypatch.setattr(
+        "brain.jobs.pipelines.nightly_dream.UnitOfWork",
+        unit_of_work_for_session,
+    )
+
+    memories = await gather_random_old_memories(date(2026, 8, 10))
+
+    assert isinstance(memories, list)
 
 
 class TestBuildDreamPrompt:
