@@ -433,7 +433,6 @@ async def async_manage_storage_policy(
     policy_id: int | None = None,
     limit: int = 50,
     patch: StoragePolicyPatch | None = None,
-    **storage_values: object,
 ) -> dict[str, Any]:
     """Agent-facing read, update, history, and revert actions."""
 
@@ -445,9 +444,7 @@ async def async_manage_storage_policy(
         rows = await async_list_storage_policy_history(session, limit=limit)
         return {"policies": [serialize_storage_policy(row) for row in rows]}
     if normalized_action == "update":
-        if patch is not None and storage_values:
-            raise TypeError("Pass a storage policy patch or storage fields, not both")
-        update_patch = patch or StoragePolicyPatch.from_storage_fields(storage_values)
+        update_patch = patch if patch is not None else StoragePolicyPatch()
         if update_patch.is_empty():
             raise ValueError("update requires at least one policy field")
         row = await async_update_storage_policy(

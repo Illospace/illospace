@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import Field as DataclassField
 from dataclasses import dataclass, field as dataclass_field, fields, replace
 from datetime import datetime, timezone
-from typing import Any, ClassVar, Mapping, TypeAlias, cast, get_type_hints
+from typing import Any, ClassVar, Mapping, TypeAlias, cast
 
 from brain.kernel.common.serialization import jsonable
 from brain.platform.db.models.cycle import Cycle, CycleGuidance
@@ -21,7 +21,6 @@ from brain.systems.cycles.execution_policy_registry import (
 )
 from brain.systems.cycles.schedules import (
     compute_next_run_at,
-    safe_humanize_schedule,
     validate_schedule_expr,
     validate_timezone_name,
 )
@@ -34,8 +33,6 @@ __all__ = [
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 
-_API_EDITABLE = "api_editable"
-_API_RESPONSE_TYPE = "api_response_type"
 _PATCH_IGNORE_NONE = "patch_ignore_none"
 
 
@@ -49,67 +46,30 @@ def patch_ignores_none(snapshot_field: DataclassField[Any]) -> bool:
 class CyclePolicySnapshot:
     """One validated Cycle policy, with versioned JSON persistence.
 
-    Scalar fields use the same name on the snapshot, Cycle, patch, and API.
-    Field metadata declares editor and response behavior at this one owner.
+    Scalar fields use the same name on the snapshot, Cycle, and patch.
     """
 
     SNAPSHOT_VERSION: ClassVar[int] = 1
 
     name: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
-    prompt: str = dataclass_field(
-        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
-    )
-    schedule_expr: str = dataclass_field(
-        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
-    )
-    timezone: str = dataclass_field(
-        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
-    )
-    enabled: bool = dataclass_field(
-        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
-    )
+    prompt: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
+    schedule_expr: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
+    timezone: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
+    enabled: bool = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
     max_concurrency: int
     timeout_seconds: int | None
-    retry_policy: dict[str, JsonValue] = dataclass_field(
-        metadata={_API_RESPONSE_TYPE: dict[str, Any]}
-    )
-    model_override: str | None = dataclass_field(metadata={_API_EDITABLE: True})
-    thinking_override: str | None = dataclass_field(
-        metadata={_API_EDITABLE: True}
-    )
+    retry_policy: dict[str, JsonValue]
+    model_override: str | None
+    thinking_override: str | None
     execution_policy_key: str | None
     target_idea_id: str | None
-    guidance: list[str] = dataclass_field(metadata={_API_EDITABLE: True})
+    guidance: list[str]
 
     @classmethod
     def configuration_field_names(cls) -> tuple[str, ...]:
         """Return the scalar fields rendered under ``configuration``."""
 
         return tuple(field.name for field in fields(cls) if field.name != "guidance")
-
-    @classmethod
-    def configuration_field_types(cls) -> dict[str, Any]:
-        """Return response types for fields rendered under ``configuration``."""
-
-        type_hints = get_type_hints(cls)
-        return {
-            field.name: field.metadata.get(
-                _API_RESPONSE_TYPE,
-                type_hints[field.name],
-            )
-            for field in fields(cls)
-            if field.name != "guidance"
-        }
-
-    @classmethod
-    def api_editable_field_names(cls) -> tuple[str, ...]:
-        """Return behavior-editor fields in snapshot declaration order."""
-
-        return tuple(
-            field.name
-            for field in fields(cls)
-            if field.metadata.get(_API_EDITABLE, False)
-        )
 
     @classmethod
     def from_cycle(
@@ -196,22 +156,6 @@ class CyclePolicySnapshot:
             ),
             guidance=sorted(guidance),
         )
-
-    def response_payload(self) -> dict[str, Any]:
-        """Serialize this snapshot for every behavior-policy response surface."""
-
-        configuration = {}
-        for field_name in self.configuration_field_names():
-            configuration[field_name] = deepcopy(getattr(self, field_name))
-            if field_name == "schedule_expr":
-                configuration["schedule_human"] = safe_humanize_schedule(
-                    self.schedule_expr,
-                    self.timezone,
-                )
-        return {
-            "configuration": configuration,
-            "guidance": list(self.guidance),
-        }
 
     def encode(self) -> dict[str, Any]:
         """Encode the current schema for the JSON database boundary."""

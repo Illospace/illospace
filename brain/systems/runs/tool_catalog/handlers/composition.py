@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from brain.systems.runs.tool_catalog.handlers.binding import bind_derived_tool_contract
 from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser,
     _handle_browser_back,
@@ -276,16 +275,10 @@ def _get_tool_handlers(
         from brain.systems.storage_policy import (
             StoragePolicyPatch,
             async_manage_storage_policy,
-            storage_policy_field_schema,
         )
 
         actor_id = _current_run_id() or _current_agent_value("user_id")
-        patch = bind_derived_tool_contract(
-            storage_values,
-            field_schema=storage_policy_field_schema(),
-            factory=StoragePolicyPatch.from_storage_fields,
-            contract_name="storage policy",
-        )
+        patch = StoragePolicyPatch.from_storage_fields(storage_values)
         async with UnitOfWork() as uow:
             return await async_manage_storage_policy(
                 uow.session,
