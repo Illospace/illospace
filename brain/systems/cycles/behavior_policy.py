@@ -71,7 +71,6 @@ __all__ = [
     "async_list_cycle_policy_history",
     "async_preview_cycle_policy_change",
     "async_preview_cycle_policy_revert",
-    "async_read_effective_cycle_policy",
 ]
 
 CYCLE_POLICY_KIND = "cycle"
@@ -180,6 +179,12 @@ class CyclePolicySnapshot:
             dict[str, JsonValue],
             jsonable(deepcopy(self.retry_policy)),
         )
+        guidance = [
+            validate_nonempty_trimmed(value, "guidance")
+            for value in self.guidance
+        ]
+        if len(guidance) != len(set(guidance)):
+            raise ValueError("guidance entries must be unique")
         return CyclePolicySnapshot(
             name=validate_nonempty_trimmed(self.name, "name"),
             prompt=validate_nonempty_trimmed(self.prompt, "prompt"),
@@ -202,10 +207,7 @@ class CyclePolicySnapshot:
                 if self.target_idea_id is not None
                 else None
             ),
-            guidance=sorted(
-                validate_nonempty_trimmed(value, "guidance")
-                for value in self.guidance
-            ),
+            guidance=sorted(guidance),
         )
 
     def encode(self) -> dict[str, Any]:
@@ -345,16 +347,6 @@ class CyclePolicyConflict:
 
 
 CyclePolicyApplyResult = CyclePolicyApplied | CyclePolicyConflict
-
-
-async def async_read_effective_cycle_policy(
-    session,
-    *,
-    actor: CycleActor,
-    cycle_id: int,
-) -> EffectiveCyclePolicy:
-    cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
-    return await _effective_policy(session, cycle)
 
 
 async def async_preview_cycle_policy_change(
@@ -512,10 +504,12 @@ async def async_list_cycle_policy_history(
     actor: CycleActor,
     cycle_id: int,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[BehaviorChangeRecord]:
     cycle = await _load_scoped_cycle(session, actor=actor, cycle_id=cycle_id)
     current = await _effective_policy(session, cycle)
     clean_limit = max(1, min(int(limit), 500))
+    clean_offset = max(0, int(offset))
     rows = list(
         (
             await session.scalars(
@@ -523,6 +517,7 @@ async def async_list_cycle_policy_history(
                 .where(*_audit_target_conditions(cycle))
                 .order_by(BehaviorChangeAudit.version.desc())
                 .limit(clean_limit)
+                .offset(clean_offset)
             )
         ).all()
     )
@@ -607,6 +602,7 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
             )
         ).all()
     )
+    snapshot = CyclePolicySnapshot.from_cycle(cycle, guidance_rows)
     version = int(
         (
             await session.scalar(
@@ -630,7 +626,7 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
         target_id=str(cycle.id),
         version=version,
         revision_id=revision_id,
-        snapshot=CyclePolicySnapshot.from_cycle(cycle, guidance_rows),
+        snapshot=snapshot,
     )
 
 
@@ -915,14 +911,17 @@ def _preview_digest(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _record(
     row: BehaviorChangeAudit,
     *,
     current_snapshot: CyclePolicySnapshot,
 ) -> BehaviorChangeRecord:
-    applied_at = row.applied_at
-    if applied_at.tzinfo is None:
-        applied_at = applied_at.replace(tzinfo=timezone.utc)
     return BehaviorChangeRecord(
         id=row.id,
         workspace_id=row.workspace_id,
@@ -944,7 +943,7 @@ def _record(
         ),
         changed_fields=tuple(row.changed_fields or []),
         cycle_revision_id=row.cycle_revision_id,
-        applied_at=applied_at,
+        applied_at=_aware_utc(row.applied_at),
         reverted_from_id=row.reverted_from_id,
     )
 
