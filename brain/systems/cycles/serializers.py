@@ -34,54 +34,12 @@ if TYPE_CHECKING:
         EffectiveCyclePolicyReadModel,
     )
 
-
-BEHAVIOR_POLICY_EDITABLE_FIELDS = (
-    "prompt",
-    "schedule_expr",
-    "timezone",
-    "enabled",
-    "model_override",
-    "thinking_override",
-    "guidance",
-)
-
-
 def _utc_datetime(value):
     if value is None:
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
-
-def serialize_cycle_policy_configuration(
-    snapshot: CyclePolicySnapshot,
-) -> dict:
-    return {
-        "name": snapshot.name,
-        "prompt": snapshot.prompt,
-        "schedule_expr": snapshot.schedule_expr,
-        "schedule_human": safe_humanize_schedule(
-            snapshot.schedule_expr,
-            snapshot.timezone,
-        ),
-        "timezone": snapshot.timezone,
-        "enabled": snapshot.enabled,
-        "max_concurrency": snapshot.max_concurrency,
-        "timeout_seconds": snapshot.timeout_seconds,
-        "retry_policy": deepcopy(snapshot.retry_policy),
-        "model_override": snapshot.model_override,
-        "thinking_override": snapshot.thinking_override,
-        "execution_policy_key": snapshot.execution_policy_key,
-        "target_idea_id": snapshot.target_idea_id,
-    }
-
-
-def serialize_cycle_policy_snapshot(snapshot: CyclePolicySnapshot) -> dict:
-    return {
-        "configuration": serialize_cycle_policy_configuration(snapshot),
-        "guidance": list(snapshot.guidance),
-    }
 
 
 def serialize_behavior_change_summary(
@@ -109,12 +67,8 @@ def serialize_behavior_change_record(change: BehaviorChangeRecord) -> dict:
         "policy_kind": change.policy_kind,
         "target_type": change.target_type,
         "target_id": change.target_id,
-        "before_snapshot": serialize_cycle_policy_snapshot(
-            change.before_snapshot
-        ),
-        "after_snapshot": serialize_cycle_policy_snapshot(
-            change.after_snapshot
-        ),
+        "before_snapshot": change.before_snapshot.response_payload(),
+        "after_snapshot": change.after_snapshot.response_payload(),
         "cycle_revision_id": change.cycle_revision_id,
     }
 
@@ -124,6 +78,7 @@ def serialize_effective_cycle_policy(
 ) -> dict:
     revision = policy.source_revision
     latest_change = policy.latest_change
+    snapshot_payload = policy.snapshot.response_payload()
     output_targets = [
         {
             "id": target.id,
@@ -159,9 +114,8 @@ def serialize_effective_cycle_policy(
         "target_id": policy.target_id,
         "version": policy.version,
         "revision_id": policy.revision_id,
-        "configuration": serialize_cycle_policy_configuration(policy.snapshot),
-        "guidance": list(policy.snapshot.guidance),
-        "editable_fields": list(BEHAVIOR_POLICY_EDITABLE_FIELDS),
+        **snapshot_payload,
+        "editable_fields": list(policy.snapshot.api_editable_field_names()),
         "output_targets": output_targets,
         "output_targets_read_only": True,
         "source": {
@@ -226,8 +180,8 @@ def serialize_cycle_policy_preview(preview: CyclePolicyPreview) -> dict:
     return {
         "expected_version": preview.before.version,
         "preview_digest": preview.preview_digest,
-        "before": serialize_cycle_policy_snapshot(preview.before.snapshot),
-        "after": serialize_cycle_policy_snapshot(preview.after_snapshot),
+        "before": preview.before.snapshot.response_payload(),
+        "after": preview.after_snapshot.response_payload(),
         "changed_fields": changed_fields,
         "diff": [
             _serialize_cycle_policy_diff_entry(preview, field_name)

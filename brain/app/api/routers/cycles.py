@@ -80,19 +80,7 @@ def _policy_request_error(exc: ValueError) -> HTTPException:
 
 
 def _policy_patch(body: CyclePolicyPreviewRequest) -> CyclePolicyPatch:
-    proposal = body.proposal.model_dump(exclude_unset=True)
-    return CyclePolicyPatch(
-        prompt=proposal.get("prompt", UNSET_CYCLE_FIELD),
-        schedule_expr=proposal.get("schedule_expr", UNSET_CYCLE_FIELD),
-        timezone_name=proposal.get("timezone", UNSET_CYCLE_FIELD),
-        enabled=proposal.get("enabled", UNSET_CYCLE_FIELD),
-        model_override=proposal.get("model_override", UNSET_CYCLE_FIELD),
-        thinking_override=proposal.get(
-            "thinking_override",
-            UNSET_CYCLE_FIELD,
-        ),
-        guidance=proposal.get("guidance", UNSET_CYCLE_FIELD),
-    )
+    return CyclePolicyPatch(**body.proposal.model_dump(exclude_unset=True))
 
 
 def _policy_source_reference(cycle_id: int) -> str:
