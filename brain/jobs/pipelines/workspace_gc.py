@@ -163,7 +163,7 @@ async def reclaim_headless_worker_workspaces(
         return result
     if retention is None:
         policy = await async_get_storage_policy(session)
-        retention = timedelta(hours=policy.finished_workspace_retention_hours)
+        retention = policy.finished_workspace_retention
     if retention.total_seconds() <= 0:
         raise ValueError("retention must be positive")
     cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - retention

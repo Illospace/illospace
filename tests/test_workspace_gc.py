@@ -36,7 +36,12 @@ class _Session:
 
     async def scalar(self, _statement):
         return SimpleNamespace(
-            finished_workspace_retention_hours=self._retention_hours
+            finished_workspace_retention_hours=self._retention_hours,
+            project_draft_retention_hours=168,
+            canvas_quiet_hours=24,
+            capacity_warn_percent=80,
+            capacity_critical_percent=90,
+            automatic_reclamation_allowed=False,
         )
 
     async def execute(self, _statement) -> _Rows:

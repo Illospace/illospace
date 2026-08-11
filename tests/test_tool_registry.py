@@ -375,6 +375,7 @@ def test_manage_storage_policy_tool_is_registered_and_audited():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers
     from brain.systems.runs.tool_catalog.registry import get_tool_registration
+    from brain.systems.storage_policy import storage_policy_field_schema
 
     name = "manage_storage_policy"
     assert name in _names(COORDINATOR_TOOLS)
@@ -383,15 +384,9 @@ def test_manage_storage_policy_tool_is_registered_and_audited():
     assert set(inspect.signature(handler).parameters) == {
         "action",
         "policy_id",
-        "finished_workspace_retention_hours",
-        "project_draft_retention_hours",
-        "canvas_quiet_hours",
-        "capacity_warn_percent",
-        "capacity_critical_percent",
-        "automatic_reclamation_allowed",
         "rationale",
         "limit",
-    }
+    } | set(storage_policy_field_schema())
 
     registration = get_tool_registration(name)
     assert registration is not None
