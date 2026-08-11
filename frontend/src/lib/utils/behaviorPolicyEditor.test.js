@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import {
   applyPolicyReview,
@@ -8,6 +7,12 @@ import {
   reviewPolicyDraft,
   reviewPolicyRevert,
 } from '../features/cycles/domain/effectivePolicy.ts';
+import {
+  EffectivePolicyWorkflowController,
+  isPolicyWorkflowDirty,
+  policyReviewProps,
+} from '../features/cycles/domain/effectivePolicyWorkflow.ts';
+import { createPreviewBehaviorPolicyClient } from '../../routes/cycles/previewBehaviorPolicy.ts';
 
 function configuration(overrides = {}) {
   return {
@@ -202,30 +207,136 @@ test('revert requires explicit confirmation before it applies a new version', as
   assert.deepEqual(calls.slice(0, 2), [['revert-preview', 41], ['revert-apply', 41]]);
 });
 
-test('the shipped editor keeps apply disabled without rationale and states the active-run boundary', () => {
-  const source = readFileSync(
-    new URL('../features/cycles/components/EffectiveCyclePolicyView.svelte', import.meta.url),
-    'utf8',
+test('review props disable apply until rationale and state the active-run boundary', async () => {
+  const controller = new EffectivePolicyWorkflowController({
+    client: client(),
+    cycleId: 7,
+    data: { policy: policy(), history: history() },
+  });
+  controller.startEditing();
+  const draft = hydratePolicyDraft(policy());
+  draft.prompt = 'Review incidents and owners.';
+  controller.updateDraft(draft);
+  await controller.reviewDraft();
+
+  assert.equal(controller.state.kind, 'review');
+  let props = policyReviewProps(controller.state);
+  assert.equal(props.applyDisabled, true);
+  assert.equal(
+    props.activeRunBoundary,
+    'Active runs are unchanged. Future runs use this policy only after apply.',
   );
 
-  assert.match(source, /disabled=\{applyDisabled\}/);
-  assert.match(source, /Active runs are unchanged\. Future runs use this policy only after apply\./);
-  assert.match(source, /beforeunload/);
-  assert.match(source, /Your draft is safe/);
+  controller.setRationale('Keep incident ownership current.');
+  props = policyReviewProps(controller.state);
+  assert.equal(props.applyDisabled, false);
 });
 
-test('existing Cycle surfaces no longer expose a direct behavior update path', () => {
-  const mainPage = readFileSync(
-    new URL('../../routes/cycles/+page.svelte', import.meta.url),
-    'utf8',
-  );
-  const threadPane = readFileSync(
-    new URL('../features/cycles/components/ThreadCyclesPane.svelte', import.meta.url),
-    'utf8',
-  );
+test('dirty drafts require confirmation before the controller discards them', () => {
+  const controller = new EffectivePolicyWorkflowController({
+    client: client(),
+    cycleId: 7,
+    data: { policy: policy(), history: history() },
+  });
+  controller.startEditing();
+  const draft = hydratePolicyDraft(policy());
+  draft.guidance.push('Name the incident owner.');
+  controller.updateDraft(draft);
+  assert.equal(isPolicyWorkflowDirty(controller.state), true);
 
-  assert.doesNotMatch(mainPage, /api\.updateCycle/);
-  assert.doesNotMatch(threadPane, /api\.updateCycle/);
-  assert.match(mainPage, /editable=\{!isCyclesPreview\}/);
-  assert.match(threadPane, /<EffectiveCyclePolicyView[\s\S]*?editable/);
+  let confirmations = 0;
+  controller.cancelEditing(() => {
+    confirmations += 1;
+    return false;
+  });
+  assert.equal(confirmations, 1);
+  assert.equal(controller.state.kind, 'edit');
+
+  controller.cancelEditing(() => true);
+  assert.equal(controller.state.kind, 'view');
+});
+
+test('a 409 moves the controller to conflicted and preserves the dirty draft', async () => {
+  const latest = policy(2, { configuration: { prompt: 'Another reviewer changed this.' } });
+  const api = client({
+    applyCycleBehaviorPolicy: async () => {
+      throw {
+        status: 409,
+        detail: { reason: 'version_conflict', latest_effective_policy: latest },
+      };
+    },
+  });
+  const controller = new EffectivePolicyWorkflowController({
+    client: api,
+    cycleId: 7,
+    data: { policy: policy(), history: history() },
+  });
+  controller.startEditing();
+  const draft = hydratePolicyDraft(policy());
+  draft.prompt = 'My safe draft.';
+  controller.updateDraft(draft);
+  await controller.reviewDraft();
+  controller.setRationale('Keep my proposed incident workflow.');
+  await controller.applyReviewedChange();
+
+  assert.equal(controller.state.kind, 'conflicted');
+  assert.equal(controller.state.draft.prompt, 'My safe draft.');
+  assert.equal(controller.state.data.policy.version, 2);
+  assert.equal(isPolicyWorkflowDirty(controller.state), true);
+  assert.match(controller.state.notice, /Your draft is safe/);
+});
+
+test('preview client runs semantic edit and revert flows through the production controller', async () => {
+  let livePolicy = policy();
+  let liveHistory = history();
+  const previewClient = createPreviewBehaviorPolicyClient({
+    cycleId: 7,
+    getPolicy: () => livePolicy,
+    getHistory: () => liveHistory,
+    commit: (nextPolicy, nextHistory) => {
+      livePolicy = nextPolicy;
+      liveHistory = nextHistory;
+    },
+    scheduleLabel: (expression, timezone) => `${expression} (${timezone})`,
+    now: () => '2026-08-11T18:00:00Z',
+  });
+  const controller = new EffectivePolicyWorkflowController({
+    client: previewClient,
+    cycleId: 7,
+    data: { policy: livePolicy, history: liveHistory },
+  });
+
+  controller.startEditing();
+  const draft = hydratePolicyDraft(livePolicy);
+  draft.prompt = 'Review incidents and owners.';
+  draft.guidance = ['Keep reports concise', 'Name the incident owner.'];
+  controller.updateDraft(draft);
+  await controller.reviewDraft();
+  assert.equal(controller.state.kind, 'review');
+  assert.deepEqual(controller.state.review.preview.changed_fields, ['prompt', 'guidance']);
+  assert.deepEqual(
+    controller.state.review.preview.diff.map(({ field, kind }) => [field, kind]),
+    [['prompt', 'value'], ['guidance', 'collection']],
+  );
+  controller.setRationale('Keep incident ownership current.');
+  await controller.applyReviewedChange();
+
+  assert.equal(controller.state.kind, 'view');
+  assert.equal(controller.state.data.policy.version, 2);
+  assert.equal(controller.state.data.policy.configuration.prompt, 'Review incidents and owners.');
+  assert.equal(controller.state.data.history.items[0].rationale, 'Keep incident ownership current.');
+  assert.equal(controller.state.data.history.items[0].actor_id, 'preview-user');
+
+  const appliedChangeId = controller.state.data.history.items[0].id;
+  await controller.beginRevert(appliedChangeId);
+  assert.equal(controller.state.kind, 'review');
+  assert.deepEqual(controller.state.review.preview.changed_fields, ['prompt', 'guidance']);
+  controller.setRationale('Restore the earlier preview behavior.');
+  await controller.applyReviewedChange(() => true);
+
+  assert.equal(controller.state.kind, 'view');
+  assert.equal(controller.state.data.policy.version, 3);
+  assert.equal(controller.state.data.policy.configuration.prompt, 'Review current priorities.');
+  assert.equal(controller.state.data.history.items[0].reverted_from_id, appliedChangeId);
+  assert.equal(controller.state.data.history.items[0].rationale, 'Restore the earlier preview behavior.');
 });

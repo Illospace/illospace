@@ -13,14 +13,80 @@ import type {
 import type { RuntimeModelCatalogEntry } from '$lib/types/runtimeSettings';
 import { parseServerDate } from '../../../utils/datetime.ts';
 
+export const POLICY_FIELD_SCHEMA = [
+  {
+    key: 'prompt',
+    label: 'Mission prompt',
+    control: 'textarea',
+    fullWidth: true,
+    rows: 7,
+    read: (policy: EffectiveCyclePolicyRead) => policy.configuration.prompt,
+    proposal: (value: unknown) => String(value).trim(),
+  },
+  {
+    key: 'schedule_expr',
+    label: 'Stored schedule',
+    control: 'text',
+    mono: true,
+    placeholder: '0 9 * * *',
+    read: (policy: EffectiveCyclePolicyRead) => policy.configuration.schedule_expr,
+    proposal: (value: unknown) => String(value).trim(),
+  },
+  {
+    key: 'timezone',
+    label: 'Timezone',
+    control: 'text',
+    placeholder: 'America/Toronto',
+    read: (policy: EffectiveCyclePolicyRead) => policy.configuration.timezone,
+    proposal: (value: unknown) => String(value).trim(),
+  },
+  {
+    key: 'enabled',
+    label: 'Status',
+    control: 'toggle',
+    read: (policy: EffectiveCyclePolicyRead) => policy.configuration.enabled,
+    proposal: (value: unknown) => Boolean(value),
+  },
+  {
+    key: 'model_override',
+    label: 'Model override',
+    control: 'model',
+    read: (policy: EffectiveCyclePolicyRead) => policy.configuration.model_override ?? '',
+    proposal: (value: unknown) => String(value).trim() || null,
+  },
+  {
+    key: 'thinking_override',
+    label: 'Thinking override',
+    control: 'thinking',
+    options: [
+      { value: '', label: 'Workspace default' },
+      { value: 'none', label: 'None' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'xhigh', label: 'xHigh' },
+    ],
+    read: (policy: EffectiveCyclePolicyRead) => policy.configuration.thinking_override ?? '',
+    proposal: (value: unknown) => String(value) || null,
+  },
+  {
+    key: 'guidance',
+    label: 'Active guidance',
+    control: 'guidance',
+    fullWidth: true,
+    read: (policy: EffectiveCyclePolicyRead) => [...policy.guidance],
+    proposal: (value: unknown) => Array.isArray(value)
+      ? value.map((item) => String(item).trim())
+      : [],
+  },
+] as const;
+
+type PolicyFieldDefinition = (typeof POLICY_FIELD_SCHEMA)[number];
+
+export type CyclePolicyFieldKey = PolicyFieldDefinition['key'];
+
 export type CyclePolicyDraft = {
-  prompt: string;
-  schedule_expr: string;
-  timezone: string;
-  enabled: boolean;
-  model_override: string;
-  thinking_override: string;
-  guidance: string[];
+  [Field in PolicyFieldDefinition as Field['key']]: ReturnType<Field['read']>;
 };
 
 export type CyclePolicyDraftErrors = Partial<Record<keyof CyclePolicyDraft, string>>;
@@ -69,7 +135,7 @@ export type CyclePolicyReview =
       preview: CyclePolicyPreviewRead;
     };
 
-type CyclePolicyEditorApi = Pick<
+export type CyclePolicyEditorApi = Pick<
   typeof import('$lib/api/client').api,
   | 'previewCycleBehaviorPolicy'
   | 'applyCycleBehaviorPolicy'
@@ -78,22 +144,6 @@ type CyclePolicyEditorApi = Pick<
   | 'getCycleBehaviorPolicy'
   | 'getCycleBehaviorPolicyHistory'
 >;
-
-const THINKING_OVERRIDES = new Set(['', 'none', 'low', 'medium', 'high', 'xhigh']);
-const CRON_NAME_RANGES: Record<number, Record<string, number>> = {
-  3: {
-    JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6,
-    JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12,
-  },
-  4: { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 },
-};
-const CRON_RANGES: Array<[number, number]> = [
-  [0, 59],
-  [0, 23],
-  [1, 31],
-  [1, 12],
-  [0, 7],
-];
 
 export type CyclePolicyConfigurationEntry = {
   key: keyof CyclePolicyConfigurationRead & string;
@@ -110,15 +160,9 @@ export function policyConfigurationEntries(
 }
 
 export function hydratePolicyDraft(policy: EffectiveCyclePolicyRead): CyclePolicyDraft {
-  return {
-    prompt: policy.configuration.prompt,
-    schedule_expr: policy.configuration.schedule_expr,
-    timezone: policy.configuration.timezone,
-    enabled: policy.configuration.enabled,
-    model_override: policy.configuration.model_override ?? '',
-    thinking_override: policy.configuration.thinking_override ?? '',
-    guidance: [...policy.guidance],
-  };
+  return Object.fromEntries(
+    POLICY_FIELD_SCHEMA.map((field) => [field.key, field.read(policy)]),
+  ) as CyclePolicyDraft;
 }
 
 export function clonePolicyDraft(draft: CyclePolicyDraft): CyclePolicyDraft {
@@ -131,16 +175,15 @@ export function isPolicyDraftDirty(
 ): boolean {
   if (!draft || !policy) return false;
   const baseline = hydratePolicyDraft(policy);
-  return (
-    draft.prompt !== baseline.prompt
-    || draft.schedule_expr !== baseline.schedule_expr
-    || draft.timezone !== baseline.timezone
-    || draft.enabled !== baseline.enabled
-    || draft.model_override !== baseline.model_override
-    || draft.thinking_override !== baseline.thinking_override
-    || draft.guidance.length !== baseline.guidance.length
-    || draft.guidance.some((value, index) => value !== baseline.guidance[index])
-  );
+  return POLICY_FIELD_SCHEMA.some((field) => {
+    const current = draft[field.key];
+    const original = baseline[field.key];
+    if (Array.isArray(current) && Array.isArray(original)) {
+      return current.length !== original.length
+        || current.some((value, index) => value !== original[index]);
+    }
+    return current !== original;
+  });
 }
 
 export function shouldConfirmPolicyDraftDiscard(
@@ -150,27 +193,6 @@ export function shouldConfirmPolicyDraftDiscard(
   return isPolicyDraftDirty(draft, policy);
 }
 
-function cronValue(value: string, fieldIndex: number): number | null {
-  if (/^\d+$/.test(value)) return Number(value);
-  return CRON_NAME_RANGES[fieldIndex]?.[value.toUpperCase()] ?? null;
-}
-
-function validCronAtom(value: string, fieldIndex: number): boolean {
-  const [minimum, maximum] = CRON_RANGES[fieldIndex];
-  const [rangePart, stepPart, ...extra] = value.split('/');
-  if (extra.length || (stepPart !== undefined && (!/^\d+$/.test(stepPart) || Number(stepPart) < 1))) {
-    return false;
-  }
-  if (rangePart === '*') return true;
-  const [startPart, endPart, ...rangeExtra] = rangePart.split('-');
-  if (rangeExtra.length) return false;
-  const start = cronValue(startPart, fieldIndex);
-  if (start === null || start < minimum || start > maximum) return false;
-  if (endPart === undefined) return true;
-  const end = cronValue(endPart, fieldIndex);
-  return end !== null && end >= minimum && end <= maximum && start <= end;
-}
-
 export function isValidPolicySchedule(value: string): boolean {
   const schedule = value.trim();
   if (schedule.toLowerCase().startsWith('at:')) {
@@ -178,17 +200,7 @@ export function isValidPolicySchedule(value: string): boolean {
     return Boolean(timestamp) && !Number.isNaN(new Date(timestamp).getTime());
   }
   const fields = schedule.split(/\s+/);
-  return fields.length === 5 && fields.every((field, fieldIndex) =>
-    field.split(',').every((atom) => Boolean(atom) && validCronAtom(atom, fieldIndex)));
-}
-
-export function isValidPolicyTimezone(value: string): boolean {
-  try {
-    new Intl.DateTimeFormat('en', { timeZone: value.trim() }).format();
-    return Boolean(value.trim());
-  } catch {
-    return false;
-  }
+  return fields.length === 5 && fields.every(Boolean);
 }
 
 export function validatePolicyDraft(
@@ -199,46 +211,28 @@ export function validatePolicyDraft(
   const errors: CyclePolicyDraftErrors = {};
   const prompt = draft.prompt.trim();
   const schedule = draft.schedule_expr.trim();
-  const timezone = draft.timezone.trim();
   const model = draft.model_override.trim();
   const guidance = draft.guidance.map((value) => value.trim());
 
   if (!prompt) errors.prompt = 'Mission prompt is required.';
-  else if (prompt.length > 20_000) errors.prompt = 'Mission prompt must be 20,000 characters or fewer.';
-  if (!schedule) errors.schedule_expr = 'Schedule is required.';
-  else if (schedule.length > 100 || !isValidPolicySchedule(schedule)) {
+  if (!schedule || !isValidPolicySchedule(schedule)) {
     errors.schedule_expr = 'Use a valid five-field cron rule or one-time at: timestamp.';
-  }
-  if (!timezone) errors.timezone = 'Timezone is required.';
-  else if (timezone.length > 64 || !isValidPolicyTimezone(timezone)) {
-    errors.timezone = 'Use a valid IANA timezone, such as America/Toronto.';
   }
   if (model) {
     const supportedModels = new Set(modelCatalog.map((entry) => entry.id));
     if (currentModel) supportedModels.add(currentModel);
     if (!supportedModels.has(model)) errors.model_override = 'Select a supported model.';
   }
-  if (!THINKING_OVERRIDES.has(draft.thinking_override)) {
-    errors.thinking_override = 'Select a supported thinking level.';
-  }
-  if (guidance.some((value) => !value)) {
-    errors.guidance = 'Guidance cannot be empty.';
-  } else if (new Set(guidance).size !== guidance.length) {
+  if (new Set(guidance).size !== guidance.length) {
     errors.guidance = 'Guidance entries must be unique.';
   }
   return errors;
 }
 
 export function policyProposalFromDraft(draft: CyclePolicyDraft): CyclePolicyProposal {
-  return {
-    prompt: draft.prompt.trim(),
-    schedule_expr: draft.schedule_expr.trim(),
-    timezone: draft.timezone.trim(),
-    enabled: draft.enabled,
-    model_override: draft.model_override.trim() || null,
-    thinking_override: draft.thinking_override || null,
-    guidance: draft.guidance.map((value) => value.trim()),
-  };
+  return Object.fromEntries(
+    POLICY_FIELD_SCHEMA.map((field) => [field.key, field.proposal(draft[field.key])]),
+  ) as CyclePolicyProposal;
 }
 
 export async function reviewPolicyDraft(

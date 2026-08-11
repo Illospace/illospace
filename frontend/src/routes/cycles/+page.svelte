@@ -1,7 +1,7 @@
 <script lang="ts">
   import { dev } from '$app/environment';
   import { page } from '$app/stores';
-  import { getContext, onMount } from 'svelte';
+  import { getContext, onMount, setContext } from 'svelte';
 
   import {
     api,
@@ -29,8 +29,11 @@
   } from '$lib/components/constellation/constellationPageFrameContext';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
   import EffectiveCyclePolicyView from '$lib/features/cycles/components/EffectiveCyclePolicyView.svelte';
+  import type { CyclePolicyEditorApi } from '$lib/features/cycles/domain/effectivePolicy';
+  import { EFFECTIVE_POLICY_CLIENT_CONTEXT } from '$lib/features/cycles/domain/effectivePolicyClientContext';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
+  import { createPreviewBehaviorPolicyClient } from './previewBehaviorPolicy';
 
   type ThinkingLevel = '' | 'none' | 'low' | 'medium' | 'high' | 'xhigh';
   type ScheduleCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
@@ -112,8 +115,14 @@
   let previewRuns = $state<Record<number, CycleRunRead[]>>({});
   let previewPolicies = $state<Record<number, EffectiveCyclePolicyRead>>({});
   let previewPolicyHistories = $state<Record<number, CyclePolicyHistoryRead>>({});
+  let previewPolicyClients: Record<number, CyclePolicyEditorApi> = {};
   let behaviorPolicyRefreshSerial = $state(0);
   let behaviorPolicyDirty = $state(false);
+
+  setContext(
+    EFFECTIVE_POLICY_CLIENT_CONTEXT,
+    (cycleId: number) => previewPolicyClients[cycleId],
+  );
 
   const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
     CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
@@ -431,6 +440,25 @@
     const { policy, history } = previewBehaviorPolicy(cycle);
     previewPolicies = { ...previewPolicies, [cycle.id]: policy };
     previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: history };
+    previewPolicyClients[cycle.id] = createPreviewBehaviorPolicyClient({
+      cycleId: cycle.id,
+      getPolicy: () => previewPolicies[cycle.id],
+      getHistory: () => previewPolicyHistories[cycle.id],
+      commit: (nextPolicy, nextHistory) => {
+        previewPolicies = { ...previewPolicies, [cycle.id]: nextPolicy };
+        previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: nextHistory };
+      },
+      scheduleLabel: (scheduleExpression, timezone) => {
+        const parsed = parseSchedule(scheduleExpression);
+        if (parsed.cadence === 'custom') return 'Custom schedule';
+        return scheduleLabelForForm({
+          ...emptyForm(),
+          ...parsed,
+          schedule_expr: scheduleExpression,
+          timezone,
+        });
+      },
+    });
   }
 
   function loadPreviewData() {
@@ -847,8 +875,24 @@
     return !behaviorPolicyDirty || window.confirm('Discard the current behavior draft?');
   }
 
-  async function handlePolicyApplied() {
+  async function handlePolicyApplied(policy: EffectiveCyclePolicyRead) {
     behaviorPolicyDirty = false;
+    if (isCyclesPreview) {
+      cycles = cycles.map((cycle) => cycle.id === Number(policy.target_id)
+        ? {
+            ...cycle,
+            prompt: policy.configuration.prompt,
+            schedule_expr: policy.configuration.schedule_expr,
+            schedule_human: policy.configuration.schedule_human,
+            timezone: policy.configuration.timezone,
+            enabled: policy.configuration.enabled,
+            model_override: policy.configuration.model_override,
+            thinking_override: policy.configuration.thinking_override,
+            updated_at: policy.source.changed_at ?? cycle.updated_at,
+          }
+        : cycle);
+      return;
+    }
     await loadCycles(selectedCycleId);
   }
 
@@ -1092,7 +1136,7 @@
                     previewPolicy={isCyclesPreview ? previewPolicies[cycle.id] : null}
                     previewHistory={isCyclesPreview ? previewPolicyHistories[cycle.id] : null}
                     displayTimezone={isCyclesPreview ? localTimezone : null}
-                    editable={!isCyclesPreview}
+                    editable
                     refreshSerial={behaviorPolicyRefreshSerial}
                     onPolicyApplied={handlePolicyApplied}
                     onDirtyChange={(dirty) => (behaviorPolicyDirty = dirty)}
