@@ -1,5 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { nextFocusableFrom } from '$lib/utils/focusOrder';
+  import {
+    edgeOptionIndex,
+    initialOptionIndex,
+    nextOptionIndex,
+  } from '$lib/utils/selectKeyboard';
   import ConstellationIcon from './ConstellationIcon.svelte';
 
   export type ConstellationSelectOption = {
@@ -131,15 +137,6 @@
     openMenu();
   }
 
-  function enabledOptionIndexes(): number[] {
-    return options.flatMap((option, index) => option.disabled ? [] : [index]);
-  }
-
-  function initialOptionIndex(): number {
-    const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled);
-    return selectedIndex >= 0 ? selectedIndex : (enabledOptionIndexes()[0] ?? -1);
-  }
-
   function optionElement(index: number): HTMLButtonElement | null {
     return menuEl?.querySelector<HTMLButtonElement>(`[data-option-index="${index}"]`) ?? null;
   }
@@ -150,7 +147,7 @@
 
   function openMenu(): void {
     open = true;
-    const index = initialOptionIndex();
+    const index = initialOptionIndex(options, value);
     tick().then(() => {
       updateFixedMenuPosition();
       if (index >= 0) focusOption(index);
@@ -158,31 +155,16 @@
   }
 
   function moveOptionFocus(currentIndex: number, direction: -1 | 1): void {
-    const indexes = enabledOptionIndexes();
-    if (!indexes.length) return;
-    const position = indexes.indexOf(currentIndex);
-    const nextPosition = position < 0
-      ? 0
-      : (position + direction + indexes.length) % indexes.length;
-    focusOption(indexes[nextPosition]);
+    const index = nextOptionIndex(options, currentIndex, direction);
+    if (index >= 0) focusOption(index);
   }
 
   function focusOutsideMenu(direction: -1 | 1): void {
     if (!triggerEl) return;
-    const focusableSelector = [
-      'a[href]',
-      'button:not([disabled])',
-      'input:not([disabled])',
-      'select:not([disabled])',
-      'textarea:not([disabled])',
-      '[tabindex]:not([tabindex="-1"])',
-    ].join(',');
-    const focusable = Array.from(document.querySelectorAll<HTMLElement>(focusableSelector))
-      .filter((element) => !menuEl?.contains(element) && element.getClientRects().length > 0);
-    const triggerIndex = focusable.indexOf(triggerEl);
-    const next = focusable[triggerIndex + direction];
+    const trigger = triggerEl;
+    const next = nextFocusableFrom(trigger, direction, menuEl);
     open = false;
-    tick().then(() => (next ?? triggerEl).focus());
+    tick().then(() => (next ?? trigger).focus());
   }
 
   function selectValue(nextValue: string) {
@@ -219,9 +201,8 @@
 
     if (event.key === 'Home' || event.key === 'End') {
       event.preventDefault();
-      const indexes = enabledOptionIndexes();
-      const nextIndex = event.key === 'Home' ? indexes[0] : indexes[indexes.length - 1];
-      if (nextIndex !== undefined) focusOption(nextIndex);
+      const nextIndex = edgeOptionIndex(options, event.key === 'Home' ? 'first' : 'last');
+      if (nextIndex >= 0) focusOption(nextIndex);
       return;
     }
 

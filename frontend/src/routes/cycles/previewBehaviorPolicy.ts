@@ -23,8 +23,8 @@ import {
 type PreviewPolicyClientOptions = {
   cycleId: number;
   getPolicy: () => EffectiveCyclePolicyRead;
-  getHistory: () => CyclePolicyHistoryRead;
-  historyItems?: readonly CyclePolicyChangeRead[];
+  historyItems: readonly CyclePolicyChangeRead[];
+  historyPageSize?: number;
   commit: (policy: EffectiveCyclePolicyRead, history: CyclePolicyHistoryRead) => void;
   scheduleLabel: (scheduleExpression: string, timezone: string) => string;
   now?: () => string;
@@ -40,6 +40,24 @@ type PreviewBehaviorPolicyFixtureOptions = {
   agentChangedAt: string;
   originatingAgentRunId: number;
 };
+
+function historyPage(
+  historyItems: readonly CyclePolicyChangeRead[],
+  limit: number,
+  offset = 0,
+): CyclePolicyHistoryRead {
+  const items = historyItems.slice(offset, offset + limit);
+  const nextOffset = offset + items.length;
+  return {
+    items: clonePlainData(items),
+    pagination: {
+      limit,
+      offset,
+      has_more: nextOffset < historyItems.length,
+      next_offset: nextOffset < historyItems.length ? nextOffset : null,
+    },
+  };
+}
 
 export function createPreviewBehaviorPolicyFixture(
   cycle: CycleRead,
@@ -241,10 +259,7 @@ export function createPreviewBehaviorPolicyFixture(
   const historyItems = [agentChange, humanChange, initialChange];
   return {
     policy,
-    history: {
-      items: historyItems.slice(0, 2),
-      pagination: { limit: 2, offset: 0, has_more: true, next_offset: 2 },
-    },
+    history: historyPage(historyItems, 2),
     historyItems,
   };
 }
@@ -422,7 +437,8 @@ export function createPreviewBehaviorPolicyClient(
   options: PreviewPolicyClientOptions,
 ): CyclePolicyEditorApi {
   let previewSerial = 0;
-  let historyItems = clonePlainData(options.historyItems ?? options.getHistory().items);
+  let historyItems = clonePlainData(options.historyItems);
+  const historyPageSize = options.historyPageSize ?? 50;
   const pending = new Map<string, PendingPreview>();
 
   function nextDigest(): string {
@@ -493,10 +509,9 @@ export function createPreviewBehaviorPolicyClient(
     }
 
     const appliedAt = options.now?.() ?? new Date().toISOString();
-    const history = options.getHistory();
     const version = policy.version + 1;
     const revisionId = (policy.revision_id ?? 0) + 1;
-    const changeId = Math.max(0, ...history.items.map((change) => change.id)) + 1;
+    const changeId = Math.max(0, ...historyItems.map((change) => change.id)) + 1;
     const actor = {
       actor_type: 'human',
       actor_id: 'preview-user',
@@ -554,17 +569,7 @@ export function createPreviewBehaviorPolicyClient(
       },
     };
     historyItems = [change, ...historyItems.filter((item) => item.id !== change.id)];
-    const nextHistoryItems = [change, ...history.items];
-    const nextHistoryOffset = nextHistoryItems.length;
-    const nextHistory: CyclePolicyHistoryRead = {
-      items: nextHistoryItems,
-      pagination: {
-        ...history.pagination,
-        offset: 0,
-        has_more: nextHistoryOffset < historyItems.length,
-        next_offset: nextHistoryOffset < historyItems.length ? nextHistoryOffset : null,
-      },
-    };
+    const nextHistory = historyPage(historyItems, historyPageSize);
     options.commit(nextPolicy, nextHistory);
     pending.delete(previewDigest);
     return { effective_policy: clonePlainData(nextPolicy), change: clonePlainData(change) };
@@ -573,17 +578,7 @@ export function createPreviewBehaviorPolicyClient(
   const client: CyclePolicyEditorApi = {
     getCycleBehaviorPolicy: async () => clonePlainData(options.getPolicy()),
     getCycleBehaviorPolicyHistory: async (_cycleId, limit = 50, offset = 0) => {
-      const items = historyItems.slice(offset, offset + limit);
-      const nextOffset = offset + items.length;
-      return {
-        items: clonePlainData(items),
-        pagination: {
-          limit,
-          offset,
-          has_more: nextOffset < historyItems.length,
-          next_offset: nextOffset < historyItems.length ? nextOffset : null,
-        },
-      };
+      return historyPage(historyItems, limit, offset);
     },
     previewCycleBehaviorPolicy: async (_cycleId, { proposal }) => {
       const policy = options.getPolicy();

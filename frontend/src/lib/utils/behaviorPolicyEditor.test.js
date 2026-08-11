@@ -292,7 +292,7 @@ test('preview client runs semantic edit and revert flows through the production 
   const previewClient = createPreviewBehaviorPolicyClient({
     cycleId: 7,
     getPolicy: () => livePolicy,
-    getHistory: () => liveHistory,
+    historyItems: liveHistory.items,
     commit: (nextPolicy, nextHistory) => {
       livePolicy = nextPolicy;
       liveHistory = nextHistory;
@@ -342,18 +342,16 @@ test('preview client runs semantic edit and revert flows through the production 
 });
 
 test('preview history exposes an older page through the production controller', async () => {
-  const visibleHistory = {
-    items: [{ id: 3 }, { id: 2 }],
-    pagination: { limit: 2, offset: 0, has_more: true, next_offset: 2 },
-  };
+  const historyItems = [{ id: 3 }, { id: 2 }, { id: 1 }];
   const previewClient = createPreviewBehaviorPolicyClient({
     cycleId: 7,
     getPolicy: () => policy(),
-    getHistory: () => visibleHistory,
-    historyItems: [...visibleHistory.items, { id: 1 }],
+    historyItems,
+    historyPageSize: 2,
     commit: () => {},
     scheduleLabel: (expression, timezone) => `${expression} (${timezone})`,
   });
+  const visibleHistory = await previewClient.getCycleBehaviorPolicyHistory(7, 2);
   const controller = new EffectivePolicyWorkflowController({
     client: previewClient,
     cycleId: 7,
@@ -379,7 +377,7 @@ test('preview client reviews a semantic diff when policy state is proxied', asyn
   const previewClient = createPreviewBehaviorPolicyClient({
     cycleId: 7,
     getPolicy: () => livePolicy,
-    getHistory: () => history(),
+    historyItems: [],
     commit: () => {},
     scheduleLabel: (expression, timezone) => `${expression} (${timezone})`,
   });

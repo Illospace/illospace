@@ -343,8 +343,8 @@
     previewPolicyClients[cycle.id] = createPreviewBehaviorPolicyClient({
       cycleId: cycle.id,
       getPolicy: () => previewPolicies[cycle.id],
-      getHistory: () => previewPolicyHistories[cycle.id],
       historyItems,
+      historyPageSize: history.pagination.limit,
       commit: (nextPolicy, nextHistory) => {
         previewPolicies = { ...previewPolicies, [cycle.id]: nextPolicy };
         previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: nextHistory };
