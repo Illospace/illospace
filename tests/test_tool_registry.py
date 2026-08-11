@@ -479,6 +479,7 @@ def test_context_route_surface_is_registry_driven():
         "query_workspace_data",
         "read_capabilities",
         "read_cycles",
+        "read_host_capacity",
         "read_project_contexts",
         "read_self_context",
         "read_team_activity",

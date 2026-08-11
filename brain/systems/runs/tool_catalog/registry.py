@@ -17,6 +17,7 @@ from brain.systems.runs.tool_definitions import (
     DOMAIN_TOOLS,
     EXEC_TOOLS,
     GITHUB_TOOLS,
+    HOST_CAPACITY_TOOLS,
     KNOWLEDGE_TOOLS,
     INBOUND_TOOLS,
     LAUNCH_HANDOFF_TOOLS,
@@ -212,6 +213,25 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "context_route": {
             "description": "Inspect active provider, credentials/auth status, runtime model routing, and provider/model mappings for the current user/workspace.",
             "domains": ["runtime settings", "provider", "auth status", "model routing", "credentials"],
+            "scopes": ["narrow"],
+        },
+    },
+    "read_host_capacity": {
+        "permission": "read_runtime",
+        "side_effect_class": "read_only",
+        "output_budget_chars": 24_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": (
+                "Read live disk capacity, workspace consumers, active capacity "
+                "thresholds, and the recent measurement trend."
+            ),
+            "domains": [
+                "disk capacity",
+                "storage use",
+                "workspace volume",
+                "disk trend",
+            ],
             "scopes": ["narrow"],
         },
     },
@@ -911,6 +931,7 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("session", ("coordinator", "worker"), SESSION_TOOLS),
         ("lifecycle", ("coordinator",), LIFECYCLE_TOOLS),
         ("deployment", ("coordinator",), DEPLOYMENT_TOOLS),
+        ("host_capacity", ("coordinator", "worker"), HOST_CAPACITY_TOOLS),
         ("runtime_preferences", ("coordinator",), RUNTIME_PREFERENCE_TOOLS),
         ("workspace_tools", ("coordinator",), WORKSPACE_TOOL_TOOLS),
         ("worker_spawn", ("coordinator",), WORKER_SPAWN_TOOLS),

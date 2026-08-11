@@ -93,6 +93,14 @@ class SingleCommandProgram:
 
 # Programs whose plan and StepSpec projections share one representation.
 SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
+    "host_capacity": SingleCommandProgram(
+        command=("python3", "-m", "brain.jobs.pipelines.host_capacity"),
+        step_key="host_capacity",
+        description=(
+            "Measure filesystem capacity and the largest workspace consumers, "
+            "then evaluate the active storage policy"
+        ),
+    ),
     "workspace_gc": SingleCommandProgram(
         command=("python3", "-m", "brain.jobs.pipelines.workspace_gc"),
         step_key="workspace_gc",

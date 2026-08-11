@@ -291,10 +291,23 @@ def _get_tool_handlers(
                 patch=patch,
             )
 
+    async def _read_host_capacity(limit=24):
+        from brain.kernel import config as brain_config
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.systems.host_capacity import async_read_host_capacity
+
+        async with UnitOfWork() as uow:
+            return await async_read_host_capacity(
+                uow.session,
+                workspace_root=brain_config.resolve_workspace_root(),
+                limit=limit,
+            )
+
     _manage_deployment._illo_run_on_event_loop = True
     _manage_runtime_services._illo_run_on_event_loop = True
     _manage_runtime_preferences._illo_run_on_event_loop = True
     _manage_storage_policy._illo_run_on_event_loop = True
+    _read_host_capacity._illo_run_on_event_loop = True
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -351,6 +364,7 @@ def _get_tool_handlers(
         ),
         "manage_runtime_preferences": _manage_runtime_preferences,
         "manage_storage_policy": _manage_storage_policy,
+        "read_host_capacity": _read_host_capacity,
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,
