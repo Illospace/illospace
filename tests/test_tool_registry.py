@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
+import pytest
+
 
 def _names(tools: list[dict]) -> set[str]:
     return {str(tool["name"]) for tool in tools}
@@ -375,7 +379,6 @@ def test_manage_storage_policy_tool_is_registered_and_audited():
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers
     from brain.systems.runs.tool_catalog.registry import get_tool_registration
-    from brain.systems.storage_policy import storage_policy_field_schema
 
     name = "manage_storage_policy"
     assert name in _names(COORDINATOR_TOOLS)
@@ -386,7 +389,9 @@ def test_manage_storage_policy_tool_is_registered_and_audited():
         "policy_id",
         "rationale",
         "limit",
-    } | set(storage_policy_field_schema())
+        "storage_values",
+    }
+    assert "__signature__" not in vars(handler)
 
     registration = get_tool_registration(name)
     assert registration is not None
@@ -395,6 +400,53 @@ def test_manage_storage_policy_tool_is_registered_and_audited():
     assert registration.side_effect_class == "runtime_configuration"
     assert registration.reversibility == "reversible"
     assert registration.action_manifest is True
+
+
+@pytest.mark.asyncio
+async def test_manage_storage_policy_handler_binds_the_derived_patch(monkeypatch):
+    from brain.systems import storage_policy
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    captured = {}
+
+    class FakeUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fake_manage_storage_policy(session, **kwargs):
+        captured.update(session=session, **kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        FakeUnitOfWork,
+    )
+    monkeypatch.setattr(
+        storage_policy,
+        "async_manage_storage_policy",
+        fake_manage_storage_policy,
+    )
+    handler = _get_tool_handlers()["manage_storage_policy"]
+
+    result = await handler(
+        action="update",
+        canvas_quiet_hours=12,
+        rationale="Exercise the typed boundary",
+    )
+
+    assert result == {"ok": True}
+    assert captured["patch"] == storage_policy.StoragePolicyPatch(
+        canvas_quiet_period=timedelta(hours=12)
+    )
+    assert "canvas_quiet_hours" not in captured
+
+    with pytest.raises(TypeError, match="Unexpected storage policy fields: unknown"):
+        await handler(unknown=True)
 
 
 def test_manage_workspace_tools_tool_is_coordinator_only_and_registered():

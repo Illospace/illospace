@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 
 import pytest
@@ -185,6 +185,32 @@ async def test_dataclass_fields_drive_patch_storage_and_tool_schema(session):
             **{policy_field.name: getattr(values, policy_field.name)}
         )
         assert not patch.is_empty()
+
+
+def test_added_value_field_derives_patch_and_tool_schema():
+    from brain.systems import storage_policy
+
+    @dataclass(frozen=True)
+    class ExtendedStoragePolicyValues(StoragePolicyValues):
+        test_retention: timedelta = storage_policy._policy_value_field(
+            "test_retention_hours",
+            storage_policy._DURATION_HOURS,
+            {"type": "integer", "minimum": 1},
+        )
+
+    patch_type = storage_policy._derive_storage_policy_patch(
+        ExtendedStoragePolicyValues
+    )
+
+    assert "test_retention" in {
+        patch_field.name for patch_field in fields(patch_type)
+    }
+    assert storage_policy.storage_policy_field_schema(
+        ExtendedStoragePolicyValues
+    )["test_retention_hours"] == {"type": "integer", "minimum": 1}
+    assert patch_type.from_storage_fields(
+        {"test_retention_hours": 6}
+    ).test_retention == timedelta(hours=6)
 
 
 @pytest.mark.asyncio
