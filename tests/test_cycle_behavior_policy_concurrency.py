@@ -12,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.schema import CreateTable
 
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleGuidance,
     CycleRevision,
 )
@@ -125,7 +125,7 @@ async def postgres_policy_workspace(monkeypatch):
                 Cycle.__table__,
                 CycleRevision.__table__,
                 CycleGuidance.__table__,
-                BehaviorChangeAudit.__table__,
+                CycleBehaviorChangeAudit.__table__,
             ):
                 await connection.execute(CreateTable(table))
 
@@ -254,8 +254,8 @@ async def test_two_reviewed_editors_serialize_and_second_gets_latest_conflict(
         changes = list(
             (
                 await session.scalars(
-                    select(BehaviorChangeAudit).order_by(
-                        BehaviorChangeAudit.version.asc()
+                    select(CycleBehaviorChangeAudit).order_by(
+                        CycleBehaviorChangeAudit.version.asc()
                     )
                 )
             ).all()

@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
+    CycleBehaviorChangeAudit,
     CycleOutputTarget,
     CycleRevision,
 )
@@ -85,11 +85,11 @@ async def async_read_effective_cycle_policy(
     change_rows = list(
         (
             await session.scalars(
-                select(BehaviorChangeAudit)
+                select(CycleBehaviorChangeAudit)
                 .where(*_audit_target_conditions(cycle))
                 .order_by(
-                    BehaviorChangeAudit.version.desc(),
-                    BehaviorChangeAudit.id.desc(),
+                    CycleBehaviorChangeAudit.version.desc(),
+                    CycleBehaviorChangeAudit.id.desc(),
                 )
             )
         ).all()
@@ -126,8 +126,6 @@ async def async_read_effective_cycle_policy(
     )
     return EffectiveCyclePolicyReadModel(
         workspace_id=effective.workspace_id,
-        policy_kind=effective.policy_kind,
-        target_type=effective.target_type,
         target_id=effective.target_id,
         version=effective.version,
         revision_id=(
@@ -147,9 +145,9 @@ def _field_sources(
     *,
     snapshot: CyclePolicySnapshot,
     baseline_revision: CycleRevision | None,
-    change_rows: list[BehaviorChangeAudit],
+    change_rows: list[CycleBehaviorChangeAudit],
 ) -> tuple[CyclePolicyFieldSource, ...]:
-    latest_by_field: dict[str, BehaviorChangeAudit] = {}
+    latest_by_field: dict[str, CycleBehaviorChangeAudit] = {}
     for row in change_rows:
         for field_name in row.changed_fields or []:
             latest_by_field.setdefault(str(field_name), row)

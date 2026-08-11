@@ -6,8 +6,8 @@ from datetime import timezone
 from typing import TYPE_CHECKING
 
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleGuidance,
     CycleOutputTarget,
     CycleRevision,
@@ -93,8 +93,6 @@ def serialize_behavior_change_record(change: BehaviorChangeRecord) -> dict:
     return {
         **serialize_behavior_change_summary(change),
         "workspace_id": change.workspace_id,
-        "policy_kind": change.policy_kind,
-        "target_type": change.target_type,
         "target_id": change.target_id,
         "before_snapshot": _serialize_cycle_policy_snapshot(change.before_snapshot),
         "after_snapshot": _serialize_cycle_policy_snapshot(change.after_snapshot),
@@ -138,8 +136,6 @@ def serialize_effective_cycle_policy(
     }
     return {
         "workspace_id": policy.workspace_id,
-        "policy_kind": policy.policy_kind,
-        "target_type": policy.target_type,
         "target_id": policy.target_id,
         "version": policy.version,
         "revision_id": policy.revision_id,
@@ -272,7 +268,7 @@ def _schedule_diff_value(snapshot: CyclePolicySnapshot) -> dict:
     }
 
 
-def serialize_behavior_change(row: BehaviorChangeAudit | None) -> dict | None:
+def serialize_behavior_change(row: CycleBehaviorChangeAudit | None) -> dict | None:
     if row is None:
         return None
     applied_at = row.applied_at
@@ -281,8 +277,6 @@ def serialize_behavior_change(row: BehaviorChangeAudit | None) -> dict | None:
     return {
         "id": row.id,
         "workspace_id": row.workspace_id,
-        "policy_kind": row.policy_kind,
-        "target_type": row.target_type,
         "target_id": row.target_id,
         "version": row.version,
         "actor_type": row.actor_type,

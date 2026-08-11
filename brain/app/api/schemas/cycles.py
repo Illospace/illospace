@@ -227,8 +227,6 @@ class CyclePolicyChangeSummaryRead(BaseModel):
 
 class EffectiveCyclePolicyRead(BaseModel):
     workspace_id: str
-    policy_kind: str
-    target_type: str
     target_id: str
     version: int
     revision_id: int | None = None
@@ -275,8 +273,6 @@ class CyclePolicyPreviewRead(BaseModel):
 
 class CyclePolicyChangeRead(CyclePolicyChangeSummaryRead):
     workspace_id: str
-    policy_kind: str
-    target_type: str
     target_id: str
     before_snapshot: CyclePolicySnapshotRead
     after_snapshot: CyclePolicySnapshotRead
