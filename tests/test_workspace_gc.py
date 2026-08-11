@@ -70,7 +70,10 @@ def _worker_workspace(
     return path
 
 
-async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(tmp_path):
+async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(
+    tmp_path,
+    monkeypatch,
+):
     workspace_root = tmp_path / "workspaces"
     payload = b"old worker bytes"
     workspace = _worker_workspace(
@@ -78,6 +81,19 @@ async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(tm
         101,
         age=timedelta(hours=49),
         payload=payload,
+    )
+
+    from brain.systems.workspace_inventory import inventory_workspace
+
+    inventoried = []
+
+    def recording_inventory(path):
+        inventoried.append(path)
+        return inventory_workspace(path)
+
+    monkeypatch.setattr(
+        "brain.jobs.pipelines.workspace_gc.inventory_workspace",
+        recording_inventory,
     )
 
     result = await reclaim_headless_worker_workspaces(
@@ -89,6 +105,37 @@ async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(tm
     assert not workspace.exists()
     assert result["directories_reclaimed"] == 1
     assert result["bytes_reclaimed"] == len(payload)
+    assert inventoried == [workspace]
+
+
+async def test_incomplete_inventory_prevents_workspace_reclamation(
+    tmp_path,
+    monkeypatch,
+):
+    workspace_root = tmp_path / "workspaces"
+    workspace = _worker_workspace(
+        workspace_root,
+        109,
+        age=timedelta(hours=49),
+    )
+    real_scandir = os.scandir
+
+    def fake_scandir(path):
+        if Path(path) == workspace:
+            raise PermissionError("blocked for test")
+        return real_scandir(path)
+
+    monkeypatch.setattr("brain.systems.workspace_inventory.os.scandir", fake_scandir)
+
+    result = await reclaim_headless_worker_workspaces(
+        _Session({109: "completed"}),
+        workspace_root=workspace_root,
+        now=NOW,
+    )
+
+    assert workspace.is_dir()
+    assert result["directories_reclaimed"] == 0
+    assert result["errors"] == 1
 
 
 async def test_terminal_workspace_inside_retention_is_kept(tmp_path):

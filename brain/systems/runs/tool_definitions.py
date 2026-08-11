@@ -55,6 +55,7 @@ from brain.systems.runs.tool_catalog.definitions.run_support import (
 )
 from brain.systems.runs.tool_catalog.definitions.runtime_management import (
     DEPLOYMENT_TOOLS,
+    HOST_CAPACITY_TOOLS,
     RUNTIME_PREFERENCE_TOOLS,
     WORKSPACE_TOOL_TOOLS,
 )
@@ -81,6 +82,7 @@ WORKER_TOOLS = (
     + GITHUB_TOOLS
     + KNOWLEDGE_TOOLS
     + MEETING_TOOLS
+    + HOST_CAPACITY_TOOLS
     + EXEC_TOOLS
     + SESSION_TOOLS
     + [
@@ -106,6 +108,7 @@ COORDINATOR_TOOLS = (
     + GITHUB_TOOLS
     + KNOWLEDGE_TOOLS
     + MEETING_TOOLS
+    + HOST_CAPACITY_TOOLS
     + EXEC_TOOLS
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS

@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import shutil
 import stat
 from datetime import datetime, timedelta, timezone
@@ -29,6 +28,7 @@ from brain.systems.runs.status import (
     project_run_status_value,
 )
 from brain.systems.storage_policy import async_get_storage_policy
+from brain.systems.workspace_inventory import inventory_workspace
 
 log = logging.getLogger(__name__)
 
@@ -112,23 +112,6 @@ def _validate_headless_worker_workspace(
     if modified_at > cutoff:
         return _WorkspaceValidation(parent_run_id, "directories_recent")
     return _WorkspaceValidation(parent_run_id, None)
-
-
-def _directory_size_bytes(path: Path) -> int:
-    """Return regular-file bytes without following links inside the workspace."""
-
-    total = 0
-    pending = [path]
-    while pending:
-        current = pending.pop()
-        with os.scandir(current) as entries:
-            for entry in entries:
-                entry_stat = entry.stat(follow_symlinks=False)
-                if stat.S_ISREG(entry_stat.st_mode):
-                    total += entry_stat.st_size
-                elif stat.S_ISDIR(entry_stat.st_mode):
-                    pending.append(Path(entry.path))
-    return total
 
 
 async def _parent_run_statuses(
@@ -237,7 +220,18 @@ async def reclaim_headless_worker_workspaces(
                         "Workspace GC could not delete %s: %s", path, validation.error
                     )
                 continue
-            size = _directory_size_bytes(path)
+            inventory = inventory_workspace(path)
+            if not inventory.complete:
+                result["errors"] += len(inventory.scan_errors)
+                for error in inventory.scan_errors:
+                    log.warning(
+                        "Workspace GC could not %s %s: %s",
+                        error["operation"],
+                        error["path"],
+                        error["message"],
+                    )
+                continue
+            size = inventory.bytes_used
             shutil.rmtree(path)
         except OSError as exc:
             result["errors"] += 1

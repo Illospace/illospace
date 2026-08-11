@@ -5,6 +5,38 @@ from __future__ import annotations
 from brain.systems.storage_policy import storage_policy_field_schema
 
 
+HOST_CAPACITY_TOOLS = [
+    {
+        "name": "read_host_capacity",
+        "description": (
+            "Read live host disk capacity, the latest recorded workspace consumers, the "
+            "active storage-policy thresholds, and recent scheduled measurements as a trend. "
+            "Use this to answer how much disk is available and what is using it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 168,
+                    "default": 24,
+                    "description": "Maximum recent hourly measurements to return.",
+                },
+                "refresh_inventory": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Walk the workspace now instead of using the latest recorded inventory. "
+                        "Keep false unless the caller explicitly needs a fresh inventory."
+                    ),
+                },
+            },
+        },
+    },
+]
+
+
 DEPLOYMENT_TOOLS = [
     {
         "name": "manage_deployment",
@@ -201,6 +233,7 @@ WORKSPACE_TOOL_TOOLS = [
 
 __all__ = [
     "DEPLOYMENT_TOOLS",
+    "HOST_CAPACITY_TOOLS",
     "RUNTIME_PREFERENCE_TOOLS",
     "WORKSPACE_TOOL_TOOLS",
 ]

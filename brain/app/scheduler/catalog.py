@@ -197,6 +197,35 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "misfire_policy": "skip",
     },
     {
+        "job_key": "host_capacity",
+        "family": "host_capacity",
+        "program_key": "host_capacity",
+        "handler_kind": CATALOG_HANDLER_KIND,
+        "handler_ref": "brain.app.scheduler.programs:host_capacity",
+        "cron_expr": "7 * * * *",
+        "timezone": "UTC",
+        "default_payload": {
+            "name": "Host Capacity",
+            "description": (
+                "Measure filesystem capacity and the largest workspace consumers"
+            ),
+        },
+        "task_contract": {
+            "memory_scope": {"visibility": "system"},
+            "allowed_actions": ["scheduler.run"],
+            "output_channel": "scheduler",
+            "success_criteria": [
+                "One host_capacity health row records filesystem use and workspace consumers",
+                "The active storage policy determines health and a warning alerts once",
+            ],
+        },
+        "priority": 90,
+        "max_concurrency": 1,
+        "timeout_seconds": 3600,
+        "retry_policy": {"max_attempts": 2, "backoff_seconds": 300},
+        "misfire_policy": "skip",
+    },
+    {
         "job_key": "workspace_gc",
         "family": "workspace_gc",
         "program_key": "workspace_gc",
