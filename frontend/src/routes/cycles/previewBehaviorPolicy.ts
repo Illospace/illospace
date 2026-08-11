@@ -24,6 +24,7 @@ type PreviewPolicyClientOptions = {
   cycleId: number;
   getPolicy: () => EffectiveCyclePolicyRead;
   getHistory: () => CyclePolicyHistoryRead;
+  historyItems?: readonly CyclePolicyChangeRead[];
   commit: (policy: EffectiveCyclePolicyRead, history: CyclePolicyHistoryRead) => void;
   scheduleLabel: (scheduleExpression: string, timezone: string) => string;
   now?: () => string;
@@ -43,7 +44,11 @@ type PreviewBehaviorPolicyFixtureOptions = {
 export function createPreviewBehaviorPolicyFixture(
   cycle: CycleRead,
   options: PreviewBehaviorPolicyFixtureOptions,
-): { policy: EffectiveCyclePolicyRead; history: CyclePolicyHistoryRead } {
+): {
+  policy: EffectiveCyclePolicyRead;
+  history: CyclePolicyHistoryRead;
+  historyItems: CyclePolicyChangeRead[];
+} {
   const configuration: CyclePolicyConfigurationRead = {
     name: cycle.name,
     prompt: cycle.prompt,
@@ -68,8 +73,10 @@ export function createPreviewBehaviorPolicyFixture(
     'Keep the result concise and name any blocker that needs attention.',
   ];
   const retiredGuidance = 'Use the legacy priority list before reviewing the workspace.';
+  const initialChangeId = 5000 + cycle.id;
   const humanChangeId = 5100 + cycle.id;
   const agentChangeId = 5200 + cycle.id;
+  const initialRevisionId = 4000 + cycle.id;
   const humanRevisionId = 4100 + cycle.id;
   const agentRevisionId = 4200 + cycle.id;
   const humanSource = {
@@ -120,6 +127,38 @@ export function createPreviewBehaviorPolicyFixture(
       guidance: [...activeGuidance],
     },
     cycle_revision_id: humanRevisionId,
+  };
+  const initialChange: CyclePolicyChangeRead = {
+    id: initialChangeId,
+    version: 1,
+    actor_type: 'system',
+    actor_id: 'cycle-import',
+    source_reference: `cycle:${cycle.id}:initial`,
+    rationale: 'Created the initial Cycle behavior.',
+    changed_fields: [
+      'prompt',
+      'schedule_expr',
+      'timezone',
+      'enabled',
+      'model_override',
+      'thinking_override',
+      'guidance',
+    ],
+    applied_at: cycle.created_at,
+    reverted_from_id: null,
+    workspace_id: 'preview-org',
+    policy_kind: 'cycle',
+    target_type: 'cycle',
+    target_id: String(cycle.id),
+    before_snapshot: {
+      configuration: clonePlainData(priorConfiguration),
+      guidance: [],
+    },
+    after_snapshot: {
+      configuration: clonePlainData(priorConfiguration),
+      guidance: [...activeGuidance, retiredGuidance],
+    },
+    cycle_revision_id: initialRevisionId,
   };
   const agentChange: CyclePolicyChangeRead = {
     id: agentChangeId,
@@ -199,12 +238,14 @@ export function createPreviewBehaviorPolicyFixture(
       reverted_from_id: agentChange.reverted_from_id,
     },
   };
+  const historyItems = [agentChange, humanChange, initialChange];
   return {
     policy,
     history: {
-      items: [agentChange, humanChange],
-      pagination: { limit: 50, offset: 0, has_more: false, next_offset: null },
+      items: historyItems.slice(0, 2),
+      pagination: { limit: 2, offset: 0, has_more: true, next_offset: 2 },
     },
+    historyItems,
   };
 }
 
@@ -381,6 +422,7 @@ export function createPreviewBehaviorPolicyClient(
   options: PreviewPolicyClientOptions,
 ): CyclePolicyEditorApi {
   let previewSerial = 0;
+  let historyItems = clonePlainData(options.historyItems ?? options.getHistory().items);
   const pending = new Map<string, PendingPreview>();
 
   function nextDigest(): string {
@@ -511,13 +553,16 @@ export function createPreviewBehaviorPolicyClient(
         reverted_from_id: change.reverted_from_id,
       },
     };
+    historyItems = [change, ...historyItems.filter((item) => item.id !== change.id)];
+    const nextHistoryItems = [change, ...history.items];
+    const nextHistoryOffset = nextHistoryItems.length;
     const nextHistory: CyclePolicyHistoryRead = {
-      items: [change, ...history.items],
+      items: nextHistoryItems,
       pagination: {
         ...history.pagination,
         offset: 0,
-        has_more: false,
-        next_offset: null,
+        has_more: nextHistoryOffset < historyItems.length,
+        next_offset: nextHistoryOffset < historyItems.length ? nextHistoryOffset : null,
       },
     };
     options.commit(nextPolicy, nextHistory);
@@ -528,16 +573,15 @@ export function createPreviewBehaviorPolicyClient(
   const client: CyclePolicyEditorApi = {
     getCycleBehaviorPolicy: async () => clonePlainData(options.getPolicy()),
     getCycleBehaviorPolicyHistory: async (_cycleId, limit = 50, offset = 0) => {
-      const history = options.getHistory();
-      const items = history.items.slice(offset, offset + limit);
+      const items = historyItems.slice(offset, offset + limit);
       const nextOffset = offset + items.length;
       return {
         items: clonePlainData(items),
         pagination: {
           limit,
           offset,
-          has_more: nextOffset < history.items.length,
-          next_offset: nextOffset < history.items.length ? nextOffset : null,
+          has_more: nextOffset < historyItems.length,
+          next_offset: nextOffset < historyItems.length ? nextOffset : null,
         },
       };
     },
@@ -552,7 +596,7 @@ export function createPreviewBehaviorPolicyClient(
     ),
     previewCycleBehaviorPolicyRevert: async (_cycleId, changeId) => {
       const policy = options.getPolicy();
-      const change = options.getHistory().items.find((item) => item.id === changeId);
+      const change = historyItems.find((item) => item.id === changeId);
       if (!change) throw new Error('The selected history entry is not available.');
       return createPreview(policy, clonePlainData(change.before_snapshot), changeId);
     },

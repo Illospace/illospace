@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+
   import type { CyclePolicyHistoryRead, CycleRunRead } from '$lib/api/client';
   import { ConstellationButton } from '$lib/components/constellation';
   import CyclePolicyProvenanceLine from '$lib/features/cycles/components/CyclePolicyProvenanceLine.svelte';
@@ -35,19 +37,24 @@
   } = $props();
 
   let loadingMore = $state(false);
+  let historyRegionEl: HTMLDetailsElement | undefined = $state();
 
   async function loadMore(): Promise<void> {
     if (loadingMore) return;
     loadingMore = true;
     try {
       await onLoadMore();
+      await tick();
+      if (!history.pagination.has_more) {
+        historyRegionEl?.querySelector('summary')?.focus();
+      }
     } finally {
       loadingMore = false;
     }
   }
 </script>
 
-<details class="history-region">
+<details bind:this={historyRegionEl} class="history-region">
   <summary>
     <span>
       <strong>History</strong>
@@ -84,6 +91,8 @@
                     size="sm"
                     loading={workflowKind === 'reverting' && revertingChangeId === change.id}
                     disabled={workflowKind !== 'view'}
+                    aria-label={`Revert behavior version ${change.version}`}
+                    data-policy-revert-id={change.id}
                     onclick={() => onRevert(change.id)}
                   >
                     Revert
@@ -142,6 +151,11 @@
 
   .history-region summary::-webkit-details-marker {
     display: none;
+  }
+
+  .history-region summary:focus-visible {
+    outline: calc(var(--sp-1) / 2) solid var(--constellation-control-focus-ring);
+    outline-offset: calc(var(--sp-1) * -1);
   }
 
   .history-region summary > span:first-child {

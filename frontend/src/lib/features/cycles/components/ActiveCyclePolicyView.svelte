@@ -67,7 +67,12 @@
           <span>Version {policy.version}</span>
         </div>
         {#if canEdit}
-          <ConstellationButton variant="secondary" size="sm" onclick={onEdit}>
+          <ConstellationButton
+            variant="secondary"
+            size="sm"
+            data-policy-edit-control
+            onclick={onEdit}
+          >
             Edit behavior
           </ConstellationButton>
         {/if}
@@ -315,6 +320,7 @@
   .output-target {
     display: grid;
     gap: 7px;
+    min-width: 0;
     padding: 11px;
     border: 1px solid var(--constellation-surface-nested-border);
     border-radius: 7px;
@@ -341,7 +347,7 @@
   .output-target pre {
     max-width: 100%;
     margin: 0;
-    overflow: auto;
+    overflow-wrap: anywhere;
     white-space: pre-wrap;
   }
 

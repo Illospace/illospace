@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
+
   import {
     ConstellationButton,
     ConstellationSelect,
@@ -82,6 +84,36 @@
   function removeGuidance(index: number): void {
     changeField('guidance', draft.guidance.filter((_, itemIndex) => itemIndex !== index));
   }
+
+  function fieldControlId(key: CyclePolicyFieldKey): string {
+    return `cycle-${cycleId}-policy-${key}`;
+  }
+
+  function fieldErrorId(key: CyclePolicyFieldKey): string {
+    return `${fieldControlId(key)}-error`;
+  }
+
+  function guidanceControlId(index: number): string {
+    return `${fieldControlId('guidance')}-${index + 1}`;
+  }
+
+  function focusControl(id: string): void {
+    tick().then(() => document.getElementById(id)?.focus());
+  }
+
+  onMount(() => {
+    focusControl(fieldControlId(POLICY_FIELD_SCHEMA[0].key));
+  });
+
+  $effect(() => {
+    const firstInvalidField = POLICY_FIELD_SCHEMA.find((field) => Boolean(errors[field.key]));
+    if (!firstInvalidField) return;
+    focusControl(
+      firstInvalidField.key === 'guidance'
+        ? guidanceControlId(0)
+        : fieldControlId(firstInvalidField.key),
+    );
+  });
 </script>
 
 <section class:compact class="policy-editor" aria-label="Edit cycle behavior">
@@ -99,28 +131,30 @@
     {#each POLICY_FIELD_SCHEMA as field (field.key)}
       {#if field.control === 'textarea'}
         <div class="editor-field" class:editor-field-full={field.fullWidth}>
-          <label for={`cycle-${cycleId}-policy-${field.key}`}>{field.label}</label>
+          <label for={fieldControlId(field.key)}>{field.label}</label>
           <ConstellationTextarea
-            id={`cycle-${cycleId}-policy-${field.key}`}
+            id={fieldControlId(field.key)}
             value={draft[field.key]}
             rows={field.rows}
             aria-invalid={errors[field.key] ? 'true' : undefined}
+            aria-describedby={errors[field.key] ? fieldErrorId(field.key) : undefined}
             oninput={(event) => changeField(field.key, inputValue(event))}
           />
-          {#if errors[field.key]}<small class="field-error">{errors[field.key]}</small>{/if}
+          {#if errors[field.key]}<small id={fieldErrorId(field.key)} class="field-error">{errors[field.key]}</small>{/if}
         </div>
       {:else if field.control === 'text'}
         <div class="editor-field">
-          <label for={`cycle-${cycleId}-policy-${field.key}`}>{field.label}</label>
+          <label for={fieldControlId(field.key)}>{field.label}</label>
           <ConstellationTextInput
-            id={`cycle-${cycleId}-policy-${field.key}`}
+            id={fieldControlId(field.key)}
             value={draft[field.key]}
             mono={'mono' in field && field.mono}
             placeholder={field.placeholder}
             aria-invalid={errors[field.key] ? 'true' : undefined}
+            aria-describedby={errors[field.key] ? fieldErrorId(field.key) : undefined}
             oninput={(event) => changeField(field.key, inputValue(event))}
           />
-          {#if errors[field.key]}<small class="field-error">{errors[field.key]}</small>{/if}
+          {#if errors[field.key]}<small id={fieldErrorId(field.key)} class="field-error">{errors[field.key]}</small>{/if}
         </div>
       {:else if field.control === 'toggle'}
         <div class="editor-field">
@@ -129,6 +163,7 @@
             type="button"
             class="policy-status-toggle"
             class:is-enabled={draft[field.key]}
+            aria-label={`${field.label}: ${draft[field.key] ? 'Enabled' : 'Paused'}`}
             aria-pressed={draft[field.key]}
             onclick={() => changeField(field.key, !draft[field.key])}
           >
@@ -140,17 +175,21 @@
         <div class="editor-field">
           <span class="editor-field-label">{field.label}</span>
           <ConstellationSelect
+            id={fieldControlId(field.key)}
             value={draft[field.key]}
             options={modelOptions}
             ariaLabel={field.label}
+            ariaInvalid={errors[field.key] ? 'true' : undefined}
+            ariaDescribedby={errors[field.key] ? fieldErrorId(field.key) : undefined}
             onValueChange={(value) => changeField(field.key, value)}
           />
-          {#if errors[field.key]}<small class="field-error">{errors[field.key]}</small>{/if}
+          {#if errors[field.key]}<small id={fieldErrorId(field.key)} class="field-error">{errors[field.key]}</small>{/if}
         </div>
       {:else if field.control === 'thinking'}
         <div class="editor-field">
           <span class="editor-field-label">{field.label}</span>
           <ConstellationSelect
+            id={fieldControlId(field.key)}
             value={draft[field.key]}
             options={field.options}
             ariaLabel={field.label}
@@ -158,7 +197,11 @@
           />
         </div>
       {:else if field.control === 'guidance'}
-        <section class="guidance-editor editor-field-full" aria-labelledby={`cycle-${cycleId}-guidance-editor`}>
+        <section
+          class="guidance-editor editor-field-full"
+          aria-labelledby={`cycle-${cycleId}-guidance-editor`}
+          aria-describedby={errors[field.key] ? fieldErrorId(field.key) : undefined}
+        >
           <div class="guidance-editor-heading">
             <div>
               <span class="editor-field-label" id={`cycle-${cycleId}-guidance-editor`}>{field.label}</span>
@@ -173,9 +216,12 @@
               {#each draft[field.key] as guidance, index}
                 <li>
                   <ConstellationTextarea
+                    id={guidanceControlId(index)}
                     value={guidance}
                     rows={2}
                     aria-label={`Guidance ${index + 1}`}
+                    aria-invalid={errors[field.key] ? 'true' : undefined}
+                    aria-describedby={errors[field.key] ? fieldErrorId(field.key) : undefined}
                     oninput={(event) => updateGuidance(index, inputValue(event))}
                   />
                   <ConstellationButton
@@ -192,7 +238,7 @@
           {:else}
             <p class="empty-policy-value">No active guidance.</p>
           {/if}
-          {#if errors[field.key]}<small class="field-error">{errors[field.key]}</small>{/if}
+          {#if errors[field.key]}<small id={fieldErrorId(field.key)} class="field-error">{errors[field.key]}</small>{/if}
         </section>
       {/if}
     {/each}
@@ -388,6 +434,7 @@
 
   .editor-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: flex-end;
     gap: 8px;

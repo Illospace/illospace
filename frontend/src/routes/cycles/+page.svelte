@@ -333,7 +333,7 @@
   }
 
   function setPreviewBehaviorPolicy(cycle: CycleRead) {
-    const { policy, history } = createPreviewBehaviorPolicyFixture(cycle, {
+    const { policy, history, historyItems } = createPreviewBehaviorPolicyFixture(cycle, {
       humanChangedAt: previewIso(-4),
       agentChangedAt: previewIso(-2),
       originatingAgentRunId: cycle.id === 901 ? 15100 : 100000 + cycle.id,
@@ -344,6 +344,7 @@
       cycleId: cycle.id,
       getPolicy: () => previewPolicies[cycle.id],
       getHistory: () => previewPolicyHistories[cycle.id],
+      historyItems,
       commit: (nextPolicy, nextHistory) => {
         previewPolicies = { ...previewPolicies, [cycle.id]: nextPolicy };
         previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: nextHistory };
@@ -1420,6 +1421,7 @@
     display: grid;
     grid-template-columns: 1fr;
     gap: 10px;
+    min-width: 0;
     padding: 0 12px 12px;
     border-top: 1px solid var(--constellation-surface-panel-separator);
   }

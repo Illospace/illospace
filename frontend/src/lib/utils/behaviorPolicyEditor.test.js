@@ -341,6 +341,36 @@ test('preview client runs semantic edit and revert flows through the production 
   assert.equal(controller.state.data.history.items[0].rationale, 'Restore the earlier preview behavior.');
 });
 
+test('preview history exposes an older page through the production controller', async () => {
+  const visibleHistory = {
+    items: [{ id: 3 }, { id: 2 }],
+    pagination: { limit: 2, offset: 0, has_more: true, next_offset: 2 },
+  };
+  const previewClient = createPreviewBehaviorPolicyClient({
+    cycleId: 7,
+    getPolicy: () => policy(),
+    getHistory: () => visibleHistory,
+    historyItems: [...visibleHistory.items, { id: 1 }],
+    commit: () => {},
+    scheduleLabel: (expression, timezone) => `${expression} (${timezone})`,
+  });
+  const controller = new EffectivePolicyWorkflowController({
+    client: previewClient,
+    cycleId: 7,
+    data: { policy: policy(), history: visibleHistory },
+  });
+
+  await controller.loadMoreHistory();
+
+  assert.deepEqual(controller.state.data.history.items.map(({ id }) => id), [3, 2, 1]);
+  assert.deepEqual(controller.state.data.history.pagination, {
+    limit: 2,
+    offset: 2,
+    has_more: false,
+    next_offset: null,
+  });
+});
+
 test('preview client reviews a semantic diff when policy state is proxied', async () => {
   const livePolicy = policy();
   livePolicy.configuration = new Proxy(livePolicy.configuration, {});

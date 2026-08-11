@@ -1,6 +1,6 @@
 <script lang="ts">
   import { beforeNavigate } from '$app/navigation';
-  import { getContext, onDestroy, onMount } from 'svelte';
+  import { getContext, onDestroy, onMount, tick } from 'svelte';
 
   import {
     api,
@@ -63,6 +63,7 @@
   let requestSerial = 0;
   let loadedCycleId: number | null = null;
   let loadedPolicyVersion: number | null = null;
+  let effectivePolicyEl: HTMLElement | undefined = $state();
   const resolvePolicyClient = getContext<EffectivePolicyClientResolver | undefined>(
     EFFECTIVE_POLICY_CLIENT_CONTEXT,
   );
@@ -146,14 +147,42 @@
     }
   }
 
-  function cancelEditing(): void {
-    controller?.cancelEditing(() => window.confirm('Discard this behavior draft?'));
+  function focusPolicyControl(selector: string): void {
+    tick().then(() => effectivePolicyEl?.querySelector<HTMLElement>(selector)?.focus());
   }
 
-  function applyReviewedChange(): void {
-    void controller?.applyReviewedChange(
+  function cancelEditing(): void {
+    const activeController = controller;
+    activeController?.cancelEditing(() => window.confirm('Discard this behavior draft?'));
+    if (activeController?.state.kind === 'view') {
+      focusPolicyControl('[data-policy-edit-control]');
+    }
+  }
+
+  function leaveReview(): void {
+    const activeController = controller;
+    const state = activeController?.state;
+    const revertChangeId = state?.kind === 'review' && state.review.kind === 'revert'
+      ? state.review.changeId
+      : null;
+    activeController?.leaveReview();
+    if (revertChangeId !== null) {
+      focusPolicyControl(`[data-policy-revert-id="${revertChangeId}"]`);
+    }
+  }
+
+  async function applyReviewedChange(): Promise<void> {
+    const activeController = controller;
+    await activeController?.applyReviewedChange(
       () => window.confirm('Apply this revert as a new behavior version?'),
     );
+    if (activeController !== controller) return;
+    if (
+      activeController?.state.kind === 'view'
+      || (activeController?.state.kind === 'conflicted' && !activeController.state.draft)
+    ) {
+      focusPolicyControl('[data-policy-edit-control]');
+    }
   }
 
   beforeNavigate(({ cancel }) => {
@@ -214,7 +243,12 @@
   });
 </script>
 
-<section class:compact class="effective-policy" aria-label="Effective cycle behavior">
+<section
+  bind:this={effectivePolicyEl}
+  class:compact
+  class="effective-policy"
+  aria-label="Effective cycle behavior"
+>
   <ActiveCyclePolicyView
     {cycleId}
     {policy}
@@ -268,7 +302,7 @@
         {...policyReviewProps(reviewState)}
         {compact}
         onRationaleChange={(rationale) => controller?.setRationale(rationale)}
-        onBack={() => controller?.leaveReview()}
+        onBack={leaveReview}
         onApply={applyReviewedChange}
       />
     {:else if showReadView}
@@ -323,6 +357,11 @@
     font-size: 12px;
   }
 
+  .policy-error span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   .policy-loading {
     display: grid;
     gap: 8px;
@@ -342,5 +381,13 @@
   @keyframes policy-pulse {
     from { background-position: 200% 0; }
     to { background-position: -200% 0; }
+  }
+
+  @media (max-width: 720px) {
+    .policy-error {
+      align-items: flex-start;
+      flex-direction: column;
+      padding: var(--sp-3);
+    }
   }
 </style>

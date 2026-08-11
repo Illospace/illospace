@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount, tick } from 'svelte';
+
   import {
     ConstellationButton,
     ConstellationNotice,
@@ -28,17 +30,24 @@
   } = $props();
 
   const diffEntries = $derived(presentedPolicyDiff(review.preview));
+  let reviewHeadingEl: HTMLHeadingElement | undefined = $state();
 
   function inputValue(event: Event): string {
     return (event.currentTarget as HTMLTextAreaElement).value;
   }
+
+  onMount(() => {
+    tick().then(() => reviewHeadingEl?.focus());
+  });
 </script>
 
 <section class:compact class="policy-review" aria-label="Review cycle behavior change">
   <header class="editor-heading">
     <div>
       <span class="section-kicker">Review</span>
-      <h4>{review.kind === 'revert' ? 'Review revert' : 'Review behavior change'}</h4>
+      <h4 bind:this={reviewHeadingEl} tabindex="-1">
+        {review.kind === 'revert' ? 'Review revert' : 'Review behavior change'}
+      </h4>
     </div>
     <p>{activeRunBoundary}</p>
   </header>
@@ -107,6 +116,8 @@
       value={rationale}
       rows={3}
       maxlength={5000}
+      required
+      aria-required="true"
       placeholder="Why should this behavior change?"
       oninput={(event) => onRationaleChange(inputValue(event))}
     />
@@ -187,11 +198,13 @@
   .diff-list {
     display: grid;
     gap: 10px;
+    min-width: 0;
   }
 
   .diff-entry {
     display: grid;
     gap: 9px;
+    min-width: 0;
     padding: 12px;
     border: 1px solid var(--constellation-surface-nested-border);
     border-radius: 7px;
@@ -303,6 +316,7 @@
 
   .editor-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: flex-end;
     gap: 8px;
