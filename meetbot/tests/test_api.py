@@ -13,6 +13,7 @@ from meetbot.app import create_app
 from meetbot.config import MeetbotConfig
 from meetbot.models import (
     EngineResult,
+    JoinRefusedError,
     SessionEvents,
     SessionHealthSnapshot,
     SessionRecord,
@@ -27,11 +28,13 @@ class FakeEngine:
         captions: bool = False,
         warnings: tuple[str, ...] = (),
         result: EngineResult | None = None,
+        failure: Exception | None = None,
     ) -> None:
         self.admit = admit
         self.captions = captions
         self.warnings = warnings
         self.result = result
+        self.failure = failure
         self.started = threading.Event()
         self.leave_requested = threading.Event()
         self.chat_messages: list[str] = []
@@ -54,6 +57,8 @@ class FakeEngine:
             await events.caption("Alice", "A complete line", "line-1")
             await events.caption("Alice", "A second line", "line-2")
         self.started.set()
+        if self.failure is not None:
+            raise self.failure
         if self.result is not None:
             return self.result
         while not self.leave_requested.is_set():
@@ -75,6 +80,9 @@ class FakeMeetingWebhookSender:
     async def send_transcript(self, record: SessionRecord) -> None:
         self.payloads.append(record.completion_payload())
         self.sent.set()
+
+    async def send_status(self, record: SessionRecord) -> None:
+        return None
 
     async def send_health(
         self,
@@ -198,12 +206,14 @@ def test_join_accepts_empty_origin_for_non_slack_runs(tmp_path: Path) -> None:
             "/join",
             headers={"X-Meetbot-Token": "meetbot-secret"},
             json={
+                "session_id": "session-from-brain",
                 "meeting_url": "https://meet.google.com/abc-defg-hij",
                 "origin": {},
             },
         )
 
         assert response.status_code == 202
+        assert response.json()["session_id"] == "session-from-brain"
 
 
 def test_caption_mutation_is_required_for_captions_flowing_and_transcript(
@@ -349,6 +359,27 @@ def test_lobby_timeout_fails_with_distinct_reason_and_actionable_error(
         assert sender.payloads[0]["status"] == "failed"
         assert sender.payloads[0]["end_reason"] == "not_admitted"
         assert sender.payloads[0]["error"] == message
+
+
+def test_google_meet_refusal_is_reported_with_refusal_text(tmp_path: Path) -> None:
+    refusal_text = "Your request to join was denied"
+    engine = FakeEngine(failure=JoinRefusedError(refusal_text))
+    sender = FakeMeetingWebhookSender()
+    app = create_app(
+        config=_config(tmp_path),
+        engine=engine,
+        webhook_sender=sender,
+    )
+    with TestClient(app) as client:
+        joined = _join(client)
+        session_id = joined.json()["session_id"]
+        response = _wait_for_status(client, session_id, "failed")
+
+        assert response["end_reason"] == "refused"
+        assert response["error"] == refusal_text
+        assert sender.sent.wait(1.0)
+        assert sender.payloads[0]["end_reason"] == "refused"
+        assert sender.payloads[0]["error"] == refusal_text
 
 
 def test_unknown_session_and_chat_before_admission_are_honest(tmp_path: Path) -> None:

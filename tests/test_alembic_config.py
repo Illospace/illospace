@@ -61,6 +61,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0059_behavior_change_audits.py",
     # Downgrade removes only the storage-policy table introduced here.
     "0060_storage_policies.py",
+    # Downgrade removes only the meetbot-session table introduced here.
+    "0061_meetbot_sessions.py",
 }
 
 

@@ -113,6 +113,7 @@ class SessionRecord:
             "transcript_path": self.transcript_path,
             "transcript_md_path": self.transcript_md_path,
             "started_at": self.started_at,
+            "joined_at": self.joined_at,
             "ended_at": self.ended_at,
             "caption_lines": self.caption_lines,
             "participants": list(self.participants),
@@ -206,6 +207,10 @@ class EngineResult:
     terminal_status: Literal["ended", "failed"] = "ended"
     warning: str | None = None
     error: str | None = None
+
+
+class JoinRefusedError(RuntimeError):
+    """Google Meet displayed a refusal instead of admitting the bot."""
 
 
 class SessionEvents(Protocol):

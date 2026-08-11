@@ -10,7 +10,7 @@ from typing import Any
 
 from meetbot.browser_diagnostics import capture_failure_evidence
 from meetbot.config import MeetbotConfig
-from meetbot.models import EngineResult, SessionEvents
+from meetbot.models import EngineResult, JoinRefusedError, SessionEvents
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +396,16 @@ class PlaywrightMeetEngine:
                 )
             )
             if await rejection.count() and await rejection.first.is_visible():
-                raise RuntimeError("Google Meet did not admit the bot to the call.")
+                refusal_text = ""
+                try:
+                    refusal_text = " ".join(
+                        str(await rejection.first.inner_text() or "").split()
+                    )
+                except Exception:
+                    logger.debug("Google Meet refusal text could not be read", exc_info=True)
+                raise JoinRefusedError(
+                    refusal_text or "Google Meet did not admit the bot to the call."
+                )
             if loop.time() >= deadline:
                 return EngineResult(
                     reason="not_admitted",
@@ -623,7 +632,7 @@ async def _raise_if_join_blocked(page: Any) -> None:
         re.compile(r"You can.?t join this (video )?call", re.IGNORECASE)
     )
     if await blocked.count() and await blocked.first.is_visible():
-        raise RuntimeError(JOIN_BLOCKED_ERROR)
+        raise JoinRefusedError(JOIN_BLOCKED_ERROR)
 
 
 async def _ensure_media_muted(

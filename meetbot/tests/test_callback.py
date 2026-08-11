@@ -141,6 +141,35 @@ async def test_health_webhook_uses_non_terminal_envelope_and_unique_key(
 
 
 @pytest.mark.asyncio
+async def test_status_transition_uses_durable_health_ingress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    monkeypatch.setattr("meetbot.callback.httpx.AsyncClient", lambda **_: client)
+    sender = MeetingWebhookCallback(
+        MeetbotConfig(
+            bridge_token="bridge-secret",
+            callback_url="http://api:8000",
+            private_root=tmp_path,
+        )
+    )
+    record = _terminal_record()
+    record.status = "admitted"
+    record.joined_at = "2026-08-03T14:00:10Z"
+    record.ended_at = None
+
+    await sender.send_status(record)
+
+    _, body, headers = client.posts[0]
+    assert body["kind"] == "meeting_session_health"
+    assert body["payload"]["status"] == "admitted"
+    assert body["payload"]["joined_at"] == "2026-08-03T14:00:10Z"
+    assert body["idempotency_key"] == "meeting-status-session-1-admitted"
+    assert headers["X-Illo-Idempotency-Key"] == body["idempotency_key"]
+
+
+@pytest.mark.asyncio
 async def test_transcript_webhook_retries_three_times_then_dead_letters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -62,6 +62,7 @@ EXPECTED_TABLES = {
     "memory_assertions",
     "memory_edges",
     "memory_health_log",
+    "meetbot_sessions",
     "memory_node_embeddings",
     "memory_nodes",
     "memory_sources",

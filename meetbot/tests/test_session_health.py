@@ -80,6 +80,9 @@ class _RecordingSender:
     async def send_transcript(self, record: SessionRecord) -> None:
         self.terminal.append(record.completion_payload())
 
+    async def send_status(self, record: SessionRecord) -> None:
+        return None
+
     async def send_health(
         self,
         snapshot: SessionHealthSnapshot,

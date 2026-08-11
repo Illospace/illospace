@@ -15,6 +15,7 @@ from meetbot.config import MeetbotConfig
 from meetbot.models import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
+    JoinRefusedError,
     MeetEngine,
     Origin,
     SessionEvents,
@@ -91,6 +92,7 @@ class SessionManager:
     async def join(
         self,
         *,
+        session_id: str | None = None,
         meeting_url: str,
         display_name: str | None,
         origin: Origin,
@@ -105,7 +107,7 @@ class SessionManager:
                     raise ActiveSessionError(active.record.session_id)
                 self._active_session_id = None
 
-            session_id = str(uuid4())
+            session_id = session_id or str(uuid4())
             transcript_path, transcript_md_path = TranscriptWriter.public_paths(session_id)
             record = SessionRecord(
                 session_id=session_id,
@@ -212,6 +214,10 @@ class SessionManager:
             except Exception:
                 logger.exception("Meetbot could not click leave at the hard session cap")
             await self._finish(record, "ended")
+        except JoinRefusedError as exc:
+            record.error = str(exc) or exc.__class__.__name__
+            record.end_reason = "refused"
+            await self._finish(record, "failed")
         except asyncio.CancelledError:
             if record.status not in TERMINAL_STATUSES:
                 record.error = "Meetbot stopped while the meeting session was active."
@@ -264,6 +270,15 @@ class SessionManager:
         if status in TERMINAL_STATUSES:
             record.ended_at = timestamp
         self._active_managed_session(record.session_id).writer.write_session(record)
+        if status in ACTIVE_STATUSES:
+            try:
+                await self._webhook_sender.send_status(record)
+            except Exception:
+                logger.exception(
+                    "Meetbot could not deliver or dead-letter status %s for session %s",
+                    status,
+                    record.session_id,
+                )
 
     async def _on_status(self, session_id: str, status: SessionStatus) -> None:
         record = self.get(session_id)

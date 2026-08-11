@@ -33,6 +33,10 @@ from brain.systems.meetings.message import (
     compose_meeting_health_warning_message,
     compose_post_meeting_run_message,
 )
+from brain.systems.meetings.session_record import (
+    record_meetbot_health,
+    record_meetbot_terminal,
+)
 from brain.systems.runs.work_intake import WorkIntakeEvent
 from brain.systems.slack.delivery_routes import (
     SlackDeliveryRoute,
@@ -67,6 +71,12 @@ async def process_meeting_transcript_envelope(
 ) -> dict[str, Any]:
     """Admit one post-meeting run, preserving its Slack route when possible."""
 
+    try:
+        payload = _validate_payload(normalized.get("payload"))
+    except MeetingTranscriptValidationError:
+        pass
+    else:
+        await record_meetbot_terminal(session, payload)
     return await admit_surface_envelope(
         session,
         context=context,
@@ -87,6 +97,12 @@ async def process_meeting_session_health_envelope(
 ) -> dict[str, Any]:
     """Persist health observations and admit only warnings to the meeting route."""
 
+    try:
+        payload = _validate_health_payload(normalized.get("payload"))
+    except MeetingTranscriptValidationError:
+        pass
+    else:
+        await record_meetbot_health(session, payload)
     preparation = await prepare_surface_envelope(
         session,
         context=context,
@@ -307,7 +323,10 @@ def _validate_payload(raw_payload: Any) -> dict[str, Any]:
     ]
     origin = _validated_origin(payload)
     started_at = str(payload.get("started_at") or "").strip() or None
+    joined_at = str(payload.get("joined_at") or "").strip() or None
     ended_at = str(payload.get("ended_at") or "").strip() or None
+    if joined_at is not None and coerce_datetime(joined_at) is None:
+        raise MeetingTranscriptValidationError("joined_at must be a valid timestamp")
     if status == "ended":
         if coerce_datetime(started_at) is None or coerce_datetime(ended_at) is None:
             raise MeetingTranscriptValidationError(
@@ -348,6 +367,7 @@ def _validate_payload(raw_payload: Any) -> dict[str, Any]:
         "_resolved_transcript_path": str(transcript_path) if transcript_path else None,
         "_resolved_transcript_md_path": str(transcript_md_path) if transcript_md_path else None,
         "started_at": started_at,
+        "joined_at": joined_at,
         "ended_at": ended_at,
         "caption_lines": caption_lines,
         "participants": participants,
@@ -355,6 +375,7 @@ def _validate_payload(raw_payload: Any) -> dict[str, Any]:
         "requested_by": str(payload.get("requested_by") or "").strip() or None,
         "warning": str(payload.get("warning") or "").strip() or None,
         "error": str(payload.get("error") or "").strip() or None,
+        "end_reason": str(payload.get("end_reason") or "").strip() or None,
     }
 
 
