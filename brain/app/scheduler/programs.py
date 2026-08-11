@@ -97,8 +97,8 @@ SINGLE_COMMAND_PROGRAM_REGISTRY: dict[str, SingleCommandProgram] = {
         command=("python3", "-m", "brain.jobs.pipelines.workspace_gc"),
         step_key="workspace_gc",
         description=(
-            "Reclaim headless-worker workspaces older than 48 hours when parent runs are "
-            "terminal or absent from the database"
+            "Reclaim headless-worker workspaces past the active storage-policy retention "
+            "window when parent runs are terminal or absent from the database"
         ),
     ),
     "cortex_canvas_occupancy": SingleCommandProgram(

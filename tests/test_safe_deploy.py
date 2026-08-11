@@ -439,6 +439,7 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "docker update --restart=no" in runtime_lib
     assert 'docker kill -s TERM "$worker_id"' in runtime_lib
     assert "wait_for_worker_exit" in runtime_lib
+    assert "wait_for_idle_worker_exit" in runtime_lib
     assert "compose up -d --force-recreate --no-deps worker" in runtime_lib
     assert "compose up -d --force-recreate --remove-orphans" in upgrade
     assert "replace_idle_worker" in combined
@@ -975,7 +976,7 @@ compose() {{ :; }}
 worker_container_id() {{ printf 'old-worker\\n'; }}
 worker_swap_snapshot() {{ printf 'snapshot\\n'; }}
 worker_swap_snapshot_decision() {{ printf 'replace\\n'; }}
-wait_for_worker_exit() {{ return 0; }}
+wait_for_idle_worker_exit() {{ return 0; }}
 replace_idle_worker
 '''
 
@@ -1004,7 +1005,7 @@ compose() {{ :; }}
 worker_container_id() {{ printf 'old-worker\\n'; }}
 worker_swap_snapshot() {{ printf 'snapshot\\n'; }}
 worker_swap_snapshot_decision() {{ printf 'replace\\n'; }}
-wait_for_worker_exit() {{ return 0; }}
+wait_for_idle_worker_exit() {{ return 0; }}
 replace_idle_worker
 '''
 
@@ -1246,7 +1247,7 @@ compose() {{ return 1; }}
 worker_container_id() {{ printf 'old-worker\\n'; }}
 worker_swap_snapshot() {{ printf 'snapshot\\n'; }}
 worker_swap_snapshot_decision() {{ printf 'replace\\n'; }}
-wait_for_worker_exit() {{ return 0; }}
+wait_for_idle_worker_exit() {{ return 0; }}
 replace_idle_worker
 '''
 

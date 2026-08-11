@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from brain.systems.storage_policy import storage_policy_field_schema
+
 
 DEPLOYMENT_TOOLS = [
     {
@@ -94,6 +96,41 @@ RUNTIME_PREFERENCE_TOOLS = [
                 "value": {
                     "type": "string",
                     "description": "Value for action=set; an IANA timezone or ET/Eastern alias.",
+                },
+            },
+        },
+    },
+    {
+        "name": "manage_storage_policy",
+        "description": (
+            "Read or revise the installation-wide storage policy without a deploy. "
+            "Use get for the active retention windows, capacity thresholds, and automatic "
+            "reclamation permission; history for the audit trail; update with a rationale "
+            "to append a new active revision; and revert with a prior policy_id and rationale."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get", "update", "history", "revert"],
+                    "default": "get",
+                },
+                "policy_id": {
+                    "type": "integer",
+                    "description": "Prior policy revision id required for revert.",
+                },
+                **storage_policy_field_schema(),
+                "rationale": {
+                    "type": "string",
+                    "description": "Required reason for update and revert actions.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "Maximum revisions returned by history.",
                 },
             },
         },

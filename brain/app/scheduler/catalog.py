@@ -213,8 +213,9 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
             "allowed_actions": ["scheduler.run"],
             "output_channel": "scheduler",
             "success_criteria": [
-                "Headless-worker workspaces older than 48 hours are reclaimed only when "
-                "the parent run is terminal or absent from the database"
+                "Headless-worker workspaces past the active storage-policy retention "
+                "window are reclaimed only when the parent run is terminal or absent "
+                "from the database"
             ],
         },
         "priority": 70,
@@ -233,7 +234,9 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "timezone": "UTC",
         "default_payload": {
             "name": "Cortex Canvas Occupancy",
-            "description": "Archive emerged thoughts after 24 quiet hours",
+            "description": (
+                "Archive emerged thoughts after the active storage-policy quiet window"
+            ),
         },
         "task_contract": {
             "memory_scope": {"visibility": "system"},

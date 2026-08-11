@@ -1,7 +1,7 @@
 """Neutral failure identity and latch/edge evaluation primitives."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
@@ -16,7 +16,7 @@ from typing import (
     Sequence,
     TypeAlias,
     TypeVar,
-    cast,
+    assert_never,
 )
 
 
@@ -166,6 +166,18 @@ class FailureGuardStatefulTrigger(Protocol[FailureGuardContextT]):
         """Return replacement state, or ``None`` to clear persisted state."""
 
 
+FailureGuardStatelessTriggerT = TypeVar(
+    "FailureGuardStatelessTriggerT",
+    bound=FailureGuardTrigger[Any],
+    covariant=True,
+)
+FailureGuardStatefulTriggerT = TypeVar(
+    "FailureGuardStatefulTriggerT",
+    bound=FailureGuardStatefulTrigger[Any],
+    covariant=True,
+)
+
+
 class FailureGuardTriggerMode(StrEnum):
     """A registered trigger's explicit evaluation and persistence mode."""
 
@@ -174,38 +186,21 @@ class FailureGuardTriggerMode(StrEnum):
 
 
 @dataclass(frozen=True)
-class FailureGuardTriggerRegistration(Generic[FailureGuardContextT]):
-    """Bind one trigger implementation to its declared dispatch mode."""
+class FailureGuardStatelessTriggerRegistration(
+    Generic[FailureGuardStatelessTriggerT]
+):
+    """Bind one stateless trigger to its literal dispatch mode."""
 
-    mode: FailureGuardTriggerMode
-    trigger: (
-        FailureGuardTrigger[FailureGuardContextT]
-        | FailureGuardStatefulTrigger[FailureGuardContextT]
+    trigger: FailureGuardStatelessTriggerT
+    mode: Literal[FailureGuardTriggerMode.STATELESS] = field(
+        default=FailureGuardTriggerMode.STATELESS,
+        init=False,
     )
 
     def __post_init__(self) -> None:
         trigger_name = type(self.trigger).__name__
-        if not isinstance(self.mode, FailureGuardTriggerMode):
-            raise ValueError(
-                f"Failure-guard trigger {trigger_name} has invalid mode: "
-                f"{self.mode!r}"
-            )
         stateless_method = "evaluate"
         stateful_methods = ("evaluate_with_state", "transition_state")
-        if self.mode is FailureGuardTriggerMode.STATEFUL:
-            missing_methods = [
-                method
-                for method in stateful_methods
-                if not callable(getattr(self.trigger, method, None))
-            ]
-            if missing_methods:
-                raise ValueError(
-                    f"Failure-guard trigger {trigger_name} declared stateful "
-                    "but is missing required method(s): "
-                    + ", ".join(missing_methods)
-                )
-            return
-
         if not callable(getattr(self.trigger, stateless_method, None)):
             raise ValueError(
                 f"Failure-guard trigger {trigger_name} declared stateless "
@@ -228,27 +223,74 @@ class FailureGuardTriggerRegistration(Generic[FailureGuardContextT]):
         return self.trigger.kind
 
 
+@dataclass(frozen=True)
+class FailureGuardStatefulTriggerRegistration(
+    Generic[FailureGuardStatefulTriggerT]
+):
+    """Bind one stateful trigger to its literal dispatch mode."""
+
+    trigger: FailureGuardStatefulTriggerT
+    mode: Literal[FailureGuardTriggerMode.STATEFUL] = field(
+        default=FailureGuardTriggerMode.STATEFUL,
+        init=False,
+    )
+
+    def __post_init__(self) -> None:
+        trigger_name = type(self.trigger).__name__
+        stateful_methods = ("evaluate_with_state", "transition_state")
+        missing_methods = [
+            method
+            for method in stateful_methods
+            if not callable(getattr(self.trigger, method, None))
+        ]
+        if missing_methods:
+            raise ValueError(
+                f"Failure-guard trigger {trigger_name} declared stateful "
+                "but is missing required method(s): "
+                + ", ".join(missing_methods)
+            )
+
+    @property
+    def kind(self) -> FailureGuardTriggerKind:
+        return self.trigger.kind
+
+
+FailureGuardTriggerRegistration: TypeAlias = (
+    FailureGuardStatelessTriggerRegistration[
+        FailureGuardTrigger[FailureGuardContextT]
+    ]
+    | FailureGuardStatefulTriggerRegistration[
+        FailureGuardStatefulTrigger[FailureGuardContextT]
+    ]
+)
+
+
 def require_failure_guard_registrations(
     triggers: Sequence[object], *, owner: str
 ) -> None:
     """Reject a registry entry that is a bare trigger rather than a registration.
 
     Without this, a raw trigger passes a consumer registry's own checks — it has
-    a ``kind`` — and skips ``FailureGuardTriggerRegistration.__post_init__``
-    entirely. The declared mode would then be missing at dispatch time, far from
-    the provider that omitted it, which is exactly the late failure this module
-    exists to prevent.
+    a ``kind`` — and skips the registration variant's validation entirely. The
+    declared mode would then be missing at dispatch time, far from the provider
+    that omitted it, which is exactly the late failure this module prevents.
     """
 
     unregistered = [
         type(trigger).__name__
         for trigger in triggers
-        if not isinstance(trigger, FailureGuardTriggerRegistration)
+        if not isinstance(
+            trigger,
+            (
+                FailureGuardStatelessTriggerRegistration,
+                FailureGuardStatefulTriggerRegistration,
+            ),
+        )
     ]
     if unregistered:
         raise ValueError(
             f"{owner} failure-guard triggers must be wrapped in "
-            "FailureGuardTriggerRegistration with an explicit mode; got bare "
+            "a failure-guard trigger registration; got bare "
             "trigger(s): " + ", ".join(unregistered)
         )
 
@@ -263,24 +305,17 @@ async def async_evaluate_failure_guard_triggers(
     states = dict(await store.load_trigger_states())
     results: list[FailureGuardTriggerResult] = []
     for registration in triggers:
-        trigger = registration.trigger
         if registration.mode is FailureGuardTriggerMode.STATEFUL:
-            stateful_trigger = cast(
-                FailureGuardStatefulTrigger[FailureGuardContextT],
-                trigger,
-            )
             results.append(
-                await stateful_trigger.evaluate_with_state(
+                await registration.trigger.evaluate_with_state(
                     context,
                     state=dict(states.get(registration.kind, {})),
                 )
             )
+        elif registration.mode is FailureGuardTriggerMode.STATELESS:
+            results.append(await registration.trigger.evaluate(context))
         else:
-            stateless_trigger = cast(
-                FailureGuardTrigger[FailureGuardContextT],
-                trigger,
-            )
-            results.append(await stateless_trigger.evaluate(context))
+            assert_never(registration)
     return tuple(results)
 
 
@@ -296,19 +331,21 @@ async def async_transition_failure_guard_trigger_states(
     for registration in triggers:
         if registration.mode is FailureGuardTriggerMode.STATELESS:
             continue
-        trigger = cast(
-            FailureGuardStatefulTrigger[FailureGuardContextT],
-            registration.trigger,
-        )
-        next_state = await trigger.transition_state(
-            context,
-            dict(states.get(registration.kind, {})),
-            event=event,
-        )
-        if next_state is None:
-            await store.delete_trigger_state(registration.kind)
-        else:
-            await store.save_trigger_state(registration.kind, dict(next_state))
+        if registration.mode is FailureGuardTriggerMode.STATEFUL:
+            next_state = await registration.trigger.transition_state(
+                context,
+                dict(states.get(registration.kind, {})),
+                event=event,
+            )
+            if next_state is None:
+                await store.delete_trigger_state(registration.kind)
+            else:
+                await store.save_trigger_state(
+                    registration.kind,
+                    dict(next_state),
+                )
+            continue
+        assert_never(registration)
 
 
 @dataclass(frozen=True)

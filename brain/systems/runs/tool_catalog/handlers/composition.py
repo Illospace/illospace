@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from inspect import Parameter, Signature
+
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser,
@@ -264,9 +266,56 @@ def _get_tool_handlers(
                 )
         return result
 
+    async def _manage_storage_policy(
+        action="get",
+        policy_id=None,
+        rationale=None,
+        limit=50,
+        **storage_values,
+    ):
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.systems.storage_policy import async_manage_storage_policy
+
+        actor_id = _current_run_id() or _current_agent_value("user_id")
+        async with UnitOfWork() as uow:
+            return await async_manage_storage_policy(
+                uow.session,
+                action=action,
+                policy_id=policy_id,
+                rationale=rationale,
+                source_type="agent",
+                source_id=str(actor_id) if actor_id is not None else None,
+                limit=limit,
+                **storage_values,
+            )
+
+    from brain.systems.storage_policy import storage_policy_field_schema
+
+    setattr(
+        _manage_storage_policy,
+        "__signature__",
+        Signature(
+            [
+                Parameter("action", Parameter.POSITIONAL_OR_KEYWORD, default="get"),
+                Parameter("policy_id", Parameter.POSITIONAL_OR_KEYWORD, default=None),
+                *(
+                    Parameter(
+                        field_name,
+                        Parameter.POSITIONAL_OR_KEYWORD,
+                        default=None,
+                    )
+                    for field_name in storage_policy_field_schema()
+                ),
+                Parameter("rationale", Parameter.POSITIONAL_OR_KEYWORD, default=None),
+                Parameter("limit", Parameter.POSITIONAL_OR_KEYWORD, default=50),
+            ]
+        ),
+    )
+
     _manage_deployment._illo_run_on_event_loop = True
     _manage_runtime_services._illo_run_on_event_loop = True
     _manage_runtime_preferences._illo_run_on_event_loop = True
+    _manage_storage_policy._illo_run_on_event_loop = True
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -322,6 +371,7 @@ def _get_tool_handlers(
             )
         ),
         "manage_runtime_preferences": _manage_runtime_preferences,
+        "manage_storage_policy": _manage_storage_policy,
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,

@@ -26,10 +26,10 @@ from brain.systems.failure_guard.core import (
     FailureGuardEvaluation,
     FailureGuardLifecycleEvent,
     FailureGuardStatefulTrigger,
+    FailureGuardStatefulTriggerRegistration,
+    FailureGuardStatelessTriggerRegistration,
     FailureGuardTrigger,
     FailureGuardTriggerKind,
-    FailureGuardTriggerMode,
-    FailureGuardTriggerRegistration,
     require_failure_guard_registrations,
     FailureGuardTriggerResult,
     FailureGuardTriggerState,
@@ -310,11 +310,11 @@ class CycleFailureGuardStatefulTrigger(
     """One state-owning cycle failure trigger."""
 
 
-CycleFailureGuardTriggerImplementation: TypeAlias = (
-    CycleFailureGuardTrigger | CycleFailureGuardStatefulTrigger
-)
 CycleRegisteredFailureGuardTrigger: TypeAlias = (
-    FailureGuardTriggerRegistration[CycleFailureGuardLifecycleContext]
+    FailureGuardStatelessTriggerRegistration[CycleFailureGuardTrigger]
+    | FailureGuardStatefulTriggerRegistration[
+        CycleFailureGuardStatefulTrigger
+    ]
 )
 
 
@@ -337,8 +337,7 @@ def cycle_failure_guard_registry() -> CycleFailureGuardRegistry:
     """Return every trigger applied to cycle terminal observations."""
     return CycleFailureGuardRegistry(
         triggers=(
-            FailureGuardTriggerRegistration(
-                mode=FailureGuardTriggerMode.STATEFUL,
+            FailureGuardStatefulTriggerRegistration(
                 trigger=CycleConsecutiveFailuresTrigger(),
             ),
         )

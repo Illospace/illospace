@@ -28,10 +28,9 @@ from brain.systems.runs.status import (
     coerce_run_status,
     project_run_status_value,
 )
+from brain.systems.storage_policy import async_get_storage_policy
 
 log = logging.getLogger(__name__)
-
-HEADLESS_WORKER_WORKSPACE_RETENTION = timedelta(hours=48)
 
 
 class WorkspaceGCResult(TypedDict):
@@ -153,17 +152,21 @@ async def reclaim_headless_worker_workspaces(
     *,
     workspace_root: Path,
     now: datetime | None = None,
-    retention: timedelta = HEADLESS_WORKER_WORKSPACE_RETENTION,
+    retention: timedelta | None = None,
 ) -> WorkspaceGCResult:
     """Delete old worker workspaces whose parent run is terminal or absent."""
 
     result = _empty_result()
-    cutoff = now or datetime.now(timezone.utc)
-    cutoff = cutoff.astimezone(timezone.utc) - retention
     ideas = workspace_root.expanduser() / "ideas"
     if not ideas.exists():
         log.info("Workspace GC complete: %s", result)
         return result
+    if retention is None:
+        policy = await async_get_storage_policy(session)
+        retention = policy.finished_workspace_retention
+    if retention.total_seconds() <= 0:
+        raise ValueError("retention must be positive")
+    cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - retention
 
     try:
         root = workspace_root.expanduser().resolve(strict=True)

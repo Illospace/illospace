@@ -14,18 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.thought_lifecycle import ThoughtStatusCommand, transition_thought_status
+from brain.systems.storage_policy import async_get_storage_policy
 
 log = logging.getLogger(__name__)
 
-CANVAS_QUIET_HOURS = 24
-ARCHIVE_TRIGGER = "canvas_occupancy_24h_quiet"
+ARCHIVE_TRIGGER = "canvas_occupancy_quiet"
 
 
 async def archive_dormant_emerged(
     session: AsyncSession,
     *,
     now: datetime | None = None,
-    quiet_hours: int = CANVAS_QUIET_HOURS,
+    quiet_hours: int | None = None,
     batch_size: int = 250,
 ) -> int:
     """Archive emerged thoughts after a bounded quiet period.
@@ -33,8 +33,13 @@ async def archive_dormant_emerged(
     The canonical lifecycle service sets ``archived_at`` and records the
     transition in ``idea_state_log``. Other states are never changed here.
     """
+    if quiet_hours is None:
+        policy = await async_get_storage_policy(session)
+        quiet_period = policy.canvas_quiet_period
+    else:
+        quiet_period = timedelta(hours=quiet_hours)
     changed_at = now or datetime.now(timezone.utc)
-    cutoff = changed_at - timedelta(hours=quiet_hours)
+    cutoff = changed_at - quiet_period
     archived = 0
 
     while True:
@@ -73,8 +78,13 @@ async def archive_dormant_emerged(
 
 async def run() -> dict[str, int]:
     async with UnitOfWork() as uow:
-        archived = await archive_dormant_emerged(uow.session)  # type: ignore[arg-type]
-    result = {"archived": archived, "quiet_hours": CANVAS_QUIET_HOURS}
+        policy = await async_get_storage_policy(uow.session)
+        quiet_hours = policy.canvas_quiet_period // timedelta(hours=1)
+        archived = await archive_dormant_emerged(
+            uow.session,  # type: ignore[arg-type]
+            quiet_hours=quiet_hours,
+        )
+    result = {"archived": archived, "quiet_hours": quiet_hours}
     log.info("Cortex occupancy maintenance complete: %s", result)
     return result
 

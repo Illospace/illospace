@@ -38,10 +38,10 @@ def _simulator(
     it, `docker rm` removes it, and `compose up --force-recreate` swaps the
     service container for a new id. Handoff ids carry Compose's one-off label.
 
-    With `stub_drain_wait=False` the real `wait_for_worker_exit` runs, with
-    `sleep` replaced by a tick counter so the loop is instantaneous. The worker
-    it waits on never drains, so the only way the wait can end is the condition
-    under test.
+    With `stub_drain_wait=False` the real covered and idle wait functions run,
+    with `sleep` replaced by a tick counter so the loop is instantaneous. The
+    worker they wait on never drains, so the only way the wait can end is the
+    condition under test.
     """
 
     state.mkdir(parents=True, exist_ok=True)
@@ -178,7 +178,8 @@ start_worker_handoff() {{
 
 # The drain never completes: the worker is wedged on an in-flight run, which is
 # what run 2896 did on illo-dev for 65 minutes.
-{'wait_for_worker_exit() { [ ! -f "$STATE/$1.running" ]; }' if stub_drain_wait else ''}
+{'''wait_for_worker_exit() { [ ! -f "$STATE/$1.running" ]; }
+wait_for_idle_worker_exit() { [ ! -f "$STATE/$1.running" ]; }''' if stub_drain_wait else ''}
 
 {body}
 echo "STATUS=$?"
@@ -415,7 +416,7 @@ def test_idle_deadline_is_abandoned_and_rearmed_when_active_runs_reappear(tmp_pa
             'case "$(ticks)" in 18) printf \'1\\n\' ;; *) printf \'0\\n\' ;; esac; }\n'
             'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
             "SECONDS=$((SECONDS + $1)); return 0; }\n"
-            "wait_for_worker_exit worker-1 ''"
+            "wait_for_idle_worker_exit worker-1"
         ),
         stub_drain_wait=False,
         drain_timeout_seconds=300,
@@ -441,7 +442,7 @@ def test_active_run_at_idle_deadline_requires_two_fresh_zero_snapshots(tmp_path)
             'case "$(ticks)" in 19) printf \'1\\n\' ;; *) printf \'0\\n\' ;; esac; }\n'
             'sleep() { local n; n=$(( $(ticks) + 1 )); printf "%s\\n" "$n" > "$STATE/ticks"; '
             "SECONDS=$((SECONDS + $1)); return 0; }\n"
-            "wait_for_worker_exit worker-1 ''"
+            "wait_for_idle_worker_exit worker-1"
         ),
         stub_drain_wait=False,
         drain_timeout_seconds=300,

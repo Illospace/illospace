@@ -12,6 +12,7 @@ from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler, SQLiteDDLCompile
 from brain.platform.db.base import Base
 from brain.platform.db.models.idea import Idea, IdeaConnection, IdeaStateLog, IdeaThread
 from brain.platform.db.models.org import Org, User
+from brain.platform.db.models.storage_policy import StoragePolicy
 from brain.platform.db.repositories.ideas import (
     IdeaConnectionRepository,
     IdeaRepository,
@@ -73,6 +74,7 @@ async def session(async_sqlite_session_factory):
             IdeaStateLog.__table__,
             IdeaConnection.__table__,
             IdeaThread.__table__,
+            StoragePolicy.__table__,
         ],
         connect_listener=_register_sqlite_functions,
     )
@@ -81,6 +83,19 @@ async def session(async_sqlite_session_factory):
     s.add(org)
     user = User(id=USER_1, org_id=ORG_1, name="Alex", email="alex@test.com")
     s.add(user)
+    s.add(
+        StoragePolicy(
+            finished_workspace_retention_hours=48,
+            project_draft_retention_hours=168,
+            canvas_quiet_hours=24,
+            capacity_warn_percent=80,
+            capacity_critical_percent=90,
+            automatic_reclamation_allowed=False,
+            rationale="Test policy",
+            source_type="test",
+            is_active=True,
+        )
+    )
     await s.flush()
     return s
 
@@ -181,6 +196,23 @@ class TestIdeaRepository:
         assert (log.from_state, log.to_state, log.trigger) == (
             "emerged", "archived", ARCHIVE_TRIGGER
         )
+
+    async def test_canvas_occupancy_reads_runtime_quiet_window(self, session):
+        policy = await session.scalar(
+            select(StoragePolicy).where(StoragePolicy.is_active.is_(True))
+        )
+        policy.canvas_quiet_hours = 48
+        now = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+        retained = await _make_idea(
+            session,
+            status="emerged",
+            updated_at=now - timedelta(hours=25),
+        )
+
+        archived = await archive_dormant_emerged(session, now=now)
+
+        assert archived == 0
+        assert retained.status == "emerged"
 
     async def test_list_by_org(self, repo, session):
         await _make_idea(session, org_id=ORG_1)

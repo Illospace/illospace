@@ -12,7 +12,7 @@ def test_enabled_cycle_fixture_gate_passes_with_healthy_catalog(monkeypatch):
     assert report["ok"] is True
     assert {item["cycle_id"] for item in report["results"]} == {2, 8, 9}
     assert all(item["status"] == "passed" for item in report["results"])
-    assert all(item["tools"] == 91 for item in report["results"])
+    assert all(item["tools"] == 92 for item in report["results"])
 
 
 def test_enabled_cycle_fixture_gate_names_cycles_killed_by_128k_regression(monkeypatch):
@@ -31,7 +31,7 @@ def test_enabled_cycle_fixture_gate_names_cycles_killed_by_128k_regression(monke
     assert all("floor=" in item["diagnostic"] for item in failures.values())
     assert "ceiling=50486" in failures[2]["diagnostic"]
     assert "ceiling=57859" in failures[9]["diagnostic"]
-    assert all("tools=91" in item["diagnostic"] for item in failures.values())
+    assert all("tools=92" in item["diagnostic"] for item in failures.values())
 
 
 def test_compose_upgrade_runs_live_cycle_gate_after_doctor():
