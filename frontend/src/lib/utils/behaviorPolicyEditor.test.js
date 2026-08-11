@@ -340,3 +340,40 @@ test('preview client runs semantic edit and revert flows through the production 
   assert.equal(controller.state.data.history.items[0].reverted_from_id, appliedChangeId);
   assert.equal(controller.state.data.history.items[0].rationale, 'Restore the earlier preview behavior.');
 });
+
+test('preview client reviews a semantic diff when policy state is proxied', async () => {
+  const livePolicy = policy();
+  livePolicy.configuration = new Proxy(livePolicy.configuration, {});
+  assert.throws(() => structuredClone(livePolicy.configuration), { name: 'DataCloneError' });
+
+  const previewClient = createPreviewBehaviorPolicyClient({
+    cycleId: 7,
+    getPolicy: () => livePolicy,
+    getHistory: () => history(),
+    commit: () => {},
+    scheduleLabel: (expression, timezone) => `${expression} (${timezone})`,
+  });
+  const controller = new EffectivePolicyWorkflowController({
+    client: previewClient,
+    cycleId: 7,
+    data: { policy: livePolicy, history: history() },
+  });
+
+  controller.startEditing();
+  const draft = hydratePolicyDraft(livePolicy);
+  draft.prompt = 'Review incidents and owners.';
+  controller.updateDraft(draft);
+  await controller.reviewDraft();
+
+  assert.equal(controller.state.error, undefined);
+  assert.equal(controller.state.kind, 'review');
+  assert.deepEqual(controller.state.review.preview.changed_fields, ['prompt']);
+  assert.deepEqual(controller.state.review.preview.diff, [{
+    field: 'prompt',
+    kind: 'value',
+    before: 'Review current priorities.',
+    after: 'Review incidents and owners.',
+    added: null,
+    removed: null,
+  }]);
+});

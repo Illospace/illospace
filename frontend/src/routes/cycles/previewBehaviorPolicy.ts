@@ -9,6 +9,8 @@ import type {
   EffectiveCyclePolicyRead,
 } from '$lib/api/client';
 
+import { clonePlainData } from '../../lib/utils/postMessageClone.ts';
+
 import {
   POLICY_FIELD_SCHEMA,
   type CyclePolicyEditorApi,
@@ -29,13 +31,9 @@ type PendingPreview = {
   revertedFromId: number | null;
 };
 
-function clone<Value>(value: Value): Value {
-  return structuredClone(value);
-}
-
 function snapshot(policy: EffectiveCyclePolicyRead): CyclePolicySnapshotRead {
   return {
-    configuration: clone(policy.configuration),
+    configuration: clonePlainData(policy.configuration),
     guidance: [...policy.guidance],
   };
 }
@@ -114,7 +112,7 @@ function conflict(policy: EffectiveCyclePolicyRead): never {
     status: 409,
     detail: {
       reason: 'version_conflict',
-      latest_effective_policy: clone(policy),
+      latest_effective_policy: clonePlainData(policy),
     },
   };
 }
@@ -163,7 +161,7 @@ export function createPreviewBehaviorPolicyClient(
       expected_version: policy.version,
       preview_digest: nextDigest(),
       before,
-      after: clone(after),
+      after: clonePlainData(after),
       changed_fields: changedFields,
       diff,
       warnings: [{
@@ -177,7 +175,7 @@ export function createPreviewBehaviorPolicyClient(
       reverted_from_id: revertedFromId,
     };
     pending.set(preview.preview_digest, { preview, revertedFromId });
-    return clone(preview);
+    return clonePlainData(preview);
   }
 
   function applyPending(
@@ -202,7 +200,7 @@ export function createPreviewBehaviorPolicyClient(
       actor_id: 'preview-user',
       source_reference: `preview:/cycles/${options.cycleId}/behavior-policy`,
     };
-    const after = clone(pendingPreview.preview.after);
+    const after = clonePlainData(pendingPreview.preview.after);
     const change: CyclePolicyChangeRead = {
       id: changeId,
       version,
@@ -215,7 +213,7 @@ export function createPreviewBehaviorPolicyClient(
       policy_kind: policy.policy_kind,
       target_type: policy.target_type,
       target_id: policy.target_id,
-      before_snapshot: clone(pendingPreview.preview.before),
+      before_snapshot: clonePlainData(pendingPreview.preview.before),
       after_snapshot: after,
       cycle_revision_id: revisionId,
     };
@@ -234,7 +232,7 @@ export function createPreviewBehaviorPolicyClient(
       ...policy,
       version,
       revision_id: revisionId,
-      configuration: clone(after.configuration),
+      configuration: clonePlainData(after.configuration),
       guidance: [...after.guidance],
       source: {
         revision_id: revisionId,
@@ -264,17 +262,17 @@ export function createPreviewBehaviorPolicyClient(
     };
     options.commit(nextPolicy, nextHistory);
     pending.delete(previewDigest);
-    return { effective_policy: clone(nextPolicy), change: clone(change) };
+    return { effective_policy: clonePlainData(nextPolicy), change: clonePlainData(change) };
   }
 
   const client: CyclePolicyEditorApi = {
-    getCycleBehaviorPolicy: async () => clone(options.getPolicy()),
+    getCycleBehaviorPolicy: async () => clonePlainData(options.getPolicy()),
     getCycleBehaviorPolicyHistory: async (_cycleId, limit = 50, offset = 0) => {
       const history = options.getHistory();
       const items = history.items.slice(offset, offset + limit);
       const nextOffset = offset + items.length;
       return {
-        items: clone(items),
+        items: clonePlainData(items),
         pagination: {
           limit,
           offset,
@@ -296,7 +294,7 @@ export function createPreviewBehaviorPolicyClient(
       const policy = options.getPolicy();
       const change = options.getHistory().items.find((item) => item.id === changeId);
       if (!change) throw new Error('The selected history entry is not available.');
-      return createPreview(policy, clone(change.before_snapshot), changeId);
+      return createPreview(policy, clonePlainData(change.before_snapshot), changeId);
     },
     applyCycleBehaviorPolicyRevert: async (_cycleId, _changeId, request) => applyPending(
       request.expected_version,
