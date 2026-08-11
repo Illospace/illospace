@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import fields
 from datetime import datetime
-from typing import Any, get_args
+from typing import Any, get_args, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
@@ -149,12 +149,16 @@ class CyclePolicyRevertApplyRequest(BaseModel):
 def _cycle_policy_configuration_read_model(
     snapshot_type: type[CyclePolicySnapshot],
 ) -> type[BaseModel]:
-    field_types = snapshot_type.configuration_field_types()
+    field_types = get_type_hints(snapshot_type)
+    response_type_overrides = {"retry_policy": dict[str, Any]}
     model_fields: dict[str, tuple[Any, Any]] = {}
     for snapshot_field in fields(snapshot_type):
         if snapshot_field.name == "guidance":
             continue
-        annotation = field_types[snapshot_field.name]
+        annotation = response_type_overrides.get(
+            snapshot_field.name,
+            field_types[snapshot_field.name],
+        )
         default = None if type(None) in get_args(annotation) else ...
         model_fields[snapshot_field.name] = (annotation, default)
         if snapshot_field.name == "schedule_expr":
