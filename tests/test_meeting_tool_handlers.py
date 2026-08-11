@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from brain.systems.meetings import client as meetbot_client
 from brain.systems.runs.tool_catalog.handlers import meetings as meeting_handlers
@@ -36,8 +37,10 @@ class _HTTPClient:
 
     async def request(self, method: str, url: str, **kwargs):
         if method == "POST" and url.endswith("/join"):
-            assert self.persistence_state["committed"] is True
-            assert len(self.persistence_state["rows"]) == 1
+            assert self.persistence_state["attempted"] is True
+            if not self.persistence_state["write_failed"]:
+                assert self.persistence_state["committed"] is True
+                assert len(self.persistence_state["rows"]) == 1
         self.requests.append({"method": method, "url": url, **kwargs})
         return self.responses.pop(0)
 
@@ -45,9 +48,16 @@ class _HTTPClient:
 def _patch_http(
     monkeypatch: pytest.MonkeyPatch,
     responses: list[httpx.Response],
+    *,
+    persistence_error: SQLAlchemyError | None = None,
 ) -> _HTTPClient:
     requested_session_id = str(responses[0].json().get("session_id") or "session-requested")
-    persistence_state: dict[str, Any] = {"committed": False, "rows": []}
+    persistence_state: dict[str, Any] = {
+        "attempted": False,
+        "committed": False,
+        "rows": [],
+        "write_failed": persistence_error is not None,
+    }
 
     class _UnitOfWork:
         session = object()
@@ -55,10 +65,13 @@ def _patch_http(
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, *_exc) -> None:
-            persistence_state["committed"] = True
+        async def __aexit__(self, exc_type, *_exc) -> None:
+            persistence_state["committed"] = exc_type is None
 
     async def create_requested(_session, **kwargs) -> None:
+        persistence_state["attempted"] = True
+        if persistence_error is not None:
+            raise persistence_error
         persistence_state["rows"].append(kwargs)
 
     monkeypatch.setattr(meeting_handlers, "UnitOfWork", _UnitOfWork)
@@ -73,6 +86,33 @@ def _patch_http(
     monkeypatch.setenv("ILLO_MEETBOT_URL", "http://meetbot:8010/")
     monkeypatch.setenv("ILLO_MEETBOT_TOKEN", "shared-secret")
     return client
+
+
+@pytest.mark.asyncio
+async def test_join_continues_when_request_record_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    http = _patch_http(
+        monkeypatch,
+        [
+            httpx.Response(
+                202,
+                json={"session_id": "session-write-failed", "status": "captions_flowing"},
+            )
+        ],
+        persistence_error=SQLAlchemyError("database unavailable"),
+    )
+
+    result = json.loads(
+        await _handle_join_meeting("https://meet.google.com/abc-defg-hij")
+    )
+
+    assert result["ok"] is True
+    assert result["session_id"] == "session-write-failed"
+    assert http.persistence_state["committed"] is False
+    assert http.requests[0]["url"] == "http://meetbot:8010/join"
+    assert "could not be recorded; continuing to join" in caplog.text
 
 
 @pytest.mark.asyncio

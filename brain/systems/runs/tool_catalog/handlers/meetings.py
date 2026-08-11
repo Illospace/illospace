@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any, Mapping
 from uuid import uuid4
@@ -23,6 +24,8 @@ from brain.systems.runs.tool_catalog.handlers.common import (
 )
 from brain.systems.runs.slack_delivery import slack_response_target
 
+logger = logging.getLogger(__name__)
+
 
 async def _handle_join_meeting(
     meeting_url: str,
@@ -32,9 +35,13 @@ async def _handle_join_meeting(
     if not meeting_url:
         return _error("join_meeting requires meeting_url")
     origin, requested_by = _current_slack_origin()
+    session_id = str(uuid4())
     try:
         client = MeetbotClient()
-        session_id = str(uuid4())
+    except (MeetbotConfigurationError, MeetbotServiceError, ValueError) as exc:
+        return _meetbot_error(exc)
+
+    try:
         async with UnitOfWork() as uow:
             await create_requested_meetbot_session(
                 uow.session,
@@ -42,6 +49,13 @@ async def _handle_join_meeting(
                 meeting_url=meeting_url,
                 requesting_run_id=_current_requesting_run_id(),
             )
+    except SQLAlchemyError:
+        logger.exception(
+            "Meetbot join request %s could not be recorded; continuing to join",
+            session_id,
+        )
+
+    try:
         joined = await client.join(
             session_id=session_id,
             meeting_url=meeting_url,
@@ -58,8 +72,6 @@ async def _handle_join_meeting(
         )
     except (MeetbotConfigurationError, MeetbotServiceError, ValueError) as exc:
         return _meetbot_error(exc)
-    except SQLAlchemyError:
-        return _error("meetbot join request could not be recorded in the database")
 
     status = str(current.get("status") or joined.get("status") or "starting").strip()
     result = {

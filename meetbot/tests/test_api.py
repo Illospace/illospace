@@ -13,7 +13,7 @@ from meetbot.app import create_app
 from meetbot.config import MeetbotConfig
 from meetbot.models import (
     EngineResult,
-    JoinRefusedError,
+    MeetbotSessionOutcome,
     SessionEvents,
     SessionHealthSnapshot,
     SessionRecord,
@@ -81,7 +81,7 @@ class FakeMeetingWebhookSender:
         self.payloads.append(record.completion_payload())
         self.sent.set()
 
-    async def send_status(self, record: SessionRecord) -> None:
+    async def send_status(self, snapshot: SessionHealthSnapshot) -> None:
         return None
 
     async def send_health(
@@ -110,6 +110,7 @@ def _join(client: TestClient, *, token: bool = True, url: str | None = None) -> 
         "/join",
         headers=headers,
         json={
+            "session_id": "session-from-brain",
             "meeting_url": url or "https://meet.google.com/abc-defg-hij?authuser=0",
             "origin": {"channel": "C123", "thread_ts": "1234.500"},
             "requested_by": "U123",
@@ -180,6 +181,16 @@ def test_join_validates_url_and_rejects_second_active_session(tmp_path: Path) ->
         webhook_sender=FakeMeetingWebhookSender(),
     )
     with TestClient(app) as client:
+        missing_session_id = client.post(
+            "/join",
+            headers={"X-Meetbot-Token": "meetbot-secret"},
+            json={
+                "meeting_url": "https://meet.google.com/abc-defg-hij",
+                "origin": {},
+            },
+        )
+        assert missing_session_id.status_code == 422
+
         invalid = _join(client, url="https://example.com/abc-defg-hij")
         assert invalid.status_code == 422
 
@@ -335,7 +346,7 @@ def test_lobby_timeout_fails_with_distinct_reason_and_actionable_error(
     )
     engine = FakeEngine(
         result=EngineResult(
-            reason="not_admitted",
+            reason=MeetbotSessionOutcome.NOT_ADMITTED,
             terminal_status="failed",
             error=message,
         )
@@ -355,15 +366,23 @@ def test_lobby_timeout_fails_with_distinct_reason_and_actionable_error(
         assert response["end_reason"] == "not_admitted"
         record = app.state.session_manager.get(session_id)
         assert record.end_reason == "not_admitted"
+        assert record.outcome is MeetbotSessionOutcome.NOT_ADMITTED
         assert sender.sent.wait(1.0)
         assert sender.payloads[0]["status"] == "failed"
         assert sender.payloads[0]["end_reason"] == "not_admitted"
+        assert sender.payloads[0]["outcome"] == "not_admitted"
         assert sender.payloads[0]["error"] == message
 
 
 def test_google_meet_refusal_is_reported_with_refusal_text(tmp_path: Path) -> None:
     refusal_text = "Your request to join was denied"
-    engine = FakeEngine(failure=JoinRefusedError(refusal_text))
+    engine = FakeEngine(
+        result=EngineResult(
+            reason=MeetbotSessionOutcome.REFUSED,
+            terminal_status="failed",
+            error=refusal_text,
+        )
+    )
     sender = FakeMeetingWebhookSender()
     app = create_app(
         config=_config(tmp_path),
@@ -377,9 +396,31 @@ def test_google_meet_refusal_is_reported_with_refusal_text(tmp_path: Path) -> No
 
         assert response["end_reason"] == "refused"
         assert response["error"] == refusal_text
+        assert app.state.session_manager.get(session_id).outcome is MeetbotSessionOutcome.REFUSED
         assert sender.sent.wait(1.0)
         assert sender.payloads[0]["end_reason"] == "refused"
+        assert sender.payloads[0]["outcome"] == "refused"
         assert sender.payloads[0]["error"] == refusal_text
+
+
+def test_unknown_engine_end_reason_surfaces_as_an_explicit_failure(
+    tmp_path: Path,
+) -> None:
+    sender = FakeMeetingWebhookSender()
+    app = create_app(
+        config=_config(tmp_path),
+        engine=FakeEngine(result=EngineResult(reason="new_unmapped_reason")),
+        webhook_sender=sender,
+    )
+
+    with TestClient(app) as client:
+        session_id = _join(client).json()["session_id"]
+        response = _wait_for_status(client, session_id, "failed")
+
+        assert response["end_reason"] == "error"
+        assert "Unknown meetbot engine end reason" in str(response["error"])
+        assert sender.sent.wait(1.0)
+        assert sender.payloads[0]["outcome"] == "not_admitted"
 
 
 def test_unknown_session_and_chat_before_admission_are_honest(tmp_path: Path) -> None:

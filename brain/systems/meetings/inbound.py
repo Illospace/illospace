@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +22,6 @@ from brain.systems.inbound.surface_admission import (
     SurfaceIdentity,
     SurfaceTarget,
     admit_prepared_surface_envelope,
-    admit_surface_envelope,
     complete_prepared_surface_envelope,
     prepare_surface_envelope,
 )
@@ -34,6 +33,8 @@ from brain.systems.meetings.message import (
     compose_post_meeting_run_message,
 )
 from brain.systems.meetings.session_record import (
+    MeetbotHealthUpdate,
+    MeetbotTerminalUpdate,
     record_meetbot_health,
     record_meetbot_terminal,
 )
@@ -43,6 +44,7 @@ from brain.systems.slack.delivery_routes import (
     build_delivery_trigger,
     resolve_delivery_route,
 )
+from meetbot.models import MeetbotSessionOutcome, SessionStatus
 
 
 MEETING_TRANSCRIPT_ENVELOPE_KIND = "meeting_transcript"
@@ -71,19 +73,28 @@ async def process_meeting_transcript_envelope(
 ) -> dict[str, Any]:
     """Admit one post-meeting run, preserving its Slack route when possible."""
 
-    try:
-        payload = _validate_payload(normalized.get("payload"))
-    except MeetingTranscriptValidationError:
-        pass
-    else:
-        await record_meetbot_terminal(session, payload)
-    return await admit_surface_envelope(
+    preparation = await prepare_surface_envelope(
         session,
         context=context,
         event=event,
         normalized=normalized,
         complete=complete,
         spec=MEETING_TRANSCRIPT_ADMISSION,
+    )
+    if isinstance(preparation, RejectedSurfaceEnvelope):
+        return preparation.result
+
+    payload = _prepared_meeting_payload(preparation.payload)
+    await record_meetbot_terminal(session, _terminal_update(payload))
+    return await admit_prepared_surface_envelope(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        complete=complete,
+        spec=MEETING_TRANSCRIPT_ADMISSION,
+        prepared=preparation,
+        work=WorkIntakeEvent.from_trigger_payload(preparation.payload),
     )
 
 
@@ -97,12 +108,6 @@ async def process_meeting_session_health_envelope(
 ) -> dict[str, Any]:
     """Persist health observations and admit only warnings to the meeting route."""
 
-    try:
-        payload = _validate_health_payload(normalized.get("payload"))
-    except MeetingTranscriptValidationError:
-        pass
-    else:
-        await record_meetbot_health(session, payload)
     preparation = await prepare_surface_envelope(
         session,
         context=context,
@@ -115,7 +120,8 @@ async def process_meeting_session_health_envelope(
         return preparation.result
 
     surface_context = dict(preparation.payload.get("_meeting_surface") or {})
-    payload = dict(surface_context.get("payload") or {})
+    payload = _prepared_meeting_payload(preparation.payload)
+    await record_meetbot_health(session, _health_update(payload))
     if not payload.get("warning"):
         return await complete_prepared_surface_envelope(
             context=context,
@@ -295,6 +301,39 @@ def _meeting_capture_status(payload: Mapping[str, Any]) -> str:
     return str(payload.get("status") or "")
 
 
+def _prepared_meeting_payload(
+    trigger_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    surface_context = dict(trigger_payload.get("_meeting_surface") or {})
+    return dict(surface_context.get("payload") or {})
+
+
+def _terminal_update(payload: Mapping[str, Any]) -> MeetbotTerminalUpdate:
+    return MeetbotTerminalUpdate(
+        session_id=str(payload["session_id"]),
+        outcome=cast(MeetbotSessionOutcome, payload["_outcome"]),
+        joined_at=payload["_joined_at_datetime"],
+        ended_at=payload["_ended_at_datetime"],
+        participant_count=len(payload["participants"]),
+        caption_count=int(payload["caption_lines"]),
+        refusal_text=(
+            str(payload.get("error") or "").strip() or None
+            if payload["_outcome"] is MeetbotSessionOutcome.REFUSED
+            else None
+        ),
+    )
+
+
+def _health_update(payload: Mapping[str, Any]) -> MeetbotHealthUpdate:
+    return MeetbotHealthUpdate(
+        session_id=str(payload["session_id"]),
+        status=cast(SessionStatus, payload["status"]),
+        joined_at=payload["_joined_at_datetime"],
+        participant_count=int(payload["participant_count"]),
+        caption_count=int(payload["caption_lines"]),
+    )
+
+
 def _validate_payload(raw_payload: Any) -> dict[str, Any]:
     if not isinstance(raw_payload, Mapping):
         raise MeetingTranscriptValidationError("meeting_transcript payload must be an object")
@@ -310,6 +349,19 @@ def _validate_payload(raw_payload: Any) -> dict[str, Any]:
     status = _required_text(payload, "status").lower()
     if status not in {"ended", "failed"}:
         raise MeetingTranscriptValidationError("status must be ended or failed")
+    try:
+        outcome = MeetbotSessionOutcome(_required_text(payload, "outcome").lower())
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in MeetbotSessionOutcome)
+        raise MeetingTranscriptValidationError(
+            f"outcome must be one of: {allowed}"
+        ) from exc
+    if outcome not in {
+        MeetbotSessionOutcome.LEFT,
+        MeetbotSessionOutcome.REFUSED,
+        MeetbotSessionOutcome.NOT_ADMITTED,
+    }:
+        raise MeetingTranscriptValidationError("outcome must be terminal")
 
     caption_lines = _nonnegative_int(payload, "caption_lines")
 
@@ -325,10 +377,25 @@ def _validate_payload(raw_payload: Any) -> dict[str, Any]:
     started_at = str(payload.get("started_at") or "").strip() or None
     joined_at = str(payload.get("joined_at") or "").strip() or None
     ended_at = str(payload.get("ended_at") or "").strip() or None
-    if joined_at is not None and coerce_datetime(joined_at) is None:
+    joined_datetime = coerce_datetime(joined_at)
+    ended_datetime = coerce_datetime(ended_at)
+    if joined_at is not None and joined_datetime is None:
         raise MeetingTranscriptValidationError("joined_at must be a valid timestamp")
+    if ended_datetime is None:
+        raise MeetingTranscriptValidationError(
+            "terminal meetings require a valid ended_at timestamp"
+        )
+    if outcome is MeetbotSessionOutcome.LEFT and joined_datetime is None:
+        raise MeetingTranscriptValidationError("left outcome requires joined_at")
+    if outcome in {
+        MeetbotSessionOutcome.REFUSED,
+        MeetbotSessionOutcome.NOT_ADMITTED,
+    } and joined_datetime is not None:
+        raise MeetingTranscriptValidationError(
+            f"{outcome.value} outcome cannot include joined_at"
+        )
     if status == "ended":
-        if coerce_datetime(started_at) is None or coerce_datetime(ended_at) is None:
+        if coerce_datetime(started_at) is None:
             raise MeetingTranscriptValidationError(
                 "ended meetings require valid started_at and ended_at timestamps"
             )
@@ -362,13 +429,17 @@ def _validate_payload(raw_payload: Any) -> dict[str, Any]:
         "session_id": session_id,
         "meeting_url": meeting_url,
         "status": status,
+        "outcome": outcome.value,
+        "_outcome": outcome,
         "transcript_path": str(payload.get("transcript_path") or "").strip() or None,
         "transcript_md_path": str(payload.get("transcript_md_path") or "").strip() or None,
         "_resolved_transcript_path": str(transcript_path) if transcript_path else None,
         "_resolved_transcript_md_path": str(transcript_md_path) if transcript_md_path else None,
         "started_at": started_at,
         "joined_at": joined_at,
+        "_joined_at_datetime": joined_datetime,
         "ended_at": ended_at,
+        "_ended_at_datetime": ended_datetime,
         "caption_lines": caption_lines,
         "participants": participants,
         "origin": origin,
@@ -403,7 +474,8 @@ def _validate_health_payload(raw_payload: Any) -> dict[str, Any]:
     started_at = _required_datetime(payload, "started_at")
     observed_at = _required_datetime(payload, "observed_at")
     joined_at = str(payload.get("joined_at") or "").strip() or None
-    if joined_at is not None and coerce_datetime(joined_at) is None:
+    joined_datetime = coerce_datetime(joined_at)
+    if joined_at is not None and joined_datetime is None:
         raise MeetingTranscriptValidationError("joined_at must be a valid timestamp")
     started_datetime = coerce_datetime(started_at)
     observed_datetime = coerce_datetime(observed_at)
@@ -421,6 +493,7 @@ def _validate_health_payload(raw_payload: Any) -> dict[str, Any]:
         "status": status,
         "started_at": started_at,
         "joined_at": joined_at,
+        "_joined_at_datetime": joined_datetime,
         "observed_at": observed_at,
         "caption_lines": caption_lines,
         "participant_count": participant_count,

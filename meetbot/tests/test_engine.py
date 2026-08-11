@@ -317,8 +317,6 @@ class _BlockedPage(_NeverAdmittedPage):
 def test_blocked_meeting_reports_the_real_cause() -> None:
     """Anonymous-join hard block (seen live 2026-08-03) must name itself."""
 
-    from meetbot.engine import JOIN_BLOCKED_ERROR, _raise_if_join_blocked
+    from meetbot.engine import JOIN_BLOCKED_ERROR, _join_blocked_error
 
-    with pytest.raises(RuntimeError) as excinfo:
-        asyncio.run(_raise_if_join_blocked(_BlockedPage()))
-    assert str(excinfo.value) == JOIN_BLOCKED_ERROR
+    assert asyncio.run(_join_blocked_error(_BlockedPage())) == JOIN_BLOCKED_ERROR

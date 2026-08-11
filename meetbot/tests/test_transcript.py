@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from meetbot.captions import CaptionLine
-from meetbot.models import Origin, SessionRecord
+from meetbot.models import MeetbotSessionOutcome, Origin, SessionRecord
 from meetbot.transcript import TranscriptWriter
 
 
@@ -22,6 +22,7 @@ def _record(session_id: str) -> SessionRecord:
         joined_at="2026-08-03T14:00:05Z",
         ended_at="2026-08-03T14:07:00Z",
         status="ended",
+        outcome=MeetbotSessionOutcome.LEFT,
         participants=["Alice", "Bob"],
         status_history=[
             {"status": "starting", "ts": "2026-08-03T14:00:00Z"},

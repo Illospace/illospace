@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import select
 
 from brain.platform.db.models.meetbot_session import MeetbotSession
 from brain.systems.meetings.session_record import (
+    MeetbotHealthUpdate,
+    MeetbotTerminalUpdate,
     create_requested_meetbot_session,
     record_meetbot_health,
     record_meetbot_terminal,
 )
+from meetbot.models import MeetbotSessionOutcome
 
 
 async def test_terminal_meetbot_session_outcomes_remain_distinguishable(
@@ -25,41 +30,37 @@ async def test_terminal_meetbot_session_outcomes_remain_distinguishable(
 
     await record_meetbot_terminal(
         session,
-        {
-            "session_id": "joined-session",
-            "meeting_url": meeting_url,
-            "joined_at": "2026-08-11T14:00:10Z",
-            "ended_at": "2026-08-11T15:00:00Z",
-            "end_reason": "leave_requested",
-            "participants": ["Reda", "Illo"],
-            "caption_lines": 12,
-        },
+        MeetbotTerminalUpdate(
+            session_id="joined-session",
+            outcome=MeetbotSessionOutcome.LEFT,
+            joined_at=datetime(2026, 8, 11, 14, 0, 10, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc),
+            participant_count=2,
+            caption_count=12,
+        ),
     )
     await record_meetbot_terminal(
         session,
-        {
-            "session_id": "refused-session",
-            "meeting_url": meeting_url,
-            "joined_at": None,
-            "ended_at": "2026-08-11T14:00:10Z",
-            "end_reason": "refused",
-            "error": "Your request to join was denied",
-            "participants": [],
-            "caption_lines": 0,
-        },
+        MeetbotTerminalUpdate(
+            session_id="refused-session",
+            outcome=MeetbotSessionOutcome.REFUSED,
+            joined_at=None,
+            ended_at=datetime(2026, 8, 11, 14, 0, 10, tzinfo=timezone.utc),
+            participant_count=0,
+            caption_count=0,
+            refusal_text="Your request to join was denied",
+        ),
     )
     await record_meetbot_terminal(
         session,
-        {
-            "session_id": "timeout-session",
-            "meeting_url": meeting_url,
-            "joined_at": None,
-            "ended_at": "2026-08-11T14:10:00Z",
-            "end_reason": "not_admitted",
-            "error": "Nobody admitted the bot within 10 minutes.",
-            "participants": [],
-            "caption_lines": 0,
-        },
+        MeetbotTerminalUpdate(
+            session_id="timeout-session",
+            outcome=MeetbotSessionOutcome.NOT_ADMITTED,
+            joined_at=None,
+            ended_at=datetime(2026, 8, 11, 14, 10, tzinfo=timezone.utc),
+            participant_count=0,
+            caption_count=0,
+        ),
     )
 
     rows = {
@@ -88,14 +89,13 @@ async def test_admission_status_promotes_requested_session(
 
     await record_meetbot_health(
         session,
-        {
-            "session_id": "admitted-session",
-            "meeting_url": meeting_url,
-            "status": "admitted",
-            "joined_at": "2026-08-11T14:00:10Z",
-            "participant_count": 2,
-            "caption_lines": 4,
-        },
+        MeetbotHealthUpdate(
+            session_id="admitted-session",
+            status="admitted",
+            joined_at=datetime(2026, 8, 11, 14, 0, 10, tzinfo=timezone.utc),
+            participant_count=2,
+            caption_count=4,
+        ),
     )
 
     row = await session.get(MeetbotSession, "admitted-session")
@@ -103,3 +103,24 @@ async def test_admission_status_promotes_requested_session(
     assert row.admitted_at is not None
     assert row.participant_count == 2
     assert row.caption_count == 4
+
+
+async def test_callback_does_not_fabricate_a_missing_request_row(
+    async_sqlite_session_factory,
+):
+    session = await async_sqlite_session_factory([MeetbotSession.__table__])
+
+    result = await record_meetbot_terminal(
+        session,
+        MeetbotTerminalUpdate(
+            session_id="missing-request",
+            outcome=MeetbotSessionOutcome.NOT_ADMITTED,
+            joined_at=None,
+            ended_at=datetime(2026, 8, 11, 14, 10, tzinfo=timezone.utc),
+            participant_count=0,
+            caption_count=0,
+        ),
+    )
+
+    assert result is None
+    assert await session.get(MeetbotSession, "missing-request") is None
