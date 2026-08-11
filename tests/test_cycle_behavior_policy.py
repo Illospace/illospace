@@ -8,8 +8,8 @@ import pytest
 from sqlalchemy import func, select
 
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleGuidance,
     CycleOutputTarget,
     CycleRevision,
@@ -66,7 +66,7 @@ async def policy_workspace(
             CycleGuidance.__table__,
             CycleOutputTarget.__table__,
             CycleRun.__table__,
-            BehaviorChangeAudit.__table__,
+            CycleBehaviorChangeAudit.__table__,
         ]
     )
     org_id = str(uuid4())
@@ -301,8 +301,8 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     assert len(history) == 1
     change = history[0]
     assert change.workspace_id == str(workspace.cycle.org_id)
-    assert change.policy_kind == "cycle"
-    assert change.target_type == "cycle"
+    assert not hasattr(change, "policy_kind")
+    assert not hasattr(change, "target_type")
     assert change.target_id == str(workspace.cycle.id)
     assert change.version == 1
     assert change.actor_type == "user"
@@ -313,7 +313,7 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     assert isinstance(change.after_snapshot, CyclePolicySnapshot)
     assert change.before_snapshot == preview.before.snapshot
     assert change.after_snapshot == preview.after_snapshot
-    stored_change = await workspace.session.get(BehaviorChangeAudit, change.id)
+    stored_change = await workspace.session.get(CycleBehaviorChangeAudit, change.id)
     assert stored_change.before_snapshot["snapshot_version"] == 1
     assert stored_change.after_snapshot["snapshot_version"] == 1
     assert change.changed_fields == preview.changed_fields
@@ -387,7 +387,7 @@ async def test_stale_version_and_stale_digest_return_latest_policy(policy_worksp
     assert stale_digest.reason == "stale_preview_digest"
     assert stale_digest.latest_effective_policy.version == 1
     assert await workspace.session.scalar(
-        select(func.count(BehaviorChangeAudit.id))
+        select(func.count(CycleBehaviorChangeAudit.id))
     ) == 1
 
 
@@ -501,7 +501,7 @@ async def test_apply_failure_rolls_back_the_entire_policy_write_set(
         )
     ) == 1
     assert await workspace.session.scalar(
-        select(func.count(BehaviorChangeAudit.id))
+        select(func.count(CycleBehaviorChangeAudit.id))
     ) == 0
 
 
@@ -551,7 +551,7 @@ async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_works
         workspace,
         CyclePolicyPatch(name="Changed policy"),
     )
-    stored_change = await workspace.session.get(BehaviorChangeAudit, first.change.id)
+    stored_change = await workspace.session.get(CycleBehaviorChangeAudit, first.change.id)
     stored_before = dict(stored_change.before_snapshot)
     stored_before.pop("max_concurrency")
     stored_before["retired_policy_field"] = "legacy value"
@@ -590,7 +590,7 @@ async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_works
     assert reverted.effective_policy.version == 2
     assert isinstance(reverted.effective_policy.snapshot, CyclePolicySnapshot)
     new_stored_change = await workspace.session.get(
-        BehaviorChangeAudit,
+        CycleBehaviorChangeAudit,
         reverted.change.id,
     )
     assert new_stored_change.before_snapshot["snapshot_version"] == 1
@@ -603,7 +603,7 @@ async def test_revert_decodes_snapshot_written_before_versioning(policy_workspac
         workspace,
         CyclePolicyPatch(name="Changed policy"),
     )
-    stored_change = await workspace.session.get(BehaviorChangeAudit, first.change.id)
+    stored_change = await workspace.session.get(CycleBehaviorChangeAudit, first.change.id)
     stored_before = dict(stored_change.before_snapshot)
     stored_before.pop("snapshot_version")
     stored_change.before_snapshot = stored_before
@@ -707,6 +707,8 @@ async def test_admitted_run_keeps_snapshot_and_next_run_gets_new_policy(policy_w
     ]
     assert second_run.context_snapshot["revision"]["id"] == applied.revision.id
     assert second_run.context_snapshot["behavior_change"]["id"] == applied.change.id
+    assert "policy_kind" not in second_run.context_snapshot["behavior_change"]
+    assert "target_type" not in second_run.context_snapshot["behavior_change"]
 
 
 async def test_workspace_authorization_and_delegated_agent_attribution(policy_workspace):

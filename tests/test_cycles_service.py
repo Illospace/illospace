@@ -34,8 +34,8 @@ from brain.systems.cycles.promotion_readiness import (
 )
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleFailureGuardLatch,
     CycleFailureGuardObservation,
     CycleFailureGuardTriggerState,
@@ -344,12 +344,12 @@ class _RouterCycleSession:
 
     async def scalar(self, statement):
         sql = str(statement)
-        if "max(behavior_change_audits.version)" in sql:
+        if "max(cycle_behavior_change_audits.version)" in sql:
             return max(
                 (
                     row.version
                     for row in self.added
-                    if isinstance(row, BehaviorChangeAudit)
+                    if isinstance(row, CycleBehaviorChangeAudit)
                 ),
                 default=0,
             )
@@ -1172,7 +1172,7 @@ async def test_cycle_update_persists_and_serializes_max_concurrency():
 
     assert cycle.max_concurrency == 4
     assert response["max_concurrency"] == 4
-    audit = next(row for row in db.added if isinstance(row, BehaviorChangeAudit))
+    audit = next(row for row in db.added if isinstance(row, CycleBehaviorChangeAudit))
     assert audit.before_snapshot["max_concurrency"] == 1
     assert audit.after_snapshot["max_concurrency"] == 4
     assert audit.cycle_revision_id == next(
