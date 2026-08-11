@@ -402,6 +402,38 @@ def test_manage_storage_policy_tool_is_registered_and_audited():
     assert registration.action_manifest is True
 
 
+def test_manage_workspace_reclamation_tool_is_coordinator_only_and_audited():
+    import inspect
+
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import (
+        action_policy_for_tool,
+        get_tool_registration,
+    )
+
+    name = "manage_workspace_reclamation"
+    assert name in _names(COORDINATOR_TOOLS)
+    assert name not in _names(WORKER_TOOLS)
+    handler = _get_tool_handlers()[name]
+    assert set(inspect.signature(handler).parameters) == {
+        "action",
+        "limit",
+        "max_reclaims",
+    }
+
+    registration = get_tool_registration(name)
+    assert registration is not None
+    assert [role.value for role in registration.availability] == ["coordinator"]
+    assert registration.permission == "manage_runtime"
+    assert registration.risk_class == "high"
+    assert registration.side_effect_class == "write"
+    assert registration.reversibility == "variable"
+    assert registration.action_manifest is True
+    assert action_policy_for_tool(name, kwargs={"action": "inventory"}) is None
+    assert action_policy_for_tool(name, kwargs={"action": "reclaim"}) is not None
+
+
 @pytest.mark.asyncio
 async def test_manage_storage_policy_handler_binds_the_derived_patch(monkeypatch):
     from brain.systems import storage_policy

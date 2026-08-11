@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from brain.jobs.pipelines.workspace_gc import reclaim_headless_worker_workspaces
+from brain.systems.workspace_reclamation import (
+    manage_headless_worker_workspaces,
+    reclaim_headless_worker_workspaces,
+)
 from brain.systems.runs.headless_worker_identity import (
     build_headless_worker_thread_id,
     headless_worker_directory_name,
@@ -30,9 +33,11 @@ class _Session:
         statuses: dict[int, str],
         *,
         retention_hours: int = 48,
+        automatic_reclamation_allowed: bool = False,
     ) -> None:
         self._statuses = statuses
         self._retention_hours = retention_hours
+        self._automatic_reclamation_allowed = automatic_reclamation_allowed
 
     async def scalar(self, _statement):
         return SimpleNamespace(
@@ -41,7 +46,7 @@ class _Session:
             canvas_quiet_hours=24,
             capacity_warn_percent=80,
             capacity_critical_percent=90,
-            automatic_reclamation_allowed=False,
+            automatic_reclamation_allowed=self._automatic_reclamation_allowed,
         )
 
     async def execute(self, _statement) -> _Rows:
@@ -92,7 +97,7 @@ async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(
         return inventory_workspace(path)
 
     monkeypatch.setattr(
-        "brain.jobs.pipelines.workspace_gc.inventory_workspace",
+        "brain.systems.workspace_reclamation.inventory_workspace",
         recording_inventory,
     )
 
@@ -105,7 +110,9 @@ async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(
     assert not workspace.exists()
     assert result["directories_reclaimed"] == 1
     assert result["bytes_reclaimed"] == len(payload)
-    assert inventoried == [workspace]
+    # The reclaim path measures once, then re-confirms the complete inventory
+    # immediately before deletion.
+    assert inventoried == [workspace, workspace]
 
 
 async def test_incomplete_inventory_prevents_workspace_reclamation(
@@ -136,6 +143,8 @@ async def test_incomplete_inventory_prevents_workspace_reclamation(
     assert workspace.is_dir()
     assert result["directories_reclaimed"] == 0
     assert result["errors"] == 1
+    assert result["workspaces"][0]["disposition"] == "incomplete_inventory"
+    assert result["workspaces"][0]["inventory_complete"] is False
 
 
 async def test_terminal_workspace_inside_retention_is_kept(tmp_path):
@@ -181,6 +190,189 @@ async def test_non_terminal_workspace_is_kept_past_retention(tmp_path):
     assert workspace.is_dir()
     assert result["directories_non_terminal"] == 1
     assert result["directories_reclaimed"] == 0
+    assert result["workspaces"][0]["disposition"] == "parent_run_non_terminal"
+
+
+async def test_reclamation_reconfirms_parent_status_after_inventory(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    workspace = _worker_workspace(
+        workspace_root,
+        115,
+        age=timedelta(days=7),
+    )
+
+    class _ChangingSession(_Session):
+        status_reads = 0
+
+        async def execute(self, _statement) -> _Rows:
+            self.status_reads += 1
+            status = "completed" if self.status_reads == 1 else "running"
+            return _Rows({115: status})
+
+    result = await reclaim_headless_worker_workspaces(
+        _ChangingSession({}),
+        workspace_root=workspace_root,
+        now=NOW,
+    )
+
+    assert workspace.is_dir()
+    assert result["directories_reclaimed"] == 0
+    assert result["bytes_reclaimed"] == 0
+    assert result["workspaces"][0]["disposition"] == "parent_run_non_terminal"
+
+
+async def test_inventory_action_reports_workspace_sizes_without_reclaiming(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    terminal_payload = b"terminal workspace"
+    running_payload = b"running workspace"
+    terminal = _worker_workspace(
+        workspace_root,
+        110,
+        age=timedelta(days=7),
+        payload=terminal_payload,
+    )
+    running = _worker_workspace(
+        workspace_root,
+        111,
+        age=timedelta(days=7),
+        payload=running_payload,
+    )
+
+    result = await manage_headless_worker_workspaces(
+        _Session({110: "completed", 111: "running"}),
+        action="inventory",
+        workspace_root=workspace_root,
+        now=NOW,
+    )
+
+    assert terminal.is_dir()
+    assert running.is_dir()
+    assert result["directories_reclaimed"] == 0
+    assert result["bytes_reclaimable"] == len(terminal_payload)
+    assert {
+        (item["parent_run_id"], item["bytes_used"], item["disposition"])
+        for item in result["workspaces"]
+    } == {
+        (110, len(terminal_payload), "reclaimable"),
+        (111, len(running_payload), "parent_run_non_terminal"),
+    }
+
+
+async def test_illo_tool_handler_uses_shared_workspace_service(monkeypatch, tmp_path):
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    captured = {}
+
+    class FakeUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fake_manage(session, **kwargs):
+        captured.update(session=session, **kwargs)
+        return {"action": kwargs["action"], "bytes_reclaimed": 0}
+
+    monkeypatch.setattr(
+        "brain.platform.db.repositories.unit_of_work.UnitOfWork",
+        FakeUnitOfWork,
+    )
+    monkeypatch.setattr(
+        "brain.systems.workspace_reclamation.manage_headless_worker_workspaces",
+        fake_manage,
+    )
+    monkeypatch.setattr(
+        "brain.kernel.config.resolve_workspace_root",
+        lambda: tmp_path,
+    )
+
+    result = await _get_tool_handlers()["manage_workspace_reclamation"](
+        action="inventory",
+        limit=12,
+        max_reclaims=4,
+    )
+
+    assert result == {"action": "inventory", "bytes_reclaimed": 0}
+    assert captured == {
+        "session": FakeUnitOfWork.session,
+        "action": "inventory",
+        "workspace_root": tmp_path,
+        "max_reclaims": 4,
+        "report_limit": 12,
+    }
+
+
+async def test_automatic_reclamation_reads_permission_from_policy(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    workspace = _worker_workspace(
+        workspace_root,
+        112,
+        age=timedelta(days=7),
+    )
+
+    disabled = await reclaim_headless_worker_workspaces(
+        _Session({112: "completed"}, automatic_reclamation_allowed=False),
+        workspace_root=workspace_root,
+        now=NOW,
+        automatic=True,
+    )
+
+    assert workspace.is_dir()
+    assert disabled["directories_scanned"] == 0
+    assert disabled["reclamation_skipped_reason"] == (
+        "automatic_reclamation_disabled_by_policy"
+    )
+
+    enabled = await reclaim_headless_worker_workspaces(
+        _Session({112: "completed"}, automatic_reclamation_allowed=True),
+        workspace_root=workspace_root,
+        now=NOW,
+        automatic=True,
+    )
+
+    assert not workspace.exists()
+    assert enabled["directories_reclaimed"] == 1
+    assert enabled["bytes_reclaimed"] == len(b"workspace data")
+
+
+async def test_reclamation_batch_is_bounded_and_reports_exact_freed_bytes(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    oldest_payload = b"oldest"
+    newer_payload = b"newer but still reclaimable"
+    oldest = _worker_workspace(
+        workspace_root,
+        113,
+        age=timedelta(days=8),
+        payload=oldest_payload,
+    )
+    newer = _worker_workspace(
+        workspace_root,
+        114,
+        age=timedelta(days=7),
+        payload=newer_payload,
+    )
+
+    result = await reclaim_headless_worker_workspaces(
+        _Session({113: "completed", 114: "completed"}),
+        workspace_root=workspace_root,
+        now=NOW,
+        max_reclaims=1,
+    )
+
+    assert not oldest.exists()
+    assert newer.is_dir()
+    assert result["max_reclaims"] == 1
+    assert result["directories_reclaimable"] == 2
+    assert result["directories_reclaimed"] == 1
+    assert result["bytes_reclaimed"] == len(oldest_payload)
+    assert any(
+        item["parent_run_id"] == 114
+        and item["disposition"] == "reclaim_limit_reached"
+        for item in result["workspaces"]
+    )
 
 
 async def test_missing_parent_run_is_treated_as_terminal_past_retention(tmp_path):
