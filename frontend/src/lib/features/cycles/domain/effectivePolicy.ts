@@ -1,10 +1,99 @@
 import type {
+  CyclePolicyApplyRead,
   CyclePolicyChangeRead,
   CyclePolicyConfigurationRead,
+  CyclePolicyDiffEntryRead,
   CyclePolicyFieldSourceRead,
   CyclePolicyJsonValue,
+  CyclePolicyPreviewRead,
+  CyclePolicyProposal,
+  CyclePolicyHistoryRead,
+  EffectiveCyclePolicyRead,
 } from '$lib/api/client';
+import type { RuntimeModelCatalogEntry } from '$lib/types/runtimeSettings';
 import { parseServerDate } from '../../../utils/datetime.ts';
+
+export type CyclePolicyDraft = {
+  prompt: string;
+  schedule_expr: string;
+  timezone: string;
+  enabled: boolean;
+  model_override: string;
+  thinking_override: string;
+  guidance: string[];
+};
+
+export type CyclePolicyDraftErrors = Partial<Record<keyof CyclePolicyDraft, string>>;
+
+export type CyclePolicyScheduleDiffValue = {
+  schedule_expr: string;
+  schedule_human: string;
+  timezone: string;
+};
+
+export type PresentedCyclePolicyDiff =
+  | {
+      key: string;
+      kind: 'value';
+      field: string;
+      label: string;
+      before: string;
+      after: string;
+    }
+  | {
+      key: 'schedule';
+      kind: 'schedule';
+      field: 'schedule';
+      label: 'Schedule';
+      before: CyclePolicyScheduleDiffValue;
+      after: CyclePolicyScheduleDiffValue;
+    }
+  | {
+      key: 'guidance';
+      kind: 'guidance';
+      field: 'guidance';
+      label: 'Guidance';
+      added: string[];
+      retired: string[];
+    };
+
+export type CyclePolicyReview =
+  | {
+      kind: 'edit';
+      proposal: CyclePolicyProposal;
+      preview: CyclePolicyPreviewRead;
+    }
+  | {
+      kind: 'revert';
+      changeId: number;
+      preview: CyclePolicyPreviewRead;
+    };
+
+type CyclePolicyEditorApi = Pick<
+  typeof import('$lib/api/client').api,
+  | 'previewCycleBehaviorPolicy'
+  | 'applyCycleBehaviorPolicy'
+  | 'previewCycleBehaviorPolicyRevert'
+  | 'applyCycleBehaviorPolicyRevert'
+  | 'getCycleBehaviorPolicy'
+  | 'getCycleBehaviorPolicyHistory'
+>;
+
+const THINKING_OVERRIDES = new Set(['', 'none', 'low', 'medium', 'high', 'xhigh']);
+const CRON_NAME_RANGES: Record<number, Record<string, number>> = {
+  3: {
+    JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6,
+    JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12,
+  },
+  4: { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 },
+};
+const CRON_RANGES: Array<[number, number]> = [
+  [0, 59],
+  [0, 23],
+  [1, 31],
+  [1, 12],
+  [0, 7],
+];
 
 export type CyclePolicyConfigurationEntry = {
   key: keyof CyclePolicyConfigurationRead & string;
@@ -18,6 +107,269 @@ export function policyConfigurationEntries(
     key: key as CyclePolicyConfigurationEntry['key'],
     value,
   }));
+}
+
+export function hydratePolicyDraft(policy: EffectiveCyclePolicyRead): CyclePolicyDraft {
+  return {
+    prompt: policy.configuration.prompt,
+    schedule_expr: policy.configuration.schedule_expr,
+    timezone: policy.configuration.timezone,
+    enabled: policy.configuration.enabled,
+    model_override: policy.configuration.model_override ?? '',
+    thinking_override: policy.configuration.thinking_override ?? '',
+    guidance: [...policy.guidance],
+  };
+}
+
+export function clonePolicyDraft(draft: CyclePolicyDraft): CyclePolicyDraft {
+  return { ...draft, guidance: [...draft.guidance] };
+}
+
+export function isPolicyDraftDirty(
+  draft: CyclePolicyDraft | null,
+  policy: EffectiveCyclePolicyRead | null,
+): boolean {
+  if (!draft || !policy) return false;
+  const baseline = hydratePolicyDraft(policy);
+  return (
+    draft.prompt !== baseline.prompt
+    || draft.schedule_expr !== baseline.schedule_expr
+    || draft.timezone !== baseline.timezone
+    || draft.enabled !== baseline.enabled
+    || draft.model_override !== baseline.model_override
+    || draft.thinking_override !== baseline.thinking_override
+    || draft.guidance.length !== baseline.guidance.length
+    || draft.guidance.some((value, index) => value !== baseline.guidance[index])
+  );
+}
+
+export function shouldConfirmPolicyDraftDiscard(
+  draft: CyclePolicyDraft | null,
+  policy: EffectiveCyclePolicyRead | null,
+): boolean {
+  return isPolicyDraftDirty(draft, policy);
+}
+
+function cronValue(value: string, fieldIndex: number): number | null {
+  if (/^\d+$/.test(value)) return Number(value);
+  return CRON_NAME_RANGES[fieldIndex]?.[value.toUpperCase()] ?? null;
+}
+
+function validCronAtom(value: string, fieldIndex: number): boolean {
+  const [minimum, maximum] = CRON_RANGES[fieldIndex];
+  const [rangePart, stepPart, ...extra] = value.split('/');
+  if (extra.length || (stepPart !== undefined && (!/^\d+$/.test(stepPart) || Number(stepPart) < 1))) {
+    return false;
+  }
+  if (rangePart === '*') return true;
+  const [startPart, endPart, ...rangeExtra] = rangePart.split('-');
+  if (rangeExtra.length) return false;
+  const start = cronValue(startPart, fieldIndex);
+  if (start === null || start < minimum || start > maximum) return false;
+  if (endPart === undefined) return true;
+  const end = cronValue(endPart, fieldIndex);
+  return end !== null && end >= minimum && end <= maximum && start <= end;
+}
+
+export function isValidPolicySchedule(value: string): boolean {
+  const schedule = value.trim();
+  if (schedule.toLowerCase().startsWith('at:')) {
+    const timestamp = schedule.slice(3).trim();
+    return Boolean(timestamp) && !Number.isNaN(new Date(timestamp).getTime());
+  }
+  const fields = schedule.split(/\s+/);
+  return fields.length === 5 && fields.every((field, fieldIndex) =>
+    field.split(',').every((atom) => Boolean(atom) && validCronAtom(atom, fieldIndex)));
+}
+
+export function isValidPolicyTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value.trim() }).format();
+    return Boolean(value.trim());
+  } catch {
+    return false;
+  }
+}
+
+export function validatePolicyDraft(
+  draft: CyclePolicyDraft,
+  modelCatalog: readonly Pick<RuntimeModelCatalogEntry, 'id'>[],
+  currentModel: string | null = null,
+): CyclePolicyDraftErrors {
+  const errors: CyclePolicyDraftErrors = {};
+  const prompt = draft.prompt.trim();
+  const schedule = draft.schedule_expr.trim();
+  const timezone = draft.timezone.trim();
+  const model = draft.model_override.trim();
+  const guidance = draft.guidance.map((value) => value.trim());
+
+  if (!prompt) errors.prompt = 'Mission prompt is required.';
+  else if (prompt.length > 20_000) errors.prompt = 'Mission prompt must be 20,000 characters or fewer.';
+  if (!schedule) errors.schedule_expr = 'Schedule is required.';
+  else if (schedule.length > 100 || !isValidPolicySchedule(schedule)) {
+    errors.schedule_expr = 'Use a valid five-field cron rule or one-time at: timestamp.';
+  }
+  if (!timezone) errors.timezone = 'Timezone is required.';
+  else if (timezone.length > 64 || !isValidPolicyTimezone(timezone)) {
+    errors.timezone = 'Use a valid IANA timezone, such as America/Toronto.';
+  }
+  if (model) {
+    const supportedModels = new Set(modelCatalog.map((entry) => entry.id));
+    if (currentModel) supportedModels.add(currentModel);
+    if (!supportedModels.has(model)) errors.model_override = 'Select a supported model.';
+  }
+  if (!THINKING_OVERRIDES.has(draft.thinking_override)) {
+    errors.thinking_override = 'Select a supported thinking level.';
+  }
+  if (guidance.some((value) => !value)) {
+    errors.guidance = 'Guidance cannot be empty.';
+  } else if (new Set(guidance).size !== guidance.length) {
+    errors.guidance = 'Guidance entries must be unique.';
+  }
+  return errors;
+}
+
+export function policyProposalFromDraft(draft: CyclePolicyDraft): CyclePolicyProposal {
+  return {
+    prompt: draft.prompt.trim(),
+    schedule_expr: draft.schedule_expr.trim(),
+    timezone: draft.timezone.trim(),
+    enabled: draft.enabled,
+    model_override: draft.model_override.trim() || null,
+    thinking_override: draft.thinking_override || null,
+    guidance: draft.guidance.map((value) => value.trim()),
+  };
+}
+
+export async function reviewPolicyDraft(
+  client: CyclePolicyEditorApi,
+  cycleId: number,
+  draft: CyclePolicyDraft,
+  modelCatalog: readonly Pick<RuntimeModelCatalogEntry, 'id'>[],
+  currentModel: string | null = null,
+): Promise<{ review: CyclePolicyReview | null; errors: CyclePolicyDraftErrors }> {
+  const errors = validatePolicyDraft(draft, modelCatalog, currentModel);
+  if (Object.keys(errors).length) return { review: null, errors };
+  const proposal = policyProposalFromDraft(draft);
+  const preview = await client.previewCycleBehaviorPolicy(cycleId, { proposal });
+  return { review: { kind: 'edit', proposal, preview }, errors: {} };
+}
+
+export async function reviewPolicyRevert(
+  client: CyclePolicyEditorApi,
+  cycleId: number,
+  changeId: number,
+): Promise<CyclePolicyReview> {
+  return {
+    kind: 'revert',
+    changeId,
+    preview: await client.previewCycleBehaviorPolicyRevert(cycleId, changeId),
+  };
+}
+
+export async function applyPolicyReview(
+  client: CyclePolicyEditorApi,
+  cycleId: number,
+  review: CyclePolicyReview | null,
+  rationale: string,
+  confirmRevert: () => boolean = () => true,
+): Promise<{
+  applied: CyclePolicyApplyRead;
+  policy: EffectiveCyclePolicyRead;
+  history: CyclePolicyHistoryRead;
+} | null> {
+  if (!review) throw new Error('Review the change before applying it.');
+  const normalizedRationale = rationale.trim();
+  if (!normalizedRationale) throw new Error('Rationale is required.');
+  if (!review.preview.changed_fields.length) throw new Error('There are no changes to apply.');
+  if (review.kind === 'revert' && !confirmRevert()) return null;
+
+  const common = {
+    expected_version: review.preview.expected_version,
+    preview_digest: review.preview.preview_digest,
+    rationale: normalizedRationale,
+  };
+  const applied = review.kind === 'edit'
+    ? await client.applyCycleBehaviorPolicy(cycleId, {
+        proposal: review.proposal,
+        ...common,
+      })
+    : await client.applyCycleBehaviorPolicyRevert(cycleId, review.changeId, common);
+  const [policy, history] = await Promise.all([
+    client.getCycleBehaviorPolicy(cycleId),
+    client.getCycleBehaviorPolicyHistory(cycleId),
+  ]);
+  return { applied, policy, history };
+}
+
+export function recoverPolicyDraftAfterConflict(
+  draft: CyclePolicyDraft,
+  latestPolicy: EffectiveCyclePolicyRead,
+): { draft: CyclePolicyDraft; policy: EffectiveCyclePolicyRead } {
+  return { draft: clonePolicyDraft(draft), policy: latestPolicy };
+}
+
+function scheduleDiffValue(value: CyclePolicyJsonValue): CyclePolicyScheduleDiffValue | null {
+  if (!value || Array.isArray(value) || typeof value !== 'object') return null;
+  const scheduleExpr = value.schedule_expr;
+  const scheduleHuman = value.schedule_human;
+  const timezone = value.timezone;
+  if (typeof scheduleExpr !== 'string' || typeof scheduleHuman !== 'string' || typeof timezone !== 'string') {
+    return null;
+  }
+  return { schedule_expr: scheduleExpr, schedule_human: scheduleHuman, timezone };
+}
+
+export function guidanceDiff(entry: CyclePolicyDiffEntryRead): {
+  added: string[];
+  retired: string[];
+} {
+  return { added: [...(entry.added ?? [])], retired: [...(entry.removed ?? [])] };
+}
+
+export function presentedPolicyDiff(preview: CyclePolicyPreviewRead): PresentedCyclePolicyDiff[] {
+  const presented: PresentedCyclePolicyDiff[] = [];
+  let scheduleAdded = false;
+  for (const entry of preview.diff) {
+    if (entry.kind === 'schedule') {
+      if (scheduleAdded) continue;
+      const before = scheduleDiffValue(entry.before);
+      const after = scheduleDiffValue(entry.after);
+      if (before && after) {
+        presented.push({
+          key: 'schedule',
+          kind: 'schedule',
+          field: 'schedule',
+          label: 'Schedule',
+          before,
+          after,
+        });
+        scheduleAdded = true;
+      }
+      continue;
+    }
+    if (entry.kind === 'collection' && entry.field === 'guidance') {
+      const { added, retired } = guidanceDiff(entry);
+      presented.push({
+        key: 'guidance',
+        kind: 'guidance',
+        field: 'guidance',
+        label: 'Guidance',
+        added,
+        retired,
+      });
+      continue;
+    }
+    presented.push({
+      key: entry.field,
+      kind: 'value',
+      field: entry.field,
+      label: policyFieldLabel(entry.field),
+      before: policyValueLabel(entry.before),
+      after: policyValueLabel(entry.after),
+    });
+  }
+  return presented;
 }
 
 export function policyFieldLabel(field: string): string {

@@ -74,6 +74,7 @@
   let lastFocusCycleId = $state<number | null>(null);
   let lastRefreshSerial = $state<number | null>(null);
   let behaviorPolicyRefreshSerial = $state(0);
+  let behaviorPolicyDirty = $state(false);
   let unsubscribeCyclesChanged: (() => void) | null = null;
 
   const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -180,21 +181,8 @@
     return { ...base, cadence: 'custom' };
   }
 
-  function fillForm(cycle: CycleRead | null) {
-    if (!cycle) {
-      form = emptyForm();
-      return;
-    }
-    const schedule = parseSchedule(cycle);
-    form = {
-      name: cycle.name,
-      prompt: cycle.prompt,
-      ...schedule,
-      enabled: cycle.enabled,
-      modelOverride: cycle.model_override || '',
-      thinkingOverride: (cycle.thinking_override as FormState['thinkingOverride']) || '',
-      targetIdeaId: cycle.target_idea_id || '',
-    };
+  function resetCreateForm() {
+    form = emptyForm();
   }
 
   function scheduleExprFromForm(): string {
@@ -286,7 +274,6 @@
         : selectedCycle ?? nextCycles[0] ?? null;
       selectedCycleId = nextSelected?.id ?? null;
       isDraft = !nextSelected && isDraft;
-      if (nextSelected) fillForm(nextSelected);
       await loadRuns(nextSelected?.id ?? null);
       behaviorPolicyRefreshSerial += 1;
     } catch (err: any) {
@@ -297,22 +284,22 @@
   }
 
   async function selectCycle(cycle: CycleRead) {
+    if (!confirmDiscardBehaviorDraft()) return;
     selectedCycleId = cycle.id;
     isDraft = false;
-    fillForm(cycle);
     await loadRuns(cycle.id);
   }
 
   function newCycle() {
+    if (!confirmDiscardBehaviorDraft()) return;
     selectedCycleId = null;
     isDraft = true;
     runs = [];
-    fillForm(null);
+    resetCreateForm();
   }
 
   async function saveCycle() {
     const scheduleExpr = scheduleExprFromForm();
-    const wasUpdate = Boolean(selectedCycleId);
     const payload = {
       name: form.name.trim(),
       prompt: form.prompt.trim(),
@@ -322,7 +309,7 @@
       model_override: form.modelOverride.trim() || null,
       thinking_override: form.thinkingOverride || null,
       execution_mode: 'reuse_same_idea' as const,
-      target_idea_id: form.targetIdeaId || selectedCycle?.target_idea_id || null,
+      target_idea_id: form.targetIdeaId || null,
       reopen_archived: true,
     };
     if (!payload.name || !payload.prompt || !payload.schedule_expr) {
@@ -331,19 +318,26 @@
     }
     saving = true;
     try {
-      const saved = selectedCycleId
-        ? await api.updateCycle(selectedCycleId, payload)
-        : await api.createCycle(payload);
+      const saved = await api.createCycle(payload);
       selectedCycleId = saved.id;
       isDraft = false;
-      fillForm(saved);
-      ui.toast(wasUpdate ? 'Cycle saved' : 'Cycle created', 'success');
+      resetCreateForm();
+      ui.toast('Cycle created', 'success');
       await loadCycles(saved.id);
     } catch (err: any) {
       ui.toast(err?.detail || 'Failed to save cycle', 'error');
     } finally {
       saving = false;
     }
+  }
+
+  function confirmDiscardBehaviorDraft(): boolean {
+    return !behaviorPolicyDirty || window.confirm('Discard the current behavior draft?');
+  }
+
+  async function handlePolicyApplied() {
+    behaviorPolicyDirty = false;
+    await loadCycles(selectedCycleId);
   }
 
   async function runSelectedNow() {
@@ -373,12 +367,14 @@
 
   $effect(() => {
     if (!focusCycleId || focusCycleId === lastFocusCycleId) return;
+    if (behaviorPolicyDirty) return;
     lastFocusCycleId = focusCycleId;
     void loadCycles(focusCycleId);
   });
 
   $effect(() => {
     if (!refreshSerial || refreshSerial === lastRefreshSerial) return;
+    if (behaviorPolicyDirty) return;
     lastRefreshSerial = refreshSerial;
     void loadCycles(focusCycleId || selectedCycleId);
   });
@@ -386,6 +382,7 @@
   onMount(() => {
     void loadCycles(focusCycleId);
     unsubscribeCyclesChanged = wsClient.on('cycles_changed', (msg) => {
+      if (behaviorPolicyDirty) return;
       const cycleId = Number(msg?.cycle_id || 0) || selectedCycleId;
       void loadCycles(cycleId ?? null);
     });
@@ -437,17 +434,10 @@
     </button>
   {/if}
 
-  {#if isDraft || selectedCycle}
-    {#if selectedCycle}
-      <EffectiveCyclePolicyView
-        cycleId={selectedCycle.id}
-        compact
-        refreshSerial={behaviorPolicyRefreshSerial}
-      />
-    {/if}
+  {#if isDraft}
     <div class="cycle-pane-editor">
       <div class="cycle-pane-editor-head">
-        <span>{isDraft ? 'New cycle' : 'Selected cycle'}</span>
+        <span>New cycle</span>
         <strong>{schedulePreview}</strong>
       </div>
 
@@ -535,32 +525,38 @@
 
       <div class="cycle-pane-actions">
         <ConstellationButton variant="primary" size="sm" loading={saving} onclick={saveCycle}>
-          Save
+          Create
         </ConstellationButton>
-        {#if selectedCycleId}
-          <ConstellationButton variant="quiet" size="sm" onclick={runSelectedNow}>Run now</ConstellationButton>
-          <ConstellationButton variant="destructive" size="sm" onclick={deleteSelected}>Delete</ConstellationButton>
-        {/if}
       </div>
-
-      {#if selectedCycle}
-        <div class="cycle-pane-runs">
-          <span>Recent runs</span>
-          {#if runsLoading}
-            <small>Loading...</small>
-          {:else if runs.length === 0}
-            <small>No runs yet.</small>
-          {:else}
-            {#each runs as run (run.id)}
-              <article>
-                <strong>{formatDateTime(run.scheduled_for)}</strong>
-                <ConstellationPill variant={run.status === 'failed' ? 'danger' : run.status === 'completed' ? 'success' : 'muted'}>
-                  {run.status}
-                </ConstellationPill>
-              </article>
-            {/each}
-          {/if}
-        </div>
+    </div>
+  {:else if selectedCycle}
+    <EffectiveCyclePolicyView
+      cycleId={selectedCycle.id}
+      compact
+      editable
+      refreshSerial={behaviorPolicyRefreshSerial}
+      onPolicyApplied={handlePolicyApplied}
+      onDirtyChange={(dirty) => (behaviorPolicyDirty = dirty)}
+    />
+    <div class="cycle-pane-actions">
+      <ConstellationButton variant="quiet" size="sm" onclick={runSelectedNow}>Run now</ConstellationButton>
+      <ConstellationButton variant="destructive" size="sm" onclick={deleteSelected}>Delete</ConstellationButton>
+    </div>
+    <div class="cycle-pane-runs">
+      <span>Recent runs</span>
+      {#if runsLoading}
+        <small>Loading...</small>
+      {:else if runs.length === 0}
+        <small>No runs yet.</small>
+      {:else}
+        {#each runs as run (run.id)}
+          <article>
+            <strong>{formatDateTime(run.scheduled_for)}</strong>
+            <ConstellationPill variant={run.status === 'failed' ? 'danger' : run.status === 'completed' ? 'success' : 'muted'}>
+              {run.status}
+            </ConstellationPill>
+          </article>
+        {/each}
       {/if}
     </div>
   {/if}

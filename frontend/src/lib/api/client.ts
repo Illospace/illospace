@@ -518,6 +518,74 @@ export interface CyclePolicyHistoryRead {
   };
 }
 
+/** Mirrors the editable fields in the server CyclePolicyProposal schema. */
+export interface CyclePolicyProposal {
+  prompt?: string | null;
+  schedule_expr?: string | null;
+  timezone?: string | null;
+  enabled?: boolean | null;
+  model_override?: string | null;
+  thinking_override?: string | null;
+  guidance?: string[] | null;
+}
+
+export interface CyclePolicyPreviewRequest {
+  proposal: CyclePolicyProposal;
+}
+
+export interface CyclePolicyApplyRequest extends CyclePolicyPreviewRequest {
+  expected_version: number;
+  preview_digest: string;
+  rationale: string;
+}
+
+export interface CyclePolicyRevertApplyRequest {
+  expected_version: number;
+  preview_digest: string;
+  rationale: string;
+}
+
+export interface CyclePolicyDiffEntryRead {
+  field: string;
+  kind: string;
+  before: CyclePolicyJsonValue;
+  after: CyclePolicyJsonValue;
+  added: string[] | null;
+  removed: string[] | null;
+}
+
+export interface CyclePolicyWarningRead {
+  code: string;
+  message: string;
+}
+
+export interface CyclePolicyAffectedRunsRead {
+  admitted_runs: string;
+  future_runs: string;
+}
+
+export interface CyclePolicyPreviewRead {
+  expected_version: number;
+  preview_digest: string;
+  before: CyclePolicySnapshotRead;
+  after: CyclePolicySnapshotRead;
+  changed_fields: string[];
+  diff: CyclePolicyDiffEntryRead[];
+  warnings: CyclePolicyWarningRead[];
+  affected_runs: CyclePolicyAffectedRunsRead;
+  reverted_from_id: number | null;
+}
+
+export interface CyclePolicyApplyRead {
+  effective_policy: EffectiveCyclePolicyRead;
+  change: CyclePolicyChangeRead;
+}
+
+export interface CyclePolicyConflictDetail {
+  reason: string;
+  latest_effective_policy: EffectiveCyclePolicyRead;
+}
+
 export interface DomainFieldRead {
   id: number;
   domain_id: number;
@@ -1534,9 +1602,33 @@ export const api = {
     fetchJson<CycleRunRead>(`/api/cycles/${cycleId}/run`, { method: 'POST' }),
   getCycleBehaviorPolicy: (cycleId: number) =>
     fetchJson<EffectiveCyclePolicyRead>(`/api/cycles/${cycleId}/behavior-policy`),
+  previewCycleBehaviorPolicy: (cycleId: number, data: CyclePolicyPreviewRequest) =>
+    fetchJson<CyclePolicyPreviewRead>(`/api/cycles/${cycleId}/behavior-policy/preview`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  applyCycleBehaviorPolicy: (cycleId: number, data: CyclePolicyApplyRequest) =>
+    fetchJson<CyclePolicyApplyRead>(`/api/cycles/${cycleId}/behavior-policy/apply`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   getCycleBehaviorPolicyHistory: (cycleId: number, limit = 50, offset = 0) =>
     fetchJson<CyclePolicyHistoryRead>(
       withQuery(`/api/cycles/${cycleId}/behavior-policy/history`, { limit, offset }),
+    ),
+  previewCycleBehaviorPolicyRevert: (cycleId: number, changeId: number) =>
+    fetchJson<CyclePolicyPreviewRead>(
+      `/api/cycles/${cycleId}/behavior-policy/history/${changeId}/revert/preview`,
+      { method: 'POST' },
+    ),
+  applyCycleBehaviorPolicyRevert: (
+    cycleId: number,
+    changeId: number,
+    data: CyclePolicyRevertApplyRequest,
+  ) =>
+    fetchJson<CyclePolicyApplyRead>(
+      `/api/cycles/${cycleId}/behavior-policy/history/${changeId}/revert/apply`,
+      { method: 'POST', body: JSON.stringify(data) },
     ),
 
   // Domains
