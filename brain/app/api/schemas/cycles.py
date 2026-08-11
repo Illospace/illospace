@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import fields
 from datetime import datetime
-from typing import Any, get_args
+from typing import Any, get_args, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from brain.systems.cycles.behavior_policy import CyclePolicySnapshot
+from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
 from brain.systems.cycles.common import (
     MAX_CYCLE_TIMEOUT_SECONDS,
     MIN_CYCLE_TIMEOUT_SECONDS,
@@ -146,13 +146,19 @@ class CyclePolicyRevertApplyRequest(BaseModel):
     rationale: str = Field(min_length=1, max_length=5000)
 
 
-def _cycle_policy_configuration_read_model() -> type[BaseModel]:
-    field_types = CyclePolicySnapshot.configuration_field_types()
+def _cycle_policy_configuration_read_model(
+    snapshot_type: type[CyclePolicySnapshot],
+) -> type[BaseModel]:
+    field_types = get_type_hints(snapshot_type)
+    response_type_overrides = {"retry_policy": dict[str, Any]}
     model_fields: dict[str, tuple[Any, Any]] = {}
-    for snapshot_field in fields(CyclePolicySnapshot):
+    for snapshot_field in fields(snapshot_type):
         if snapshot_field.name == "guidance":
             continue
-        annotation = field_types[snapshot_field.name]
+        annotation = response_type_overrides.get(
+            snapshot_field.name,
+            field_types[snapshot_field.name],
+        )
         default = None if type(None) in get_args(annotation) else ...
         model_fields[snapshot_field.name] = (annotation, default)
         if snapshot_field.name == "schedule_expr":
@@ -164,7 +170,9 @@ def _cycle_policy_configuration_read_model() -> type[BaseModel]:
     )
 
 
-CyclePolicyConfigurationRead = _cycle_policy_configuration_read_model()
+CyclePolicyConfigurationRead = _cycle_policy_configuration_read_model(
+    CyclePolicySnapshot
+)
 
 
 class CyclePolicySnapshotRead(BaseModel):

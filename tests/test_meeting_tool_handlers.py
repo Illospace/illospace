@@ -6,8 +6,10 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from brain.systems.meetings import client as meetbot_client
+from brain.systems.runs.tool_catalog.handlers import meetings as meeting_handlers
 from brain.systems.runs.execution_context import bind_agent_context
 from brain.systems.runs.tool_catalog.handlers.meetings import (
     _handle_join_meeting,
@@ -18,9 +20,14 @@ from brain.systems.runs.tool_catalog.handlers.meetings import (
 
 
 class _HTTPClient:
-    def __init__(self, responses: list[httpx.Response]) -> None:
+    def __init__(
+        self,
+        responses: list[httpx.Response],
+        persistence_state: dict[str, Any],
+    ) -> None:
         self.responses = list(responses)
         self.requests: list[dict[str, Any]] = []
+        self.persistence_state = persistence_state
 
     async def __aenter__(self):
         return self
@@ -29,6 +36,11 @@ class _HTTPClient:
         return None
 
     async def request(self, method: str, url: str, **kwargs):
+        if method == "POST" and url.endswith("/join"):
+            assert self.persistence_state["attempted"] is True
+            if not self.persistence_state["write_failed"]:
+                assert self.persistence_state["committed"] is True
+                assert len(self.persistence_state["rows"]) == 1
         self.requests.append({"method": method, "url": url, **kwargs})
         return self.responses.pop(0)
 
@@ -36,12 +48,71 @@ class _HTTPClient:
 def _patch_http(
     monkeypatch: pytest.MonkeyPatch,
     responses: list[httpx.Response],
+    *,
+    persistence_error: SQLAlchemyError | None = None,
 ) -> _HTTPClient:
-    client = _HTTPClient(responses)
+    requested_session_id = str(responses[0].json().get("session_id") or "session-requested")
+    persistence_state: dict[str, Any] = {
+        "attempted": False,
+        "committed": False,
+        "rows": [],
+        "write_failed": persistence_error is not None,
+    }
+
+    class _UnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, *_exc) -> None:
+            persistence_state["committed"] = exc_type is None
+
+    async def create_requested(_session, **kwargs) -> None:
+        persistence_state["attempted"] = True
+        if persistence_error is not None:
+            raise persistence_error
+        persistence_state["rows"].append(kwargs)
+
+    monkeypatch.setattr(meeting_handlers, "UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr(
+        meeting_handlers,
+        "create_requested_meetbot_session",
+        create_requested,
+    )
+    monkeypatch.setattr(meeting_handlers, "uuid4", lambda: requested_session_id)
+    client = _HTTPClient(responses, persistence_state)
     monkeypatch.setattr(meetbot_client, "async_http_client", lambda **_kwargs: client)
     monkeypatch.setenv("ILLO_MEETBOT_URL", "http://meetbot:8010/")
     monkeypatch.setenv("ILLO_MEETBOT_TOKEN", "shared-secret")
     return client
+
+
+@pytest.mark.asyncio
+async def test_join_continues_when_request_record_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    http = _patch_http(
+        monkeypatch,
+        [
+            httpx.Response(
+                202,
+                json={"session_id": "session-write-failed", "status": "captions_flowing"},
+            )
+        ],
+        persistence_error=SQLAlchemyError("database unavailable"),
+    )
+
+    result = json.loads(
+        await _handle_join_meeting("https://meet.google.com/abc-defg-hij")
+    )
+
+    assert result["ok"] is True
+    assert result["session_id"] == "session-write-failed"
+    assert http.persistence_state["committed"] is False
+    assert http.requests[0]["url"] == "http://meetbot:8010/join"
+    assert "could not be recorded; continuing to join" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -61,6 +132,7 @@ async def test_join_meeting_passes_slack_origin_and_reports_captions_flowing(mon
         ],
     )
     run = SimpleNamespace(
+        id=42,
         metadata_={
             "slack_trigger": {
                 "channel_id": "C-source",
@@ -95,6 +167,7 @@ async def test_join_meeting_passes_slack_origin_and_reports_captions_flowing(mon
         "url": "http://meetbot:8010/join",
         "headers": {"X-Meetbot-Token": "shared-secret"},
         "json": {
+            "session_id": "session-1",
             "meeting_url": "https://meet.google.com/abc-defg-hij",
             "origin": {"channel": "C-follow-up", "thread_ts": "100.2"},
             "display_name": "Illo test notetaker",
@@ -103,6 +176,13 @@ async def test_join_meeting_passes_slack_origin_and_reports_captions_flowing(mon
     }
     assert http.requests[1]["method"] == "GET"
     assert http.requests[1]["url"] == "http://meetbot:8010/sessions/session-1"
+    assert http.persistence_state["rows"] == [
+        {
+            "session_id": "session-1",
+            "meeting_url": "https://meet.google.com/abc-defg-hij",
+            "requesting_run_id": 42,
+        }
+    ]
 
 
 @pytest.mark.asyncio

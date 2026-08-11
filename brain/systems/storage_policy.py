@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields, make_dataclass, replace
 from datetime import timedelta
-from typing import Any
+from typing import Any, ClassVar, Self, get_type_hints
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -154,26 +154,21 @@ class StoragePolicyValues:
 
 
 @dataclass(frozen=True)
-class StoragePolicyPatch:
-    """Typed optional changes to storage policy values."""
+class _StoragePolicyPatchContract:
+    """Behavior shared by patch shapes derived from a value contract."""
 
-    finished_workspace_retention: timedelta | None = None
-    project_draft_retention: timedelta | None = None
-    canvas_quiet_period: timedelta | None = None
-    capacity_warn_percent: int | None = None
-    capacity_critical_percent: int | None = None
-    automatic_reclamation_allowed: bool | None = None
+    _value_contract: ClassVar[type[StoragePolicyValues]]
 
     @classmethod
     def from_storage_fields(
         cls,
         storage_values: Mapping[str, object],
-    ) -> StoragePolicyPatch:
+    ) -> Self:
         """Decode tool and route field names into the typed write shape."""
 
         fields_by_storage_name = {
             _storage_name(policy_field): policy_field
-            for policy_field in fields(StoragePolicyValues)
+            for policy_field in fields(cls._value_contract)
         }
         unexpected = set(storage_values) - fields_by_storage_name.keys()
         if unexpected:
@@ -195,6 +190,35 @@ class StoragePolicyPatch:
             getattr(self, patch_field.name) is None
             for patch_field in fields(self)
         )
+
+
+def _derive_storage_policy_patch(
+    value_contract: type[StoragePolicyValues],
+) -> type[_StoragePolicyPatchContract]:
+    """Return the value contract with every field made optional."""
+
+    value_types = get_type_hints(value_contract)
+    return make_dataclass(
+        "StoragePolicyPatch",
+        [
+            (
+                policy_field.name,
+                value_types[policy_field.name] | None,
+                field(default=None),
+            )
+            for policy_field in fields(value_contract)
+        ],
+        bases=(_StoragePolicyPatchContract,),
+        namespace={
+            "__doc__": "Typed optional changes to storage policy values.",
+            "__module__": __name__,
+            "_value_contract": value_contract,
+        },
+        frozen=True,
+    )
+
+
+StoragePolicyPatch = _derive_storage_policy_patch(StoragePolicyValues)
 
 
 def _positive_hours(value: object, field_name: str) -> int:
@@ -255,12 +279,14 @@ def _encode_storage_value(policy_field, value: object) -> int | bool:
     raise RuntimeError(f"Unsupported storage policy field kind: {storage_kind}")
 
 
-def storage_policy_field_schema() -> dict[str, dict[str, Any]]:
+def storage_policy_field_schema(
+    value_contract: type[StoragePolicyValues] = StoragePolicyValues,
+) -> dict[str, dict[str, Any]]:
     """Return tool input schemas for every writable policy value."""
 
     return {
         _storage_name(policy_field): dict(policy_field.metadata[_INPUT_SCHEMA])
-        for policy_field in fields(StoragePolicyValues)
+        for policy_field in fields(value_contract)
     }
 
 
@@ -407,7 +433,6 @@ async def async_manage_storage_policy(
     policy_id: int | None = None,
     limit: int = 50,
     patch: StoragePolicyPatch | None = None,
-    **storage_values: object,
 ) -> dict[str, Any]:
     """Agent-facing read, update, history, and revert actions."""
 
@@ -419,9 +444,7 @@ async def async_manage_storage_policy(
         rows = await async_list_storage_policy_history(session, limit=limit)
         return {"policies": [serialize_storage_policy(row) for row in rows]}
     if normalized_action == "update":
-        if patch is not None and storage_values:
-            raise TypeError("Pass a storage policy patch or storage fields, not both")
-        update_patch = patch or StoragePolicyPatch.from_storage_fields(storage_values)
+        update_patch = patch if patch is not None else StoragePolicyPatch()
         if update_patch.is_empty():
             raise ValueError("update requires at least one policy field")
         row = await async_update_storage_policy(

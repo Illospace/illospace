@@ -8,8 +8,10 @@ from sqlalchemy import func, select
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
+from brain.platform.db.models.meetbot_session import MeetbotSession
 from brain.platform.db.models.open_ask import OpenAsk
 from brain.platform.db.models.org import Org, User
+from brain.systems.meetings.session_record import create_requested_meetbot_session
 
 
 ORG_ID = "11111111-1111-4111-8111-111111111111"
@@ -30,6 +32,7 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             OpenAsk.__table__,
             InboundEventRow.__table__,
             InboundDecisionReceiptRow.__table__,
+            MeetbotSession.__table__,
         ]
     )
 
@@ -72,6 +75,15 @@ async def _seed(session, *, include_slack: bool = True):
     return meetbot
 
 
+async def _seed_request(session, session_id: str) -> None:
+    await create_requested_meetbot_session(
+        session,
+        session_id=session_id,
+        meeting_url="https://meet.google.com/abc-defg-hij",
+        requesting_run_id=None,
+    )
+
+
 def _ended_payload(upload_root: Path, *, session_id: str = "session-ended") -> dict:
     session_dir = upload_root / session_id
     session_dir.mkdir(parents=True)
@@ -87,9 +99,11 @@ def _ended_payload(upload_root: Path, *, session_id: str = "session-ended") -> d
         "session_id": session_id,
         "meeting_url": "https://meet.google.com/abc-defg-hij",
         "status": "ended",
+        "outcome": "left",
         "transcript_path": str(session_dir / "transcript.jsonl"),
         "transcript_md_path": str(session_dir / "transcript.md"),
         "started_at": "2026-08-03T15:00:00Z",
+        "joined_at": "2026-08-03T15:00:30Z",
         "ended_at": "2026-08-03T15:30:00Z",
         "caption_lines": 2,
         "participants": ["Reda", "Axel"],
@@ -132,7 +146,17 @@ async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     meetbot = await _seed(session)
     upload_root = tmp_path / "meetings"
     monkeypatch.setattr(meeting_inbound, "MEETING_UPLOAD_ROOT", upload_root)
+    validation_calls = 0
+    validate_payload = meeting_inbound._validate_payload
+
+    def counted_validation(raw_payload):
+        nonlocal validation_calls
+        validation_calls += 1
+        return validate_payload(raw_payload)
+
+    monkeypatch.setattr(meeting_inbound, "_validate_payload", counted_validation)
     payload = _ended_payload(upload_root)
+    await _seed_request(session, payload["session_id"])
     envelope = {
         "kind": "meeting_transcript",
         "origin": "meetbot.session_complete",
@@ -151,6 +175,7 @@ async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     assert first["ilo_outcome"]["operation"] == "meeting_run_admitted"
     assert first["ilo_outcome"]["routing"] == "slack_origin"
     assert second["idempotent_replay"] is True
+    assert validation_calls == 1
     assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
     assert await session.scalar(select(func.count()).select_from(OpenAsk)) == 0
     assert run.thread_id == "slack:T-team:C-meetings:1722700000.001"
@@ -165,6 +190,12 @@ async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     assert event.action_type == "meeting.run_admitted"
     assert receipt.tool_use["type"] == "meeting_transcript_intake"
     assert receipt.target["thread_ts"] == "1722700000.001"
+    session_record = await session.get(MeetbotSession, "session-ended")
+    assert session_record.outcome == "left"
+    assert session_record.admitted_at is not None
+    assert session_record.left_at is not None
+    assert session_record.participant_count == 2
+    assert session_record.caption_count == 2
 
 
 @pytest.mark.asyncio
@@ -216,15 +247,19 @@ async def test_failed_meeting_admits_short_failure_report_run(session):
         "session_id": "session-failed",
         "meeting_url": "https://meet.google.com/abc-defg-hij",
         "status": "failed",
+        "outcome": "refused",
         "transcript_path": None,
         "transcript_md_path": None,
         "started_at": "2026-08-03T15:00:00Z",
+        "joined_at": None,
         "ended_at": "2026-08-03T15:01:00Z",
         "caption_lines": 0,
         "participants": [],
         "origin": {"channel": "C-meetings", "thread_ts": "1722700000.002"},
         "error": "Host denied admission",
+        "end_reason": "refused",
     }
+    await _seed_request(session, payload["session_id"])
 
     result = await submit_inbound_envelope(
         session,
@@ -244,6 +279,45 @@ async def test_failed_meeting_admits_short_failure_report_run(session):
     assert "Post a short failure report" in run.input_message
     assert "Required sequence" not in run.input_message
     assert "create_github_issue" not in run.input_message
+    session_record = await session.get(MeetbotSession, "session-failed")
+    assert session_record.outcome == "refused"
+    assert session_record.refusal_text == "Host denied admission"
+
+
+@pytest.mark.asyncio
+async def test_unknown_terminal_outcome_is_rejected_explicitly(session):
+    from brain.systems.inbound.service import submit_inbound_envelope
+
+    meetbot = await _seed(session)
+    result = await submit_inbound_envelope(
+        session,
+        connection=meetbot,
+        envelope={
+            "kind": "meeting_transcript",
+            "origin": "meetbot.session_complete",
+            "payload": {
+                "session_id": "session-unknown-outcome",
+                "meeting_url": "https://meet.google.com/abc-defg-hij",
+                "status": "failed",
+                "outcome": "new_unknown_outcome",
+                "transcript_path": None,
+                "transcript_md_path": None,
+                "started_at": "2026-08-03T15:00:00Z",
+                "joined_at": None,
+                "ended_at": "2026-08-03T15:01:00Z",
+                "caption_lines": 0,
+                "participants": [],
+                "origin": {},
+            },
+            "idempotency_key": "meeting-session-unknown-outcome",
+        },
+    )
+
+    assert result["status"] == "failed"
+    assert result["ilo_outcome"]["operation"] == "meeting_payload_rejected"
+    assert result["ilo_outcome"]["reason"] == "invalid_meeting_transcript_payload"
+    event = (await session.scalars(select(InboundEventRow))).one()
+    assert "outcome must be" in str(event.error)
 
 
 @pytest.mark.asyncio
@@ -281,10 +355,28 @@ async def test_zero_caption_terminal_reports_degraded_capture(session, tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_healthy_session_health_is_persisted_without_admitting_a_run(session):
+async def test_healthy_session_health_is_persisted_without_admitting_a_run(
+    session,
+    monkeypatch,
+):
     from brain.systems.inbound.service import submit_inbound_envelope
+    from brain.systems.meetings import inbound as meeting_inbound
 
     meetbot = await _seed(session)
+    await _seed_request(session, "session-active")
+    validation_calls = 0
+    validate_health_payload = meeting_inbound._validate_health_payload
+
+    def counted_validation(raw_payload):
+        nonlocal validation_calls
+        validation_calls += 1
+        return validate_health_payload(raw_payload)
+
+    monkeypatch.setattr(
+        meeting_inbound,
+        "_validate_health_payload",
+        counted_validation,
+    )
     result = await submit_inbound_envelope(
         session,
         connection=meetbot,
@@ -305,6 +397,7 @@ async def test_healthy_session_health_is_persisted_without_admitting_a_run(sessi
     assert event.raw_payload["participant_count"] == 0
     assert receipt.tool_use["type"] == "meeting_session_health_intake"
     assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 0
+    assert validation_calls == 1
 
 
 @pytest.mark.asyncio
@@ -339,6 +432,7 @@ async def test_stale_health_warning_admits_run_to_inviting_slack_thread(session)
     from brain.systems.inbound.service import submit_inbound_envelope
 
     meetbot = await _seed(session)
+    await _seed_request(session, "session-active")
     warning = (
         "Session stale: wrong meeting, bot was never admitted, or captions off."
     )
@@ -379,6 +473,7 @@ async def test_replay_shape_persists_health_rows_between_join_and_terminal(
     from brain.systems.meetings import inbound as meeting_inbound
 
     meetbot = await _seed(session)
+    await _seed_request(session, "session-active")
     for sequence, observed_at in enumerate(
         ("2026-08-05T13:53:49Z", "2026-08-05T13:54:49Z"),
         start=1,

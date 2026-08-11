@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from inspect import Parameter, Signature
-
-from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser,
     _handle_browser_back,
@@ -28,6 +25,7 @@ from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser_wait,
 )
 from brain.systems.runs.tool_catalog.handlers.capabilities import _handle_read_capabilities
+from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
     _handle_cortex_reply,
     _handle_cortex_visual_reply,
@@ -274,9 +272,13 @@ def _get_tool_handlers(
         **storage_values,
     ):
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.systems.storage_policy import async_manage_storage_policy
+        from brain.systems.storage_policy import (
+            StoragePolicyPatch,
+            async_manage_storage_policy,
+        )
 
         actor_id = _current_run_id() or _current_agent_value("user_id")
+        patch = StoragePolicyPatch.from_storage_fields(storage_values)
         async with UnitOfWork() as uow:
             return await async_manage_storage_policy(
                 uow.session,
@@ -286,31 +288,8 @@ def _get_tool_handlers(
                 source_type="agent",
                 source_id=str(actor_id) if actor_id is not None else None,
                 limit=limit,
-                **storage_values,
+                patch=patch,
             )
-
-    from brain.systems.storage_policy import storage_policy_field_schema
-
-    setattr(
-        _manage_storage_policy,
-        "__signature__",
-        Signature(
-            [
-                Parameter("action", Parameter.POSITIONAL_OR_KEYWORD, default="get"),
-                Parameter("policy_id", Parameter.POSITIONAL_OR_KEYWORD, default=None),
-                *(
-                    Parameter(
-                        field_name,
-                        Parameter.POSITIONAL_OR_KEYWORD,
-                        default=None,
-                    )
-                    for field_name in storage_policy_field_schema()
-                ),
-                Parameter("rationale", Parameter.POSITIONAL_OR_KEYWORD, default=None),
-                Parameter("limit", Parameter.POSITIONAL_OR_KEYWORD, default=50),
-            ]
-        ),
-    )
 
     _manage_deployment._illo_run_on_event_loop = True
     _manage_runtime_services._illo_run_on_event_loop = True

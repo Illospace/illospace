@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 
 import pytest
@@ -63,11 +63,15 @@ async def test_update_appends_audited_active_revision(session):
     result = await async_manage_storage_policy(
         session,
         action="update",
-        finished_workspace_retention_hours=72,
-        project_draft_retention_hours=120,
-        capacity_warn_percent=75,
-        capacity_critical_percent=88,
-        automatic_reclamation_allowed=True,
+        patch=StoragePolicyPatch.from_storage_fields(
+            {
+                "finished_workspace_retention_hours": 72,
+                "project_draft_retention_hours": 120,
+                "capacity_warn_percent": 75,
+                "capacity_critical_percent": 88,
+                "automatic_reclamation_allowed": True,
+            }
+        ),
         rationale="Capacity is tight after the new workspace rollout",
         source_type="agent",
         source_id="run-779",
@@ -99,9 +103,13 @@ async def test_revert_appends_revision_copied_from_history(session):
     await async_manage_storage_policy(
         session,
         action="update",
-        finished_workspace_retention_hours=24,
-        project_draft_retention_hours=48,
-        canvas_quiet_hours=12,
+        patch=StoragePolicyPatch.from_storage_fields(
+            {
+                "finished_workspace_retention_hours": 24,
+                "project_draft_retention_hours": 48,
+                "canvas_quiet_hours": 12,
+            }
+        ),
         rationale="Shorten both retention windows",
         source_id="run-1",
     )
@@ -145,15 +153,21 @@ async def test_update_requires_rationale_and_ordered_thresholds(session):
         await async_manage_storage_policy(
             session,
             action="update",
-            finished_workspace_retention_hours=24,
+            patch=StoragePolicyPatch.from_storage_fields(
+                {"finished_workspace_retention_hours": 24}
+            ),
         )
 
     with pytest.raises(ValueError, match="must be less than"):
         await async_manage_storage_policy(
             session,
             action="update",
-            capacity_warn_percent=95,
-            capacity_critical_percent=90,
+            patch=StoragePolicyPatch.from_storage_fields(
+                {
+                    "capacity_warn_percent": 95,
+                    "capacity_critical_percent": 90,
+                }
+            ),
             rationale="Invalid threshold experiment",
         )
 
@@ -185,6 +199,32 @@ async def test_dataclass_fields_drive_patch_storage_and_tool_schema(session):
             **{policy_field.name: getattr(values, policy_field.name)}
         )
         assert not patch.is_empty()
+
+
+def test_added_value_field_derives_patch_and_tool_schema():
+    from brain.systems import storage_policy
+
+    @dataclass(frozen=True)
+    class ExtendedStoragePolicyValues(StoragePolicyValues):
+        test_retention: timedelta = storage_policy._policy_value_field(
+            "test_retention_hours",
+            storage_policy._DURATION_HOURS,
+            {"type": "integer", "minimum": 1},
+        )
+
+    patch_type = storage_policy._derive_storage_policy_patch(
+        ExtendedStoragePolicyValues
+    )
+
+    assert "test_retention" in {
+        patch_field.name for patch_field in fields(patch_type)
+    }
+    assert storage_policy.storage_policy_field_schema(
+        ExtendedStoragePolicyValues
+    )["test_retention_hours"] == {"type": "integer", "minimum": 1}
+    assert patch_type.from_storage_fields(
+        {"test_retention_hours": 6}
+    ).test_retention == timedelta(hours=6)
 
 
 @pytest.mark.asyncio
@@ -223,7 +263,9 @@ async def test_every_policy_field_survives_update_history_and_revert(session):
             session,
             action="update",
             rationale=f"Exercise derived field coverage for {storage_name}",
-            **{storage_name: expected_storage_fields[storage_name]},
+            patch=StoragePolicyPatch.from_storage_fields(
+                {storage_name: expected_storage_fields[storage_name]}
+            ),
         )
         assert await async_get_storage_policy(session) == expected
         assert updated["updated"][storage_name] == expected_storage_fields[storage_name]

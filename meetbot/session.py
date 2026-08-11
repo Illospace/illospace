@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 import logging
 import time
 from typing import Awaitable, Callable
-from uuid import uuid4
 
 from meetbot.callback import MeetingWebhookSender
 from meetbot.captions import CaptionLine, RollingCaptionBuffer
@@ -16,8 +15,10 @@ from meetbot.models import (
     ACTIVE_STATUSES,
     TERMINAL_STATUSES,
     MeetEngine,
+    MeetbotSessionOutcome,
     Origin,
     SessionEvents,
+    SessionHealthSnapshot,
     SessionRecord,
     SessionStatus,
     isoformat_utc,
@@ -86,11 +87,13 @@ class SessionManager:
         self._monotonic = monotonic
         self._managed_sessions: dict[str, _ManagedSession] = {}
         self._active_session_id: str | None = None
+        self._status_tasks: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
 
     async def join(
         self,
         *,
+        session_id: str,
         meeting_url: str,
         display_name: str | None,
         origin: Origin,
@@ -105,7 +108,6 @@ class SessionManager:
                     raise ActiveSessionError(active.record.session_id)
                 self._active_session_id = None
 
-            session_id = str(uuid4())
             transcript_path, transcript_md_path = TranscriptWriter.public_paths(session_id)
             record = SessionRecord(
                 session_id=session_id,
@@ -176,15 +178,8 @@ class SessionManager:
             for managed in self._managed_sessions.values()
             if managed.task is not None and not managed.task.done()
         ]
-        if not tasks:
-            return
-        done, pending = await asyncio.wait(tasks, timeout=5.0)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            task.exception()
+        await self._finish_background_tasks(tasks)
+        await self._finish_background_tasks(list(self._status_tasks))
 
     async def _run_session(self, record: SessionRecord) -> None:
         events: SessionEvents = _ManagerSessionEvents(self, record.session_id)
@@ -198,6 +193,10 @@ class SessionManager:
                 ),
                 timeout=float(self._config.max_session_seconds),
             )
+            record.outcome = MeetbotSessionOutcome.from_engine_end_reason(
+                result.reason,
+                was_admitted=record.joined_at is not None,
+            )
             record.end_reason = result.reason
             if result.warning:
                 record.add_warning(result.warning)
@@ -207,6 +206,10 @@ class SessionManager:
         except asyncio.TimeoutError:
             record.add_warning(HARD_CAP_WARNING)
             record.end_reason = "hard_cap"
+            record.outcome = MeetbotSessionOutcome.from_engine_end_reason(
+                record.end_reason,
+                was_admitted=record.joined_at is not None,
+            )
             try:
                 await self._engine.request_leave(record.session_id)
             except Exception:
@@ -216,12 +219,20 @@ class SessionManager:
             if record.status not in TERMINAL_STATUSES:
                 record.error = "Meetbot stopped while the meeting session was active."
                 record.end_reason = "service_shutdown"
+                record.outcome = MeetbotSessionOutcome.from_engine_end_reason(
+                    record.end_reason,
+                    was_admitted=record.joined_at is not None,
+                )
                 await self._finish(record, "failed")
             raise
         except Exception as exc:
             logger.exception("Meetbot session %s failed", record.session_id)
             record.error = str(exc) or exc.__class__.__name__
             record.end_reason = "error"
+            record.outcome = MeetbotSessionOutcome.from_engine_end_reason(
+                record.end_reason,
+                was_admitted=record.joined_at is not None,
+            )
             await self._finish(record, "failed")
         finally:
             async with self._lock:
@@ -259,11 +270,49 @@ class SessionManager:
         record.status_history.append({"status": status, "ts": timestamp})
         if status == "admitted" and not record.joined_at:
             record.joined_at = timestamp
+            record.outcome = MeetbotSessionOutcome.ADMITTED
             managed = self._active_managed_session(record.session_id)
             managed.health_monitor.on_admitted()
         if status in TERMINAL_STATUSES:
             record.ended_at = timestamp
         self._active_managed_session(record.session_id).writer.write_session(record)
+        if status in ACTIVE_STATUSES:
+            snapshot = SessionHealthSnapshot.capture(
+                record,
+                observed_caption_count=record.caption_lines,
+            )
+            task = asyncio.create_task(
+                self._deliver_status(snapshot),
+                name=f"meetbot-status-{record.session_id}-{status}",
+            )
+            self._status_tasks.add(task)
+            task.add_done_callback(self._status_tasks.discard)
+
+    async def _deliver_status(self, snapshot: SessionHealthSnapshot) -> None:
+        try:
+            await self._webhook_sender.send_status(snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Meetbot could not deliver or dead-letter status %s for session %s",
+                snapshot.status,
+                snapshot.session_id,
+            )
+
+    @staticmethod
+    async def _finish_background_tasks(tasks: list[asyncio.Task[None]]) -> None:
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(tasks, timeout=5.0)
+        for task in pending:
+            logger.warning(
+                "Cancelling background task %s after the shutdown timeout",
+                task.get_name(),
+            )
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _on_status(self, session_id: str, status: SessionStatus) -> None:
         record = self.get(session_id)

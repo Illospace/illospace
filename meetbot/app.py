@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from meetbot.callback import MeetingWebhookCallback, MeetingWebhookSender
 from meetbot.config import MeetbotConfig
 from meetbot.engine import PlaywrightMeetEngine
-from meetbot.models import MeetEngine, Origin, SessionStatus
+from meetbot.models import MeetbotSessionOutcome, MeetEngine, Origin, SessionStatus
 from meetbot.session import (
     ActiveSessionError,
     SessionManager,
@@ -42,6 +42,7 @@ class OriginRequest(BaseModel):
 
 
 class JoinRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
     meeting_url: str
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
     origin: OriginRequest
@@ -54,6 +55,16 @@ class JoinRequest(BaseModel):
         if not _MEET_URL.fullmatch(url):
             raise ValueError("meeting_url must be a valid https://meet.google.com meeting URL")
         return url
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, value: str) -> str:
+        session_id = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", session_id):
+            raise ValueError(
+                "session_id must contain only letters, numbers, underscores, and hyphens"
+            )
+        return session_id
 
     @field_validator("display_name", "requested_by", mode="before")
     @classmethod
@@ -89,6 +100,7 @@ class SessionResponse(BaseModel):
     error: str | None
     warning: str | None
     end_reason: str | None
+    outcome: MeetbotSessionOutcome
 
 
 class ActionResponse(BaseModel):
@@ -155,6 +167,7 @@ def create_app(
     async def join(request: JoinRequest) -> JoinResponse | JSONResponse:
         try:
             record = await manager.join(
+                session_id=request.session_id,
                 meeting_url=request.meeting_url,
                 display_name=request.display_name,
                 origin=Origin(

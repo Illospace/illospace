@@ -18,19 +18,20 @@ from brain.platform.db.models.cycle import (
 from brain.platform.db.models.org import Org, User
 from brain.platform import events as platform_events
 from brain.systems.cycles import behavior_policy
+from brain.systems.cycles import behavior_policy_contract
 from brain.systems.cycles import events as cycle_events
 from brain.systems.cycles.access import CycleActor
 from brain.systems.cycles.behavior_policy import (
     CyclePolicyApplied,
     CyclePolicyConflict,
     CyclePolicyPatch,
-    CyclePolicySnapshot,
     async_apply_cycle_policy_change,
     async_apply_cycle_policy_revert,
     async_list_cycle_policy_history,
     async_preview_cycle_policy_change,
     async_preview_cycle_policy_revert,
 )
+from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
 from brain.systems.cycles.behavior_policy_read_model import (
     async_read_effective_cycle_policy,
 )
@@ -217,7 +218,7 @@ async def test_snapshot_apply_covers_every_scalar_dataclass_field(
         list(workspace.initial_guidance),
     )
     monkeypatch.setattr(
-        behavior_policy,
+        behavior_policy_contract,
         "compute_next_run_at",
         lambda *_args: None,
     )

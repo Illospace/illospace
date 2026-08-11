@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any, Mapping
+from uuid import uuid4
+
+from sqlalchemy.exc import SQLAlchemyError
+
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 from brain.systems.meetings.client import (
     MeetbotClient,
     MeetbotConfigurationError,
     MeetbotServiceError,
 )
+from brain.systems.meetings.session_record import create_requested_meetbot_session
 from brain.systems.runs.tool_catalog.handlers.common import (
     _agent_context,
     _short_exception_reason,
 )
 from brain.systems.runs.slack_delivery import slack_response_target
+
+logger = logging.getLogger(__name__)
 
 
 async def _handle_join_meeting(
@@ -26,17 +35,37 @@ async def _handle_join_meeting(
     if not meeting_url:
         return _error("join_meeting requires meeting_url")
     origin, requested_by = _current_slack_origin()
+    session_id = str(uuid4())
     try:
         client = MeetbotClient()
+    except (MeetbotConfigurationError, MeetbotServiceError, ValueError) as exc:
+        return _meetbot_error(exc)
+
+    try:
+        async with UnitOfWork() as uow:
+            await create_requested_meetbot_session(
+                uow.session,
+                session_id=session_id,
+                meeting_url=meeting_url,
+                requesting_run_id=_current_requesting_run_id(),
+            )
+    except SQLAlchemyError:
+        logger.exception(
+            "Meetbot join request %s could not be recorded; continuing to join",
+            session_id,
+        )
+
+    try:
         joined = await client.join(
+            session_id=session_id,
             meeting_url=meeting_url,
             display_name=display_name,
             origin=origin,
             requested_by=requested_by,
         )
-        session_id = str(joined.get("session_id") or "").strip()
-        if not session_id:
-            return _error("meetbot join response did not include session_id")
+        returned_session_id = str(joined.get("session_id") or "").strip()
+        if returned_session_id != session_id:
+            return _error("meetbot join response did not preserve session_id")
         current = await client.poll_join_status(
             session_id,
             initial=joined,
@@ -138,6 +167,25 @@ def _current_slack_origin() -> tuple[dict[str, str], str | None]:
     return origin, requested_by
 
 
+def _current_requesting_run_id() -> int | None:
+    """Resolve the persisted agent_runs.id for this tool call when available."""
+
+    run = getattr(_agent_context, "run", None)
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    metadata = dict(execution_metadata) if isinstance(execution_metadata, Mapping) else {}
+    value = (
+        getattr(run, "id", None)
+        or getattr(run, "run_id", None)
+        or getattr(_agent_context, "run_id", None)
+        or metadata.get("run_id")
+    )
+    try:
+        run_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return run_id if run_id > 0 else None
+
+
 def _status_message(status: str, payload: Mapping[str, Any]) -> str:
     normalized = str(status or "").strip().lower()
     messages = {
@@ -178,6 +226,7 @@ def _error(message: str) -> str:
 
 __all__ = [
     "_current_slack_origin",
+    "_current_requesting_run_id",
     "_handle_join_meeting",
     "_handle_leave_meeting",
     "_handle_meeting_status",

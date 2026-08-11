@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Literal, Protocol
 
 SessionStatus = Literal[
@@ -17,6 +18,52 @@ SessionStatus = Literal[
 
 ACTIVE_STATUSES = frozenset({"starting", "lobby", "admitted", "captions_flowing"})
 TERMINAL_STATUSES = frozenset({"ended", "failed"})
+
+
+class MeetbotSessionOutcome(StrEnum):
+    """Validated lifecycle outcome shared by meetbot and brain persistence."""
+
+    REQUESTED = "requested"
+    ADMITTED = "admitted"
+    REFUSED = "refused"
+    NOT_ADMITTED = "not_admitted"
+    LEFT = "left"
+
+    @classmethod
+    def from_engine_end_reason(
+        cls,
+        reason: str,
+        *,
+        was_admitted: bool,
+    ) -> MeetbotSessionOutcome:
+        """Translate one engine exit signal at the session boundary."""
+
+        normalized = str(reason or "").strip().lower()
+        if normalized == cls.REFUSED:
+            if was_admitted:
+                raise ValueError("A refused meeting session cannot already be admitted")
+            return cls.REFUSED
+        if normalized == cls.NOT_ADMITTED:
+            if was_admitted:
+                raise ValueError("An admitted meeting session cannot end as not_admitted")
+            return cls.NOT_ADMITTED
+
+        before_admission = {
+            "call_ended",
+            "error",
+            "hard_cap",
+            "leave_requested",
+            "service_shutdown",
+        }
+        after_admission = {
+            *before_admission,
+            "alone_for_five_minutes",
+            "call_ui_gone",
+        }
+        allowed = after_admission if was_admitted else before_admission
+        if normalized not in allowed:
+            raise ValueError(f"Unknown meetbot engine end reason: {reason!r}")
+        return cls.LEFT if was_admitted else cls.NOT_ADMITTED
 
 
 def utc_now() -> datetime:
@@ -63,6 +110,7 @@ class SessionRecord:
     warning: str | None = None
     error: str | None = None
     end_reason: str | None = None
+    outcome: MeetbotSessionOutcome = MeetbotSessionOutcome.REQUESTED
     status_history: list[dict[str, str]] = field(default_factory=list)
 
     def status_response(self) -> dict[str, object]:
@@ -78,6 +126,7 @@ class SessionRecord:
             "error": self.error,
             "warning": self.warning,
             "end_reason": self.end_reason,
+            "outcome": self.outcome.value,
         }
 
     def session_document(self) -> dict[str, object]:
@@ -100,6 +149,7 @@ class SessionRecord:
             "warning": self.warning,
             "error": self.error,
             "end_reason": self.end_reason,
+            "outcome": self.outcome.value,
             "status_history": list(self.status_history),
         }
 
@@ -113,11 +163,13 @@ class SessionRecord:
             "transcript_path": self.transcript_path,
             "transcript_md_path": self.transcript_md_path,
             "started_at": self.started_at,
+            "joined_at": self.joined_at,
             "ended_at": self.ended_at,
             "caption_lines": self.caption_lines,
             "participants": list(self.participants),
             "origin": self.origin.as_dict(),
             "requested_by": self.requested_by,
+            "outcome": self.outcome.value,
         }
         if self.warning:
             payload["warning"] = self.warning
