@@ -9,6 +9,7 @@
   } from '$lib/components/constellation';
   import { ui } from '$lib/stores/ui.svelte';
   import { wsClient } from '$lib/stores/ws.svelte';
+  import EffectiveCyclePolicyView from './EffectiveCyclePolicyView.svelte';
 
   type Cadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
   type FormState = {
@@ -72,6 +73,7 @@
   let isDraft = $state(false);
   let lastFocusCycleId = $state<number | null>(null);
   let lastRefreshSerial = $state<number | null>(null);
+  let behaviorPolicyRefreshSerial = $state(0);
   let unsubscribeCyclesChanged: (() => void) | null = null;
 
   const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -286,6 +288,7 @@
       isDraft = !nextSelected && isDraft;
       if (nextSelected) fillForm(nextSelected);
       await loadRuns(nextSelected?.id ?? null);
+      behaviorPolicyRefreshSerial += 1;
     } catch (err: any) {
       ui.toast(err?.detail || 'Failed to load cycles', 'error');
     } finally {
@@ -435,6 +438,13 @@
   {/if}
 
   {#if isDraft || selectedCycle}
+    {#if selectedCycle}
+      <EffectiveCyclePolicyView
+        cycleId={selectedCycle.id}
+        compact
+        refreshSerial={behaviorPolicyRefreshSerial}
+      />
+    {/if}
     <div class="cycle-pane-editor">
       <div class="cycle-pane-editor-head">
         <span>{isDraft ? 'New cycle' : 'Selected cycle'}</span>

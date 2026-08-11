@@ -406,6 +406,118 @@ export interface CycleRunRead {
   created_at: string;
 }
 
+export type CyclePolicyJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | CyclePolicyJsonValue[]
+  | { [key: string]: CyclePolicyJsonValue };
+
+/** Mirrors CyclePolicySnapshot configuration plus its derived schedule label. */
+export interface CyclePolicyConfigurationRead {
+  name: string;
+  prompt: string;
+  schedule_expr: string;
+  schedule_human: string;
+  timezone: string;
+  enabled: boolean;
+  max_concurrency: number;
+  timeout_seconds: number | null;
+  retry_policy: Record<string, CyclePolicyJsonValue>;
+  model_override: string | null;
+  thinking_override: string | null;
+  execution_policy_key: string | null;
+  target_idea_id: string | null;
+}
+
+export interface CyclePolicySnapshotRead {
+  configuration: CyclePolicyConfigurationRead;
+  guidance: string[];
+}
+
+export interface CyclePolicyOutputTargetRead {
+  id: number;
+  target_type: string;
+  target_id: string | null;
+  label: string | null;
+  config: Record<string, CyclePolicyJsonValue>;
+  source_type: string;
+  source_id: string | null;
+  rationale: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CyclePolicySourceRead {
+  revision_id: number | null;
+  actor_type: string | null;
+  actor_id: string | null;
+  rationale: string | null;
+  source_reference: string | null;
+  changed_at: string | null;
+}
+
+export interface CyclePolicyFieldSourceRead {
+  version: number;
+  cycle_revision_id: number | null;
+  actor_type: string | null;
+  actor_id: string | null;
+  source_reference: string | null;
+  rationale: string | null;
+  changed_at: string | null;
+  change_id: number | null;
+}
+
+export interface CyclePolicyChangeSummaryRead {
+  id: number;
+  version: number;
+  actor_type: string;
+  actor_id: string;
+  source_reference: string;
+  rationale: string;
+  changed_fields: string[];
+  applied_at: string;
+  reverted_from_id: number | null;
+}
+
+export interface EffectiveCyclePolicyRead {
+  workspace_id: string;
+  policy_kind: string;
+  target_type: string;
+  target_id: string;
+  version: number;
+  revision_id: number | null;
+  configuration: CyclePolicyConfigurationRead;
+  guidance: string[];
+  editable_fields: string[];
+  output_targets: CyclePolicyOutputTargetRead[];
+  output_targets_read_only: boolean;
+  source: CyclePolicySourceRead;
+  field_sources: Record<string, CyclePolicyFieldSourceRead>;
+  latest_change: CyclePolicyChangeSummaryRead | null;
+}
+
+export interface CyclePolicyChangeRead extends CyclePolicyChangeSummaryRead {
+  workspace_id: string;
+  policy_kind: string;
+  target_type: string;
+  target_id: string;
+  before_snapshot: CyclePolicySnapshotRead;
+  after_snapshot: CyclePolicySnapshotRead;
+  cycle_revision_id: number;
+}
+
+export interface CyclePolicyHistoryRead {
+  items: CyclePolicyChangeRead[];
+  pagination: {
+    limit: number;
+    offset: number;
+    has_more: boolean;
+    next_offset: number | null;
+  };
+}
+
 export interface DomainFieldRead {
   id: number;
   domain_id: number;
@@ -1420,6 +1532,12 @@ export const api = {
     fetchJson<CycleRunRead[]>(withQuery(`/api/cycles/${cycleId}/runs`, { limit })),
   runCycle: (cycleId: number) =>
     fetchJson<CycleRunRead>(`/api/cycles/${cycleId}/run`, { method: 'POST' }),
+  getCycleBehaviorPolicy: (cycleId: number) =>
+    fetchJson<EffectiveCyclePolicyRead>(`/api/cycles/${cycleId}/behavior-policy`),
+  getCycleBehaviorPolicyHistory: (cycleId: number, limit = 50, offset = 0) =>
+    fetchJson<CyclePolicyHistoryRead>(
+      withQuery(`/api/cycles/${cycleId}/behavior-policy/history`, { limit, offset }),
+    ),
 
   // Domains
   listDomains: () => fetchJson<DomainSummaryRead[]>('/api/domains/'),

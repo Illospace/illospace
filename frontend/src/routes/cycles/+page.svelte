@@ -3,7 +3,15 @@
   import { page } from '$app/stores';
   import { getContext, onMount } from 'svelte';
 
-  import { api, type CycleRead, type CycleRunRead } from '$lib/api/client';
+  import {
+    api,
+    type CyclePolicyConfigurationRead,
+    type CyclePolicyFieldSourceRead,
+    type CyclePolicyHistoryRead,
+    type CycleRead,
+    type CycleRunRead,
+    type EffectiveCyclePolicyRead,
+  } from '$lib/api/client';
   import {
     ConstellationButton,
     ConstellationEmptyState,
@@ -20,6 +28,7 @@
     type ConstellationPageFrameModalContext,
   } from '$lib/components/constellation/constellationPageFrameContext';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
+  import EffectiveCyclePolicyView from '$lib/features/cycles/components/EffectiveCyclePolicyView.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
 
@@ -101,6 +110,9 @@
   let filterMode = $state<FilterMode>('all');
   let showCreateModal = $state(false);
   let previewRuns = $state<Record<number, CycleRunRead[]>>({});
+  let previewPolicies = $state<Record<number, EffectiveCyclePolicyRead>>({});
+  let previewPolicyHistories = $state<Record<number, CyclePolicyHistoryRead>>({});
+  let behaviorPolicyRefreshSerial = $state(0);
 
   const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
     CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
@@ -298,6 +310,134 @@
     };
   }
 
+  function previewBehaviorPolicy(cycle: CycleRead): {
+    policy: EffectiveCyclePolicyRead;
+    history: CyclePolicyHistoryRead;
+  } {
+    const changedAt = previewIso(-2);
+    const configuration: CyclePolicyConfigurationRead = {
+      name: cycle.name,
+      prompt: cycle.prompt,
+      schedule_expr: cycle.schedule_expr,
+      schedule_human: cycle.schedule_human,
+      timezone: cycle.timezone,
+      enabled: cycle.enabled,
+      max_concurrency: 1,
+      timeout_seconds: null,
+      retry_policy: { max_attempts: 2 },
+      model_override: cycle.model_override,
+      thinking_override: cycle.thinking_override,
+      execution_policy_key: cycle.execution_policy_key,
+      target_idea_id: cycle.target_idea_id,
+    };
+    const activeGuidance = [
+      'Use the current workspace state as the source of truth.',
+      'Keep the result concise and name any blocker that needs attention.',
+    ];
+    const source: CyclePolicyFieldSourceRead = {
+      version: 2,
+      cycle_revision_id: 4100 + cycle.id,
+      actor_type: 'human',
+      actor_id: 'preview-user',
+      source_reference: `api:/cycles/${cycle.id}/behavior-policy`,
+      rationale: 'Approved behavior for the next run.',
+      changed_at: changedAt,
+      change_id: 5100 + cycle.id,
+    };
+    const fieldSources = Object.fromEntries(
+      [...Object.keys(configuration), 'guidance'].map((field) => [field, { ...source }]),
+    ) as Record<string, CyclePolicyFieldSourceRead>;
+    const policy: EffectiveCyclePolicyRead = {
+      workspace_id: 'preview-org',
+      policy_kind: 'cycle',
+      target_type: 'cycle',
+      target_id: String(cycle.id),
+      version: 2,
+      revision_id: source.cycle_revision_id,
+      configuration,
+      guidance: activeGuidance,
+      editable_fields: [
+        'prompt',
+        'schedule_expr',
+        'timezone',
+        'enabled',
+        'model_override',
+        'thinking_override',
+        'guidance',
+      ],
+      output_targets: [
+        {
+          id: 6100 + cycle.id,
+          target_type: 'cycle_ledger',
+          target_id: String(cycle.id),
+          label: 'Cycle ledger',
+          config: { format: 'summary' },
+          source_type: 'system',
+          source_id: 'cycle-defaults',
+          rationale: 'Keep a durable result for later review.',
+          created_at: previewIso(-18),
+          updated_at: changedAt,
+        },
+      ],
+      output_targets_read_only: true,
+      source: {
+        revision_id: source.cycle_revision_id,
+        actor_type: source.actor_type,
+        actor_id: source.actor_id,
+        rationale: source.rationale,
+        source_reference: source.source_reference,
+        changed_at: changedAt,
+      },
+      field_sources: fieldSources,
+      latest_change: {
+        id: source.change_id ?? 0,
+        version: 2,
+        actor_type: 'human',
+        actor_id: 'preview-user',
+        source_reference: source.source_reference ?? '',
+        rationale: source.rationale ?? '',
+        changed_fields: ['guidance'],
+        applied_at: changedAt,
+        reverted_from_id: null,
+      },
+    };
+    return {
+      policy,
+      history: {
+        items: [
+          {
+            id: source.change_id ?? 0,
+            version: 2,
+            actor_type: 'human',
+            actor_id: 'preview-user',
+            source_reference: source.source_reference ?? '',
+            rationale: 'Replace guidance that used an old priority list.',
+            changed_fields: ['guidance'],
+            applied_at: changedAt,
+            reverted_from_id: null,
+            workspace_id: 'preview-org',
+            policy_kind: 'cycle',
+            target_type: 'cycle',
+            target_id: String(cycle.id),
+            before_snapshot: {
+              configuration,
+              guidance: [...activeGuidance, 'Use the legacy priority list before reviewing the workspace.'],
+            },
+            after_snapshot: { configuration, guidance: activeGuidance },
+            cycle_revision_id: source.cycle_revision_id ?? 0,
+          },
+        ],
+        pagination: { limit: 50, offset: 0, has_more: false, next_offset: null },
+      },
+    };
+  }
+
+  function setPreviewBehaviorPolicy(cycle: CycleRead) {
+    const { policy, history } = previewBehaviorPolicy(cycle);
+    previewPolicies = { ...previewPolicies, [cycle.id]: policy };
+    previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: history };
+  }
+
   function loadPreviewData() {
     const previewCycles = [
       previewCycle(901, {
@@ -342,6 +482,7 @@
     ];
 
     cycles = previewCycles;
+    for (const cycle of previewCycles) setPreviewBehaviorPolicy(cycle);
     previewRuns = {
       901: [
         previewRun(7101, 901, 'completed', previewCycles[0].prompt, -1),
@@ -778,6 +919,7 @@
         cycles = existing
           ? cycles.map((cycle) => (cycle.id === savedId ? saved : cycle))
           : [saved, ...cycles];
+        setPreviewBehaviorPolicy(saved);
         selectedCycleId = saved.id;
         selectedRowId = cycleRowId(saved);
         fillForm(saved);
@@ -792,6 +934,7 @@
       ui.toast(selectedCycleId ? 'Cycle updated' : 'Cycle created', 'success');
       if (isCreate) showCreateModal = false;
       await loadCycles(saved.id);
+      behaviorPolicyRefreshSerial += 1;
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to save cycle', 'error');
     } finally {
@@ -809,6 +952,10 @@
         cycles = cycles.filter((cycle) => cycle.id !== selectedCycleId);
         const { [selectedCycleId]: _removed, ...nextPreviewRuns } = previewRuns;
         previewRuns = nextPreviewRuns;
+        const { [selectedCycleId]: _removedPolicy, ...nextPreviewPolicies } = previewPolicies;
+        const { [selectedCycleId]: _removedHistory, ...nextPreviewHistories } = previewPolicyHistories;
+        previewPolicies = nextPreviewPolicies;
+        previewPolicyHistories = nextPreviewHistories;
         selectedCycleId = null;
         selectedRowId = null;
         runs = [];
@@ -871,12 +1018,14 @@
         const updated = cycles.find((item) => item.id === cycle.id);
         if (updated && preferredCycleId === updated.id) {
           fillForm(updated);
+          setPreviewBehaviorPolicy(updated);
         }
         ui.toast(updated?.enabled ? 'Preview cycle resumed' : 'Preview cycle paused', 'success');
         return;
       }
       await api.updateCycle(cycle.id, { enabled: !cycle.enabled });
       await loadCycles(preferredCycleId);
+      behaviorPolicyRefreshSerial += 1;
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to update cycle', 'error');
     }
@@ -999,6 +1148,14 @@
                       tone="danger"
                     />
                   {/if}
+
+                  <EffectiveCyclePolicyView
+                    cycleId={cycle.id}
+                    previewPolicy={isCyclesPreview ? previewPolicies[cycle.id] : null}
+                    previewHistory={isCyclesPreview ? previewPolicyHistories[cycle.id] : null}
+                    displayTimezone={isCyclesPreview ? localTimezone : null}
+                    refreshSerial={behaviorPolicyRefreshSerial}
+                  />
 
                   <details class="cycle-region" open>
                     <summary>
