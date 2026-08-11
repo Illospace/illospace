@@ -3,15 +3,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base
 from brain.platform.db.constraints import check_in_constraint
-from meetbot.models import MeetbotSessionOutcome
 
-__all__ = ["MEETBOT_SESSION_OUTCOMES", "MeetbotSession"]
+__all__ = [
+    "MEETBOT_SESSION_OUTCOMES",
+    "MeetbotSession",
+    "MeetbotSessionOutcome",
+]
+
+
+class MeetbotSessionOutcome(StrEnum):
+    """Lifecycle outcomes accepted by the brain persistence boundary."""
+
+    REQUESTED = "requested"
+    ADMITTED = "admitted"
+    REFUSED = "refused"
+    NOT_ADMITTED = "not_admitted"
+    LEFT = "left"
 
 
 MEETBOT_SESSION_OUTCOMES = tuple(outcome.value for outcome in MeetbotSessionOutcome)

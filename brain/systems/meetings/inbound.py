@@ -12,6 +12,7 @@ from brain.kernel import config as brain_config
 from brain.kernel.common.coercion import coerce_datetime
 from brain.platform.async_io import run_blocking
 from brain.platform.db.models.inbound import InboundEventRow
+from brain.platform.db.models.meetbot_session import MeetbotSessionOutcome
 from brain.systems.inbound.handlers import (
     InboundEventCompleter,
     InboundHandlerContext,
@@ -33,6 +34,7 @@ from brain.systems.meetings.message import (
     compose_post_meeting_run_message,
 )
 from brain.systems.meetings.session_record import (
+    MeetbotHealthStatus,
     MeetbotHealthUpdate,
     MeetbotTerminalUpdate,
     record_meetbot_health,
@@ -44,9 +46,6 @@ from brain.systems.slack.delivery_routes import (
     build_delivery_trigger,
     resolve_delivery_route,
 )
-from meetbot.models import MeetbotSessionOutcome, SessionStatus
-
-
 MEETING_TRANSCRIPT_ENVELOPE_KIND = "meeting_transcript"
 MEETING_SESSION_HEALTH_ENVELOPE_KIND = "meeting_session_health"
 ACTION_MEETING_RUN_ADMITTED = "meeting.run_admitted"
@@ -327,7 +326,7 @@ def _terminal_update(payload: Mapping[str, Any]) -> MeetbotTerminalUpdate:
 def _health_update(payload: Mapping[str, Any]) -> MeetbotHealthUpdate:
     return MeetbotHealthUpdate(
         session_id=str(payload["session_id"]),
-        status=cast(SessionStatus, payload["status"]),
+        status=cast(MeetbotHealthStatus, payload["status"]),
         joined_at=payload["_joined_at_datetime"],
         participant_count=int(payload["participant_count"]),
         caption_count=int(payload["caption_lines"]),

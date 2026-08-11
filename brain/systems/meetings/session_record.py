@@ -5,13 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.db.models.meetbot_session import MeetbotSession
-from meetbot.models import MeetbotSessionOutcome, SessionStatus
+from brain.platform.db.models.meetbot_session import (
+    MeetbotSession,
+    MeetbotSessionOutcome,
+)
 
 logger = logging.getLogger(__name__)
+
+MeetbotHealthStatus = Literal[
+    "starting",
+    "lobby",
+    "admitted",
+    "captions_flowing",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +29,7 @@ class MeetbotHealthUpdate:
     """Validated active-session values accepted by the persistence boundary."""
 
     session_id: str
-    status: SessionStatus
+    status: MeetbotHealthStatus
     joined_at: datetime | None
     participant_count: int
     caption_count: int
@@ -133,6 +143,7 @@ def _max_observed(current: int | None, observed: int) -> int:
 
 
 __all__ = [
+    "MeetbotHealthStatus",
     "MeetbotHealthUpdate",
     "MeetbotTerminalUpdate",
     "create_requested_meetbot_session",

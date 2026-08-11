@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 
-from brain.platform.db.models.meetbot_session import MeetbotSession
+from brain.platform.db.models.meetbot_session import (
+    MEETBOT_SESSION_OUTCOMES,
+    MeetbotSession,
+    MeetbotSessionOutcome,
+)
 from brain.systems.meetings.session_record import (
     MeetbotHealthUpdate,
     MeetbotTerminalUpdate,
@@ -12,7 +18,37 @@ from brain.systems.meetings.session_record import (
     record_meetbot_health,
     record_meetbot_terminal,
 )
-from meetbot.models import MeetbotSessionOutcome
+from meetbot.models import MeetbotSessionOutcome as MeetbotCallbackOutcome
+
+
+def test_meetbot_outcomes_match_brain_persistence_contract():
+    assert {outcome.value for outcome in MeetbotCallbackOutcome} == {
+        outcome.value for outcome in MeetbotSessionOutcome
+    } == set(MEETBOT_SESSION_OUTCOMES)
+
+
+def test_brain_modules_do_not_import_meetbot():
+    repository_root = Path(__file__).resolve().parents[1]
+    violations = []
+
+    for path in sorted((repository_root / "brain").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            imported_modules = []
+            if isinstance(node, ast.Import):
+                imported_modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules = [node.module]
+
+            if any(
+                module == "meetbot" or module.startswith("meetbot.")
+                for module in imported_modules
+            ):
+                violations.append(
+                    f"{path.relative_to(repository_root)}:{node.lineno}"
+                )
+
+    assert violations == []
 
 
 async def test_terminal_meetbot_session_outcomes_remain_distinguishable(
