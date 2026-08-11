@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, replace
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -10,38 +13,255 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.storage_policy import StoragePolicy
 
 __all__ = [
+    "StoragePolicyPatch",
+    "StoragePolicyValues",
     "async_get_storage_policy",
     "async_list_storage_policy_history",
     "async_manage_storage_policy",
     "async_revert_storage_policy",
     "async_update_storage_policy",
     "serialize_storage_policy",
+    "storage_policy_field_schema",
 ]
 
+_STORAGE_NAME = "storage_name"
+_STORAGE_KIND = "storage_kind"
+_INPUT_SCHEMA = "input_schema"
+_DURATION_HOURS = "duration_hours"
+_PERCENT = "percent"
+_BOOLEAN = "boolean"
 
-def _positive_hours(value: object, field: str) -> int:
+
+def _policy_value_field(
+    storage_name: str,
+    storage_kind: str,
+    input_schema: Mapping[str, Any],
+):
+    return field(
+        metadata={
+            _STORAGE_NAME: storage_name,
+            _STORAGE_KIND: storage_kind,
+            _INPUT_SCHEMA: dict(input_schema),
+        }
+    )
+
+
+@dataclass(frozen=True)
+class StoragePolicyValues:
+    """Canonical policy values, converted from storage units for consumers."""
+
+    finished_workspace_retention: timedelta = _policy_value_field(
+        "finished_workspace_retention_hours",
+        _DURATION_HOURS,
+        {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Retention window for finished agent workspaces.",
+        },
+    )
+    project_draft_retention: timedelta = _policy_value_field(
+        "project_draft_retention_hours",
+        _DURATION_HOURS,
+        {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Retention window for unpublished Project drafts.",
+        },
+    )
+    canvas_quiet_period: timedelta = _policy_value_field(
+        "canvas_quiet_hours",
+        _DURATION_HOURS,
+        {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Quiet window before emerged canvas thoughts are archived.",
+        },
+    )
+    capacity_warn_percent: int = _policy_value_field(
+        "capacity_warn_percent",
+        _PERCENT,
+        {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99,
+            "description": "Storage-use percentage that starts a warning state.",
+        },
+    )
+    capacity_critical_percent: int = _policy_value_field(
+        "capacity_critical_percent",
+        _PERCENT,
+        {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 100,
+            "description": "Storage-use percentage that starts a critical state.",
+        },
+    )
+    automatic_reclamation_allowed: bool = _policy_value_field(
+        "automatic_reclamation_allowed",
+        _BOOLEAN,
+        {"type": "boolean"},
+    )
+
+    @classmethod
+    def from_row(cls, row: StoragePolicy) -> StoragePolicyValues:
+        """Build typed values from one database revision."""
+
+        values = {
+            policy_field.name: _decode_storage_value(
+                policy_field,
+                getattr(row, _storage_name(policy_field)),
+            )
+            for policy_field in fields(cls)
+        }
+        return cls(**values).validated()
+
+    def validated(self) -> StoragePolicyValues:
+        """Return these values after enforcing the storage-policy invariants."""
+
+        for policy_field in fields(self):
+            _encode_storage_value(
+                policy_field,
+                getattr(self, policy_field.name),
+            )
+        if self.capacity_warn_percent >= self.capacity_critical_percent:
+            raise ValueError(
+                "capacity_warn_percent must be less than capacity_critical_percent"
+            )
+        return self
+
+    def patched(self, patch: StoragePolicyPatch) -> StoragePolicyValues:
+        """Overlay the set patch fields and validate the complete policy."""
+
+        updates = {
+            policy_field.name: value
+            for policy_field in fields(self)
+            if (value := getattr(patch, policy_field.name)) is not None
+        }
+        return replace(self, **updates).validated()
+
+    def to_storage_fields(self) -> dict[str, int | bool]:
+        """Encode all policy values for the ORM and external response boundary."""
+
+        self.validated()
+        return {
+            _storage_name(policy_field): _encode_storage_value(
+                policy_field,
+                getattr(self, policy_field.name),
+            )
+            for policy_field in fields(self)
+        }
+
+
+@dataclass(frozen=True)
+class StoragePolicyPatch:
+    """Typed optional changes to storage policy values."""
+
+    finished_workspace_retention: timedelta | None = None
+    project_draft_retention: timedelta | None = None
+    canvas_quiet_period: timedelta | None = None
+    capacity_warn_percent: int | None = None
+    capacity_critical_percent: int | None = None
+    automatic_reclamation_allowed: bool | None = None
+
+    @classmethod
+    def from_storage_fields(
+        cls,
+        storage_values: Mapping[str, object],
+    ) -> StoragePolicyPatch:
+        """Decode tool and route field names into the typed write shape."""
+
+        fields_by_storage_name = {
+            _storage_name(policy_field): policy_field
+            for policy_field in fields(StoragePolicyValues)
+        }
+        unexpected = set(storage_values) - fields_by_storage_name.keys()
+        if unexpected:
+            unexpected_names = ", ".join(sorted(unexpected))
+            raise TypeError(f"Unexpected storage policy fields: {unexpected_names}")
+        patch_values = {
+            policy_field.name: _decode_storage_value(
+                policy_field,
+                storage_values[storage_name],
+            )
+            for storage_name, policy_field in fields_by_storage_name.items()
+            if storage_name in storage_values
+            and storage_values[storage_name] is not None
+        }
+        return cls(**patch_values)
+
+    def is_empty(self) -> bool:
+        return all(
+            getattr(self, patch_field.name) is None
+            for patch_field in fields(self)
+        )
+
+
+def _positive_hours(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field} must be a positive integer")
-    normalized = value
-    if normalized <= 0:
-        raise ValueError(f"{field} must be a positive integer")
-    return normalized
+        raise ValueError(f"{field_name} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
 
 
-def _percent(value: object, field: str) -> int:
+def _duration_hours(value: object, field_name: str) -> int:
+    if not isinstance(value, timedelta):
+        raise ValueError(f"{field_name} must be a positive whole-hour duration")
+    seconds = value.total_seconds()
+    if seconds <= 0 or seconds % 3600:
+        raise ValueError(f"{field_name} must be a positive whole-hour duration")
+    return int(seconds // 3600)
+
+
+def _percent(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field} must be an integer from 1 to 100")
-    normalized = value
-    if normalized < 1 or normalized > 100:
-        raise ValueError(f"{field} must be an integer from 1 to 100")
-    return normalized
+        raise ValueError(f"{field_name} must be an integer from 1 to 100")
+    if value < 1 or value > 100:
+        raise ValueError(f"{field_name} must be an integer from 1 to 100")
+    return value
 
 
-def _required_text(value: object, field: str) -> str:
+def _required_text(value: object, field_name: str) -> str:
     normalized = str(value or "").strip()
     if not normalized:
-        raise ValueError(f"{field} is required")
+        raise ValueError(f"{field_name} is required")
     return normalized
+
+
+def _storage_name(policy_field) -> str:
+    return str(policy_field.metadata[_STORAGE_NAME])
+
+
+def _decode_storage_value(policy_field, value: object) -> Any:
+    storage_name = _storage_name(policy_field)
+    storage_kind = policy_field.metadata[_STORAGE_KIND]
+    if storage_kind == _DURATION_HOURS:
+        return timedelta(hours=_positive_hours(value, storage_name))
+    return value
+
+
+def _encode_storage_value(policy_field, value: object) -> int | bool:
+    storage_name = _storage_name(policy_field)
+    storage_kind = policy_field.metadata[_STORAGE_KIND]
+    if storage_kind == _DURATION_HOURS:
+        return _duration_hours(value, storage_name)
+    if storage_kind == _PERCENT:
+        return _percent(value, storage_name)
+    if storage_kind == _BOOLEAN:
+        if not isinstance(value, bool):
+            raise ValueError(f"{storage_name} must be a boolean")
+        return value
+    raise RuntimeError(f"Unsupported storage policy field kind: {storage_kind}")
+
+
+def storage_policy_field_schema() -> dict[str, dict[str, Any]]:
+    """Return tool input schemas for every writable policy value."""
+
+    return {
+        _storage_name(policy_field): dict(policy_field.metadata[_INPUT_SCHEMA])
+        for policy_field in fields(StoragePolicyValues)
+    }
 
 
 def serialize_storage_policy(row: StoragePolicy) -> dict[str, Any]:
@@ -50,12 +270,7 @@ def serialize_storage_policy(row: StoragePolicy) -> dict[str, Any]:
     created_at = getattr(row, "created_at", None)
     return {
         "id": row.id,
-        "finished_workspace_retention_hours": row.finished_workspace_retention_hours,
-        "project_draft_retention_hours": row.project_draft_retention_hours,
-        "canvas_quiet_hours": row.canvas_quiet_hours,
-        "capacity_warn_percent": row.capacity_warn_percent,
-        "capacity_critical_percent": row.capacity_critical_percent,
-        "automatic_reclamation_allowed": row.automatic_reclamation_allowed,
+        **StoragePolicyValues.from_row(row).to_storage_fields(),
         "rationale": row.rationale,
         "source_type": row.source_type,
         "source_id": row.source_id,
@@ -65,13 +280,11 @@ def serialize_storage_policy(row: StoragePolicy) -> dict[str, Any]:
     }
 
 
-async def async_get_storage_policy(
+async def _async_get_storage_policy_row(
     session: AsyncSession,
     *,
     for_update: bool = False,
 ) -> StoragePolicy:
-    """Return the one active policy or fail closed when migration state is invalid."""
-
     statement = (
         select(StoragePolicy)
         .where(StoragePolicy.is_active.is_(True))
@@ -84,6 +297,17 @@ async def async_get_storage_policy(
     if row is None:
         raise RuntimeError("No active storage policy is configured")
     return row
+
+
+async def async_get_storage_policy(
+    session: AsyncSession,
+    *,
+    for_update: bool = False,
+) -> StoragePolicyValues:
+    """Return typed values for the one active policy."""
+
+    row = await _async_get_storage_policy_row(session, for_update=for_update)
+    return StoragePolicyValues.from_row(row)
 
 
 async def async_list_storage_policy_history(
@@ -106,45 +330,14 @@ async def _append_storage_policy(
     session: AsyncSession,
     *,
     current: StoragePolicy,
-    finished_workspace_retention_hours: object,
-    project_draft_retention_hours: object,
-    canvas_quiet_hours: object,
-    capacity_warn_percent: object,
-    capacity_critical_percent: object,
-    automatic_reclamation_allowed: object,
+    values: StoragePolicyValues,
     rationale: object,
     source_type: object,
     source_id: object,
     reverted_from_id: int | None = None,
 ) -> StoragePolicy:
-    finished_workspace_hours = _positive_hours(
-        finished_workspace_retention_hours,
-        "finished_workspace_retention_hours",
-    )
-    project_draft_hours = _positive_hours(
-        project_draft_retention_hours,
-        "project_draft_retention_hours",
-    )
-    canvas_hours = _positive_hours(canvas_quiet_hours, "canvas_quiet_hours")
-    warn_percent = _percent(capacity_warn_percent, "capacity_warn_percent")
-    critical_percent = _percent(
-        capacity_critical_percent,
-        "capacity_critical_percent",
-    )
-    if warn_percent >= critical_percent:
-        raise ValueError(
-            "capacity_warn_percent must be less than capacity_critical_percent"
-        )
-    if not isinstance(automatic_reclamation_allowed, bool):
-        raise ValueError("automatic_reclamation_allowed must be a boolean")
-
     row = StoragePolicy(
-        finished_workspace_retention_hours=finished_workspace_hours,
-        project_draft_retention_hours=project_draft_hours,
-        canvas_quiet_hours=canvas_hours,
-        capacity_warn_percent=warn_percent,
-        capacity_critical_percent=critical_percent,
-        automatic_reclamation_allowed=automatic_reclamation_allowed,
+        **values.to_storage_fields(),
         rationale=_required_text(rationale, "rationale"),
         source_type=_required_text(source_type, "source_type"),
         source_id=str(source_id).strip() if source_id is not None else None,
@@ -160,52 +353,19 @@ async def _append_storage_policy(
 async def async_update_storage_policy(
     session: AsyncSession,
     *,
+    patch: StoragePolicyPatch,
     rationale: str,
     source_type: str,
     source_id: str | None,
-    finished_workspace_retention_hours: int | None = None,
-    project_draft_retention_hours: int | None = None,
-    canvas_quiet_hours: int | None = None,
-    capacity_warn_percent: int | None = None,
-    capacity_critical_percent: int | None = None,
-    automatic_reclamation_allowed: bool | None = None,
 ) -> StoragePolicy:
     """Append one audited revision and make it the active policy."""
 
-    current = await async_get_storage_policy(session, for_update=True)
+    current = await _async_get_storage_policy_row(session, for_update=True)
+    current_values = StoragePolicyValues.from_row(current)
     return await _append_storage_policy(
         session,
         current=current,
-        finished_workspace_retention_hours=(
-            current.finished_workspace_retention_hours
-            if finished_workspace_retention_hours is None
-            else finished_workspace_retention_hours
-        ),
-        project_draft_retention_hours=(
-            current.project_draft_retention_hours
-            if project_draft_retention_hours is None
-            else project_draft_retention_hours
-        ),
-        canvas_quiet_hours=(
-            current.canvas_quiet_hours
-            if canvas_quiet_hours is None
-            else canvas_quiet_hours
-        ),
-        capacity_warn_percent=(
-            current.capacity_warn_percent
-            if capacity_warn_percent is None
-            else capacity_warn_percent
-        ),
-        capacity_critical_percent=(
-            current.capacity_critical_percent
-            if capacity_critical_percent is None
-            else capacity_critical_percent
-        ),
-        automatic_reclamation_allowed=(
-            current.automatic_reclamation_allowed
-            if automatic_reclamation_allowed is None
-            else automatic_reclamation_allowed
-        ),
+        values=current_values.patched(patch),
         rationale=rationale,
         source_type=source_type,
         source_id=source_id,
@@ -222,19 +382,14 @@ async def async_revert_storage_policy(
 ) -> StoragePolicy:
     """Append a new active revision with values copied from an older revision."""
 
-    current = await async_get_storage_policy(session, for_update=True)
+    current = await _async_get_storage_policy_row(session, for_update=True)
     target = await session.get(StoragePolicy, int(policy_id))
     if target is None:
         raise ValueError(f"Storage policy {policy_id} not found")
     return await _append_storage_policy(
         session,
         current=current,
-        finished_workspace_retention_hours=target.finished_workspace_retention_hours,
-        project_draft_retention_hours=target.project_draft_retention_hours,
-        canvas_quiet_hours=target.canvas_quiet_hours,
-        capacity_warn_percent=target.capacity_warn_percent,
-        capacity_critical_percent=target.capacity_critical_percent,
-        automatic_reclamation_allowed=target.automatic_reclamation_allowed,
+        values=StoragePolicyValues.from_row(target),
         rationale=rationale,
         source_type=source_type,
         source_id=source_id,
@@ -250,46 +405,31 @@ async def async_manage_storage_policy(
     source_type: str = "agent",
     source_id: str | None = None,
     policy_id: int | None = None,
-    finished_workspace_retention_hours: int | None = None,
-    project_draft_retention_hours: int | None = None,
-    canvas_quiet_hours: int | None = None,
-    capacity_warn_percent: int | None = None,
-    capacity_critical_percent: int | None = None,
-    automatic_reclamation_allowed: bool | None = None,
     limit: int = 50,
+    patch: StoragePolicyPatch | None = None,
+    **storage_values: object,
 ) -> dict[str, Any]:
     """Agent-facing read, update, history, and revert actions."""
 
     normalized_action = str(action or "get").strip().lower()
     if normalized_action == "get":
-        return {"policy": serialize_storage_policy(await async_get_storage_policy(session))}
+        row = await _async_get_storage_policy_row(session)
+        return {"policy": serialize_storage_policy(row)}
     if normalized_action == "history":
         rows = await async_list_storage_policy_history(session, limit=limit)
         return {"policies": [serialize_storage_policy(row) for row in rows]}
     if normalized_action == "update":
-        if all(
-            value is None
-            for value in (
-                finished_workspace_retention_hours,
-                project_draft_retention_hours,
-                canvas_quiet_hours,
-                capacity_warn_percent,
-                capacity_critical_percent,
-                automatic_reclamation_allowed,
-            )
-        ):
+        if patch is not None and storage_values:
+            raise TypeError("Pass a storage policy patch or storage fields, not both")
+        update_patch = patch or StoragePolicyPatch.from_storage_fields(storage_values)
+        if update_patch.is_empty():
             raise ValueError("update requires at least one policy field")
         row = await async_update_storage_policy(
             session,
+            patch=update_patch,
             rationale=_required_text(rationale, "rationale"),
             source_type=source_type,
             source_id=source_id,
-            finished_workspace_retention_hours=finished_workspace_retention_hours,
-            project_draft_retention_hours=project_draft_retention_hours,
-            canvas_quiet_hours=canvas_quiet_hours,
-            capacity_warn_percent=capacity_warn_percent,
-            capacity_critical_percent=capacity_critical_percent,
-            automatic_reclamation_allowed=automatic_reclamation_allowed,
         )
         return {"updated": serialize_storage_policy(row)}
     if normalized_action == "revert":

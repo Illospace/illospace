@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from brain.systems.storage_policy import storage_policy_field_schema
+
 
 DEPLOYMENT_TOOLS = [
     {
@@ -118,34 +120,7 @@ RUNTIME_PREFERENCE_TOOLS = [
                     "type": "integer",
                     "description": "Prior policy revision id required for revert.",
                 },
-                "finished_workspace_retention_hours": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Retention window for finished agent workspaces.",
-                },
-                "project_draft_retention_hours": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Retention window for unpublished Project drafts.",
-                },
-                "canvas_quiet_hours": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Quiet window before emerged canvas thoughts are archived.",
-                },
-                "capacity_warn_percent": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 99,
-                    "description": "Storage-use percentage that starts a warning state.",
-                },
-                "capacity_critical_percent": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "maximum": 100,
-                    "description": "Storage-use percentage that starts a critical state.",
-                },
-                "automatic_reclamation_allowed": {"type": "boolean"},
+                **storage_policy_field_schema(),
                 "rationale": {
                     "type": "string",
                     "description": "Required reason for update and revert actions.",

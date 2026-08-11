@@ -35,9 +35,11 @@ async def archive_dormant_emerged(
     """
     if quiet_hours is None:
         policy = await async_get_storage_policy(session)
-        quiet_hours = policy.canvas_quiet_hours
+        quiet_period = policy.canvas_quiet_period
+    else:
+        quiet_period = timedelta(hours=quiet_hours)
     changed_at = now or datetime.now(timezone.utc)
-    cutoff = changed_at - timedelta(hours=quiet_hours)
+    cutoff = changed_at - quiet_period
     archived = 0
 
     while True:
@@ -77,11 +79,11 @@ async def archive_dormant_emerged(
 async def run() -> dict[str, int]:
     async with UnitOfWork() as uow:
         policy = await async_get_storage_policy(uow.session)
+        quiet_hours = policy.canvas_quiet_period // timedelta(hours=1)
         archived = await archive_dormant_emerged(
             uow.session,  # type: ignore[arg-type]
-            quiet_hours=policy.canvas_quiet_hours,
+            quiet_hours=quiet_hours,
         )
-        quiet_hours = policy.canvas_quiet_hours
     result = {"archived": archived, "quiet_hours": quiet_hours}
     log.info("Cortex occupancy maintenance complete: %s", result)
     return result

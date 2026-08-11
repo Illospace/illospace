@@ -448,7 +448,7 @@ async def apply_project_draft_cleanup_for_thread(
     """Delete clean archived-thread Project drafts and retain dirty drafts with a grace deadline."""
 
     policy = await async_get_storage_policy(session)
-    workspace_retention = timedelta(hours=policy.project_draft_retention_hours)
+    workspace_retention = policy.project_draft_retention
     stmt = select(AgentRunRow).where(AgentRunRow.thread_id == str(thread_id))
     runs = (await session.scalars(stmt)).all()
     results = [
@@ -474,7 +474,7 @@ async def cleanup_expired_project_draft_workspaces(
 
     now = _ensure_aware(now or _utc_now())
     policy = await async_get_storage_policy(session)
-    workspace_retention = timedelta(hours=policy.project_draft_retention_hours)
+    workspace_retention = policy.project_draft_retention
     stmt = (
         select(AgentRunRow)
         .join(Idea, AgentRunRow.thread_id == Idea.id)

@@ -7,6 +7,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+def _storage_policy_row(project_draft_retention_hours: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        finished_workspace_retention_hours=48,
+        project_draft_retention_hours=project_draft_retention_hours,
+        canvas_quiet_hours=24,
+        capacity_warn_percent=80,
+        capacity_critical_percent=90,
+        automatic_reclamation_allowed=False,
+    )
+
+
 def _run_with_local_project_draft(source_dir, draft_dir):
     resource = {
         "id": "reports",
@@ -148,9 +159,7 @@ async def test_thread_cleanup_updates_all_project_runs(tmp_path):
     result = MagicMock()
     result.all.return_value = [run]
     session = MagicMock()
-    session.scalar = AsyncMock(
-        return_value=SimpleNamespace(project_draft_retention_hours=36)
-    )
+    session.scalar = AsyncMock(return_value=_storage_policy_row(36))
     session.scalars = AsyncMock(return_value=result)
     session.flush = AsyncMock()
 
@@ -185,9 +194,7 @@ async def test_thread_cleanup_reads_runtime_workspace_retention(tmp_path):
     result = MagicMock()
     result.all.return_value = [run]
     session = MagicMock()
-    session.scalar = AsyncMock(
-        return_value=SimpleNamespace(project_draft_retention_hours=60)
-    )
+    session.scalar = AsyncMock(return_value=_storage_policy_row(60))
     session.scalars = AsyncMock(return_value=result)
     session.flush = AsyncMock()
 
@@ -229,9 +236,7 @@ async def test_expired_cleanup_reaps_retained_unpublished_project_drafts(tmp_pat
     result = MagicMock()
     result.all.return_value = [run]
     session = MagicMock()
-    session.scalar = AsyncMock(
-        return_value=SimpleNamespace(project_draft_retention_hours=36)
-    )
+    session.scalar = AsyncMock(return_value=_storage_policy_row(36))
     session.scalars = AsyncMock(return_value=result)
     session.flush = AsyncMock()
 
