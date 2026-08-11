@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
+from pydantic import create_model
 from sqlalchemy import func, select
 
 from brain.app.api.routers import cycles as cycles_router
+from brain.app.api.schemas import cycles as cycles_schemas
 from brain.app.api.schemas.cycles import (
     CyclePolicyApplyRead,
     CyclePolicyApplyRequest,
@@ -29,8 +32,7 @@ from brain.platform.db.models.cycle import (
 )
 from brain.platform.db.models.org import Org, User
 from brain.systems.cycles import behavior_policy
-from brain.systems.cycles.access import CycleActor
-from brain.systems.cycles.serializers import serialize_cycle_policy_preview
+from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
 
 pytestmark = pytest.mark.asyncio
 
@@ -281,11 +283,30 @@ async def test_effective_policy_shape_includes_sources_and_read_only_targets(
 
 
 async def test_snapshot_contract_derives_api_field_plumbing():
-    snapshot_type = behavior_policy.CyclePolicySnapshot
-    assert set(CyclePolicyConfigurationRead.model_fields) == {
-        *snapshot_type.configuration_field_names(),
+    snapshot_type = CyclePolicySnapshot
+    assert tuple(
+        (field_name, model_field.is_required())
+        for field_name, model_field in CyclePolicyConfigurationRead.model_fields.items()
+    ) == (
+        ("name", True),
+        ("prompt", True),
+        ("schedule_expr", True),
+        ("schedule_human", True),
+        ("timezone", True),
+        ("enabled", True),
+        ("max_concurrency", True),
+        ("timeout_seconds", False),
+        ("retry_policy", True),
+        ("model_override", False),
+        ("thinking_override", False),
+        ("execution_policy_key", False),
+        ("target_idea_id", False),
+    )
+    assert tuple(CyclePolicyConfigurationRead.model_fields) == (
+        *snapshot_type.configuration_field_names()[:3],
         "schedule_human",
-    }
+        *snapshot_type.configuration_field_names()[3:],
+    )
     assert tuple(CyclePolicyProposal.model_fields) == (
         snapshot_type.api_editable_field_names()
     )
@@ -314,8 +335,11 @@ async def test_throwaway_scalar_reaches_preview_history_and_conflict(
     workspace = api_workspace
 
     @dataclass(frozen=True)
-    class SnapshotWithThrowawayScalar(behavior_policy.CyclePolicySnapshot):
-        throwaway_scalar: str = "before"
+    class SnapshotWithThrowawayScalar(CyclePolicySnapshot):
+        throwaway_scalar: str = dataclass_field(
+            default="before",
+            metadata={"api_editable": True},
+        )
 
     workspace.cycle.throwaway_scalar = "before"
     monkeypatch.setattr(
@@ -323,75 +347,175 @@ async def test_throwaway_scalar_reaches_preview_history_and_conflict(
         "CyclePolicySnapshot",
         SnapshotWithThrowawayScalar,
     )
-    actor = CycleActor.from_user_payload(workspace.owner)
 
-    stale_body = _preview_body(prompt="A stale editor draft.")
-    stale_preview = await cycles_router.preview_cycle_behavior_policy(
-        workspace.cycle.id,
-        stale_body,
-        db=workspace.session,
-        user=workspace.owner,
+    configuration_read = cycles_schemas._cycle_policy_configuration_read_model(
+        SnapshotWithThrowawayScalar
+    )
+    snapshot_read = create_model(
+        "ThrowawayCyclePolicySnapshotRead",
+        __base__=cycles_schemas.CyclePolicySnapshotRead,
+        configuration=(configuration_read, ...),
+    )
+    preview_read = create_model(
+        "ThrowawayCyclePolicyPreviewRead",
+        __base__=CyclePolicyPreviewRead,
+        before=(snapshot_read, ...),
+        after=(snapshot_read, ...),
+    )
+    effective_read = create_model(
+        "ThrowawayEffectiveCyclePolicyRead",
+        __base__=EffectiveCyclePolicyRead,
+        configuration=(configuration_read, ...),
+    )
+    change_read = create_model(
+        "ThrowawayCyclePolicyChangeRead",
+        __base__=cycles_schemas.CyclePolicyChangeRead,
+        before_snapshot=(snapshot_read, ...),
+        after_snapshot=(snapshot_read, ...),
+    )
+    apply_read = create_model(
+        "ThrowawayCyclePolicyApplyRead",
+        __base__=CyclePolicyApplyRead,
+        effective_policy=(effective_read, ...),
+        change=(change_read, ...),
+    )
+    history_read = create_model(
+        "ThrowawayCyclePolicyHistoryRead",
+        __base__=CyclePolicyHistoryRead,
+        items=(list[change_read], ...),
+    )
+    proposal_model = create_model(
+        "CyclePolicyProposalWithThrowawayScalar",
+        __base__=CyclePolicyProposal,
+        throwaway_scalar=(str | None, None),
+    )
+    preview_request = create_model(
+        "CyclePolicyPreviewRequestWithThrowawayScalar",
+        __base__=CyclePolicyPreviewRequest,
+        proposal=(proposal_model, ...),
+    )
+    apply_request = create_model(
+        "CyclePolicyApplyRequestWithThrowawayScalar",
+        __base__=CyclePolicyApplyRequest,
+        proposal=(proposal_model, ...),
     )
 
-    patch = behavior_policy.CyclePolicyPatch(
-        throwaway_scalar="after",
-    )
-    preview = await behavior_policy.async_preview_cycle_policy_change(
-        workspace.session,
-        actor=actor,
-        cycle_id=workspace.cycle.id,
-        proposal=patch,
-    )
-    preview_payload = serialize_cycle_policy_preview(preview)
-    assert preview_payload["changed_fields"] == ["throwaway_scalar"]
-    assert preview_payload["after"]["configuration"]["throwaway_scalar"] == (
-        "after"
-    )
-    assert preview_payload["diff"] == [
-        {
-            "field": "throwaway_scalar",
-            "kind": "value",
-            "before": "before",
-            "after": "after",
-        }
-    ]
+    async def preview_endpoint(body):
+        return await cycles_router.preview_cycle_behavior_policy(
+            workspace.cycle.id,
+            body,
+            db=workspace.session,
+            user=workspace.owner,
+        )
 
-    result = await behavior_policy.async_apply_cycle_policy_change(
-        workspace.session,
-        actor=actor,
-        cycle_id=workspace.cycle.id,
-        proposal=patch,
-        expected_version=preview.before.version,
-        preview_digest=preview.preview_digest,
-        rationale="Prove the derived field contract.",
-        source_reference="test:throwaway-policy-field",
-    )
-    assert isinstance(result, behavior_policy.CyclePolicyApplied)
-    assert workspace.cycle.throwaway_scalar == "after"
-    assert result.change.after_snapshot.throwaway_scalar == "after"
+    async def apply_endpoint(body):
+        return await cycles_router.apply_cycle_behavior_policy(
+            workspace.cycle.id,
+            body,
+            db=workspace.session,
+            user=workspace.owner,
+        )
 
-    history = await cycles_router.list_cycle_behavior_policy_history(
-        workspace.cycle.id,
-        limit=50,
-        offset=0,
-        db=workspace.session,
-        user=workspace.owner,
+    async def history_endpoint():
+        return await cycles_router.list_cycle_behavior_policy_history(
+            workspace.cycle.id,
+            limit=50,
+            offset=0,
+            db=workspace.session,
+            user=workspace.owner,
+        )
+
+    preview_endpoint.__annotations__["body"] = preview_request
+    apply_endpoint.__annotations__["body"] = apply_request
+    boundary_app = FastAPI()
+    preview_path = f"/api/cycles/{workspace.cycle.id}/behavior-policy/preview"
+    apply_path = f"/api/cycles/{workspace.cycle.id}/behavior-policy/apply"
+    history_path = f"/api/cycles/{workspace.cycle.id}/behavior-policy/history"
+    boundary_app.add_api_route(
+        preview_path,
+        preview_endpoint,
+        methods=["POST"],
+        response_model=preview_read,
     )
-    assert history["items"][0]["before_snapshot"]["configuration"][
-        "throwaway_scalar"
-    ] == "before"
-    assert history["items"][0]["after_snapshot"]["configuration"][
-        "throwaway_scalar"
-    ] == "after"
+    boundary_app.add_api_route(
+        apply_path,
+        apply_endpoint,
+        methods=["POST"],
+        response_model=apply_read,
+    )
+    boundary_app.add_api_route(
+        history_path,
+        history_endpoint,
+        methods=["GET"],
+        response_model=history_read,
+    )
+
+    transport = ASGITransport(app=boundary_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        stale_response = await client.post(
+            preview_path,
+            json={"proposal": {"prompt": "A stale editor draft."}},
+        )
+        assert stale_response.status_code == 200
+        stale_preview = stale_response.json()
+
+        preview_response = await client.post(
+            preview_path,
+            json={"proposal": {"throwaway_scalar": "after"}},
+        )
+        assert preview_response.status_code == 200
+        preview_payload = preview_response.json()
+        assert preview_payload["changed_fields"] == ["throwaway_scalar"]
+        assert preview_payload["after"]["configuration"][
+            "throwaway_scalar"
+        ] == "after"
+        assert preview_payload["diff"] == [
+            {
+                "field": "throwaway_scalar",
+                "kind": "value",
+                "before": "before",
+                "after": "after",
+                "added": None,
+                "removed": None,
+            }
+        ]
+
+        apply_response = await client.post(
+            apply_path,
+            json={
+                "proposal": {"throwaway_scalar": "after"},
+                "expected_version": preview_payload["expected_version"],
+                "preview_digest": preview_payload["preview_digest"],
+                "rationale": "Prove the derived field contract.",
+            },
+        )
+        assert apply_response.status_code == 200
+        applied = apply_response.json()
+        assert applied["effective_policy"]["configuration"][
+            "throwaway_scalar"
+        ] == "after"
+        assert workspace.cycle.throwaway_scalar == "after"
+
+        history_response = await client.get(history_path)
+        assert history_response.status_code == 200
+        history = history_response.json()
+        assert history["items"][0]["before_snapshot"]["configuration"][
+            "throwaway_scalar"
+        ] == "before"
+        assert history["items"][0]["after_snapshot"]["configuration"][
+            "throwaway_scalar"
+        ] == "after"
 
     with pytest.raises(HTTPException) as conflict:
         await cycles_router.apply_cycle_behavior_policy(
             workspace.cycle.id,
-            CyclePolicyApplyRequest(
-                proposal=stale_body.proposal,
-                expected_version=stale_preview["expected_version"],
-                preview_digest=stale_preview["preview_digest"],
-                rationale="This editor draft is stale.",
+            apply_request.model_validate(
+                {
+                    "proposal": {"prompt": "A stale editor draft."},
+                    "expected_version": stale_preview["expected_version"],
+                    "preview_digest": stale_preview["preview_digest"],
+                    "rationale": "This editor draft is stale.",
+                }
             ),
             db=workspace.session,
             user=workspace.owner,

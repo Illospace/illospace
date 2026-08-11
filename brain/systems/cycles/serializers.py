@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from brain.systems.cycles.behavior_policy import (
         BehaviorChangeRecord,
         CyclePolicyPreview,
-        CyclePolicySnapshot,
     )
+    from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
     from brain.systems.cycles.behavior_policy_read_model import (
         EffectiveCyclePolicyReadModel,
     )
