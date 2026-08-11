@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,6 +33,11 @@ from brain.systems.failure_guard.slack_delivery import (
 )
 from brain.systems.slack.client import slack_web_client_from_runtime
 from brain.systems.storage_policy import StoragePolicyValues, async_get_storage_policy
+from brain.systems.workspace_inventory import (
+    WorkspaceConsumer,
+    WorkspaceScanError,
+    inventory_workspace,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -43,16 +47,22 @@ HOST_CAPACITY_ALERT_KEY = "host_capacity_warn"
 _CAPACITY_WARN_TRIGGER_KIND = FailureGuardTriggerKind(HOST_CAPACITY_ALERT_KEY)
 
 
-class TopConsumer(TypedDict):
-    path: str
-    bytes_used: int
-
-
 class HostCapacityDetails(TypedDict):
     mount: str
     pct_used: float
     bytes_free: int
-    top_consumers: list[TopConsumer]
+    top_consumers: list[WorkspaceConsumer]
+    inventory_scan_errors: list[WorkspaceScanError]
+
+
+@dataclass(frozen=True, slots=True)
+class HostDiskCapacity:
+    """Cheap live capacity values for the workspace filesystem."""
+
+    mount: str
+    pct_used: float
+    bytes_free: int
+    bytes_total: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +73,8 @@ class HostCapacityMeasurement:
     pct_used: float
     bytes_free: int
     bytes_total: int
-    top_consumers: tuple[TopConsumer, ...]
+    top_consumers: tuple[WorkspaceConsumer, ...]
+    inventory_scan_errors: tuple[WorkspaceScanError, ...] = ()
 
     def details(self) -> HostCapacityDetails:
         """Return the exact durable memory-health detail shape."""
@@ -72,6 +83,9 @@ class HostCapacityMeasurement:
             "pct_used": self.pct_used,
             "bytes_free": self.bytes_free,
             "top_consumers": [dict(consumer) for consumer in self.top_consumers],
+            "inventory_scan_errors": [
+                dict(error) for error in self.inventory_scan_errors
+            ],
         }
 
 
@@ -101,56 +115,20 @@ class _HostCapacityLatchStore:
         return latch
 
 
-def _directory_size_bytes(path: Path) -> int:
-    """Return regular-file bytes below a path without following symlinks."""
-    total = 0
-    pending = [path]
-    while pending:
-        current = pending.pop()
-        try:
-            entries = os.scandir(current)
-        except OSError as exc:
-            logger.warning("Host capacity could not scan %s: %s", current, exc)
-            continue
-        with entries:
-            for entry in entries:
-                try:
-                    entry_stat = entry.stat(follow_symlinks=False)
-                except OSError as exc:
-                    logger.warning(
-                        "Host capacity could not stat %s: %s",
-                        entry.path,
-                        exc,
-                    )
-                    continue
-                if stat.S_ISREG(entry_stat.st_mode):
-                    total += entry_stat.st_size
-                elif stat.S_ISDIR(entry_stat.st_mode):
-                    pending.append(Path(entry.path))
-    return total
-
-
-def _workspace_top_consumers(
-    workspace_root: Path,
-    *,
-    limit: int,
-) -> tuple[TopConsumer, ...]:
-    consumers: list[TopConsumer] = []
-    for child in workspace_root.iterdir():
-        try:
-            child_stat = child.stat(follow_symlinks=False)
-        except OSError as exc:
-            logger.warning("Host capacity could not stat %s: %s", child, exc)
-            continue
-        if stat.S_ISREG(child_stat.st_mode):
-            bytes_used = child_stat.st_size
-        elif stat.S_ISDIR(child_stat.st_mode):
-            bytes_used = _directory_size_bytes(child)
-        else:
-            continue
-        consumers.append({"path": child.name, "bytes_used": bytes_used})
-    consumers.sort(key=lambda item: (-item["bytes_used"], item["path"]))
-    return tuple(consumers[:limit])
+def measure_host_disk_capacity(workspace_root: str | Path) -> HostDiskCapacity:
+    """Read live filesystem capacity without walking the workspace tree."""
+    root = Path(workspace_root).expanduser().resolve(strict=True)
+    usage = shutil.disk_usage(root)
+    pct_used = round((usage.used / usage.total) * 100, 1) if usage.total else 0.0
+    mount = root
+    while mount.parent != mount and not os.path.ismount(mount):
+        mount = mount.parent
+    return HostDiskCapacity(
+        mount=str(mount),
+        pct_used=pct_used,
+        bytes_free=int(usage.free),
+        bytes_total=int(usage.total),
+    )
 
 
 def measure_host_capacity(
@@ -160,20 +138,18 @@ def measure_host_capacity(
 ) -> HostCapacityMeasurement:
     """Measure the workspace filesystem and its largest direct consumers."""
     root = Path(workspace_root).expanduser().resolve(strict=True)
-    usage = shutil.disk_usage(root)
-    pct_used = round((usage.used / usage.total) * 100, 1) if usage.total else 0.0
-    mount = root
-    while mount.parent != mount and not os.path.ismount(mount):
-        mount = mount.parent
+    disk = measure_host_disk_capacity(root)
+    inventory = inventory_workspace(
+        root,
+        top_consumer_limit=top_consumer_limit,
+    )
     return HostCapacityMeasurement(
-        mount=str(mount),
-        pct_used=pct_used,
-        bytes_free=int(usage.free),
-        bytes_total=int(usage.total),
-        top_consumers=_workspace_top_consumers(
-            root,
-            limit=max(1, int(top_consumer_limit)),
-        ),
+        mount=disk.mount,
+        pct_used=disk.pct_used,
+        bytes_free=disk.bytes_free,
+        bytes_total=disk.bytes_total,
+        top_consumers=inventory.top_consumers,
+        inventory_scan_errors=inventory.scan_errors,
     )
 
 
@@ -182,6 +158,13 @@ async def async_measure_host_capacity(
 ) -> HostCapacityMeasurement:
     """Measure capacity without blocking the caller's event loop."""
     return await run_blocking(measure_host_capacity, workspace_root)
+
+
+async def async_measure_host_disk_capacity(
+    workspace_root: str | Path,
+) -> HostDiskCapacity:
+    """Read live filesystem capacity without blocking the event loop."""
+    return await run_blocking(measure_host_disk_capacity, workspace_root)
 
 
 def _capacity_status(
@@ -318,10 +301,21 @@ async def async_read_host_capacity(
     *,
     workspace_root: str | Path,
     limit: int = 24,
+    refresh_inventory: bool = False,
 ) -> dict[str, Any]:
-    """Return live capacity plus recent durable measurements as a trend."""
+    """Return live disk capacity and the latest durable workspace inventory."""
     normalized_limit = max(1, min(int(limit), 168))
-    measurement = await async_measure_host_capacity(workspace_root)
+    if refresh_inventory:
+        refreshed = await async_measure_host_capacity(workspace_root)
+        disk = HostDiskCapacity(
+            mount=refreshed.mount,
+            pct_used=refreshed.pct_used,
+            bytes_free=refreshed.bytes_free,
+            bytes_total=refreshed.bytes_total,
+        )
+    else:
+        refreshed = None
+        disk = await async_measure_host_disk_capacity(workspace_root)
     policy = await async_get_storage_policy(session)
     rows = await session.scalars(
         select(MemoryHealthLog)
@@ -340,11 +334,25 @@ async def async_read_host_capacity(
         }
         for row in rows.all()
     ]
+    latest = trend[0] if trend else None
+    if refreshed is not None:
+        top_consumers = [dict(item) for item in refreshed.top_consumers]
+        scan_errors = [dict(error) for error in refreshed.inventory_scan_errors]
+        inventory_observed_at = ensure_utc().isoformat()
+    else:
+        top_consumers = list((latest or {}).get("top_consumers") or [])
+        scan_errors = list((latest or {}).get("inventory_scan_errors") or [])
+        inventory_observed_at = (latest or {}).get("observed_at")
     return {
         "current": {
-            **measurement.details(),
-            "bytes_total": measurement.bytes_total,
-            "status": _capacity_status(measurement.pct_used, policy),
+            "mount": disk.mount,
+            "pct_used": disk.pct_used,
+            "bytes_free": disk.bytes_free,
+            "bytes_total": disk.bytes_total,
+            "status": _capacity_status(disk.pct_used, policy),
+            "top_consumers": top_consumers,
+            "inventory_scan_errors": scan_errors,
+            "inventory_observed_at": inventory_observed_at,
         },
         "thresholds": _thresholds(policy),
         "trend": trend,
@@ -354,9 +362,12 @@ async def async_read_host_capacity(
 __all__ = [
     "HOST_CAPACITY_ALERT_KEY",
     "HOST_CAPACITY_CHECK_TYPE",
+    "HostDiskCapacity",
     "HostCapacityMeasurement",
+    "async_measure_host_disk_capacity",
     "async_measure_host_capacity",
     "async_read_host_capacity",
     "measure_host_capacity",
+    "measure_host_disk_capacity",
     "record_host_capacity",
 ]

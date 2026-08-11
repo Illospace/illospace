@@ -291,7 +291,7 @@ def _get_tool_handlers(
                 patch=patch,
             )
 
-    async def _read_host_capacity(limit=24):
+    async def _read_host_capacity(limit=24, refresh_inventory=False):
         from brain.kernel import config as brain_config
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
         from brain.systems.host_capacity import async_read_host_capacity
@@ -301,6 +301,7 @@ def _get_tool_handlers(
                 uow.session,
                 workspace_root=brain_config.resolve_workspace_root(),
                 limit=limit,
+                refresh_inventory=refresh_inventory,
             )
 
     _manage_deployment._illo_run_on_event_loop = True

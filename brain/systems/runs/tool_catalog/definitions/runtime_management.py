@@ -9,8 +9,8 @@ HOST_CAPACITY_TOOLS = [
     {
         "name": "read_host_capacity",
         "description": (
-            "Read live host disk capacity, the largest workspace consumers, the active "
-            "storage-policy thresholds, and recent scheduled measurements as a trend. "
+            "Read live host disk capacity, the latest recorded workspace consumers, the "
+            "active storage-policy thresholds, and recent scheduled measurements as a trend. "
             "Use this to answer how much disk is available and what is using it."
         ),
         "input_schema": {
@@ -22,6 +22,14 @@ HOST_CAPACITY_TOOLS = [
                     "maximum": 168,
                     "default": 24,
                     "description": "Maximum recent hourly measurements to return.",
+                },
+                "refresh_inventory": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Walk the workspace now instead of using the latest recorded inventory. "
+                        "Keep false unless the caller explicitly needs a fresh inventory."
+                    ),
                 },
             },
         },

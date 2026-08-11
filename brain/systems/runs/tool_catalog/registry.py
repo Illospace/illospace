@@ -223,8 +223,8 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "evidence_emitter": True,
         "context_route": {
             "description": (
-                "Read live disk capacity, workspace consumers, active capacity "
-                "thresholds, and the recent measurement trend."
+                "Read live disk capacity, the latest recorded workspace consumers, "
+                "active capacity thresholds, and the recent measurement trend."
             ),
             "domains": [
                 "disk capacity",

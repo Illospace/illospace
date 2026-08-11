@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -15,10 +17,12 @@ from brain.systems.host_capacity import (
     HOST_CAPACITY_ALERT_KEY,
     HOST_CAPACITY_CHECK_TYPE,
     HostCapacityMeasurement,
+    HostDiskCapacity,
     async_read_host_capacity,
     measure_host_capacity,
     record_host_capacity,
 )
+from brain.systems.workspace_inventory import inventory_workspace
 from tests.scheduler_test_support import _patch_sqlite_for_pg_types
 
 
@@ -85,6 +89,44 @@ async def test_measure_host_capacity_inventories_largest_workspace_consumers(
         {"path": "ideas", "bytes_used": 12},
         {"path": "uploads", "bytes_used": 4},
     )
+    assert measurement.inventory_scan_errors == ()
+
+
+async def test_workspace_inventory_returns_structured_scan_errors(
+    tmp_path,
+    monkeypatch,
+):
+    workspace_root = tmp_path / "workspaces"
+    accessible = workspace_root / "accessible"
+    blocked = workspace_root / "blocked"
+    workspace_root.mkdir()
+    accessible.mkdir()
+    blocked.mkdir()
+    (accessible / "kept.bin").write_bytes(b"kept")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "not-counted.bin").write_bytes(b"outside")
+    (workspace_root / "outside-link").symlink_to(outside, target_is_directory=True)
+    real_scandir = os.scandir
+
+    def fake_scandir(path):
+        if Path(path) == blocked:
+            raise PermissionError("blocked for test")
+        return real_scandir(path)
+
+    monkeypatch.setattr("brain.systems.workspace_inventory.os.scandir", fake_scandir)
+
+    inventory = inventory_workspace(workspace_root)
+
+    assert inventory.complete is False
+    assert inventory.bytes_used == 4
+    assert inventory.scan_errors == (
+        {
+            "path": str(blocked),
+            "operation": "scan",
+            "message": "blocked for test",
+        },
+    )
 
 
 async def test_record_host_capacity_uses_policy_thresholds_and_persists_row_shape(
@@ -123,6 +165,7 @@ async def test_record_host_capacity_uses_policy_thresholds_and_persists_row_shap
             {"path": "ideas", "bytes_used": 700_000_000_000},
             {"path": "uploads", "bytes_used": 300_000_000_000},
         ],
+        "inventory_scan_errors": [],
     }
 
 
@@ -171,7 +214,7 @@ async def test_host_capacity_warn_alert_latch_fires_exactly_once_across_two_over
     assert row_count == 2
 
 
-async def test_read_host_capacity_returns_live_inventory_and_saved_trend(
+async def test_read_host_capacity_returns_live_disk_and_persisted_inventory(
     session,
     monkeypatch,
 ):
@@ -194,12 +237,24 @@ async def test_read_host_capacity_returns_live_inventory_and_saved_trend(
     )
     await session.flush()
 
-    async def fake_measure(_workspace_root):
-        return _measurement(pct_used=75.5)
+    async def fail_if_inventory_walks(_workspace_root):
+        raise AssertionError("default read must not walk the workspace")
+
+    async def fake_disk(_workspace_root):
+        return HostDiskCapacity(
+            mount="/srv/illo-workspace",
+            pct_used=75.5,
+            bytes_free=48_000_000_000,
+            bytes_total=1_800_000_000_000,
+        )
 
     monkeypatch.setattr(
         "brain.systems.host_capacity.async_measure_host_capacity",
-        fake_measure,
+        fail_if_inventory_walks,
+    )
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_disk_capacity",
+        fake_disk,
     )
 
     result = await async_read_host_capacity(
@@ -209,9 +264,17 @@ async def test_read_host_capacity_returns_live_inventory_and_saved_trend(
     )
 
     assert result["current"] == {
-        **_measurement(pct_used=75.5).details(),
+        "mount": "/srv/illo-workspace",
+        "pct_used": 75.5,
+        "bytes_free": 48_000_000_000,
         "bytes_total": 1_800_000_000_000,
         "status": "warn",
+        "top_consumers": [
+            {"path": "ideas", "bytes_used": 700_000_000_000},
+            {"path": "uploads", "bytes_used": 300_000_000_000},
+        ],
+        "inventory_scan_errors": [],
+        "inventory_observed_at": "2026-08-09T12:00:00+00:00",
     }
     assert result["thresholds"] == {
         "warn_percent": 73,
@@ -220,12 +283,51 @@ async def test_read_host_capacity_returns_live_inventory_and_saved_trend(
     assert [point["pct_used"] for point in result["trend"]] == [74.0, 62.0]
 
 
+async def test_read_host_capacity_refreshes_inventory_only_when_requested(
+    session,
+    monkeypatch,
+):
+    await _add_policy(session, warn=73, critical=91)
+    refreshed = _measurement(pct_used=75.5)
+    calls = 0
+
+    async def fake_measure(_workspace_root):
+        nonlocal calls
+        calls += 1
+        return refreshed
+
+    async def fail_if_disk_is_measured_separately(_workspace_root):
+        raise AssertionError("refresh should reuse the full measurement")
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_capacity",
+        fake_measure,
+    )
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_disk_capacity",
+        fail_if_disk_is_measured_separately,
+    )
+
+    result = await async_read_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        refresh_inventory=True,
+    )
+
+    assert calls == 1
+    assert result["current"]["top_consumers"] == list(refreshed.top_consumers)
+    assert result["current"]["inventory_observed_at"].endswith("+00:00")
+
+
 async def test_read_host_capacity_tool_is_registered_for_illo(monkeypatch):
     from brain.systems.runs.tool_catalog.registry import get_tool_registration
     from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_handlers import _get_tool_handlers
 
     names = lambda tools: {tool["name"] for tool in tools}
+    definition = next(
+        tool for tool in COORDINATOR_TOOLS if tool["name"] == "read_host_capacity"
+    )
     registration = get_tool_registration("read_host_capacity")
 
     assert "read_host_capacity" in names(COORDINATOR_TOOLS)
@@ -235,6 +337,10 @@ async def test_read_host_capacity_tool_is_registered_for_illo(monkeypatch):
     assert registration.side_effect_class == "read_only"
     assert registration.context_route is not None
     assert "disk capacity" in registration.context_route.domains
+    assert (
+        definition["input_schema"]["properties"]["refresh_inventory"]["default"]
+        is False
+    )
 
     captured = {}
 
@@ -264,3 +370,4 @@ async def test_read_host_capacity_tool_is_registered_for_illo(monkeypatch):
 
     assert result == {"current": {"pct_used": 75.5}, "trend": []}
     assert captured["limit"] == 12
+    assert captured["refresh_inventory"] is False
