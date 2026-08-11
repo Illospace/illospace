@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { CyclePolicyHistoryRead, CycleRunRead } from '$lib/api/client';
-  import { ConstellationButton, ConstellationPill } from '$lib/components/constellation';
+  import { ConstellationButton } from '$lib/components/constellation';
+  import CyclePolicyProvenanceLine from '$lib/features/cycles/components/CyclePolicyProvenanceLine.svelte';
   import {
     formatPolicyDateTime,
     policyActorPresentation,
@@ -91,22 +92,13 @@
               </div>
             </header>
             <p>{change.rationale}</p>
-            <div class="history-source" class:agent-source={actor.kind === 'agent'}>
-              <ConstellationPill
-                variant={actor.kind === 'agent' ? 'info' : actor.kind === 'human' ? 'muted' : 'warning'}
-                leadingDot
-              >
-                {actor.label}
-              </ConstellationPill>
-              <span><strong>Actor</strong> {actor.identity}</span>
-              {#if originatingRun}
-                <a href={`#cycle-run-${originatingRun.id}`}>Originating Run #{originatingRun.id}</a>
-              {/if}
-              <code>{policySourceLabel(change)}</code>
-              {#if change.reverted_from_id !== null}
-                <span>Reverted change {change.reverted_from_id}</span>
-              {/if}
-            </div>
+            <CyclePolicyProvenanceLine
+              {actor}
+              originatingRunId={originatingRun?.id}
+              sourceLabel={policySourceLabel(change)}
+              appearance="history"
+              revertedFromId={change.reverted_from_id}
+            />
 
             {#if retired.length}
               <section class="retired-guidance" aria-label="Retired guidance">
@@ -164,7 +156,6 @@
 
   .history-region summary small,
   .history-region summary > span:last-child,
-  .history-source,
   .history-change header span,
   .history-change time {
     color: var(--constellation-color-text-muted);
@@ -237,39 +228,6 @@
   .history-change p {
     color: var(--constellation-color-text-secondary);
     font-size: 12px;
-  }
-
-  .history-source {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 10px;
-    padding: 7px 8px;
-    border-left: 2px solid var(--constellation-color-text-muted);
-    background: color-mix(in srgb, var(--constellation-color-text-muted) 3%, transparent);
-    font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
-  }
-
-  .history-source.agent-source {
-    border-left-color: var(--constellation-control-pill-info-text);
-    background: color-mix(in srgb, var(--constellation-control-pill-info-text) 4%, transparent);
-  }
-
-  .history-source strong {
-    color: var(--constellation-color-text-secondary);
-    font-weight: 650;
-  }
-
-  .history-source a {
-    color: var(--constellation-color-text-secondary);
-    font-weight: 650;
-  }
-
-  .history-source code {
-    overflow-wrap: anywhere;
-    color: var(--constellation-color-text-muted);
-    font-family: inherit;
-    font-size: inherit;
   }
 
   .retired-guidance {

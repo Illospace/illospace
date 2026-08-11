@@ -172,25 +172,30 @@ export type CycleRunPolicyInspection = {
   hasSnapshot: boolean;
   revisionNumber: number | null;
   version: number | null;
-  configuration: Array<{ key: string; value: CyclePolicyJsonValue }>;
+  configuration: Array<{ key: CyclePolicySnapshotConfigurationKey; value: CyclePolicyJsonValue }>;
   guidance: string[];
   change: CycleRunPolicyChangeInspection | null;
 };
 
-const CYCLE_POLICY_SNAPSHOT_CONFIGURATION_FIELDS = [
-  'name',
-  'prompt',
-  'schedule_expr',
-  'timezone',
-  'enabled',
-  'max_concurrency',
-  'timeout_seconds',
-  'retry_policy',
-  'model_override',
-  'thinking_override',
-  'execution_policy_key',
-  'target_idea_id',
-] as const;
+export type CyclePolicySnapshotConfigurationKey = Exclude<
+  keyof CyclePolicyConfigurationRead & string,
+  'schedule_human'
+>;
+
+const CYCLE_POLICY_SNAPSHOT_CONFIGURATION_FIELDS = Object.keys({
+  name: true,
+  prompt: true,
+  schedule_expr: true,
+  timezone: true,
+  enabled: true,
+  max_concurrency: true,
+  timeout_seconds: true,
+  retry_policy: true,
+  model_override: true,
+  thinking_override: true,
+  execution_policy_key: true,
+  target_idea_id: true,
+} satisfies Record<CyclePolicySnapshotConfigurationKey, true>) as CyclePolicySnapshotConfigurationKey[];
 
 export function policyConfigurationEntries(
   configuration: CyclePolicyConfigurationRead,
@@ -519,6 +524,10 @@ export function policyOriginatingRun(
   const agentRunId = policySourceRunId(source.source_reference);
   if (agentRunId === null) return null;
   return runs.find((run) => run.run_id === agentRunId) ?? null;
+}
+
+export function cycleRunAnchorId(runId: number): string {
+  return `cycle-run-${runId}`;
 }
 
 export function policySourceLabel(source: {

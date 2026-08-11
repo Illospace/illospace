@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { EffectiveCyclePolicyRead } from '$lib/api/client';
   import { ConstellationButton, ConstellationPill } from '$lib/components/constellation';
+  import CyclePolicyFieldList from '$lib/features/cycles/components/CyclePolicyFieldList.svelte';
   import {
     formatPolicyDateTime,
     policyConfigurationEntries,
@@ -30,9 +31,21 @@
     onEdit: () => void;
   } = $props();
 
-  const configurationEntries = $derived(
-    policy ? policyConfigurationEntries(policy.configuration) : [],
-  );
+  const configurationEntries = $derived(policy
+    ? policyConfigurationEntries(policy.configuration).map((entry) => {
+        const source = policyFieldSource(policy.field_sources, entry.key);
+        const changedAt = source?.changed_at || policy.source.changed_at;
+        return {
+          ...entry,
+          source: {
+            title: source?.rationale || undefined,
+            label: `From ${source ? policySourceLabel(source) : policySourceLabel(policy.source)}`,
+            changedAt,
+            changedLabel: `Changed ${formatPolicyDateTime(changedAt, displayTimezone)}`,
+          },
+        };
+      })
+    : []);
   const guidanceSource = $derived(
     policy ? policyFieldSource(policy.field_sources, 'guidance') : undefined,
   );
@@ -71,23 +84,7 @@
         <span>{displayTimezone.replaceAll('_', ' ')}</span>
       </div>
 
-      <dl class="policy-values">
-        {#each configurationEntries as entry (entry.key)}
-          {@const source = policyFieldSource(policy.field_sources, entry.key)}
-          <div class="policy-value" class:prose-value={entry.key === 'prompt'}>
-            <dt>{policyFieldLabel(entry.key)}</dt>
-            <dd class:mono-value={entry.key.endsWith('_expr') || typeof entry.value === 'object'}>
-              {policyValueLabel(entry.value)}
-            </dd>
-            <dd class="value-source" title={source?.rationale || undefined}>
-              <span>From {source ? policySourceLabel(source) : policySourceLabel(policy.source)}</span>
-              <time datetime={source?.changed_at || policy.source.changed_at || undefined}>
-                Changed {formatPolicyDateTime(source?.changed_at || policy.source.changed_at, displayTimezone)}
-              </time>
-            </dd>
-          </div>
-        {/each}
-      </dl>
+      <CyclePolicyFieldList entries={configurationEntries} appearance="active" {compact} />
     </section>
 
     <section class="policy-section active-guidance" aria-labelledby={`cycle-${cycleId}-guidance`}>
@@ -189,7 +186,6 @@
   }
 
   .section-kicker,
-  .policy-value dt,
   .live-marker {
     color: var(--constellation-color-text-muted);
     font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
@@ -254,46 +250,6 @@
     color: var(--constellation-color-success);
   }
 
-  .policy-values {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0;
-    margin: 0;
-    border-top: 1px solid var(--constellation-section-divider);
-  }
-
-  .policy-value {
-    display: grid;
-    align-content: start;
-    gap: 7px;
-    min-width: 0;
-    padding: 12px 10px;
-    border-bottom: 1px solid var(--constellation-section-divider);
-  }
-
-  .policy-value:nth-child(odd) {
-    border-right: 1px solid var(--constellation-section-divider);
-  }
-
-  .policy-value.prose-value {
-    grid-column: 1 / -1;
-    border-right: 0;
-  }
-
-  .policy-value dd {
-    margin: 0;
-    overflow-wrap: anywhere;
-    color: var(--constellation-color-text-primary);
-    font-size: 13px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-  }
-
-  .policy-value.prose-value > dd:not(.value-source) {
-    font-size: 14px;
-  }
-
-  .mono-value,
   .output-target pre {
     font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
   }
@@ -395,25 +351,7 @@
     font-size: 12px;
   }
 
-  .policy-content.compact .policy-values {
-    grid-template-columns: 1fr;
-  }
-
-  .policy-content.compact .policy-value,
-  .policy-content.compact .policy-value:nth-child(odd) {
-    border-right: 0;
-  }
-
   @media (max-width: 720px) {
-    .policy-values {
-      grid-template-columns: 1fr;
-    }
-
-    .policy-value,
-    .policy-value:nth-child(odd) {
-      border-right: 0;
-    }
-
     .active-heading,
     .active-actions {
       align-items: flex-start;

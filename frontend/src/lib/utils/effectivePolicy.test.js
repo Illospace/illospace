@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  cycleRunAnchorId,
   cycleRunPolicyInspection,
   formatPolicyDateTime,
   guidanceDiff,
@@ -129,6 +130,7 @@ test('resolves an agent policy source to its originating CycleRun when available
   ];
 
   assert.equal(policySourceRunId('agent:15100'), 15100);
+  assert.equal(cycleRunAnchorId(7100), 'cycle-run-7100');
   assert.equal(policySourceRunId('agent_run:15101'), 15101);
   assert.equal(policySourceRunId('api:/cycles/901/behavior-policy'), null);
   assert.equal(policyOriginatingRun({ source_reference: 'agent:15100' }, runs)?.id, 7100);

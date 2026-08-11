@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { CycleRunRead } from '$lib/api/client';
   import { ConstellationPill } from '$lib/components/constellation';
+  import CyclePolicyFieldList from '$lib/features/cycles/components/CyclePolicyFieldList.svelte';
+  import CyclePolicyProvenanceLine from '$lib/features/cycles/components/CyclePolicyProvenanceLine.svelte';
   import {
     cycleRunPolicyInspection,
     formatPolicyDateTime,
@@ -8,7 +10,6 @@
     policyFieldLabel,
     policyOriginatingRun,
     policySourceLabel,
-    policyValueLabel,
   } from '$lib/features/cycles/domain/effectivePolicy';
 
   let {
@@ -55,16 +56,7 @@
           <ConstellationPill variant="muted">Read only</ConstellationPill>
         </header>
 
-        <dl class="snapshot-values">
-          {#each inspection.configuration as entry (entry.key)}
-            <div class:wide-value={entry.key === 'prompt'}>
-              <dt>{policyFieldLabel(entry.key)}</dt>
-              <dd class:mono-value={entry.key.endsWith('_expr') || typeof entry.value === 'object'}>
-                {policyValueLabel(entry.value)}
-              </dd>
-            </div>
-          {/each}
-        </dl>
+        <CyclePolicyFieldList entries={inspection.configuration} appearance="snapshot" />
 
         <div class="snapshot-guidance">
           <div>
@@ -87,36 +79,24 @@
             <span>Policy provenance</span>
             <h5 id={`run-${run.id}-change-heading`}>Change that produced this snapshot</h5>
           </div>
-          {#if actor}
-            <ConstellationPill
-              variant={actor.kind === 'agent' ? 'info' : actor.kind === 'human' ? 'muted' : 'warning'}
-              leadingDot
-            >
-              {actor.label}
-            </ConstellationPill>
-          {/if}
         </header>
 
         {#if inspection.change}
-          <p class="change-rationale">{inspection.change.rationale || 'No rationale recorded.'}</p>
-          <div class="change-facts">
-            {#if inspection.change.version !== null}<span>Version {inspection.change.version}</span>{/if}
-            {#if actor}<span><strong>Actor</strong> {actor.identity}</span>{/if}
-            {#if inspection.change.applied_at}
-              <time datetime={inspection.change.applied_at}>
-                {formatPolicyDateTime(inspection.change.applied_at, displayTimezone)}
-              </time>
-            {/if}
-            {#if originatingRun}
-              <a href={`#cycle-run-${originatingRun.id}`}>Originating Run #{originatingRun.id}</a>
-            {/if}
-          </div>
-          {#if inspection.change.changed_fields.length}
-            <p class="changed-fields">
-              Changed {inspection.change.changed_fields.map(policyFieldLabel).join(', ')}
-            </p>
+          {#if actor}
+            <CyclePolicyProvenanceLine
+              {actor}
+              originatingRunId={originatingRun?.id}
+              sourceLabel={policySourceLabel(inspection.change)}
+              appearance="snapshot"
+              version={inspection.change.version}
+              appliedAt={inspection.change.applied_at}
+              appliedAtLabel={formatPolicyDateTime(inspection.change.applied_at, displayTimezone)}
+              rationaleLabel={inspection.change.rationale || 'No rationale recorded.'}
+              changedFieldsLabel={inspection.change.changed_fields.length
+                ? `Changed ${inspection.change.changed_fields.map(policyFieldLabel).join(', ')}`
+                : null}
+            />
           {/if}
-          <code>{policySourceLabel(inspection.change)}</code>
         {:else}
           <p class="change-rationale">
             This run used the initial Cycle definition. No producing policy change was recorded.
@@ -133,24 +113,23 @@
   .run-policy-snapshot {
     grid-column: 1 / -1;
     min-width: 0;
-    border: 1px solid var(--constellation-surface-nested-border);
-    border-radius: 8px;
+    border: calc(var(--sp-1) / 4) solid var(--constellation-surface-nested-border);
+    border-radius: var(--radius-md);
     background: var(--constellation-surface-nested-background);
   }
 
   .run-policy-snapshot summary,
   .snapshot-section header,
-  .snapshot-guidance > div,
-  .change-facts {
+  .snapshot-guidance > div {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--sp-3);
   }
 
   .run-policy-snapshot summary {
     min-height: 40px;
-    padding: 0 11px;
+    padding: 0 var(--sp-3);
     color: var(--constellation-color-text-primary);
     cursor: pointer;
     list-style: none;
@@ -168,17 +147,14 @@
 
   .run-policy-snapshot summary small,
   .snapshot-section header span,
-  .snapshot-guidance span,
-  .change-facts,
-  .changed-fields,
-  .producing-change code {
+  .snapshot-guidance span {
     color: var(--constellation-color-text-muted);
     font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
     font-size: 10px;
   }
 
   .run-policy-snapshot[open] summary {
-    border-bottom: 1px solid var(--constellation-surface-panel-separator);
+    border-bottom: calc(var(--sp-1) / 4) solid var(--constellation-surface-panel-separator);
   }
 
   .snapshot-content {
@@ -187,10 +163,10 @@
 
   .snapshot-section {
     display: grid;
-    gap: 12px;
+    gap: var(--sp-3);
     min-width: 0;
-    padding: 12px;
-    border-bottom: 1px solid var(--constellation-surface-panel-separator);
+    padding: var(--sp-3);
+    border-bottom: calc(var(--sp-1) / 4) solid var(--constellation-surface-panel-separator);
   }
 
   .snapshot-section:last-child {
@@ -203,14 +179,13 @@
 
   .snapshot-section header > div {
     display: grid;
-    gap: 3px;
+    gap: var(--sp-1);
   }
 
   .snapshot-section h5,
   .snapshot-guidance strong,
   .snapshot-guidance p,
-  .change-rationale,
-  .changed-fields {
+  .change-rationale {
     margin: 0;
   }
 
@@ -220,32 +195,6 @@
     text-transform: uppercase;
   }
 
-  .snapshot-values {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    margin: 0;
-    border-top: 1px solid var(--constellation-section-divider);
-  }
-
-  .snapshot-values > div {
-    display: grid;
-    align-content: start;
-    gap: 6px;
-    min-width: 0;
-    padding: 10px;
-    border-bottom: 1px solid var(--constellation-section-divider);
-  }
-
-  .snapshot-values > div:nth-child(odd) {
-    border-right: 1px solid var(--constellation-section-divider);
-  }
-
-  .snapshot-values > .wide-value {
-    grid-column: 1 / -1;
-    border-right: 0;
-  }
-
-  .snapshot-values dt,
   .snapshot-guidance strong {
     color: var(--constellation-color-text-muted);
     font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
@@ -255,33 +204,19 @@
     text-transform: uppercase;
   }
 
-  .snapshot-values dd {
-    margin: 0;
-    overflow-wrap: anywhere;
-    color: var(--constellation-color-text-primary);
-    font-size: 12px;
-    line-height: 1.45;
-    white-space: pre-wrap;
-  }
-
-  .mono-value,
-  .producing-change code {
-    font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
-  }
-
   .snapshot-guidance {
     display: grid;
-    gap: 8px;
-    padding: 10px;
-    border-left: 3px solid var(--constellation-color-success);
+    gap: var(--sp-2);
+    padding: var(--sp-3);
+    border-left: calc(var(--sp-1) * 0.75) solid var(--constellation-color-success);
     background: color-mix(in srgb, var(--constellation-color-success) 3%, transparent);
   }
 
   .snapshot-guidance ol {
     display: grid;
-    gap: 7px;
+    gap: var(--sp-2);
     margin: 0;
-    padding-left: 22px;
+    padding-left: var(--sp-5);
     color: var(--constellation-color-text-secondary);
     font-size: 12px;
     line-height: 1.5;
@@ -296,44 +231,27 @@
   }
 
   .producing-change {
+    grid-template-columns: minmax(0, 1fr) auto;
     background: color-mix(in srgb, var(--constellation-color-text-muted) 3%, transparent);
   }
 
-  .change-facts {
-    justify-content: flex-start;
-    flex-wrap: wrap;
+  .producing-change > header {
+    grid-column: 1;
+    grid-row: 1;
   }
 
-  .change-facts strong {
-    color: var(--constellation-color-text-secondary);
-    font-weight: 650;
-  }
-
-  .change-facts a {
-    color: var(--constellation-color-text-secondary);
-    font-weight: 650;
-  }
-
-  .changed-fields {
-    letter-spacing: 0.04em;
-  }
-
-  .producing-change code {
-    overflow-wrap: anywhere;
+  .producing-change > .change-rationale {
+    grid-column: 1 / -1;
   }
 
   .snapshot-empty {
     margin: 0;
-    padding: 12px;
+    padding: var(--sp-3);
   }
 
   @media (max-width: 720px) {
-    .snapshot-values {
+    .producing-change {
       grid-template-columns: 1fr;
-    }
-
-    .snapshot-values > div:nth-child(odd) {
-      border-right: 0;
     }
 
     .snapshot-section header {

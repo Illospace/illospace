@@ -29,7 +29,10 @@
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
   import CycleRunPolicySnapshot from '$lib/features/cycles/components/CycleRunPolicySnapshot.svelte';
   import EffectiveCyclePolicyView from '$lib/features/cycles/components/EffectiveCyclePolicyView.svelte';
-  import type { CyclePolicyEditorApi } from '$lib/features/cycles/domain/effectivePolicy';
+  import {
+    cycleRunAnchorId,
+    type CyclePolicyEditorApi,
+  } from '$lib/features/cycles/domain/effectivePolicy';
   import { EFFECTIVE_POLICY_CLIENT_CONTEXT } from '$lib/features/cycles/domain/effectivePolicyClientContext';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
@@ -1058,7 +1061,7 @@
                     {:else}
                       <div class="runs-list">
                         {#each runs as run}
-                          <article class="run-row" id={`cycle-run-${run.id}`}>
+                          <article class="run-row" id={cycleRunAnchorId(run.id)}>
                             <div class="run-row-main">
                               <span class="run-row-eyebrow">Run #{run.id}</span>
                               <strong>{formatDateTime(run.scheduled_for)}</strong>
