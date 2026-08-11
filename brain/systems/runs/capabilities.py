@@ -396,7 +396,8 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
         "category": "agent_runtime",
         "summary": (
             "Illo can inspect its runtime settings, capability registry, verified "
-            "source/install context, and durable storage policy."
+            "source/install context, durable storage policy, and retained agent "
+            "workspace inventory or reclamation."
         ),
         "aliases": (
             "runtime",
@@ -410,6 +411,8 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
             "disk capacity",
             "disk space",
             "workspace storage",
+            "workspace reclamation",
+            "workspace cleanup",
             "retention",
         ),
         "tools": (
@@ -417,6 +420,7 @@ _FIRST_PARTY_CAPABILITY_SPECS: tuple[dict[str, Any], ...] = (
             "read_host_capacity",
             "manage_runtime_preferences",
             "manage_storage_policy",
+            "manage_workspace_reclamation",
             "read_self_context",
             "read_capabilities",
         ),

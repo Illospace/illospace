@@ -304,11 +304,32 @@ def _get_tool_handlers(
                 refresh_inventory=refresh_inventory,
             )
 
+    async def _manage_workspace_reclamation(
+        action="inventory",
+        limit=100,
+        max_reclaims=100,
+    ):
+        from brain.jobs.pipelines.workspace_gc import (
+            manage_headless_worker_workspaces,
+        )
+        from brain.kernel import config as brain_config
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+        async with UnitOfWork() as uow:
+            return await manage_headless_worker_workspaces(
+                uow.session,
+                action=action,
+                workspace_root=brain_config.resolve_workspace_root(),
+                max_reclaims=max_reclaims,
+                report_limit=limit,
+            )
+
     _manage_deployment._illo_run_on_event_loop = True
     _manage_runtime_services._illo_run_on_event_loop = True
     _manage_runtime_preferences._illo_run_on_event_loop = True
     _manage_storage_policy._illo_run_on_event_loop = True
     _read_host_capacity._illo_run_on_event_loop = True
+    _manage_workspace_reclamation._illo_run_on_event_loop = True
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -366,6 +387,7 @@ def _get_tool_handlers(
         "manage_runtime_preferences": _manage_runtime_preferences,
         "manage_storage_policy": _manage_storage_policy,
         "read_host_capacity": _read_host_capacity,
+        "manage_workspace_reclamation": _manage_workspace_reclamation,
         "read_self_context": _handle_read_self_context,
         "read_capabilities": _handle_read_capabilities,
         "manage_deployment": _manage_deployment,

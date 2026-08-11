@@ -37,6 +37,48 @@ HOST_CAPACITY_TOOLS = [
 ]
 
 
+WORKSPACE_RECLAMATION_TOOLS = [
+    {
+        "name": "manage_workspace_reclamation",
+        "description": (
+            "Inventory retained headless-worker workspaces with their sizes, or reclaim "
+            "workspaces that are older than the active storage-policy retention window. "
+            "Reclaim never touches a non-terminal run, refuses unsafe paths and incomplete "
+            "inventories, re-confirms each candidate, and always reports bytes freed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["inventory", "reclaim"],
+                    "default": "inventory",
+                    "description": (
+                        "Use inventory for a read-only measurement. Use reclaim to delete "
+                        "only workspaces that the active retention policy marks reclaimable."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 100,
+                    "description": "Maximum workspace inventory records to return.",
+                },
+                "max_reclaims": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 100,
+                    "description": "Maximum eligible workspaces to reclaim in this call.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+]
+
+
 DEPLOYMENT_TOOLS = [
     {
         "name": "manage_deployment",
