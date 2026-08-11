@@ -234,7 +234,9 @@ SCHEDULER_CATALOG: tuple[dict[str, Any], ...] = (
         "timezone": "UTC",
         "default_payload": {
             "name": "Cortex Canvas Occupancy",
-            "description": "Archive emerged thoughts after 24 quiet hours",
+            "description": (
+                "Archive emerged thoughts after the active storage-policy quiet window"
+            ),
         },
         "task_contract": {
             "memory_scope": {"visibility": "system"},

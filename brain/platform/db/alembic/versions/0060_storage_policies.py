@@ -51,7 +51,6 @@ def upgrade() -> None:
             sa.Column(
                 "automatic_reclamation_allowed",
                 sa.Boolean(),
-                server_default=sa.text("FALSE"),
                 nullable=False,
             ),
             sa.Column("rationale", sa.Text(), nullable=False),

@@ -75,8 +75,6 @@ class StoragePolicy(Base, CreatedAtMixin):
     automatic_reclamation_allowed: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        server_default=text("FALSE"),
-        default=False,
     )
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(
