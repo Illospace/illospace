@@ -151,7 +151,7 @@ async def async_update_cycle(
     patch = CyclePolicyPatch(
         name=_policy_field(name, ignore_none=True),
         prompt=_policy_field(prompt, ignore_none=True),
-        timezone_name=_policy_field(timezone_name, ignore_none=True),
+        timezone=_policy_field(timezone_name, ignore_none=True),
         schedule_expr=_policy_field(schedule_expr, ignore_none=True),
         run_at=_policy_field(run_at, ignore_none=True),
         enabled=_policy_field(enabled, ignore_none=True),

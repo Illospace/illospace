@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field as dataclass_field, fields, replace
 from datetime import datetime, timezone
 from typing import (
     Any,
@@ -20,6 +20,7 @@ from typing import (
     TypeGuard,
     TypeVar,
     cast,
+    get_type_hints,
 )
 
 from sqlalchemy import func, select
@@ -52,6 +53,7 @@ from brain.systems.cycles.memory import async_record_cycle_revision
 from brain.systems.cycles.schedules import (
     build_one_time_schedule_expr,
     compute_next_run_at,
+    safe_humanize_schedule,
     validate_schedule_expr,
     validate_timezone_name,
 )
@@ -80,6 +82,9 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 CycleGuidanceValues: TypeAlias = list[str] | tuple[str, ...]
 _PatchValueT = TypeVar("_PatchValueT")
+_API_EDITABLE = "api_editable"
+_API_RESPONSE_TYPE = "api_response_type"
+_PATCH_IGNORE_NONE = "patch_ignore_none"
 
 
 class _UnsetCycleField:
@@ -94,25 +99,69 @@ _CyclePatchField: TypeAlias = _PatchValueT | _UnsetCycleField
 class CyclePolicySnapshot:
     """One validated Cycle policy, with versioned JSON persistence.
 
-    Fields stay required so schema growth makes typed constructor sites fail
-    until their live-Cycle mapping and normalization are updated here.
+    Scalar fields use the same name on the snapshot, Cycle, patch, and API.
+    Field metadata declares editor and response behavior at this one owner.
     """
 
     SNAPSHOT_VERSION: ClassVar[int] = 1
 
-    name: str
-    prompt: str
-    schedule_expr: str
-    timezone: str
-    enabled: bool
+    name: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
+    prompt: str = dataclass_field(
+        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
+    )
+    schedule_expr: str = dataclass_field(
+        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
+    )
+    timezone: str = dataclass_field(
+        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
+    )
+    enabled: bool = dataclass_field(
+        metadata={_API_EDITABLE: True, _PATCH_IGNORE_NONE: True}
+    )
     max_concurrency: int
     timeout_seconds: int | None
-    retry_policy: dict[str, JsonValue]
-    model_override: str | None
-    thinking_override: str | None
+    retry_policy: dict[str, JsonValue] = dataclass_field(
+        metadata={_API_RESPONSE_TYPE: dict[str, Any]}
+    )
+    model_override: str | None = dataclass_field(
+        metadata={_API_EDITABLE: True}
+    )
+    thinking_override: str | None = dataclass_field(
+        metadata={_API_EDITABLE: True}
+    )
     execution_policy_key: str | None
     target_idea_id: str | None
-    guidance: list[str]
+    guidance: list[str] = dataclass_field(metadata={_API_EDITABLE: True})
+
+    @classmethod
+    def configuration_field_names(cls) -> tuple[str, ...]:
+        """Return the scalar fields rendered under ``configuration``."""
+
+        return tuple(field.name for field in fields(cls) if field.name != "guidance")
+
+    @classmethod
+    def configuration_field_types(cls) -> dict[str, Any]:
+        """Return response types for fields rendered under ``configuration``."""
+
+        type_hints = get_type_hints(cls)
+        return {
+            field.name: field.metadata.get(
+                _API_RESPONSE_TYPE,
+                type_hints[field.name],
+            )
+            for field in fields(cls)
+            if field.name != "guidance"
+        }
+
+    @classmethod
+    def api_editable_field_names(cls) -> tuple[str, ...]:
+        """Return behavior-editor fields in snapshot declaration order."""
+
+        return tuple(
+            field.name
+            for field in fields(cls)
+            if field.metadata.get(_API_EDITABLE, False)
+        )
 
     @classmethod
     def from_cycle(
@@ -122,41 +171,30 @@ class CyclePolicySnapshot:
     ) -> CyclePolicySnapshot:
         """Build the effective policy from the live Cycle read model."""
 
-        return cls(
-            name=cycle.name,
-            prompt=cycle.prompt,
-            schedule_expr=cycle.schedule_expr,
-            timezone=cycle.timezone,
-            enabled=bool(cycle.enabled),
-            max_concurrency=max(int(cycle.max_concurrency or 1), 1),
-            timeout_seconds=cycle.timeout_seconds,
-            retry_policy=dict(cycle.retry_policy or {}),
-            model_override=cycle.model_override,
-            thinking_override=cycle.thinking_override,
-            execution_policy_key=cycle.execution_policy_key,
-            target_idea_id=(
-                str(cycle.target_idea_id)
-                if cycle.target_idea_id is not None
-                else None
-            ),
-            guidance=[row.guidance for row in guidance_rows],
-        ).validated()
+        values = {
+            field.name: deepcopy(getattr(cycle, field.name))
+            for field in fields(cls)
+            if field.name != "guidance"
+        }
+        values["max_concurrency"] = max(
+            int(values["max_concurrency"] or 1),
+            1,
+        )
+        values["enabled"] = bool(values["enabled"])
+        values["retry_policy"] = dict(values["retry_policy"] or {})
+        values["target_idea_id"] = (
+            str(values["target_idea_id"])
+            if values["target_idea_id"] is not None
+            else None
+        )
+        values["guidance"] = [row.guidance for row in guidance_rows]
+        return cls(**values).validated()
 
     def apply_to(self, cycle: Cycle) -> None:
         """Apply this policy explicitly to its live Cycle fields."""
 
-        cycle.name = self.name
-        cycle.prompt = self.prompt
-        cycle.schedule_expr = self.schedule_expr
-        cycle.timezone = self.timezone
-        cycle.enabled = self.enabled
-        cycle.max_concurrency = self.max_concurrency
-        cycle.timeout_seconds = self.timeout_seconds
-        cycle.retry_policy = deepcopy(self.retry_policy)
-        cycle.model_override = self.model_override
-        cycle.thinking_override = self.thinking_override
-        cycle.execution_policy_key = self.execution_policy_key
-        cycle.target_idea_id = self.target_idea_id
+        for field_name in self.configuration_field_names():
+            setattr(cycle, field_name, deepcopy(getattr(self, field_name)))
         cycle.execution_mode = canonical_execution_mode()
         cycle.reopen_archived = True
         cycle.next_run_at = compute_next_run_at(
@@ -185,7 +223,8 @@ class CyclePolicySnapshot:
         ]
         if len(guidance) != len(set(guidance)):
             raise ValueError("guidance entries must be unique")
-        return CyclePolicySnapshot(
+        return replace(
+            self,
             name=validate_nonempty_trimmed(self.name, "name"),
             prompt=validate_nonempty_trimmed(self.prompt, "prompt"),
             schedule_expr=validate_schedule_expr(
@@ -209,6 +248,22 @@ class CyclePolicySnapshot:
             ),
             guidance=sorted(guidance),
         )
+
+    def response_payload(self) -> dict[str, Any]:
+        """Serialize this snapshot for every behavior-policy response surface."""
+
+        configuration = {}
+        for field_name in self.configuration_field_names():
+            configuration[field_name] = deepcopy(getattr(self, field_name))
+            if field_name == "schedule_expr":
+                configuration["schedule_human"] = safe_humanize_schedule(
+                    self.schedule_expr,
+                    self.timezone,
+                )
+        return {
+            "configuration": configuration,
+            "guidance": list(self.guidance),
+        }
 
     def encode(self) -> dict[str, Any]:
         """Encode the current schema for the JSON database boundary."""
@@ -252,25 +307,34 @@ class CyclePolicySnapshot:
         return cls(**decoded).validated()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CyclePolicyPatch:
-    """Typed changes to Cycle behavior, never arbitrary table columns."""
+    """Named snapshot changes plus the two command-only schedule/list operations."""
 
-    name: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    prompt: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    timezone_name: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    schedule_expr: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    run_at: _CyclePatchField[str | datetime | None] = UNSET_CYCLE_FIELD
-    enabled: _CyclePatchField[bool | None] = UNSET_CYCLE_FIELD
-    max_concurrency: _CyclePatchField[int] = UNSET_CYCLE_FIELD
-    timeout_seconds: _CyclePatchField[int | None] = UNSET_CYCLE_FIELD
-    retry_policy: _CyclePatchField[dict[str, JsonValue]] = UNSET_CYCLE_FIELD
-    model_override: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    thinking_override: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    execution_policy_key: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    target_idea_id: _CyclePatchField[str | None] = UNSET_CYCLE_FIELD
-    guidance: _CyclePatchField[CycleGuidanceValues] = UNSET_CYCLE_FIELD
-    guidance_additions: _CyclePatchField[CycleGuidanceValues] = UNSET_CYCLE_FIELD
+    changes: Mapping[str, object]
+    run_at: _CyclePatchField[str | datetime | None]
+    guidance_additions: _CyclePatchField[CycleGuidanceValues]
+
+    def __init__(
+        self,
+        *,
+        run_at: _CyclePatchField[str | datetime | None] = UNSET_CYCLE_FIELD,
+        guidance_additions: _CyclePatchField[
+            CycleGuidanceValues
+        ] = UNSET_CYCLE_FIELD,
+        **changes: object,
+    ) -> None:
+        object.__setattr__(
+            self,
+            "changes",
+            {
+                name: deepcopy(value)
+                for name, value in changes.items()
+                if value is not UNSET_CYCLE_FIELD
+            },
+        )
+        object.__setattr__(self, "run_at", run_at)
+        object.__setattr__(self, "guidance_additions", guidance_additions)
 
 
 @dataclass(frozen=True)
@@ -683,115 +747,38 @@ def _project_patch(
     current_snapshot: CyclePolicySnapshot,
     patch: CyclePolicyPatch,
 ) -> CyclePolicySnapshot:
-    after = deepcopy(current_snapshot)
-    timezone_name = after.timezone
-    if _set(patch.timezone_name) and patch.timezone_name is not None:
-        timezone_name = validate_timezone_name(patch.timezone_name)
-        after = replace(after, timezone=timezone_name)
+    snapshot_fields = {
+        snapshot_field.name: snapshot_field
+        for snapshot_field in fields(current_snapshot)
+    }
+    unknown_fields = sorted(set(patch.changes).difference(snapshot_fields))
+    if unknown_fields:
+        raise ValueError(
+            "Unknown Cycle policy field(s): " + ", ".join(unknown_fields)
+        )
 
+    updates = {
+        field_name: deepcopy(value)
+        for field_name, value in patch.changes.items()
+        if not (
+            value is None
+            and snapshot_fields[field_name].metadata.get(
+                _PATCH_IGNORE_NONE,
+                False,
+            )
+        )
+    }
+    timezone_name = cast(str, updates.get("timezone", current_snapshot.timezone))
     if _set(patch.run_at) and patch.run_at is not None:
-        after = replace(
-            after,
-            schedule_expr=build_one_time_schedule_expr(
-                patch.run_at,
-                timezone_name,
-            ),
-        )
-    elif _set(patch.schedule_expr) and patch.schedule_expr is not None:
-        after = replace(
-            after,
-            schedule_expr=validate_schedule_expr(
-                patch.schedule_expr,
-                timezone_name,
-            ),
-        )
-    elif after.timezone != current_snapshot.timezone:
-        after = replace(
-            after,
-            schedule_expr=validate_schedule_expr(
-                after.schedule_expr,
-                timezone_name,
-            ),
+        updates["schedule_expr"] = build_one_time_schedule_expr(
+            patch.run_at,
+            timezone_name,
         )
 
-    if _set(patch.name) and patch.name is not None:
-        after = replace(
-            after,
-            name=validate_nonempty_trimmed(patch.name, "name"),
-        )
-    if _set(patch.prompt) and patch.prompt is not None:
-        after = replace(
-            after,
-            prompt=validate_nonempty_trimmed(patch.prompt, "prompt"),
-        )
-
-    if _set(patch.enabled) and patch.enabled is not None:
-        if not isinstance(patch.enabled, bool):
-            raise ValueError("enabled must be a boolean")
-        after = replace(after, enabled=patch.enabled)
-    if _set(patch.max_concurrency):
-        after = replace(
-            after,
-            max_concurrency=_validated_max_concurrency(patch.max_concurrency),
-        )
-    if _set(patch.timeout_seconds):
-        after = replace(
-            after,
-            timeout_seconds=validate_cycle_timeout_seconds(patch.timeout_seconds),
-        )
-    if _set(patch.retry_policy):
-        if not isinstance(patch.retry_policy, dict):
-            raise ValueError("retry_policy must be an object")
-        after = replace(
-            after,
-            retry_policy=cast(
-                dict[str, JsonValue],
-                jsonable(deepcopy(patch.retry_policy)),
-            ),
-        )
-    if _set(patch.model_override):
-        after = replace(
-            after,
-            model_override=validate_model_override(patch.model_override),
-        )
-    if _set(patch.thinking_override):
-        after = replace(
-            after,
-            thinking_override=validate_thinking_override(
-                patch.thinking_override
-            ),
-        )
-    if _set(patch.execution_policy_key):
-        after = replace(
-            after,
-            execution_policy_key=validate_cycle_execution_policy_key(
-                patch.execution_policy_key
-            ),
-        )
-    else:
-        validate_cycle_execution_policy_key(after.execution_policy_key)
-    if _set(patch.target_idea_id):
-        after = replace(
-            after,
-            target_idea_id=(
-                str(patch.target_idea_id)
-                if patch.target_idea_id is not None
-                else None
-            ),
-        )
-    if _set(patch.guidance) and _set(patch.guidance_additions):
+    if "guidance" in updates and _set(patch.guidance_additions):
         raise ValueError("guidance and guidance_additions cannot be changed together")
-    if _set(patch.guidance):
-        if not isinstance(patch.guidance, (list, tuple)):
-            raise ValueError("guidance must be a list of strings")
-        after = replace(
-            after,
-            guidance=sorted(
-                validate_nonempty_trimmed(value, "guidance")
-                for value in patch.guidance
-            ),
-        )
-    elif _set(patch.guidance_additions):
+    after = replace(current_snapshot, **updates)
+    if _set(patch.guidance_additions):
         if not isinstance(patch.guidance_additions, (list, tuple)):
             raise ValueError("guidance_additions must be a list of strings")
         after = replace(
