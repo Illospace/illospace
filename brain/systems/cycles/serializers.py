@@ -29,7 +29,9 @@ if TYPE_CHECKING:
         BehaviorChangeRecord,
         CyclePolicyPreview,
         CyclePolicySnapshot,
-        EffectiveCyclePolicy,
+    )
+    from brain.systems.cycles.behavior_policy_read_model import (
+        EffectiveCyclePolicyReadModel,
     )
 
 
@@ -117,7 +119,9 @@ def serialize_behavior_change_record(change: BehaviorChangeRecord) -> dict:
     }
 
 
-def serialize_effective_cycle_policy(policy: EffectiveCyclePolicy) -> dict:
+def serialize_effective_cycle_policy(
+    policy: EffectiveCyclePolicyReadModel,
+) -> dict:
     revision = policy.source_revision
     latest_change = policy.latest_change
     output_targets = [

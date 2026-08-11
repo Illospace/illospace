@@ -36,6 +36,7 @@ from brain.systems.cycles.commands import (
 )
 from brain.systems.cycles.behavior_policy import (
     CyclePolicyApplied,
+    CyclePolicyApplyResult,
     CyclePolicyConflict,
     CyclePolicyPatch,
     async_apply_cycle_policy_change as command_apply_cycle_policy,
@@ -43,7 +44,9 @@ from brain.systems.cycles.behavior_policy import (
     async_list_cycle_policy_history as command_list_cycle_policy_history,
     async_preview_cycle_policy_change as command_preview_cycle_policy,
     async_preview_cycle_policy_revert as command_preview_cycle_policy_revert,
-    async_read_effective_cycle_policy as command_read_effective_cycle_policy,
+)
+from brain.systems.cycles.behavior_policy_read_model import (
+    async_read_effective_cycle_policy as query_effective_cycle_policy,
 )
 from brain.systems.cycles.events import publish_cycle_change_safe
 from brain.systems.cycles.common import SCHEDULED_DIGEST_RUN_KIND
@@ -102,7 +105,7 @@ async def _latest_effective_policy_payload(
     actor: CycleActor,
     cycle_id: int,
 ) -> dict:
-    latest = await command_read_effective_cycle_policy(
+    latest = await query_effective_cycle_policy(
         db,
         actor=actor,
         cycle_id=cycle_id,
@@ -129,6 +132,41 @@ async def _raise_policy_conflict(
             "latest_effective_policy": latest,
         },
     )
+
+
+async def _finalize_policy_apply_result(
+    db: AsyncSession,
+    *,
+    actor: CycleActor,
+    cycle_id: int,
+    result: CyclePolicyApplyResult,
+    invalid_result_detail: str,
+) -> dict:
+    try:
+        if isinstance(result, CyclePolicyConflict):
+            await _raise_policy_conflict(
+                db,
+                actor=actor,
+                cycle_id=cycle_id,
+                conflict=result,
+            )
+        if not isinstance(result, CyclePolicyApplied):
+            raise ValueError(invalid_result_detail)
+        effective_policy = await _latest_effective_policy_payload(
+            db,
+            actor=actor,
+            cycle_id=cycle_id,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _policy_request_error(exc) from exc
+    payload = {
+        "effective_policy": effective_policy,
+        "change": serialize_behavior_change_record(result.change),
+    }
+    await db.commit()
+    return payload
 
 
 async def _get_cycle_or_404(db: AsyncSession, cycle_id: int, user: dict[str, Any]) -> Cycle:
@@ -328,30 +366,15 @@ async def apply_cycle_behavior_policy(
             rationale=body.rationale,
             source_reference=_policy_source_reference(cycle_id),
         )
-        if isinstance(result, CyclePolicyConflict):
-            await _raise_policy_conflict(
-                db,
-                actor=actor,
-                cycle_id=cycle_id,
-                conflict=result,
-            )
-        if not isinstance(result, CyclePolicyApplied):
-            raise ValueError("Cycle policy apply returned an invalid result")
-        effective_policy = await _latest_effective_policy_payload(
-            db,
-            actor=actor,
-            cycle_id=cycle_id,
-        )
-    except HTTPException:
-        raise
     except ValueError as exc:
         raise _policy_request_error(exc) from exc
-    payload = {
-        "effective_policy": effective_policy,
-        "change": serialize_behavior_change_record(result.change),
-    }
-    await db.commit()
-    return payload
+    return await _finalize_policy_apply_result(
+        db,
+        actor=actor,
+        cycle_id=cycle_id,
+        result=result,
+        invalid_result_detail="Cycle policy apply returned an invalid result",
+    )
 
 
 @router.get(
@@ -436,30 +459,15 @@ async def apply_cycle_behavior_policy_revert(
             rationale=body.rationale,
             source_reference=_policy_source_reference(cycle_id),
         )
-        if isinstance(result, CyclePolicyConflict):
-            await _raise_policy_conflict(
-                db,
-                actor=actor,
-                cycle_id=cycle_id,
-                conflict=result,
-            )
-        if not isinstance(result, CyclePolicyApplied):
-            raise ValueError("Cycle policy revert returned an invalid result")
-        effective_policy = await _latest_effective_policy_payload(
-            db,
-            actor=actor,
-            cycle_id=cycle_id,
-        )
-    except HTTPException:
-        raise
     except ValueError as exc:
         raise _policy_request_error(exc) from exc
-    payload = {
-        "effective_policy": effective_policy,
-        "change": serialize_behavior_change_record(result.change),
-    }
-    await db.commit()
-    return payload
+    return await _finalize_policy_apply_result(
+        db,
+        actor=actor,
+        cycle_id=cycle_id,
+        result=result,
+        invalid_result_detail="Cycle policy revert returned an invalid result",
+    )
 
 
 @router.delete("/{cycle_id}")

@@ -30,6 +30,8 @@ from brain.systems.cycles.behavior_policy import (
     async_list_cycle_policy_history,
     async_preview_cycle_policy_change,
     async_preview_cycle_policy_revert,
+)
+from brain.systems.cycles.behavior_policy_read_model import (
     async_read_effective_cycle_policy,
 )
 from brain.systems.cycles.memory import async_prepare_cycle_run_memory_snapshot
