@@ -309,7 +309,7 @@ def _get_tool_handlers(
         limit=100,
         max_reclaims=100,
     ):
-        from brain.jobs.pipelines.workspace_gc import (
+        from brain.systems.workspace_reclamation import (
             manage_headless_worker_workspaces,
         )
         from brain.kernel import config as brain_config

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from brain.jobs.pipelines.workspace_gc import (
+from brain.systems.workspace_reclamation import (
     manage_headless_worker_workspaces,
     reclaim_headless_worker_workspaces,
 )
@@ -97,7 +97,7 @@ async def test_terminal_workspace_past_retention_is_deleted_and_reports_bytes(
         return inventory_workspace(path)
 
     monkeypatch.setattr(
-        "brain.jobs.pipelines.workspace_gc.inventory_workspace",
+        "brain.systems.workspace_reclamation.inventory_workspace",
         recording_inventory,
     )
 
@@ -281,7 +281,7 @@ async def test_illo_tool_handler_uses_shared_workspace_service(monkeypatch, tmp_
         FakeUnitOfWork,
     )
     monkeypatch.setattr(
-        "brain.jobs.pipelines.workspace_gc.manage_headless_worker_workspaces",
+        "brain.systems.workspace_reclamation.manage_headless_worker_workspaces",
         fake_manage,
     )
     monkeypatch.setattr(
