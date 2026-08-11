@@ -14,7 +14,6 @@ from brain.platform.db.models.cycle import (
 from brain.systems.cycles.access import CycleActor
 from brain.systems.cycles.behavior_policy import (
     BehaviorChangeRecord,
-    CyclePolicySnapshot,
     EffectiveCyclePolicy,
     _audit_target_conditions,
     _aware_utc,
@@ -22,6 +21,7 @@ from brain.systems.cycles.behavior_policy import (
     _load_scoped_cycle,
     _record,
 )
+from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
 
 __all__ = [
     "CyclePolicyFieldSource",

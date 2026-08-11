@@ -6,7 +6,7 @@ from typing import Any, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from brain.systems.cycles.behavior_policy import CyclePolicySnapshot
+from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
 from brain.systems.cycles.common import (
     MAX_CYCLE_TIMEOUT_SECONDS,
     MIN_CYCLE_TIMEOUT_SECONDS,
@@ -146,10 +146,12 @@ class CyclePolicyRevertApplyRequest(BaseModel):
     rationale: str = Field(min_length=1, max_length=5000)
 
 
-def _cycle_policy_configuration_read_model() -> type[BaseModel]:
-    field_types = CyclePolicySnapshot.configuration_field_types()
+def _cycle_policy_configuration_read_model(
+    snapshot_type: type[CyclePolicySnapshot],
+) -> type[BaseModel]:
+    field_types = snapshot_type.configuration_field_types()
     model_fields: dict[str, tuple[Any, Any]] = {}
-    for snapshot_field in fields(CyclePolicySnapshot):
+    for snapshot_field in fields(snapshot_type):
         if snapshot_field.name == "guidance":
             continue
         annotation = field_types[snapshot_field.name]
@@ -164,7 +166,9 @@ def _cycle_policy_configuration_read_model() -> type[BaseModel]:
     )
 
 
-CyclePolicyConfigurationRead = _cycle_policy_configuration_read_model()
+CyclePolicyConfigurationRead = _cycle_policy_configuration_read_model(
+    CyclePolicySnapshot
+)
 
 
 class CyclePolicySnapshotRead(BaseModel):
