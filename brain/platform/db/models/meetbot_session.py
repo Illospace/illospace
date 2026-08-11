@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,16 +11,24 @@ from sqlalchemy.orm import Mapped, mapped_column
 from brain.platform.db.base import Base
 from brain.platform.db.constraints import check_in_constraint
 
-__all__ = ["MEETBOT_SESSION_OUTCOMES", "MeetbotSession"]
+__all__ = [
+    "MEETBOT_SESSION_OUTCOMES",
+    "MeetbotSession",
+    "MeetbotSessionOutcome",
+]
 
 
-MEETBOT_SESSION_OUTCOMES = (
-    "requested",
-    "admitted",
-    "refused",
-    "not_admitted",
-    "left",
-)
+class MeetbotSessionOutcome(StrEnum):
+    """Lifecycle outcomes accepted by the brain persistence boundary."""
+
+    REQUESTED = "requested"
+    ADMITTED = "admitted"
+    REFUSED = "refused"
+    NOT_ADMITTED = "not_admitted"
+    LEFT = "left"
+
+
+MEETBOT_SESSION_OUTCOMES = tuple(outcome.value for outcome in MeetbotSessionOutcome)
 
 
 class MeetbotSession(Base):
@@ -61,8 +70,8 @@ class MeetbotSession(Base):
     outcome: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        default="requested",
-        server_default="requested",
+        default=MeetbotSessionOutcome.REQUESTED.value,
+        server_default=MeetbotSessionOutcome.REQUESTED.value,
     )
     refusal_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     admitted_at: Mapped[datetime | None] = mapped_column(

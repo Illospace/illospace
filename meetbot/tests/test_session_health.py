@@ -80,7 +80,7 @@ class _RecordingSender:
     async def send_transcript(self, record: SessionRecord) -> None:
         self.terminal.append(record.completion_payload())
 
-    async def send_status(self, record: SessionRecord) -> None:
+    async def send_status(self, snapshot: SessionHealthSnapshot) -> None:
         return None
 
     async def send_health(
@@ -138,6 +138,7 @@ async def _join(
         monotonic=clock.monotonic,
     )
     record = await manager.join(
+        session_id="health-session",
         meeting_url="https://meet.google.com/abc-defg-hij",
         display_name=None,
         origin=Origin(channel="C-meetings", thread_ts="1722700000.001"),
@@ -146,6 +147,49 @@ async def _join(
     await asyncio.wait_for(engine.started.wait(), timeout=1)
     await clock.advance(0)
     return manager, engine, record
+
+
+@pytest.mark.asyncio
+async def test_active_status_delivery_does_not_block_transitions_and_drains_on_shutdown(
+    tmp_path: Path,
+) -> None:
+    class _BlockingStatusSender(_RecordingSender):
+        def __init__(self) -> None:
+            super().__init__()
+            self.statuses: list[str] = []
+            self.release = asyncio.Event()
+
+        async def send_status(self, snapshot: SessionHealthSnapshot) -> None:
+            self.statuses.append(snapshot.status)
+            await self.release.wait()
+
+    engine = _HoldingEngine(admitted=True)
+    sender = _BlockingStatusSender()
+    manager = SessionManager(_config(tmp_path), engine, sender)
+
+    record = await manager.join(
+        session_id="nonblocking-status",
+        meeting_url="https://meet.google.com/abc-defg-hij",
+        display_name=None,
+        origin=Origin(channel="C-meetings", thread_ts="1722700000.001"),
+        requested_by="U-reda",
+    )
+    await asyncio.wait_for(engine.started.wait(), timeout=1)
+    for _ in range(10):
+        if len(sender.statuses) == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert record.status == "admitted"
+    assert sender.statuses == ["lobby", "admitted"]
+
+    shutdown = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    sender.release.set()
+    await asyncio.wait_for(shutdown, timeout=1)
+
+    assert not manager._status_tasks
 
 
 def test_deadline_seam_catches_heartbeat_up_without_duplicate_events(

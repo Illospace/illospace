@@ -9,7 +9,12 @@ import pytest
 
 from meetbot.callback import MeetingWebhookCallback
 from meetbot.config import MeetbotConfig
-from meetbot.models import Origin, SessionHealthSnapshot, SessionRecord
+from meetbot.models import (
+    MeetbotSessionOutcome,
+    Origin,
+    SessionHealthSnapshot,
+    SessionRecord,
+)
 from meetbot.transcript import TranscriptWriter
 
 
@@ -54,9 +59,11 @@ def _terminal_record(session_id: str = "session-1") -> SessionRecord:
         transcript_md_path=transcript_md_path,
         status="ended",
         started_at="2026-08-03T14:00:00Z",
+        joined_at="2026-08-03T14:00:10Z",
         ended_at="2026-08-03T15:00:00Z",
         caption_lines=4,
         participants=["Alice", "Bob"],
+        outcome=MeetbotSessionOutcome.LEFT,
     )
 
 
@@ -124,7 +131,7 @@ async def test_health_webhook_uses_non_terminal_envelope_and_unique_key(
             "meeting_url": "https://meet.google.com/abc-defg-hij",
             "status": "admitted",
             "started_at": "2026-08-03T14:00:00Z",
-            "joined_at": None,
+            "joined_at": "2026-08-03T14:00:10Z",
             "observed_at": body["payload"]["observed_at"],
             "caption_lines": 4,
             "participant_count": 2,
@@ -159,7 +166,9 @@ async def test_status_transition_uses_durable_health_ingress(
     record.joined_at = "2026-08-03T14:00:10Z"
     record.ended_at = None
 
-    await sender.send_status(record)
+    await sender.send_status(
+        SessionHealthSnapshot.capture(record, observed_caption_count=record.caption_lines)
+    )
 
     _, body, headers = client.posts[0]
     assert body["kind"] == "meeting_session_health"

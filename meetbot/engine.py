@@ -10,7 +10,7 @@ from typing import Any
 
 from meetbot.browser_diagnostics import capture_failure_evidence
 from meetbot.config import MeetbotConfig
-from meetbot.models import EngineResult, JoinRefusedError, SessionEvents
+from meetbot.models import EngineResult, MeetbotSessionOutcome, SessionEvents
 
 logger = logging.getLogger(__name__)
 
@@ -229,9 +229,21 @@ class PlaywrightMeetEngine:
                 await self._dismiss_media_prompt(page)
                 await self._mute_before_join(page)
                 if not using_storage_state:
-                    await self._fill_guest_name(page, display_name)
+                    blocked_error = await self._fill_guest_name(page, display_name)
+                    if blocked_error:
+                        return EngineResult(
+                            reason=MeetbotSessionOutcome.REFUSED,
+                            terminal_status="failed",
+                            error=blocked_error,
+                        )
                 if not await self._click_join(page):
-                    await _raise_if_join_blocked(page)
+                    blocked_error = await _join_blocked_error(page)
+                    if blocked_error:
+                        return EngineResult(
+                            reason=MeetbotSessionOutcome.REFUSED,
+                            terminal_status="failed",
+                            error=blocked_error,
+                        )
                     raise RuntimeError("Google Meet did not show an Ask to join or Join now button.")
 
                 admission_result = await self._wait_for_admission(page, runtime.leave_requested)
@@ -341,7 +353,7 @@ class PlaywrightMeetEngine:
             ),
         )
 
-    async def _fill_guest_name(self, page: Any, display_name: str) -> None:
+    async def _fill_guest_name(self, page: Any, display_name: str) -> str | None:
         # The prejoin UI renders progressively; poll briefly before concluding
         # the field is absent, and distinguish "blocked" from "not rendered".
         for _ in range(20):
@@ -355,8 +367,9 @@ class PlaywrightMeetEngine:
             )
             if field is not None:
                 await field.fill(display_name)
-                return
-            await _raise_if_join_blocked(page)
+                return None
+            if blocked_error := await _join_blocked_error(page):
+                return blocked_error
             await asyncio.sleep(0.5)
         raise RuntimeError("Google Meet did not show the anonymous guest name field.")
 
@@ -403,12 +416,17 @@ class PlaywrightMeetEngine:
                     )
                 except Exception:
                     logger.debug("Google Meet refusal text could not be read", exc_info=True)
-                raise JoinRefusedError(
-                    refusal_text or "Google Meet did not admit the bot to the call."
+                return EngineResult(
+                    reason=MeetbotSessionOutcome.REFUSED,
+                    terminal_status="failed",
+                    error=(
+                        refusal_text
+                        or "Google Meet did not admit the bot to the call."
+                    ),
                 )
             if loop.time() >= deadline:
                 return EngineResult(
-                    reason="not_admitted",
+                    reason=MeetbotSessionOutcome.NOT_ADMITTED,
                     terminal_status="failed",
                     error=_lobby_timeout_error(self._config.lobby_timeout_seconds),
                 )
@@ -619,7 +637,7 @@ JOIN_BLOCKED_ERROR = (
 )
 
 
-async def _raise_if_join_blocked(page: Any) -> None:
+async def _join_blocked_error(page: Any) -> str | None:
     """Detect Meet's hard block page, observed live on 2026-08-03.
 
     Workspace-hosted meetings can require signed-in participants; anonymous
@@ -632,7 +650,8 @@ async def _raise_if_join_blocked(page: Any) -> None:
         re.compile(r"You can.?t join this (video )?call", re.IGNORECASE)
     )
     if await blocked.count() and await blocked.first.is_visible():
-        raise JoinRefusedError(JOIN_BLOCKED_ERROR)
+        return JOIN_BLOCKED_ERROR
+    return None
 
 
 async def _ensure_media_muted(

@@ -21,7 +21,7 @@ class MeetingWebhookSender(Protocol):
 
     async def send_transcript(self, record: SessionRecord) -> None: ...
 
-    async def send_status(self, record: SessionRecord) -> None: ...
+    async def send_status(self, snapshot: SessionHealthSnapshot) -> None: ...
 
     async def send_health(
         self,
@@ -67,14 +67,10 @@ class MeetingWebhookCallback:
             dead_letter_log="Meetbot transcript webhook saved to dead letter %s",
         )
 
-    async def send_status(self, record: SessionRecord) -> None:
+    async def send_status(self, snapshot: SessionHealthSnapshot) -> None:
         """Deliver one active lifecycle transition through the health ingress."""
 
-        snapshot = SessionHealthSnapshot.capture(
-            record,
-            observed_caption_count=record.caption_lines,
-        )
-        key = f"meeting-status-{record.session_id}-{record.status}"
+        key = f"meeting-status-{snapshot.session_id}-{snapshot.status}"
         envelope = {
             "origin": "meetbot",
             "kind": "meeting_session_health",
@@ -82,11 +78,11 @@ class MeetingWebhookCallback:
             "idempotency_key": key,
         }
         await self._deliver(
-            session_id=record.session_id,
+            session_id=snapshot.session_id,
             key=key,
             envelope=envelope,
             dead_letter_name=(
-                f"dead-letter-meeting-status-{record.session_id}-{record.status}.json"
+                f"dead-letter-meeting-status-{snapshot.session_id}-{snapshot.status}.json"
             ),
             failure_log=(
                 "Meetbot status webhook attempt %d/3 failed for session %s: %s"

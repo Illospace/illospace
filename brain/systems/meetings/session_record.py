@@ -2,13 +2,50 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+import logging
+from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.kernel.common.coercion import coerce_datetime
-from brain.platform.db.models.meetbot_session import MeetbotSession
+from brain.platform.db.models.meetbot_session import (
+    MeetbotSession,
+    MeetbotSessionOutcome,
+)
+
+logger = logging.getLogger(__name__)
+
+MeetbotHealthStatus = Literal[
+    "starting",
+    "lobby",
+    "admitted",
+    "captions_flowing",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MeetbotHealthUpdate:
+    """Validated active-session values accepted by the persistence boundary."""
+
+    session_id: str
+    status: MeetbotHealthStatus
+    joined_at: datetime | None
+    participant_count: int
+    caption_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class MeetbotTerminalUpdate:
+    """Validated terminal-session values accepted by the persistence boundary."""
+
+    session_id: str
+    outcome: MeetbotSessionOutcome
+    joined_at: datetime | None
+    ended_at: datetime
+    participant_count: int
+    caption_count: int
+    refusal_text: str | None = None
 
 
 async def create_requested_meetbot_session(
@@ -18,115 +55,97 @@ async def create_requested_meetbot_session(
     meeting_url: str,
     requesting_run_id: int | None,
     requested_at: datetime | None = None,
-) -> MeetbotSession:
+) -> None:
     """Add the durable request that must commit before meetbot starts a browser."""
 
-    row = MeetbotSession(
-        session_id=session_id,
-        meeting_url=meeting_url,
-        requesting_run_id=requesting_run_id,
-        requested_at=requested_at or datetime.now(timezone.utc),
-        outcome="requested",
+    session.add(
+        MeetbotSession(
+            session_id=session_id,
+            meeting_url=meeting_url,
+            requesting_run_id=requesting_run_id,
+            requested_at=requested_at or datetime.now(timezone.utc),
+            outcome=MeetbotSessionOutcome.REQUESTED.value,
+        )
     )
-    session.add(row)
     await session.flush()
-    return row
 
 
 async def record_meetbot_health(
     session: AsyncSession,
-    payload: Mapping[str, Any],
-) -> MeetbotSession:
-    """Apply one active-session callback without undoing a terminal outcome."""
+    update: MeetbotHealthUpdate,
+) -> None:
+    """Apply one validated active callback without undoing a terminal outcome."""
 
-    row = await _get_or_create_callback_row(session, payload)
-    status = str(payload.get("status") or "").strip().lower()
-    joined_at = coerce_datetime(payload.get("joined_at"))
-    if row.outcome in {"requested", "admitted"} and status in {
-        "admitted",
-        "captions_flowing",
-    }:
-        row.outcome = "admitted"
-        row.admitted_at = row.admitted_at or joined_at
+    row = await _requested_row(session, update.session_id)
+    if row is None:
+        return
+    if row.outcome in {
+        MeetbotSessionOutcome.REQUESTED.value,
+        MeetbotSessionOutcome.ADMITTED.value,
+    } and update.status in {"admitted", "captions_flowing"}:
+        row.outcome = MeetbotSessionOutcome.ADMITTED.value
+        row.admitted_at = row.admitted_at or update.joined_at
     row.participant_count = _max_observed(
         row.participant_count,
-        payload.get("participant_count"),
+        update.participant_count,
     )
-    row.caption_count = _max_observed(
-        row.caption_count,
-        payload.get("caption_lines"),
-    )
+    row.caption_count = _max_observed(row.caption_count, update.caption_count)
     await session.flush()
-    return row
 
 
 async def record_meetbot_terminal(
     session: AsyncSession,
-    payload: Mapping[str, Any],
-) -> MeetbotSession:
-    """Apply a terminal callback and preserve the reason admission failed."""
+    update: MeetbotTerminalUpdate,
+) -> None:
+    """Apply one validated terminal callback to its brain-issued request."""
 
-    row = await _get_or_create_callback_row(session, payload)
-    joined_at = coerce_datetime(payload.get("joined_at"))
-    ended_at = coerce_datetime(payload.get("ended_at"))
-    end_reason = str(payload.get("end_reason") or "").strip().lower()
+    if update.outcome not in {
+        MeetbotSessionOutcome.LEFT,
+        MeetbotSessionOutcome.REFUSED,
+        MeetbotSessionOutcome.NOT_ADMITTED,
+    }:
+        raise ValueError(f"Meetbot terminal outcome is not terminal: {update.outcome}")
 
-    if joined_at is not None:
-        row.admitted_at = row.admitted_at or joined_at
-    if row.admitted_at is not None:
-        row.outcome = "left"
-        row.left_at = ended_at
-    elif end_reason == "refused":
-        row.outcome = "refused"
-        row.refusal_text = str(payload.get("error") or "").strip() or None
-        row.left_at = ended_at
-    else:
-        row.outcome = "not_admitted"
-        row.left_at = ended_at
-
-    participants = payload.get("participants")
-    participant_count = len(participants) if isinstance(participants, list) else None
-    row.participant_count = _max_observed(row.participant_count, participant_count)
-    row.caption_count = _max_observed(row.caption_count, payload.get("caption_lines"))
-    await session.flush()
-    return row
-
-
-async def _get_or_create_callback_row(
-    session: AsyncSession,
-    payload: Mapping[str, Any],
-) -> MeetbotSession:
-    session_id = str(payload.get("session_id") or "").strip()
-    row = await session.get(MeetbotSession, session_id)
-    if row is not None:
-        return row
-    row = MeetbotSession(
-        session_id=session_id,
-        meeting_url=str(payload.get("meeting_url") or "").strip(),
-        requesting_run_id=None,
-        requested_at=(
-            coerce_datetime(payload.get("started_at")) or datetime.now(timezone.utc)
-        ),
-        outcome="requested",
+    row = await _requested_row(session, update.session_id)
+    if row is None:
+        return
+    row.admitted_at = row.admitted_at or update.joined_at
+    row.outcome = update.outcome.value
+    row.refusal_text = (
+        update.refusal_text
+        if update.outcome is MeetbotSessionOutcome.REFUSED
+        else None
     )
-    session.add(row)
+    row.left_at = update.ended_at
+    row.participant_count = _max_observed(
+        row.participant_count,
+        update.participant_count,
+    )
+    row.caption_count = _max_observed(row.caption_count, update.caption_count)
     await session.flush()
+
+
+async def _requested_row(
+    session: AsyncSession,
+    session_id: str,
+) -> MeetbotSession | None:
+    row = await session.get(MeetbotSession, session_id)
+    if row is None:
+        logger.warning(
+            "Meetbot callback for %s has no brain-issued request row; skipping audit update",
+            session_id,
+        )
     return row
 
 
-def _max_observed(current: int | None, value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return current
-    try:
-        observed = int(value)
-    except (TypeError, ValueError):
-        return current
-    if observed < 0:
-        return current
+def _max_observed(current: int | None, observed: int) -> int:
     return observed if current is None else max(current, observed)
 
 
 __all__ = [
+    "MeetbotHealthStatus",
+    "MeetbotHealthUpdate",
+    "MeetbotTerminalUpdate",
     "create_requested_meetbot_session",
     "record_meetbot_health",
     "record_meetbot_terminal",
