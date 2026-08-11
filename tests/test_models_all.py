@@ -156,7 +156,6 @@ def test_cycle_behavior_change_audit_schema_is_cycle_only():
     }
     assert {index.name for index in table.indexes} == {
         "ix_cycle_behavior_change_audits_workspace_applied",
-        "ix_cycle_behavior_change_audits_target_history",
     }
 
 

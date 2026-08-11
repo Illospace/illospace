@@ -44,11 +44,6 @@ class CycleBehaviorChangeAudit(Base):
             "applied_at",
             "id",
         ),
-        Index(
-            "ix_cycle_behavior_change_audits_target_history",
-            "target_id",
-            "version",
-        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

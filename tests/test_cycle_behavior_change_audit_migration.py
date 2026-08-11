@@ -25,6 +25,8 @@ def _migration_with_tables(monkeypatch, *, old_exists: bool, new_exists: bool):
             migration._TABLE: new_exists,
         }[table_name],
     )
+    monkeypatch.setattr(migration, "_has_constraint", lambda *_args: True)
+    monkeypatch.setattr(migration, "_has_index", lambda *_args: True)
     return migration, operations
 
 
@@ -42,10 +44,24 @@ def test_live_upgrade_renames_in_place_and_drops_generic_columns(monkeypatch):
     migration.upgrade()
 
     sql = _executed_sql(operations)
-    assert sql[0] == (
+    rename_sql = [statement for statement in sql if "RENAME" in statement]
+    assert rename_sql == [
         'ALTER TABLE "behavior_change_audits" '
-        'RENAME TO "cycle_behavior_change_audits"'
-    )
+        'RENAME TO "cycle_behavior_change_audits"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"behavior_change_audits_pkey" TO "cycle_behavior_change_audits_pkey"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"behavior_change_audits_cycle_revision_id_fkey" TO '
+        '"cycle_behavior_change_audits_cycle_revision_id_fkey"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"behavior_change_audits_reverted_from_id_fkey" TO '
+        '"cycle_behavior_change_audits_reverted_from_id_fkey"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"uq_behavior_change_audits_cycle_revision" TO '
+        '"uq_cycle_behavior_change_audits_cycle_revision"',
+        'ALTER INDEX "ix_behavior_change_audits_workspace_applied" '
+        'RENAME TO "ix_cycle_behavior_change_audits_workspace_applied"',
+    ]
     assert (
         'ALTER TABLE "cycle_behavior_change_audits" '
         'DROP COLUMN "policy_kind"'
@@ -54,10 +70,33 @@ def test_live_upgrade_renames_in_place_and_drops_generic_columns(monkeypatch):
         'ALTER TABLE "cycle_behavior_change_audits" '
         'DROP COLUMN "target_type"'
     ) in sql
-    assert len([statement for statement in sql if "RENAME CONSTRAINT" in statement]) == 2
-    assert len([statement for statement in sql if "ALTER INDEX" in statement]) == 2
     operations.create_table.assert_not_called()
     operations.drop_table.assert_not_called()
+    operations.create_index.assert_not_called()
+    operations.drop_index.assert_called_once_with(
+        "ix_behavior_change_audits_target_history",
+        table_name="cycle_behavior_change_audits",
+    )
+
+
+def test_live_upgrade_skips_renames_without_the_old_object_names(monkeypatch):
+    migration, operations = _migration_with_tables(
+        monkeypatch,
+        old_exists=True,
+        new_exists=False,
+    )
+    monkeypatch.setattr(migration, "_has_constraint", lambda *_args: False)
+    monkeypatch.setattr(migration, "_has_index", lambda *_args: False)
+
+    migration.upgrade()
+
+    rename_sql = [
+        statement for statement in _executed_sql(operations) if "RENAME" in statement
+    ]
+    assert rename_sql == [
+        'ALTER TABLE "behavior_change_audits" '
+        'RENAME TO "cycle_behavior_change_audits"'
+    ]
 
 
 def test_fresh_upgrade_removes_only_empty_historical_table(monkeypatch):
@@ -88,6 +127,19 @@ def test_fresh_upgrade_refuses_to_discard_historical_rows(monkeypatch):
     operations.drop_table.assert_not_called()
 
 
+def test_upgrade_refuses_to_mark_a_missing_table_as_migrated(monkeypatch):
+    migration, operations = _migration_with_tables(
+        monkeypatch,
+        old_exists=False,
+        new_exists=False,
+    )
+
+    with pytest.raises(RuntimeError, match="neither behavior-change audit table exists"):
+        migration.upgrade()
+
+    operations.execute.assert_not_called()
+
+
 def test_downgrade_restores_historical_shape_and_names(monkeypatch):
     migration, operations = _migration_with_tables(
         monkeypatch,
@@ -104,10 +156,26 @@ def test_downgrade_restores_historical_shape_and_names(monkeypatch):
     assert set(restored_columns) == {"policy_kind", "target_type"}
     assert all(column.nullable is False for column in restored_columns.values())
     assert all(column.server_default is not None for column in restored_columns.values())
-    assert _executed_sql(operations)[-1] == (
+    rename_sql = [
+        statement for statement in _executed_sql(operations) if "RENAME" in statement
+    ]
+    assert rename_sql == [
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"cycle_behavior_change_audits_pkey" TO "behavior_change_audits_pkey"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"cycle_behavior_change_audits_cycle_revision_id_fkey" TO '
+        '"behavior_change_audits_cycle_revision_id_fkey"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"cycle_behavior_change_audits_reverted_from_id_fkey" TO '
+        '"behavior_change_audits_reverted_from_id_fkey"',
+        'ALTER TABLE "cycle_behavior_change_audits" RENAME CONSTRAINT '
+        '"uq_cycle_behavior_change_audits_cycle_revision" TO '
+        '"uq_behavior_change_audits_cycle_revision"',
+        'ALTER INDEX "ix_cycle_behavior_change_audits_workspace_applied" '
+        'RENAME TO "ix_behavior_change_audits_workspace_applied"',
         'ALTER TABLE "cycle_behavior_change_audits" '
-        'RENAME TO "behavior_change_audits"'
-    )
+        'RENAME TO "behavior_change_audits"',
+    ]
     operations.create_unique_constraint.assert_called_once_with(
         "uq_behavior_change_audits_target_version",
         "cycle_behavior_change_audits",
