@@ -2,13 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  cycleRunPolicyInspection,
   formatPolicyDateTime,
   guidanceDiff,
   hydratePolicyDraft,
   isPolicyDraftDirty,
+  policyActorPresentation,
   policyConfigurationEntries,
   policyFieldSource,
+  policyOriginatingRun,
   policyProposalFromDraft,
+  policySourceRunId,
   presentedPolicyDiff,
   recoverPolicyDraftAfterConflict,
   retiredGuidance,
@@ -103,6 +107,102 @@ test('keeps removed guidance in history without treating unchanged guidance as r
   };
 
   assert.deepEqual(retiredGuidance(change), ['Use old CRM copy']);
+});
+
+test('presents agent and human policy actors as distinct identities', () => {
+  assert.deepEqual(policyActorPresentation({ actor_type: 'agent', actor_id: '15100' }), {
+    kind: 'agent',
+    label: 'Agent',
+    identity: '15100',
+  });
+  assert.deepEqual(policyActorPresentation({ actor_type: 'user', actor_id: 'reviewer-8' }), {
+    kind: 'human',
+    label: 'Human',
+    identity: 'reviewer-8',
+  });
+});
+
+test('resolves an agent policy source to its originating CycleRun when available', () => {
+  const runs = [
+    { id: 7100, run_id: 15100 },
+    { id: 7101, run_id: 15101 },
+  ];
+
+  assert.equal(policySourceRunId('agent:15100'), 15100);
+  assert.equal(policySourceRunId('agent_run:15101'), 15101);
+  assert.equal(policySourceRunId('api:/cycles/901/behavior-policy'), null);
+  assert.equal(policyOriginatingRun({ source_reference: 'agent:15100' }, runs)?.id, 7100);
+  assert.equal(policyOriginatingRun({ source_reference: 'agent:99999' }, runs), null);
+});
+
+test('reads the immutable policy and producing change from a CycleRun context snapshot', () => {
+  const inspection = cycleRunPolicyInspection({
+    id: 7101,
+    cycle_id: 901,
+    revision_id: 4901,
+    scheduled_for: '2026-08-10T13:00:00Z',
+    started_at: '2026-08-10T13:00:00Z',
+    completed_at: '2026-08-10T13:05:00Z',
+    status: 'completed',
+    error: null,
+    skip_reason: null,
+    idea_id: 'preview-run-7101',
+    run_id: 15101,
+    prompt_snapshot: 'Review active Cortex thoughts.',
+    guidance_snapshot: [],
+    output_targets_snapshot: [],
+    context_snapshot: {
+      revision: {
+        id: 4901,
+        revision_number: 3,
+        prompt: 'Review active Cortex thoughts.',
+      },
+      behavior_change: {
+        id: 6001,
+        version: 3,
+        actor_type: 'agent',
+        actor_id: '15100',
+        source_reference: 'agent:15100',
+        rationale: 'Focused the next request.',
+        changed_fields: ['prompt'],
+        applied_at: '2026-08-09T13:00:00Z',
+        after_snapshot: {
+          snapshot_version: 1,
+          name: 'Morning priority sweep',
+          prompt: 'Review active Cortex thoughts.',
+          schedule_expr: '0 9 * * 1-5',
+          timezone: 'America/Toronto',
+          enabled: true,
+          max_concurrency: 1,
+          timeout_seconds: null,
+          retry_policy: { max_attempts: 2 },
+          model_override: null,
+          thinking_override: null,
+          execution_policy_key: null,
+          target_idea_id: 'preview-cycle-901',
+          guidance: ['Use the current workspace state as the source of truth.'],
+        },
+      },
+    },
+    self_review_summary: null,
+    created_at: '2026-08-10T13:00:00Z',
+  });
+
+  assert.equal(inspection.hasSnapshot, true);
+  assert.equal(inspection.version, 3);
+  assert.equal(inspection.revisionNumber, 3);
+  assert.equal(inspection.configuration.find((entry) => entry.key === 'prompt')?.value, 'Review active Cortex thoughts.');
+  assert.deepEqual(inspection.guidance, ['Use the current workspace state as the source of truth.']);
+  assert.deepEqual(inspection.change, {
+    id: 6001,
+    version: 3,
+    actor_type: 'agent',
+    actor_id: '15100',
+    source_reference: 'agent:15100',
+    rationale: 'Focused the next request.',
+    changed_fields: ['prompt'],
+    applied_at: '2026-08-09T13:00:00Z',
+  });
 });
 
 test('formats UTC API timestamps in the display timezone', () => {

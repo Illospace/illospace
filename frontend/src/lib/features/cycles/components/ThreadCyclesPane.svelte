@@ -532,6 +532,7 @@
   {:else if selectedCycle}
     <EffectiveCyclePolicyView
       cycleId={selectedCycle.id}
+      {runs}
       compact
       editable
       refreshSerial={behaviorPolicyRefreshSerial}

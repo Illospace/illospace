@@ -8,6 +8,7 @@ import type {
   CyclePolicyPreviewRead,
   CyclePolicyProposal,
   CyclePolicyHistoryRead,
+  CycleRunRead,
   EffectiveCyclePolicyRead,
 } from '$lib/api/client';
 import type { RuntimeModelCatalogEntry } from '$lib/types/runtimeSettings';
@@ -150,6 +151,47 @@ export type CyclePolicyConfigurationEntry = {
   value: CyclePolicyConfigurationRead[keyof CyclePolicyConfigurationRead];
 };
 
+export type CyclePolicyActorPresentation = {
+  kind: 'agent' | 'human' | 'system';
+  label: 'Agent' | 'Human' | 'System';
+  identity: string;
+};
+
+export type CycleRunPolicyChangeInspection = {
+  id: number | null;
+  version: number | null;
+  actor_type: string | null;
+  actor_id: string | null;
+  source_reference: string | null;
+  rationale: string | null;
+  changed_fields: string[];
+  applied_at: string | null;
+};
+
+export type CycleRunPolicyInspection = {
+  hasSnapshot: boolean;
+  revisionNumber: number | null;
+  version: number | null;
+  configuration: Array<{ key: string; value: CyclePolicyJsonValue }>;
+  guidance: string[];
+  change: CycleRunPolicyChangeInspection | null;
+};
+
+const CYCLE_POLICY_SNAPSHOT_CONFIGURATION_FIELDS = [
+  'name',
+  'prompt',
+  'schedule_expr',
+  'timezone',
+  'enabled',
+  'max_concurrency',
+  'timeout_seconds',
+  'retry_policy',
+  'model_override',
+  'thinking_override',
+  'execution_policy_key',
+  'target_idea_id',
+] as const;
+
 export function policyConfigurationEntries(
   configuration: CyclePolicyConfigurationRead,
 ): CyclePolicyConfigurationEntry[] {
@@ -157,6 +199,65 @@ export function policyConfigurationEntries(
     key: key as CyclePolicyConfigurationEntry['key'],
     value,
   }));
+}
+
+function policyJsonObject(
+  value: CyclePolicyJsonValue | undefined,
+): Record<string, CyclePolicyJsonValue> | null {
+  if (!value || Array.isArray(value) || typeof value !== 'object') return null;
+  return value;
+}
+
+function policyJsonNumber(value: CyclePolicyJsonValue | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function policyJsonString(value: CyclePolicyJsonValue | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  return value.trim() || null;
+}
+
+function policyJsonStringList(value: CyclePolicyJsonValue | undefined): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is string => typeof item === 'string');
+}
+
+export function cycleRunPolicyInspection(run: CycleRunRead): CycleRunPolicyInspection {
+  const revision = policyJsonObject(run.context_snapshot?.revision);
+  const rawChange = policyJsonObject(run.context_snapshot?.behavior_change);
+  const afterSnapshot = policyJsonObject(rawChange?.after_snapshot);
+  const snapshot = afterSnapshot ?? revision;
+  const configuration = snapshot
+    ? CYCLE_POLICY_SNAPSHOT_CONFIGURATION_FIELDS.flatMap((key) => (
+        Object.hasOwn(snapshot, key) ? [{ key, value: snapshot[key] }] : []
+      ))
+    : [];
+  const snapshotGuidance = policyJsonStringList(snapshot?.guidance);
+  const guidance = snapshotGuidance ?? run.guidance_snapshot.flatMap((item) => {
+    const value = item.guidance;
+    return typeof value === 'string' ? [value] : [];
+  });
+  const change = rawChange
+    ? {
+        id: policyJsonNumber(rawChange.id),
+        version: policyJsonNumber(rawChange.version),
+        actor_type: policyJsonString(rawChange.actor_type),
+        actor_id: policyJsonString(rawChange.actor_id),
+        source_reference: policyJsonString(rawChange.source_reference),
+        rationale: policyJsonString(rawChange.rationale),
+        changed_fields: policyJsonStringList(rawChange.changed_fields) ?? [],
+        applied_at: policyJsonString(rawChange.applied_at),
+      }
+    : null;
+
+  return {
+    hasSnapshot: Boolean(snapshot || revision || configuration.length || snapshotGuidance),
+    revisionNumber: policyJsonNumber(revision?.revision_number),
+    version: change?.version ?? null,
+    configuration,
+    guidance,
+    change,
+  };
 }
 
 export function hydratePolicyDraft(policy: EffectiveCyclePolicyRead): CyclePolicyDraft {
@@ -389,6 +490,35 @@ export function policyFieldSource(
 ): CyclePolicyFieldSourceRead | undefined {
   if (field === 'schedule_human') return fieldSources.schedule_expr;
   return fieldSources[field];
+}
+
+export function policyActorPresentation(source: {
+  actor_type?: string | null;
+  actor_id?: string | null;
+}): CyclePolicyActorPresentation {
+  const actorType = String(source.actor_type ?? '').trim().toLowerCase();
+  const identity = String(source.actor_id ?? '').trim() || 'Not recorded';
+  if (actorType.includes('agent')) return { kind: 'agent', label: 'Agent', identity };
+  if (actorType === 'human' || actorType === 'user') {
+    return { kind: 'human', label: 'Human', identity };
+  }
+  return { kind: 'system', label: 'System', identity };
+}
+
+export function policySourceRunId(sourceReference: string | null | undefined): number | null {
+  const match = /^(?:agent|agent_run):(\d+)$/.exec(String(sourceReference ?? '').trim());
+  if (!match) return null;
+  const runId = Number(match[1]);
+  return Number.isSafeInteger(runId) && runId > 0 ? runId : null;
+}
+
+export function policyOriginatingRun(
+  source: { source_reference?: string | null },
+  runs: readonly CycleRunRead[],
+): CycleRunRead | null {
+  const agentRunId = policySourceRunId(source.source_reference);
+  if (agentRunId === null) return null;
+  return runs.find((run) => run.run_id === agentRunId) ?? null;
 }
 
 export function policySourceLabel(source: {

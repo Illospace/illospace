@@ -2,10 +2,13 @@ import type {
   CyclePolicyChangeRead,
   CyclePolicyConfigurationRead,
   CyclePolicyDiffEntryRead,
+  CyclePolicyFieldSourceRead,
   CyclePolicyHistoryRead,
   CyclePolicyPreviewRead,
   CyclePolicyProposal,
   CyclePolicySnapshotRead,
+  CycleRead,
+  CycleRunRead,
   EffectiveCyclePolicyRead,
 } from '$lib/api/client';
 
@@ -30,6 +33,263 @@ type PendingPreview = {
   preview: CyclePolicyPreviewRead;
   revertedFromId: number | null;
 };
+
+type PreviewBehaviorPolicyFixtureOptions = {
+  humanChangedAt: string;
+  agentChangedAt: string;
+  originatingAgentRunId: number;
+};
+
+export function createPreviewBehaviorPolicyFixture(
+  cycle: CycleRead,
+  options: PreviewBehaviorPolicyFixtureOptions,
+): { policy: EffectiveCyclePolicyRead; history: CyclePolicyHistoryRead } {
+  const configuration: CyclePolicyConfigurationRead = {
+    name: cycle.name,
+    prompt: cycle.prompt,
+    schedule_expr: cycle.schedule_expr,
+    schedule_human: cycle.schedule_human,
+    timezone: cycle.timezone,
+    enabled: cycle.enabled,
+    max_concurrency: 1,
+    timeout_seconds: null,
+    retry_policy: { max_attempts: 2 },
+    model_override: cycle.model_override,
+    thinking_override: cycle.thinking_override,
+    execution_policy_key: cycle.execution_policy_key,
+    target_idea_id: cycle.target_idea_id,
+  };
+  const priorConfiguration = {
+    ...configuration,
+    prompt: 'Review current priorities, summarize the most important items, and continue in the planning thread.',
+  };
+  const activeGuidance = [
+    'Use the current workspace state as the source of truth.',
+    'Keep the result concise and name any blocker that needs attention.',
+  ];
+  const retiredGuidance = 'Use the legacy priority list before reviewing the workspace.';
+  const humanChangeId = 5100 + cycle.id;
+  const agentChangeId = 5200 + cycle.id;
+  const humanRevisionId = 4100 + cycle.id;
+  const agentRevisionId = 4200 + cycle.id;
+  const humanSource = {
+    version: 2,
+    cycle_revision_id: humanRevisionId,
+    actor_type: 'user',
+    actor_id: 'preview-user',
+    source_reference: `api:/cycles/${cycle.id}/behavior-policy`,
+    rationale: 'Replace guidance that used an old priority list.',
+    changed_at: options.humanChangedAt,
+    change_id: humanChangeId,
+  } satisfies CyclePolicyFieldSourceRead;
+  const agentSource = {
+    version: 3,
+    cycle_revision_id: agentRevisionId,
+    actor_type: 'agent',
+    actor_id: String(options.originatingAgentRunId),
+    source_reference: `agent:${options.originatingAgentRunId}`,
+    rationale: 'Focused the request after reviewing the prior Cycle run.',
+    changed_at: options.agentChangedAt,
+    change_id: agentChangeId,
+  } satisfies CyclePolicyFieldSourceRead;
+  const fieldSources = Object.fromEntries(
+    [...Object.keys(configuration), 'guidance'].map((field) => [field, { ...humanSource }]),
+  ) as Record<string, CyclePolicyFieldSourceRead>;
+  fieldSources.prompt = { ...agentSource };
+
+  const humanChange: CyclePolicyChangeRead = {
+    id: humanChangeId,
+    version: 2,
+    actor_type: humanSource.actor_type,
+    actor_id: humanSource.actor_id,
+    source_reference: humanSource.source_reference,
+    rationale: humanSource.rationale,
+    changed_fields: ['guidance'],
+    applied_at: options.humanChangedAt,
+    reverted_from_id: null,
+    workspace_id: 'preview-org',
+    policy_kind: 'cycle',
+    target_type: 'cycle',
+    target_id: String(cycle.id),
+    before_snapshot: {
+      configuration: clonePlainData(priorConfiguration),
+      guidance: [...activeGuidance, retiredGuidance],
+    },
+    after_snapshot: {
+      configuration: clonePlainData(priorConfiguration),
+      guidance: [...activeGuidance],
+    },
+    cycle_revision_id: humanRevisionId,
+  };
+  const agentChange: CyclePolicyChangeRead = {
+    id: agentChangeId,
+    version: 3,
+    actor_type: agentSource.actor_type,
+    actor_id: agentSource.actor_id,
+    source_reference: agentSource.source_reference,
+    rationale: agentSource.rationale,
+    changed_fields: ['prompt'],
+    applied_at: options.agentChangedAt,
+    reverted_from_id: null,
+    workspace_id: 'preview-org',
+    policy_kind: 'cycle',
+    target_type: 'cycle',
+    target_id: String(cycle.id),
+    before_snapshot: {
+      configuration: clonePlainData(priorConfiguration),
+      guidance: [...activeGuidance],
+    },
+    after_snapshot: {
+      configuration: clonePlainData(configuration),
+      guidance: [...activeGuidance],
+    },
+    cycle_revision_id: agentRevisionId,
+  };
+  const policy: EffectiveCyclePolicyRead = {
+    workspace_id: 'preview-org',
+    policy_kind: 'cycle',
+    target_type: 'cycle',
+    target_id: String(cycle.id),
+    version: 3,
+    revision_id: agentRevisionId,
+    configuration,
+    guidance: activeGuidance,
+    editable_fields: [
+      'prompt',
+      'schedule_expr',
+      'timezone',
+      'enabled',
+      'model_override',
+      'thinking_override',
+      'guidance',
+    ],
+    output_targets: [
+      {
+        id: 6100 + cycle.id,
+        target_type: 'cycle_ledger',
+        target_id: String(cycle.id),
+        label: 'Cycle ledger',
+        config: { format: 'summary' },
+        source_type: 'system',
+        source_id: 'cycle-defaults',
+        rationale: 'Keep a durable result for later review.',
+        created_at: cycle.created_at,
+        updated_at: options.agentChangedAt,
+      },
+    ],
+    output_targets_read_only: true,
+    source: {
+      revision_id: agentRevisionId,
+      actor_type: agentSource.actor_type,
+      actor_id: agentSource.actor_id,
+      rationale: agentSource.rationale,
+      source_reference: agentSource.source_reference,
+      changed_at: options.agentChangedAt,
+    },
+    field_sources: fieldSources,
+    latest_change: {
+      id: agentChange.id,
+      version: agentChange.version,
+      actor_type: agentChange.actor_type,
+      actor_id: agentChange.actor_id,
+      source_reference: agentChange.source_reference,
+      rationale: agentChange.rationale,
+      changed_fields: [...agentChange.changed_fields],
+      applied_at: agentChange.applied_at,
+      reverted_from_id: agentChange.reverted_from_id,
+    },
+  };
+  return {
+    policy,
+    history: {
+      items: [agentChange, humanChange],
+      pagination: { limit: 50, offset: 0, has_more: false, next_offset: null },
+    },
+  };
+}
+
+function encodedPreviewPolicySnapshot(snapshot: CyclePolicySnapshotRead) {
+  const { schedule_human: _scheduleHuman, ...configuration } = snapshot.configuration;
+  return {
+    snapshot_version: 1,
+    ...clonePlainData(configuration),
+    guidance: [...snapshot.guidance],
+  };
+}
+
+export function createPreviewCycleRunPolicyData(
+  cycleRunId: number,
+  change: CyclePolicyChangeRead,
+): Pick<
+  CycleRunRead,
+  | 'revision_id'
+  | 'guidance_snapshot'
+  | 'output_targets_snapshot'
+  | 'context_snapshot'
+  | 'self_review_summary'
+> {
+  const configuration = change.after_snapshot.configuration;
+  return {
+    revision_id: change.cycle_revision_id,
+    guidance_snapshot: change.after_snapshot.guidance.map((guidance, index) => ({
+      id: cycleRunId * 10 + index,
+      cycle_id: Number(change.target_id),
+      revision_id: change.cycle_revision_id,
+      source_type: change.actor_type,
+      source_id: change.actor_id,
+      guidance,
+      rationale: change.rationale,
+      is_active: true,
+      created_at: change.applied_at,
+    })),
+    output_targets_snapshot: [],
+    context_snapshot: {
+      revision: {
+        id: change.cycle_revision_id,
+        cycle_id: Number(change.target_id),
+        revision_number: change.version,
+        source_type: change.actor_type,
+        source_id: change.actor_id,
+        rationale: change.rationale,
+        name: configuration.name,
+        prompt: configuration.prompt,
+        schedule_expr: configuration.schedule_expr,
+        timezone: configuration.timezone,
+        enabled: configuration.enabled,
+        model_override: configuration.model_override,
+        thinking_override: configuration.thinking_override,
+        execution_policy_key: configuration.execution_policy_key,
+        target_idea_id: configuration.target_idea_id,
+        context_policy: {},
+        created_at: change.applied_at,
+      },
+      behavior_change: {
+        id: change.id,
+        workspace_id: change.workspace_id,
+        policy_kind: change.policy_kind,
+        target_type: change.target_type,
+        target_id: change.target_id,
+        version: change.version,
+        actor_type: change.actor_type,
+        actor_id: change.actor_id,
+        source_reference: change.source_reference,
+        rationale: change.rationale,
+        before_snapshot: encodedPreviewPolicySnapshot(change.before_snapshot),
+        after_snapshot: encodedPreviewPolicySnapshot(change.after_snapshot),
+        changed_fields: [...change.changed_fields],
+        cycle_revision_id: change.cycle_revision_id,
+        applied_at: change.applied_at,
+        reverted_from_id: change.reverted_from_id,
+      },
+      launch_context: {
+        origin: 'cycle_scheduler',
+        source: 'cycle_scheduler',
+        run_kind: 'scheduled_digest',
+      },
+    },
+    self_review_summary: 'Completed the review with the admitted policy unchanged.',
+  };
+}
 
 function snapshot(policy: EffectiveCyclePolicyRead): CyclePolicySnapshotRead {
   return {

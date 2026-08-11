@@ -394,6 +394,7 @@ export interface CycleRead {
 export interface CycleRunRead {
   id: number;
   cycle_id: number;
+  revision_id: number | null;
   scheduled_for: string;
   started_at: string | null;
   completed_at: string | null;
@@ -403,6 +404,10 @@ export interface CycleRunRead {
   idea_id: string | null;
   run_id: number | null;
   prompt_snapshot: string;
+  guidance_snapshot: Record<string, CyclePolicyJsonValue>[];
+  output_targets_snapshot: Record<string, CyclePolicyJsonValue>[];
+  context_snapshot: Record<string, CyclePolicyJsonValue>;
+  self_review_summary: string | null;
   created_at: string;
 }
 

@@ -5,6 +5,7 @@
   import {
     api,
     type CyclePolicyHistoryRead,
+    type CycleRunRead,
     type EffectiveCyclePolicyRead,
   } from '$lib/api/client';
   import { ConstellationButton, ConstellationNotice } from '$lib/components/constellation';
@@ -31,6 +32,7 @@
     cycleId,
     previewPolicy = null,
     previewHistory = null,
+    runs = [],
     displayTimezone = null,
     compact = false,
     editable = false,
@@ -41,6 +43,7 @@
     cycleId: number;
     previewPolicy?: EffectiveCyclePolicyRead | null;
     previewHistory?: CyclePolicyHistoryRead | null;
+    runs?: readonly CycleRunRead[];
     displayTimezone?: string | null;
     compact?: boolean;
     editable?: boolean;
@@ -283,6 +286,7 @@
 
     <CyclePolicyHistory
       history={workflow.data.history}
+      {runs}
       displayTimezone={resolvedTimezone}
       {editable}
       workflowKind={workflow.kind}

@@ -5,8 +5,7 @@
 
   import {
     api,
-    type CyclePolicyConfigurationRead,
-    type CyclePolicyFieldSourceRead,
+    type CyclePolicyChangeRead,
     type CyclePolicyHistoryRead,
     type CycleRead,
     type CycleRunRead,
@@ -28,12 +27,17 @@
     type ConstellationPageFrameModalContext,
   } from '$lib/components/constellation/constellationPageFrameContext';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
+  import CycleRunPolicySnapshot from '$lib/features/cycles/components/CycleRunPolicySnapshot.svelte';
   import EffectiveCyclePolicyView from '$lib/features/cycles/components/EffectiveCyclePolicyView.svelte';
   import type { CyclePolicyEditorApi } from '$lib/features/cycles/domain/effectivePolicy';
   import { EFFECTIVE_POLICY_CLIENT_CONTEXT } from '$lib/features/cycles/domain/effectivePolicyClientContext';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
-  import { createPreviewBehaviorPolicyClient } from './previewBehaviorPolicy';
+  import {
+    createPreviewBehaviorPolicyClient,
+    createPreviewBehaviorPolicyFixture,
+    createPreviewCycleRunPolicyData,
+  } from './previewBehaviorPolicy';
 
   type ThinkingLevel = '' | 'none' | 'low' | 'medium' | 'high' | 'xhigh';
   type ScheduleCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
@@ -296,11 +300,22 @@
     status: string,
     prompt: string,
     daysOffset: number,
+    policyChange: CyclePolicyChangeRead | null = null,
   ): CycleRunRead {
     const timestamp = previewIso(daysOffset);
+    const policyData = policyChange
+      ? createPreviewCycleRunPolicyData(id, policyChange)
+      : {
+          revision_id: null,
+          guidance_snapshot: [],
+          output_targets_snapshot: [],
+          context_snapshot: {},
+          self_review_summary: null,
+        };
     return {
       id,
       cycle_id: cycleId,
+      ...policyData,
       scheduled_for: timestamp,
       started_at: timestamp,
       completed_at: status === 'running' ? null : previewIso(daysOffset, 1),
@@ -314,130 +329,12 @@
     };
   }
 
-  function previewBehaviorPolicy(cycle: CycleRead): {
-    policy: EffectiveCyclePolicyRead;
-    history: CyclePolicyHistoryRead;
-  } {
-    const changedAt = previewIso(-2);
-    const configuration: CyclePolicyConfigurationRead = {
-      name: cycle.name,
-      prompt: cycle.prompt,
-      schedule_expr: cycle.schedule_expr,
-      schedule_human: cycle.schedule_human,
-      timezone: cycle.timezone,
-      enabled: cycle.enabled,
-      max_concurrency: 1,
-      timeout_seconds: null,
-      retry_policy: { max_attempts: 2 },
-      model_override: cycle.model_override,
-      thinking_override: cycle.thinking_override,
-      execution_policy_key: cycle.execution_policy_key,
-      target_idea_id: cycle.target_idea_id,
-    };
-    const activeGuidance = [
-      'Use the current workspace state as the source of truth.',
-      'Keep the result concise and name any blocker that needs attention.',
-    ];
-    const source: CyclePolicyFieldSourceRead = {
-      version: 2,
-      cycle_revision_id: 4100 + cycle.id,
-      actor_type: 'human',
-      actor_id: 'preview-user',
-      source_reference: `api:/cycles/${cycle.id}/behavior-policy`,
-      rationale: 'Approved behavior for the next run.',
-      changed_at: changedAt,
-      change_id: 5100 + cycle.id,
-    };
-    const fieldSources = Object.fromEntries(
-      [...Object.keys(configuration), 'guidance'].map((field) => [field, { ...source }]),
-    ) as Record<string, CyclePolicyFieldSourceRead>;
-    const policy: EffectiveCyclePolicyRead = {
-      workspace_id: 'preview-org',
-      policy_kind: 'cycle',
-      target_type: 'cycle',
-      target_id: String(cycle.id),
-      version: 2,
-      revision_id: source.cycle_revision_id,
-      configuration,
-      guidance: activeGuidance,
-      editable_fields: [
-        'prompt',
-        'schedule_expr',
-        'timezone',
-        'enabled',
-        'model_override',
-        'thinking_override',
-        'guidance',
-      ],
-      output_targets: [
-        {
-          id: 6100 + cycle.id,
-          target_type: 'cycle_ledger',
-          target_id: String(cycle.id),
-          label: 'Cycle ledger',
-          config: { format: 'summary' },
-          source_type: 'system',
-          source_id: 'cycle-defaults',
-          rationale: 'Keep a durable result for later review.',
-          created_at: previewIso(-18),
-          updated_at: changedAt,
-        },
-      ],
-      output_targets_read_only: true,
-      source: {
-        revision_id: source.cycle_revision_id,
-        actor_type: source.actor_type,
-        actor_id: source.actor_id,
-        rationale: source.rationale,
-        source_reference: source.source_reference,
-        changed_at: changedAt,
-      },
-      field_sources: fieldSources,
-      latest_change: {
-        id: source.change_id ?? 0,
-        version: 2,
-        actor_type: 'human',
-        actor_id: 'preview-user',
-        source_reference: source.source_reference ?? '',
-        rationale: source.rationale ?? '',
-        changed_fields: ['guidance'],
-        applied_at: changedAt,
-        reverted_from_id: null,
-      },
-    };
-    return {
-      policy,
-      history: {
-        items: [
-          {
-            id: source.change_id ?? 0,
-            version: 2,
-            actor_type: 'human',
-            actor_id: 'preview-user',
-            source_reference: source.source_reference ?? '',
-            rationale: 'Replace guidance that used an old priority list.',
-            changed_fields: ['guidance'],
-            applied_at: changedAt,
-            reverted_from_id: null,
-            workspace_id: 'preview-org',
-            policy_kind: 'cycle',
-            target_type: 'cycle',
-            target_id: String(cycle.id),
-            before_snapshot: {
-              configuration,
-              guidance: [...activeGuidance, 'Use the legacy priority list before reviewing the workspace.'],
-            },
-            after_snapshot: { configuration, guidance: activeGuidance },
-            cycle_revision_id: source.cycle_revision_id ?? 0,
-          },
-        ],
-        pagination: { limit: 50, offset: 0, has_more: false, next_offset: null },
-      },
-    };
-  }
-
   function setPreviewBehaviorPolicy(cycle: CycleRead) {
-    const { policy, history } = previewBehaviorPolicy(cycle);
+    const { policy, history } = createPreviewBehaviorPolicyFixture(cycle, {
+      humanChangedAt: previewIso(-4),
+      agentChangedAt: previewIso(-2),
+      originatingAgentRunId: cycle.id === 901 ? 15100 : 100000 + cycle.id,
+    });
     previewPolicies = { ...previewPolicies, [cycle.id]: policy };
     previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: history };
     previewPolicyClients[cycle.id] = createPreviewBehaviorPolicyClient({
@@ -506,10 +403,13 @@
 
     cycles = previewCycles;
     for (const cycle of previewCycles) setPreviewBehaviorPolicy(cycle);
+    const priorityHistory = previewPolicyHistories[901].items;
+    const agentPolicyChange = priorityHistory.find((change) => change.version === 3) ?? null;
+    const humanPolicyChange = priorityHistory.find((change) => change.version === 2) ?? null;
     previewRuns = {
       901: [
-        previewRun(7101, 901, 'completed', previewCycles[0].prompt, -1),
-        previewRun(7100, 901, 'completed', previewCycles[0].prompt, -2),
+        previewRun(7101, 901, 'completed', previewCycles[0].prompt, -1, agentPolicyChange),
+        previewRun(7100, 901, 'completed', previewCycles[0].prompt, -2, humanPolicyChange),
       ],
       902: [previewRun(7201, 902, 'completed', previewCycles[1].prompt, -4)],
       903: [previewRun(7301, 903, 'failed', previewCycles[2].prompt, -2)],
@@ -1135,6 +1035,7 @@
                     cycleId={cycle.id}
                     previewPolicy={isCyclesPreview ? previewPolicies[cycle.id] : null}
                     previewHistory={isCyclesPreview ? previewPolicyHistories[cycle.id] : null}
+                    {runs}
                     displayTimezone={isCyclesPreview ? localTimezone : null}
                     editable
                     refreshSerial={behaviorPolicyRefreshSerial}
@@ -1157,7 +1058,7 @@
                     {:else}
                       <div class="runs-list">
                         {#each runs as run}
-                          <article class="run-row">
+                          <article class="run-row" id={`cycle-run-${run.id}`}>
                             <div class="run-row-main">
                               <span class="run-row-eyebrow">Run #{run.id}</span>
                               <strong>{formatDateTime(run.scheduled_for)}</strong>
@@ -1176,6 +1077,7 @@
                                 <span>{run.skip_reason}</span>
                               {/if}
                             </div>
+                            <CycleRunPolicySnapshot {run} {runs} displayTimezone={localTimezone} />
                           </article>
                         {/each}
                       </div>

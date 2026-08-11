@@ -1,9 +1,11 @@
 <script lang="ts">
-  import type { CyclePolicyHistoryRead } from '$lib/api/client';
-  import { ConstellationButton } from '$lib/components/constellation';
+  import type { CyclePolicyHistoryRead, CycleRunRead } from '$lib/api/client';
+  import { ConstellationButton, ConstellationPill } from '$lib/components/constellation';
   import {
     formatPolicyDateTime,
+    policyActorPresentation,
     policyFieldLabel,
+    policyOriginatingRun,
     policySourceLabel,
     retiredGuidance,
   } from '$lib/features/cycles/domain/effectivePolicy';
@@ -11,6 +13,7 @@
 
   let {
     history,
+    runs = [],
     displayTimezone,
     editable,
     workflowKind,
@@ -20,6 +23,7 @@
     onLoadMore,
   }: {
     history: CyclePolicyHistoryRead;
+    runs?: readonly CycleRunRead[];
     displayTimezone: string;
     editable: boolean;
     workflowKind: CyclePolicyWorkflowState['kind'];
@@ -61,6 +65,8 @@
       <ol class="history-list">
         {#each history.items as change (change.id)}
           {@const retired = retiredGuidance(change)}
+          {@const actor = policyActorPresentation(change)}
+          {@const originatingRun = policyOriginatingRun(change, runs)}
           <li class="history-change">
             <header>
               <div>
@@ -85,10 +91,20 @@
               </div>
             </header>
             <p>{change.rationale}</p>
-            <div class="history-source">
-              From {policySourceLabel(change)}
+            <div class="history-source" class:agent-source={actor.kind === 'agent'}>
+              <ConstellationPill
+                variant={actor.kind === 'agent' ? 'info' : actor.kind === 'human' ? 'muted' : 'warning'}
+                leadingDot
+              >
+                {actor.label}
+              </ConstellationPill>
+              <span><strong>Actor</strong> {actor.identity}</span>
+              {#if originatingRun}
+                <a href={`#cycle-run-${originatingRun.id}`}>Originating Run #{originatingRun.id}</a>
+              {/if}
+              <code>{policySourceLabel(change)}</code>
               {#if change.reverted_from_id !== null}
-                · Reverted change {change.reverted_from_id}
+                <span>Reverted change {change.reverted_from_id}</span>
               {/if}
             </div>
 
@@ -224,7 +240,36 @@
   }
 
   .history-source {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 7px 8px;
+    border-left: 2px solid var(--constellation-color-text-muted);
+    background: color-mix(in srgb, var(--constellation-color-text-muted) 3%, transparent);
     font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
+  }
+
+  .history-source.agent-source {
+    border-left-color: var(--constellation-control-pill-info-text);
+    background: color-mix(in srgb, var(--constellation-control-pill-info-text) 4%, transparent);
+  }
+
+  .history-source strong {
+    color: var(--constellation-color-text-secondary);
+    font-weight: 650;
+  }
+
+  .history-source a {
+    color: var(--constellation-color-text-secondary);
+    font-weight: 650;
+  }
+
+  .history-source code {
+    overflow-wrap: anywhere;
+    color: var(--constellation-color-text-muted);
+    font-family: inherit;
+    font-size: inherit;
   }
 
   .retired-guidance {
