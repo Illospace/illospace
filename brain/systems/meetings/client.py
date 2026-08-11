@@ -68,12 +68,14 @@ class MeetbotClient:
     async def join(
         self,
         *,
+        session_id: str,
         meeting_url: str,
         display_name: str | None = None,
         origin: Mapping[str, str] | None = None,
         requested_by: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
+            "session_id": str(session_id or "").strip(),
             "meeting_url": str(meeting_url or "").strip(),
             "origin": dict(origin or {}),
         }

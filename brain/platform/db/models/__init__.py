@@ -21,6 +21,7 @@ from brain.platform.db.models.browser import *  # noqa
 from brain.platform.db.models.scheduler import *  # noqa
 from brain.platform.db.models.resource_pool import *  # noqa
 from brain.platform.db.models.storage_policy import *  # noqa
+from brain.platform.db.models.meetbot_session import *  # noqa
 from brain.platform.db.models.retrieval import *  # noqa
 from brain.platform.db.models.routing import *  # noqa
 from brain.platform.db.models.chat import *  # noqa

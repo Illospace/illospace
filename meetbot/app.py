@@ -42,6 +42,7 @@ class OriginRequest(BaseModel):
 
 
 class JoinRequest(BaseModel):
+    session_id: str | None = Field(default=None, min_length=1, max_length=128)
     meeting_url: str
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
     origin: OriginRequest
@@ -54,6 +55,18 @@ class JoinRequest(BaseModel):
         if not _MEET_URL.fullmatch(url):
             raise ValueError("meeting_url must be a valid https://meet.google.com meeting URL")
         return url
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, value: str | None) -> str | None:
+        session_id = str(value or "").strip()
+        if not session_id:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", session_id):
+            raise ValueError(
+                "session_id must contain only letters, numbers, underscores, and hyphens"
+            )
+        return session_id
 
     @field_validator("display_name", "requested_by", mode="before")
     @classmethod
@@ -155,6 +168,7 @@ def create_app(
     async def join(request: JoinRequest) -> JoinResponse | JSONResponse:
         try:
             record = await manager.join(
+                session_id=request.session_id,
                 meeting_url=request.meeting_url,
                 display_name=request.display_name,
                 origin=Origin(

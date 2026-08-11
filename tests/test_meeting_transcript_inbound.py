@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
+from brain.platform.db.models.meetbot_session import MeetbotSession
 from brain.platform.db.models.open_ask import OpenAsk
 from brain.platform.db.models.org import Org, User
 
@@ -30,6 +31,7 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
             OpenAsk.__table__,
             InboundEventRow.__table__,
             InboundDecisionReceiptRow.__table__,
+            MeetbotSession.__table__,
         ]
     )
 
@@ -90,6 +92,7 @@ def _ended_payload(upload_root: Path, *, session_id: str = "session-ended") -> d
         "transcript_path": str(session_dir / "transcript.jsonl"),
         "transcript_md_path": str(session_dir / "transcript.md"),
         "started_at": "2026-08-03T15:00:00Z",
+        "joined_at": "2026-08-03T15:00:30Z",
         "ended_at": "2026-08-03T15:30:00Z",
         "caption_lines": 2,
         "participants": ["Reda", "Axel"],
@@ -165,6 +168,12 @@ async def test_meeting_transcript_admits_same_thread_run_and_is_idempotent(
     assert event.action_type == "meeting.run_admitted"
     assert receipt.tool_use["type"] == "meeting_transcript_intake"
     assert receipt.target["thread_ts"] == "1722700000.001"
+    session_record = await session.get(MeetbotSession, "session-ended")
+    assert session_record.outcome == "left"
+    assert session_record.admitted_at is not None
+    assert session_record.left_at is not None
+    assert session_record.participant_count == 2
+    assert session_record.caption_count == 2
 
 
 @pytest.mark.asyncio
@@ -219,11 +228,13 @@ async def test_failed_meeting_admits_short_failure_report_run(session):
         "transcript_path": None,
         "transcript_md_path": None,
         "started_at": "2026-08-03T15:00:00Z",
+        "joined_at": None,
         "ended_at": "2026-08-03T15:01:00Z",
         "caption_lines": 0,
         "participants": [],
         "origin": {"channel": "C-meetings", "thread_ts": "1722700000.002"},
         "error": "Host denied admission",
+        "end_reason": "refused",
     }
 
     result = await submit_inbound_envelope(
@@ -244,6 +255,9 @@ async def test_failed_meeting_admits_short_failure_report_run(session):
     assert "Post a short failure report" in run.input_message
     assert "Required sequence" not in run.input_message
     assert "create_github_issue" not in run.input_message
+    session_record = await session.get(MeetbotSession, "session-failed")
+    assert session_record.outcome == "refused"
+    assert session_record.refusal_text == "Host denied admission"
 
 
 @pytest.mark.asyncio
