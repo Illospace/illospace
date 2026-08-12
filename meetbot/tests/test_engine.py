@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from meetbot.browser_diagnostics import capture_failure_evidence
+from meetbot.caption_control import CaptionController
 from meetbot.config import MeetbotConfig
 from meetbot.engine import (
     PlaywrightMeetEngine,
@@ -104,13 +105,13 @@ async def test_caption_language_failure_emits_transcript_risk_warning(
     async def no_sleep(_: float) -> None:
         return None
 
-    monkeypatch.setattr("meetbot.engine.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("meetbot.caption_control.asyncio.sleep", no_sleep)
     events = _WarningEvents()
-    engine = PlaywrightMeetEngine(
+    caption_control = CaptionController(
         MeetbotConfig(caption_language="fr-FR", private_root=tmp_path)
     )
 
-    await engine._enable_captions(_NeverAdmittedPage(), events, "session-1")
+    await caption_control._enable_captions(_NeverAdmittedPage(), events, "session-1")
 
     assert events.messages == [
         "Could not confirm the caption language is fr-FR; "
@@ -157,13 +158,13 @@ async def test_caption_failure_capture_precedes_each_strategy_escape(
         assert debug_dir == tmp_path / "debug"
         captures.append((label, page.overlay_open))
 
-    engine = PlaywrightMeetEngine(MeetbotConfig(private_root=tmp_path))
-    monkeypatch.setattr(engine, "_set_visible_caption_language", failed_strategy)
-    monkeypatch.setattr(engine, "_set_via_caption_settings_control", failed_strategy)
-    monkeypatch.setattr(engine, "_set_via_meet_settings", failed_strategy)
-    monkeypatch.setattr("meetbot.engine.capture_failure_evidence", capture)
+    caption_control = CaptionController(MeetbotConfig(private_root=tmp_path))
+    monkeypatch.setattr(caption_control, "_set_visible_caption_language", failed_strategy)
+    monkeypatch.setattr(caption_control, "_set_via_caption_settings_control", failed_strategy)
+    monkeypatch.setattr(caption_control, "_set_via_meet_settings", failed_strategy)
+    monkeypatch.setattr("meetbot.caption_control.capture_failure_evidence", capture)
 
-    result = await engine._set_caption_language(_RecordingPage(), "session-1")
+    result = await caption_control._set_caption_language(_RecordingPage(), "session-1")
 
     assert result is None
     assert all(overlay_open for _, overlay_open in captures)
@@ -262,14 +263,14 @@ async def test_capture_errors_do_not_interrupt_caption_warning(
     async def no_sleep(_: float) -> None:
         return None
 
-    monkeypatch.setattr("meetbot.engine.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("meetbot.caption_control.asyncio.sleep", no_sleep)
     page = _BrokenCapturePage()
     events = _WarningEvents()
-    engine = PlaywrightMeetEngine(
+    caption_control = CaptionController(
         MeetbotConfig(caption_language="fr-FR", private_root=tmp_path)
     )
 
-    await engine._enable_captions(page, events, "session-1")
+    await caption_control._enable_captions(page, events, "session-1")
 
     assert page.escape_count == 3
     assert page.screenshot_count == 3
