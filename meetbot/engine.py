@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from meetbot.browser_control import _click_first_visible, _first_visible
+from meetbot.browser_control import click_first_match, first_visible
 from meetbot.browser_diagnostics import capture_failure_evidence
 from meetbot.caption_control import (
     CaptionController,
@@ -121,8 +121,7 @@ class PlaywrightMeetEngine:
                 if admission_result is not None:
                     return admission_result
                 await events.status("admitted")
-                await self._caption_control._attach_caption_observer(page, events)
-                await self._caption_control._enable_captions(page, events, session_id)
+                await self._caption_control.start(page, events, session_id)
                 return await self._monitor_call(page, runtime.leave_requested, events)
             except Exception:
                 await capture_failure_evidence(
@@ -147,7 +146,7 @@ class PlaywrightMeetEngine:
         if not runtime:
             raise RuntimeError("The meeting browser is not active.")
         page = runtime.page
-        opened = await _click_first_visible(
+        opened = await click_first_match(
             page,
             (
                 'button[aria-label*="Chat with everyone" i]',
@@ -156,7 +155,7 @@ class PlaywrightMeetEngine:
         )
         if not opened:
             raise RuntimeError("Google Meet chat is not available.")
-        editor = await _first_visible(
+        editor = await first_visible(
             page,
             (
                 'textarea[aria-label*="Send a message" i]',
@@ -178,7 +177,7 @@ class PlaywrightMeetEngine:
         """
 
         for _ in range(10):
-            clicked = await _click_first_visible(
+            clicked = await click_first_match(
                 page,
                 (
                     'button:has-text("Continue without microphone and camera")',
@@ -187,7 +186,7 @@ class PlaywrightMeetEngine:
             )
             if clicked:
                 return
-            if await _first_visible(
+            if await first_visible(
                 page,
                 (
                     'input[aria-label*="Your name" i]',
@@ -228,7 +227,7 @@ class PlaywrightMeetEngine:
         # The prejoin UI renders progressively; poll briefly before concluding
         # the field is absent, and distinguish "blocked" from "not rendered".
         for _ in range(20):
-            field = await _first_visible(
+            field = await first_visible(
                 page,
                 (
                     'input[aria-label*="Your name" i]',
@@ -254,7 +253,7 @@ class PlaywrightMeetEngine:
             if await candidate.is_visible():
                 await candidate.click()
                 return True
-        return await _click_first_visible(
+        return await click_first_match(
             page,
             ('button:has-text("Ask to join")', 'button:has-text("Join now")'),
         )
@@ -344,7 +343,7 @@ class PlaywrightMeetEngine:
 
 
 async def _click_leave(page: Any) -> None:
-    await _click_first_visible(
+    await click_first_match(
         page,
         (
             'button[aria-label*="Leave call" i]',
@@ -393,12 +392,12 @@ async def _ensure_media_muted(
     join failed here when this raised).
     """
 
-    if await _first_visible(page, on_selectors) is not None:
+    if await first_visible(page, on_selectors) is not None:
         return
-    if not await _click_first_visible(page, off_selectors):
+    if not await click_first_match(page, off_selectors):
         logger.info("Google Meet shows no %s control; nothing to mute.", device)
         return
-    if await _first_visible(page, on_selectors) is None:
+    if await first_visible(page, on_selectors) is None:
         logger.warning("Google Meet did not confirm the %s toggled off.", device)
 
 

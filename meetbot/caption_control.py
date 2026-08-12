@@ -7,12 +7,12 @@ import logging
 import re
 from typing import Any
 
-from meetbot.browser_control import _click_first_visible, _first_visible
+from meetbot.browser_control import click_first_match, first_visible
 from meetbot.browser_diagnostics import capture_failure_evidence
 from meetbot.config import MeetbotConfig
 from meetbot.models import SessionEvents
 
-logger = logging.getLogger("meetbot.engine")
+logger = logging.getLogger(__name__)
 
 _CAPTION_LANGUAGE_MENU_LABELS = {
     "fr-fr": "French",
@@ -157,6 +157,10 @@ class CaptionController:
     def __init__(self, config: MeetbotConfig) -> None:
         self._config = config
 
+    async def start(self, page: Any, events: SessionEvents, session_id: str) -> None:
+        await self._attach_caption_observer(page, events)
+        await self._enable_captions(page, events, session_id)
+
     async def _attach_caption_observer(self, page: Any, events: SessionEvents) -> None:
         async def on_caption(payload: object) -> None:
             if not isinstance(payload, dict):
@@ -178,7 +182,7 @@ class CaptionController:
     ) -> None:
         await page.keyboard.press("c")
         await asyncio.sleep(1.0)
-        enabled = await _first_visible(
+        enabled = await first_visible(
             page,
             (
                 'button[aria-label*="Turn off captions" i]',
@@ -186,7 +190,7 @@ class CaptionController:
             ),
         )
         if enabled is None:
-            clicked = await _click_first_visible(
+            clicked = await click_first_match(
                 page,
                 (
                     'button[aria-label*="Turn on captions" i]',
@@ -254,7 +258,7 @@ class CaptionController:
         return await _choose_caption_language(page, control, self._config.caption_language)
 
     async def _set_via_caption_settings_control(self, page: Any) -> bool:
-        opened = await _click_first_visible(
+        opened = await click_first_match(
             page,
             (
                 'button[aria-label*="Caption settings" i]',
@@ -269,7 +273,7 @@ class CaptionController:
         return await self._set_visible_caption_language(page)
 
     async def _set_via_meet_settings(self, page: Any) -> bool:
-        more_opened = await _click_first_visible(
+        more_opened = await click_first_match(
             page,
             (
                 'button[aria-label="More options" i]',
@@ -279,7 +283,7 @@ class CaptionController:
         if not more_opened:
             return False
         await asyncio.sleep(0.25)
-        settings_opened = await _click_first_visible(
+        settings_opened = await click_first_match(
             page,
             (
                 '[role="menuitem"]:has-text("Settings")',
@@ -290,7 +294,7 @@ class CaptionController:
         if not settings_opened:
             return False
         await asyncio.sleep(0.25)
-        captions_opened = await _click_first_visible(
+        captions_opened = await click_first_match(
             page,
             (
                 '[role="tab"]:has-text("Captions")',
@@ -306,7 +310,7 @@ class CaptionController:
 
 
 async def _caption_language_control(page: Any) -> Any | None:
-    control = await _first_visible(
+    control = await first_visible(
         page,
         (
             'select[aria-label*="Language of the meeting" i]',
@@ -330,7 +334,7 @@ async def _caption_language_control(page: Any) -> Any | None:
         if not await label.is_visible():
             continue
         parent = label.locator("xpath=..")
-        control = await _first_visible(
+        control = await first_visible(
             parent,
             (
                 "select",
