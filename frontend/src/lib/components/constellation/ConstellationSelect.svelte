@@ -1,5 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { nextFocusableFrom } from '$lib/utils/focusOrder';
+  import {
+    edgeOptionIndex,
+    initialOptionIndex,
+    nextOptionIndex,
+  } from '$lib/utils/selectKeyboard';
   import ConstellationIcon from './ConstellationIcon.svelte';
 
   export type ConstellationSelectOption = {
@@ -19,6 +25,8 @@
     disabled?: boolean;
     className?: string;
     ariaLabel?: string;
+    ariaDescribedby?: string;
+    ariaInvalid?: boolean | 'true' | 'false' | 'grammar' | 'spelling';
     size?: 'sm' | 'md';
     onValueChange?: (value: string) => void;
   };
@@ -33,6 +41,8 @@
     disabled = false,
     className = '',
     ariaLabel,
+    ariaDescribedby,
+    ariaInvalid,
     size = 'sm',
     onValueChange,
   }: Props = $props();
@@ -119,7 +129,42 @@
 
   function toggleOpen() {
     if (disabled || options.length === 0) return;
-    open = !open;
+    if (open) {
+      open = false;
+      triggerEl?.focus();
+      return;
+    }
+    openMenu();
+  }
+
+  function optionElement(index: number): HTMLButtonElement | null {
+    return menuEl?.querySelector<HTMLButtonElement>(`[data-option-index="${index}"]`) ?? null;
+  }
+
+  function focusOption(index: number): void {
+    optionElement(index)?.focus();
+  }
+
+  function openMenu(): void {
+    open = true;
+    const index = initialOptionIndex(options, value);
+    tick().then(() => {
+      updateFixedMenuPosition();
+      if (index >= 0) focusOption(index);
+    });
+  }
+
+  function moveOptionFocus(currentIndex: number, direction: -1 | 1): void {
+    const index = nextOptionIndex(options, currentIndex, direction);
+    if (index >= 0) focusOption(index);
+  }
+
+  function focusOutsideMenu(direction: -1 | 1): void {
+    if (!triggerEl) return;
+    const trigger = triggerEl;
+    const next = nextFocusableFrom(trigger, direction, menuEl);
+    open = false;
+    tick().then(() => (next ?? trigger).focus());
   }
 
   function selectValue(nextValue: string) {
@@ -137,13 +182,41 @@
 
     if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
       event.preventDefault();
-      open = true;
+      openMenu();
       return;
     }
 
     if (event.key === 'ArrowUp') {
       event.preventDefault();
-      open = true;
+      openMenu();
+    }
+  }
+
+  function handleOptionKeydown(event: KeyboardEvent, index: number): void {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveOptionFocus(index, event.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const nextIndex = edgeOptionIndex(options, event.key === 'Home' ? 'first' : 'last');
+      if (nextIndex >= 0) focusOption(nextIndex);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      open = false;
+      triggerEl?.focus();
+      return;
+    }
+
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      focusOutsideMenu(event.shiftKey ? -1 : 1);
     }
   }
 
@@ -165,12 +238,16 @@
   <button
     id={id}
     type="button"
+    role="combobox"
     bind:this={triggerEl}
     class="constellation-select-trigger"
     aria-label={label ? undefined : accessibleLabel}
     aria-labelledby={label ? labelId : undefined}
+    aria-describedby={ariaDescribedby}
+    aria-invalid={ariaInvalid}
     aria-expanded={open}
     aria-haspopup="listbox"
+    aria-controls={id ? `${id}-menu` : undefined}
     {disabled}
     onclick={toggleOpen}
     onkeydown={handleTriggerKeydown}
@@ -181,6 +258,7 @@
 
   {#if open}
     <div
+      id={id ? `${id}-menu` : undefined}
       bind:this={menuEl}
       use:portalMenu
       class="constellation-select-menu"
@@ -188,15 +266,18 @@
       role="listbox"
       aria-label={accessibleLabel}
     >
-      {#each options as option (option.value)}
+      {#each options as option, index (option.value)}
         {@const isActive = option.value === value}
         <button
           type="button"
           role="option"
           aria-selected={isActive}
+          tabindex="-1"
+          data-option-index={index}
           class={`constellation-select-option ${isActive ? 'is-active' : ''}`}
           disabled={option.disabled}
           onclick={() => selectValue(option.value)}
+          onkeydown={(event) => handleOptionKeydown(event, index)}
         >
           <span class="constellation-select-option-text">
             <span class="constellation-select-option-label">{option.label}</span>

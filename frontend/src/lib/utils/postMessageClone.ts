@@ -25,7 +25,7 @@ function safeJsonValue(value: unknown, seen = new WeakSet<object>()): unknown {
   return output;
 }
 
-export function cloneForPostMessage<T>(value: T): T {
+export function clonePlainData<T>(value: T): T {
   if (!value || typeof value !== 'object') return value;
 
   try {
@@ -35,4 +35,8 @@ export function cloneForPostMessage<T>(value: T): T {
     if (jsonClone !== null) return jsonClone;
     return safeJsonValue(value) as T;
   }
+}
+
+export function cloneForPostMessage<T>(value: T): T {
+  return clonePlainData(value);
 }

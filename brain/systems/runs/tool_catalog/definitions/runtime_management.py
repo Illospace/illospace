@@ -5,6 +5,80 @@ from __future__ import annotations
 from brain.systems.storage_policy import storage_policy_field_schema
 
 
+HOST_CAPACITY_TOOLS = [
+    {
+        "name": "read_host_capacity",
+        "description": (
+            "Read live host disk capacity, the latest recorded workspace consumers, the "
+            "active storage-policy thresholds, and recent scheduled measurements as a trend. "
+            "Use this to answer how much disk is available and what is using it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 168,
+                    "default": 24,
+                    "description": "Maximum recent hourly measurements to return.",
+                },
+                "refresh_inventory": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Walk the workspace now instead of using the latest recorded inventory. "
+                        "Keep false unless the caller explicitly needs a fresh inventory."
+                    ),
+                },
+            },
+        },
+    },
+]
+
+
+WORKSPACE_RECLAMATION_TOOLS = [
+    {
+        "name": "manage_workspace_reclamation",
+        "description": (
+            "Inventory retained headless-worker workspaces with their sizes, or reclaim "
+            "workspaces that are older than the active storage-policy retention window. "
+            "Reclaim never touches a non-terminal run, refuses unsafe paths and incomplete "
+            "inventories, re-confirms each candidate, and always reports bytes freed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["inventory", "reclaim"],
+                    "default": "inventory",
+                    "description": (
+                        "Use inventory for a read-only measurement. Use reclaim to delete "
+                        "only workspaces that the active retention policy marks reclaimable."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 100,
+                    "description": "Maximum workspace inventory records to return.",
+                },
+                "max_reclaims": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 100,
+                    "description": "Maximum eligible workspaces to reclaim in this call.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+]
+
+
 DEPLOYMENT_TOOLS = [
     {
         "name": "manage_deployment",
@@ -201,6 +275,7 @@ WORKSPACE_TOOL_TOOLS = [
 
 __all__ = [
     "DEPLOYMENT_TOOLS",
+    "HOST_CAPACITY_TOOLS",
     "RUNTIME_PREFERENCE_TOOLS",
     "WORKSPACE_TOOL_TOOLS",
 ]

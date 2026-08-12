@@ -40,10 +40,21 @@ Complete Google sign-in in the headed browser. This creates
 
 Protect this file as a credential. Do not add it to Git.
 
+## How to ask Illo to join
+
+Send Illo the Meet link in a Slack message or the web workspace, and ask it to
+join. This message is the only thing that starts a join.
+
+Illo does not watch calendars. A calendar invite alone never starts a join. This
+is a deliberate [non-goal](../specs/meetbot/README.md#non-goals-v1). Illo joins
+one meeting at a time.
+
 ## Admission and consent
 
-Invite `illo@uwear.ai` to each calendar event. An invited, signed-in account is
-less likely to wait in the guest lobby. Google Meet and host policy still control
+Use the calendar invite for admission only. It affects whether the bot waits in
+the guest lobby; it does not decide whether the bot shows up. Invite
+`illo@uwear.ai` to each calendar event. An invited, signed-in account is less
+likely to wait in the guest lobby. Google Meet and host policy still control
 admission. If the bot stays in `lobby`, a host must admit it.
 
 The participant name is visible to everyone. Keep the default name

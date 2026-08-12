@@ -1,9 +1,16 @@
 <script lang="ts">
   import { dev } from '$app/environment';
   import { page } from '$app/stores';
-  import { getContext, onMount } from 'svelte';
+  import { getContext, onMount, setContext } from 'svelte';
 
-  import { api, type CycleRead, type CycleRunRead } from '$lib/api/client';
+  import {
+    api,
+    type CyclePolicyChangeRead,
+    type CyclePolicyHistoryRead,
+    type CycleRead,
+    type CycleRunRead,
+    type EffectiveCyclePolicyRead,
+  } from '$lib/api/client';
   import {
     ConstellationButton,
     ConstellationEmptyState,
@@ -20,8 +27,20 @@
     type ConstellationPageFrameModalContext,
   } from '$lib/components/constellation/constellationPageFrameContext';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
+  import CycleRunPolicySnapshot from '$lib/features/cycles/components/CycleRunPolicySnapshot.svelte';
+  import EffectiveCyclePolicyView from '$lib/features/cycles/components/EffectiveCyclePolicyView.svelte';
+  import {
+    cycleRunAnchorId,
+    type CyclePolicyEditorApi,
+  } from '$lib/features/cycles/domain/effectivePolicy';
+  import { EFFECTIVE_POLICY_CLIENT_CONTEXT } from '$lib/features/cycles/domain/effectivePolicyClientContext';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
+  import {
+    createPreviewBehaviorPolicyClient,
+    createPreviewBehaviorPolicyFixture,
+    createPreviewCycleRunPolicyData,
+  } from './previewBehaviorPolicy';
 
   type ThinkingLevel = '' | 'none' | 'low' | 'medium' | 'high' | 'xhigh';
   type ScheduleCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
@@ -101,6 +120,16 @@
   let filterMode = $state<FilterMode>('all');
   let showCreateModal = $state(false);
   let previewRuns = $state<Record<number, CycleRunRead[]>>({});
+  let previewPolicies = $state<Record<number, EffectiveCyclePolicyRead>>({});
+  let previewPolicyHistories = $state<Record<number, CyclePolicyHistoryRead>>({});
+  let previewPolicyClients: Record<number, CyclePolicyEditorApi> = {};
+  let behaviorPolicyRefreshSerial = $state(0);
+  let behaviorPolicyDirty = $state(false);
+
+  setContext(
+    EFFECTIVE_POLICY_CLIENT_CONTEXT,
+    (cycleId: number) => previewPolicyClients[cycleId],
+  );
 
   const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
     CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
@@ -149,12 +178,6 @@
       return cycleSearchText(cycle).includes(needle);
     });
   });
-  const selectedRunThreadId = $derived.by(
-    () => runs.find((run) => Boolean(run.idea_id))?.idea_id ?? null,
-  );
-  const selectedThreadId = $derived.by(
-    () => selectedCycle?.target_idea_id || selectedRunThreadId,
-  );
   const schedulePreview = $derived.by(() => scheduleLabelForForm(form));
 
   function toneForStatus(status: string | null | undefined): PillTone {
@@ -280,11 +303,22 @@
     status: string,
     prompt: string,
     daysOffset: number,
+    policyChange: CyclePolicyChangeRead | null = null,
   ): CycleRunRead {
     const timestamp = previewIso(daysOffset);
+    const policyData = policyChange
+      ? createPreviewCycleRunPolicyData(id, policyChange)
+      : {
+          revision_id: null,
+          guidance_snapshot: [],
+          output_targets_snapshot: [],
+          context_snapshot: {},
+          self_review_summary: null,
+        };
     return {
       id,
       cycle_id: cycleId,
+      ...policyData,
       scheduled_for: timestamp,
       started_at: timestamp,
       completed_at: status === 'running' ? null : previewIso(daysOffset, 1),
@@ -296,6 +330,36 @@
       prompt_snapshot: prompt,
       created_at: timestamp,
     };
+  }
+
+  function setPreviewBehaviorPolicy(cycle: CycleRead) {
+    const { policy, history, historyItems } = createPreviewBehaviorPolicyFixture(cycle, {
+      humanChangedAt: previewIso(-4),
+      agentChangedAt: previewIso(-2),
+      originatingAgentRunId: cycle.id === 901 ? 15100 : 100000 + cycle.id,
+    });
+    previewPolicies = { ...previewPolicies, [cycle.id]: policy };
+    previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: history };
+    previewPolicyClients[cycle.id] = createPreviewBehaviorPolicyClient({
+      cycleId: cycle.id,
+      getPolicy: () => previewPolicies[cycle.id],
+      historyItems,
+      historyPageSize: history.pagination.limit,
+      commit: (nextPolicy, nextHistory) => {
+        previewPolicies = { ...previewPolicies, [cycle.id]: nextPolicy };
+        previewPolicyHistories = { ...previewPolicyHistories, [cycle.id]: nextHistory };
+      },
+      scheduleLabel: (scheduleExpression, timezone) => {
+        const parsed = parseSchedule(scheduleExpression);
+        if (parsed.cadence === 'custom') return 'Custom schedule';
+        return scheduleLabelForForm({
+          ...emptyForm(),
+          ...parsed,
+          schedule_expr: scheduleExpression,
+          timezone,
+        });
+      },
+    });
   }
 
   function loadPreviewData() {
@@ -342,10 +406,14 @@
     ];
 
     cycles = previewCycles;
+    for (const cycle of previewCycles) setPreviewBehaviorPolicy(cycle);
+    const priorityHistory = previewPolicyHistories[901].items;
+    const agentPolicyChange = priorityHistory.find((change) => change.version === 3) ?? null;
+    const humanPolicyChange = priorityHistory.find((change) => change.version === 2) ?? null;
     previewRuns = {
       901: [
-        previewRun(7101, 901, 'completed', previewCycles[0].prompt, -1),
-        previewRun(7100, 901, 'completed', previewCycles[0].prompt, -2),
+        previewRun(7101, 901, 'completed', previewCycles[0].prompt, -1, agentPolicyChange),
+        previewRun(7100, 901, 'completed', previewCycles[0].prompt, -2, humanPolicyChange),
       ],
       902: [previewRun(7201, 902, 'completed', previewCycles[1].prompt, -4)],
       903: [previewRun(7301, 903, 'failed', previewCycles[2].prompt, -2)],
@@ -353,7 +421,6 @@
     };
     selectedCycleId = previewCycles[0].id;
     selectedRowId = cycleRowId(previewCycles[0]);
-    fillForm(previewCycles[0]);
     runs = previewRuns[previewCycles[0].id] ?? [];
     loading = false;
   }
@@ -601,31 +668,9 @@
     return cycle.target_idea_id ? 'Same thread' : 'Thread after first run';
   }
 
-  function fillForm(cycle: CycleRead | null) {
-    if (!cycle) {
-      form = emptyForm();
-      advancedOpen = false;
-      return;
-    }
-
-    const parsed = parseSchedule(cycle.schedule_expr);
-    form = {
-      name: cycle.name,
-      prompt: cycle.prompt,
-      schedule_expr: cycle.schedule_expr,
-      cadence: parsed.cadence,
-      date: parsed.date,
-      time: parsed.time,
-      weekday: parsed.weekday,
-      monthday: parsed.monthday,
-      custom_schedule: parsed.custom_schedule,
-      timezone: cycle.timezone || localTimezone,
-      enabled: cycle.enabled,
-      model_override: cycle.model_override || '',
-      thinking_override: (cycle.thinking_override as ThinkingLevel) || '',
-      target_idea_id: cycle.target_idea_id || '',
-    };
-    advancedOpen = parsed.cadence === 'custom' || Boolean(cycle.model_override || cycle.thinking_override);
+  function resetCreateForm() {
+    form = emptyForm();
+    advancedOpen = false;
   }
 
   function setCadence(cadence: ScheduleCadence) {
@@ -676,13 +721,12 @@
       if (nextSelectedCycle) {
         selectedCycleId = nextSelectedCycle.id;
         selectedRowId = cycleRowId(nextSelectedCycle);
-        fillForm(nextSelectedCycle);
         await loadRuns(nextSelectedCycle.id);
       } else if (selectedRowId !== 'draft') {
         selectedCycleId = null;
         selectedRowId = null;
         runs = [];
-        fillForm(null);
+        resetCreateForm();
       }
     } catch (err: any) {
       loadError = err.detail || 'Failed to load cycles';
@@ -691,28 +735,30 @@
       runs = [];
       selectedCycleId = null;
       selectedRowId = null;
-      fillForm(null);
+      resetCreateForm();
     } finally {
       loading = false;
     }
   }
 
   function createNewCycle() {
+    if (!confirmDiscardBehaviorDraft()) return;
     selectedCycleId = null;
     selectedRowId = null;
     runs = [];
-    fillForm(null);
+    resetCreateForm();
     showCreateModal = true;
   }
 
   function closeCreateModal() {
     showCreateModal = false;
     if (!selectedCycleId) {
-      fillForm(null);
+      resetCreateForm();
     }
   }
 
   async function selectCycle(cycleId: number) {
+    if (!confirmDiscardBehaviorDraft()) return;
     showCreateModal = false;
     const cycle = cycles.find((item) => item.id === cycleId) ?? null;
     if (!cycle) return;
@@ -721,17 +767,40 @@
       selectedCycleId = null;
       selectedRowId = null;
       runs = [];
-      fillForm(null);
+      resetCreateForm();
       return;
     }
     selectedCycleId = cycleId;
     selectedRowId = rowId;
-    fillForm(cycle);
     await loadRuns(cycleId);
   }
 
+  function confirmDiscardBehaviorDraft(): boolean {
+    return !behaviorPolicyDirty || window.confirm('Discard the current behavior draft?');
+  }
+
+  async function handlePolicyApplied(policy: EffectiveCyclePolicyRead) {
+    behaviorPolicyDirty = false;
+    if (isCyclesPreview) {
+      cycles = cycles.map((cycle) => cycle.id === Number(policy.target_id)
+        ? {
+            ...cycle,
+            prompt: policy.configuration.prompt,
+            schedule_expr: policy.configuration.schedule_expr,
+            schedule_human: policy.configuration.schedule_human,
+            timezone: policy.configuration.timezone,
+            enabled: policy.configuration.enabled,
+            model_override: policy.configuration.model_override,
+            thinking_override: policy.configuration.thinking_override,
+            updated_at: policy.source.changed_at ?? cycle.updated_at,
+          }
+        : cycle);
+      return;
+    }
+    await loadCycles(selectedCycleId);
+  }
+
   async function saveCycle() {
-    const isCreate = !selectedCycleId;
     const scheduleExpr = scheduleExprFromForm();
     const payload = {
       name: form.name.trim(),
@@ -742,7 +811,7 @@
       model_override: form.model_override.trim() || null,
       thinking_override: form.thinking_override || null,
       execution_mode: 'reuse_same_idea' as const,
-      target_idea_id: form.target_idea_id || selectedRunThreadId || null,
+      target_idea_id: form.target_idea_id || null,
       reopen_archived: true,
     };
 
@@ -755,10 +824,8 @@
     try {
       if (isCyclesPreview) {
         const now = new Date().toISOString();
-        const savedId = selectedCycleId ?? Math.max(900, ...cycles.map((cycle) => cycle.id)) + 1;
-        const existing = cycles.find((cycle) => cycle.id === savedId);
+        const savedId = Math.max(900, ...cycles.map((cycle) => cycle.id)) + 1;
         const saved = previewCycle(savedId, {
-          ...existing,
           name: payload.name,
           prompt: payload.prompt,
           schedule_expr: payload.schedule_expr,
@@ -767,31 +834,29 @@
           enabled: payload.enabled,
           model_override: payload.model_override,
           thinking_override: payload.thinking_override,
-          target_idea_id: payload.target_idea_id ?? existing?.target_idea_id ?? `preview-cycle-${savedId}`,
+          target_idea_id: payload.target_idea_id ?? `preview-cycle-${savedId}`,
           next_run_at: previewNextRunAtForSchedule(payload.schedule_expr, payload.enabled),
-          last_run_at: existing?.last_run_at ?? null,
-          last_status: existing?.last_status ?? 'idle',
+          last_run_at: null,
+          last_status: 'idle',
           last_error: null,
-          created_at: existing?.created_at ?? now,
+          created_at: now,
           updated_at: now,
         });
-        cycles = existing
-          ? cycles.map((cycle) => (cycle.id === savedId ? saved : cycle))
-          : [saved, ...cycles];
+        cycles = [saved, ...cycles];
+        setPreviewBehaviorPolicy(saved);
         selectedCycleId = saved.id;
         selectedRowId = cycleRowId(saved);
-        fillForm(saved);
+        resetCreateForm();
         runs = previewRuns[saved.id] ?? [];
-        if (isCreate) showCreateModal = false;
-        ui.toast(existing ? 'Preview cycle updated' : 'Preview cycle created', 'success');
+        showCreateModal = false;
+        ui.toast('Preview cycle created', 'success');
         return;
       }
-      const saved = selectedCycleId
-        ? await api.updateCycle(selectedCycleId, payload)
-        : await api.createCycle(payload);
-      ui.toast(selectedCycleId ? 'Cycle updated' : 'Cycle created', 'success');
-      if (isCreate) showCreateModal = false;
+      const saved = await api.createCycle(payload);
+      ui.toast('Cycle created', 'success');
+      showCreateModal = false;
       await loadCycles(saved.id);
+      behaviorPolicyRefreshSerial += 1;
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to save cycle', 'error');
     } finally {
@@ -809,10 +874,14 @@
         cycles = cycles.filter((cycle) => cycle.id !== selectedCycleId);
         const { [selectedCycleId]: _removed, ...nextPreviewRuns } = previewRuns;
         previewRuns = nextPreviewRuns;
+        const { [selectedCycleId]: _removedPolicy, ...nextPreviewPolicies } = previewPolicies;
+        const { [selectedCycleId]: _removedHistory, ...nextPreviewHistories } = previewPolicyHistories;
+        previewPolicies = nextPreviewPolicies;
+        previewPolicyHistories = nextPreviewHistories;
         selectedCycleId = null;
         selectedRowId = null;
         runs = [];
-        fillForm(null);
+        resetCreateForm();
         ui.toast('Preview cycle deleted', 'success');
         return;
       }
@@ -851,34 +920,6 @@
       await loadCycles(cycleId);
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to run cycle', 'error');
-    }
-  }
-
-  async function toggleEnabled(cycle: CycleRead) {
-    const preferredCycleId = selectedCycleId;
-    try {
-      if (isCyclesPreview) {
-        cycles = cycles.map((item) =>
-          item.id === cycle.id
-            ? {
-                ...item,
-                enabled: !item.enabled,
-                next_run_at: !item.enabled ? previewNextRunAtForSchedule(item.schedule_expr, true) : null,
-                updated_at: new Date().toISOString(),
-              }
-            : item,
-        );
-        const updated = cycles.find((item) => item.id === cycle.id);
-        if (updated && preferredCycleId === updated.id) {
-          fillForm(updated);
-        }
-        ui.toast(updated?.enabled ? 'Preview cycle resumed' : 'Preview cycle paused', 'success');
-        return;
-      }
-      await api.updateCycle(cycle.id, { enabled: !cycle.enabled });
-      await loadCycles(preferredCycleId);
-    } catch (err: any) {
-      ui.toast(err.detail || 'Failed to update cycle', 'error');
     }
   }
 
@@ -975,12 +1016,6 @@
                       <ConstellationButton variant="quiet" size="sm" onclick={() => runNow(cycle.id)}>
                         Run now
                       </ConstellationButton>
-                      <ConstellationButton variant="quiet" size="sm" onclick={() => toggleEnabled(cycle)}>
-                        {cycle.enabled ? 'Pause' : 'Resume'}
-                      </ConstellationButton>
-                      <ConstellationButton variant="secondary" size="sm" loading={saving} onclick={saveCycle}>
-                        Save
-                      </ConstellationButton>
                       <ConstellationButton
                         variant="destructive"
                         size="sm"
@@ -1000,209 +1035,17 @@
                     />
                   {/if}
 
-                  <details class="cycle-region" open>
-                    <summary>
-                      <span>Editor</span>
-                      <small>{schedulePreview}</small>
-                    </summary>
-                    <div class="cycle-form">
-                      <section class="cycle-form-section" aria-labelledby={`cycle-${cycle.id}-basics-heading`}>
-                        <div class="cycle-form-section-heading">
-                          <h3 id={`cycle-${cycle.id}-basics-heading`}>Basics</h3>
-                        </div>
-
-                        <div class="cycle-form-grid">
-                          <label class="cycle-field cycle-field-full">
-                            <span class="cycle-field-label">Name</span>
-                            <input bind:value={form.name} class="cycle-input" placeholder="Morning briefing" />
-                          </label>
-
-                          <label class="cycle-field cycle-field-full">
-                            <span class="cycle-field-label">Prompt</span>
-                            <AiPromptComposer
-                              bind:value={form.prompt}
-                              className="cycle-prompt-composer"
-                              rows={7}
-                              minHeight={176}
-                              maxHeight={320}
-                              slashPlacement="below"
-                              ariaLabel="Cycle prompt"
-                              placeholder="Review my latest priorities and tell me what needs attention."
-                            />
-                          </label>
-                        </div>
-                      </section>
-
-                      <section class="cycle-form-section" aria-labelledby={`cycle-${cycle.id}-schedule-heading`}>
-                        <div class="cycle-form-section-heading">
-                          <h3 id={`cycle-${cycle.id}-schedule-heading`}>When</h3>
-                          <p>{schedulePreview}</p>
-                        </div>
-
-                        <div class="cadence-grid" role="group" aria-label="Schedule frequency">
-                          {#each CADENCE_OPTIONS as option}
-                            <button
-                              type="button"
-                              class="cadence-option"
-                              class:active={form.cadence === option.value}
-                              aria-pressed={form.cadence === option.value}
-                              onclick={() => setCadence(option.value)}
-                            >
-                              <span>{option.label}</span>
-                              <small>{option.description}</small>
-                            </button>
-                          {/each}
-                        </div>
-
-                        {#if form.cadence !== 'custom'}
-                          <div class="schedule-fields">
-                            {#if form.cadence === 'once'}
-                              <label class="cycle-field">
-                                <span class="cycle-field-label">Date</span>
-                                <input bind:value={form.date} class="cycle-input" type="date" />
-                              </label>
-                            {/if}
-
-                            <label class="cycle-field">
-                              <span class="cycle-field-label">Time</span>
-                              <input bind:value={form.time} class="cycle-input" type="time" />
-                            </label>
-
-                            {#if form.cadence === 'weekly'}
-                              <label class="cycle-field">
-                                <span class="cycle-field-label">Day</span>
-                                <select bind:value={form.weekday} class="cycle-select">
-                                  {#each WEEKDAY_OPTIONS as option}
-                                    <option value={option.value}>{option.label}</option>
-                                  {/each}
-                                </select>
-                              </label>
-                            {:else if form.cadence === 'monthly'}
-                              <label class="cycle-field">
-                                <span class="cycle-field-label">Day of month</span>
-                                <select bind:value={form.monthday} class="cycle-select">
-                                  {#each MONTHDAY_OPTIONS as day}
-                                    <option value={day}>{day}</option>
-                                  {/each}
-                                </select>
-                              </label>
-                            {/if}
-                          </div>
-                        {/if}
-
-                        <p class="local-time-note">
-                          Runs in your local time: {friendlyTimezone(localTimezone)}
-                        </p>
-                      </section>
-
-                      <section class="cycle-form-section" aria-labelledby={`cycle-${cycle.id}-thread-heading`}>
-                        <div class="cycle-form-section-heading">
-                          <h3 id={`cycle-${cycle.id}-thread-heading`}>Thread</h3>
-                        </div>
-
-                        <div class="thread-status">
-                          <div>
-                            <strong>
-                              {#if selectedThreadId}
-                                Continues in the same thread
-                              {:else}
-                                Thread will be created on first run
-                              {/if}
-                            </strong>
-                            <p>
-                              {#if selectedThreadId}
-                                Future runs return here, even if the thread gets archived.
-                              {:else}
-                                After the first run, this cycle will keep using that thread automatically.
-                              {/if}
-                            </p>
-                          </div>
-
-                          {#if selectedThreadId}
-                            <a class="cycle-link" href={`/cortex?idea=${selectedThreadId}`}>
-                              Open thread
-                            </a>
-                          {/if}
-                        </div>
-                      </section>
-
-                      <section class="cycle-form-section" aria-labelledby={`cycle-${cycle.id}-status-heading`}>
-                        <div class="cycle-form-section-heading">
-                          <h3 id={`cycle-${cycle.id}-status-heading`}>Status</h3>
-                        </div>
-
-                        <button
-                          type="button"
-                          class="status-switch"
-                          class:active={form.enabled}
-                          aria-pressed={form.enabled}
-                          onclick={() => (form.enabled = !form.enabled)}
-                        >
-                          <span aria-hidden="true"></span>
-                          <strong>{form.enabled ? 'Active' : 'Paused'}</strong>
-                          <small>
-                            {form.enabled
-                              ? 'Runs automatically on the schedule above.'
-                              : 'Kept for later, but will not run automatically.'}
-                          </small>
-                        </button>
-                      </section>
-
-                      <section class="cycle-advanced">
-                        <button
-                          type="button"
-                          class="advanced-toggle"
-                          aria-expanded={advancedOpen}
-                          onclick={() => (advancedOpen = !advancedOpen)}
-                        >
-                          <span>Advanced settings</span>
-                          <span aria-hidden="true">{advancedOpen ? 'Hide' : 'Show'}</span>
-                        </button>
-
-                        {#if advancedOpen}
-                          <div class="advanced-fields">
-                            {#if form.cadence === 'custom'}
-                              <label class="cycle-field cycle-field-full">
-                                <span class="cycle-field-label">Custom schedule</span>
-                                <input
-                                  bind:value={form.custom_schedule}
-                                  class="cycle-input cycle-mono"
-                                  placeholder="0 9 * * *"
-                                />
-                                <span class="cycle-field-hint">
-                                  Use this only when Once, Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
-                                </span>
-                              </label>
-                            {/if}
-
-                            <label class="cycle-field">
-                              <span class="cycle-field-label">Model override</span>
-                              <input
-                                bind:value={form.model_override}
-                                class="cycle-input cycle-mono"
-                                placeholder="Use default"
-                              />
-                            </label>
-
-                            <label class="cycle-field">
-                              <span class="cycle-field-label">Reasoning</span>
-                              <select bind:value={form.thinking_override} class="cycle-select">
-                                {#each THINKING_OPTIONS as option}
-                                  <option value={option.value}>{option.label}</option>
-                                {/each}
-                              </select>
-                            </label>
-                          </div>
-                        {/if}
-                      </section>
-
-                      <div class="cycle-form-actions">
-                        <ConstellationButton variant="primary" loading={saving} onclick={saveCycle}>
-                          Save cycle
-                        </ConstellationButton>
-                      </div>
-                    </div>
-                  </details>
+                  <EffectiveCyclePolicyView
+                    cycleId={cycle.id}
+                    previewPolicy={isCyclesPreview ? previewPolicies[cycle.id] : null}
+                    previewHistory={isCyclesPreview ? previewPolicyHistories[cycle.id] : null}
+                    {runs}
+                    displayTimezone={isCyclesPreview ? localTimezone : null}
+                    editable
+                    refreshSerial={behaviorPolicyRefreshSerial}
+                    onPolicyApplied={handlePolicyApplied}
+                    onDirtyChange={(dirty) => (behaviorPolicyDirty = dirty)}
+                  />
 
                   <details class="cycle-region" open>
                     <summary>
@@ -1219,7 +1062,7 @@
                     {:else}
                       <div class="runs-list">
                         {#each runs as run}
-                          <article class="run-row">
+                          <article class="run-row" id={cycleRunAnchorId(run.id)}>
                             <div class="run-row-main">
                               <span class="run-row-eyebrow">Run #{run.id}</span>
                               <strong>{formatDateTime(run.scheduled_for)}</strong>
@@ -1238,6 +1081,7 @@
                                 <span>{run.skip_reason}</span>
                               {/if}
                             </div>
+                            <CycleRunPolicySnapshot {run} {runs} displayTimezone={localTimezone} />
                           </article>
                         {/each}
                       </div>
@@ -1577,6 +1421,7 @@
     display: grid;
     grid-template-columns: 1fr;
     gap: 10px;
+    min-width: 0;
     padding: 0 12px 12px;
     border-top: 1px solid var(--constellation-surface-panel-separator);
   }
@@ -1637,7 +1482,6 @@
 
   .cycle-region summary span,
   .cycle-form-section-heading h3,
-  .thread-status strong,
   .status-switch strong,
   .advanced-toggle span:first-child,
   .run-row-main strong {
@@ -1828,22 +1672,6 @@
     max-width: 520px;
   }
 
-  .thread-status {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
-    min-width: 0;
-    padding: 12px;
-    border: 1px solid var(--constellation-surface-panel-separator);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-color-text-primary) 2%, transparent);
-  }
-
-  .thread-status p {
-    margin: 5px 0 0;
-  }
-
   .status-switch {
     display: grid;
     grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr);
@@ -2008,8 +1836,7 @@
       max-width: none;
     }
 
-    .cycle-form-section-heading,
-    .thread-status {
+    .cycle-form-section-heading {
       align-items: flex-start;
       flex-direction: column;
     }

@@ -11,7 +11,7 @@ EXPECTED_TABLES = {
     "agent_run_events",
     "agent_runs",
     "agent_sessions",
-    "behavior_change_audits",
+    "cycle_behavior_change_audits",
     "browser_pool_entries",
     "browser_sessions",
     "chat_conversation_members",
@@ -141,6 +141,22 @@ EXPECTED_TABLES = {
     "workspace_tool_installations",
     "workspace_tool_user_configs",
 }
+
+
+def test_cycle_behavior_change_audit_schema_is_cycle_only():
+    table = Base.metadata.tables["cycle_behavior_change_audits"]
+
+    assert "behavior_change_audits" not in Base.metadata.tables
+    assert "policy_kind" not in table.c
+    assert "target_type" not in table.c
+    assert table.c.cycle_revision_id.nullable is False
+    assert {constraint.name for constraint in table.constraints} >= {
+        "uq_cycle_behavior_change_audits_target_version",
+        "uq_cycle_behavior_change_audits_cycle_revision",
+    }
+    assert {index.name for index in table.indexes} == {
+        "ix_cycle_behavior_change_audits_workspace_applied",
+    }
 
 
 def _modeled_tables() -> set[str]:

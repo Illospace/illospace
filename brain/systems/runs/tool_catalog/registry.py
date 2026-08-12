@@ -17,6 +17,7 @@ from brain.systems.runs.tool_definitions import (
     DOMAIN_TOOLS,
     EXEC_TOOLS,
     GITHUB_TOOLS,
+    HOST_CAPACITY_TOOLS,
     KNOWLEDGE_TOOLS,
     INBOUND_TOOLS,
     LAUNCH_HANDOFF_TOOLS,
@@ -28,6 +29,7 @@ from brain.systems.runs.tool_definitions import (
     SESSION_TOOLS,
     WORKSPACE_OVERVIEW_SPARSE_GUIDANCE,
     WORKSPACE_APP_TOOLS,
+    WORKSPACE_RECLAMATION_TOOLS,
     WORKSPACE_TOOL_TOOLS,
     WORKER_SPAWN_TOOLS,
 )
@@ -215,6 +217,25 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "scopes": ["narrow"],
         },
     },
+    "read_host_capacity": {
+        "permission": "read_runtime",
+        "side_effect_class": "read_only",
+        "output_budget_chars": 24_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": (
+                "Read live disk capacity, the latest recorded workspace consumers, "
+                "active capacity thresholds, and the recent measurement trend."
+            ),
+            "domains": [
+                "disk capacity",
+                "storage use",
+                "workspace volume",
+                "disk trend",
+            ],
+            "scopes": ["narrow"],
+        },
+    },
     "manage_runtime_preferences": {
         "permission": "manage_runtime",
         "risk_class": "medium",
@@ -230,6 +251,18 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "reversibility": "reversible",
         "action_manifest": True,
         "expected_effect": "inspect or revise the installation-wide storage policy",
+    },
+    "manage_workspace_reclamation": {
+        "permission": "manage_runtime",
+        "risk_class": "high",
+        "side_effect_class": "write",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": (
+            "inventory retained headless-worker workspaces or permanently reclaim "
+            "policy-eligible workspace data"
+        ),
+        "output_budget_chars": 24_000,
     },
     "read_self_context": {
         "permission": "read_runtime",
@@ -911,7 +944,9 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("session", ("coordinator", "worker"), SESSION_TOOLS),
         ("lifecycle", ("coordinator",), LIFECYCLE_TOOLS),
         ("deployment", ("coordinator",), DEPLOYMENT_TOOLS),
+        ("host_capacity", ("coordinator", "worker"), HOST_CAPACITY_TOOLS),
         ("runtime_preferences", ("coordinator",), RUNTIME_PREFERENCE_TOOLS),
+        ("workspace_reclamation", ("coordinator",), WORKSPACE_RECLAMATION_TOOLS),
         ("workspace_tools", ("coordinator",), WORKSPACE_TOOL_TOOLS),
         ("worker_spawn", ("coordinator",), WORKER_SPAWN_TOOLS),
         ("meetings", ("coordinator", "worker"), MEETING_TOOLS),
@@ -1169,6 +1204,14 @@ def action_policy_for_tool(
         0,
         "get",
     ) in {"get", "history"}:
+        return None
+    if tool_name == "manage_workspace_reclamation" and _arg_at(
+        args_tuple,
+        kwargs_dict,
+        "action",
+        0,
+        "inventory",
+    ) == "inventory":
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None

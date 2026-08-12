@@ -24,8 +24,8 @@ from brain.app.api.schemas.cycles import (
     EffectiveCyclePolicyRead,
 )
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleGuidance,
     CycleOutputTarget,
     CycleRevision,
@@ -62,7 +62,7 @@ async def api_workspace(
             CycleRevision.__table__,
             CycleGuidance.__table__,
             CycleOutputTarget.__table__,
-            BehaviorChangeAudit.__table__,
+            CycleBehaviorChangeAudit.__table__,
         ]
     )
     org_id = str(uuid4())
@@ -235,6 +235,8 @@ async def test_effective_policy_shape_includes_sources_and_read_only_targets(
     )
 
     EffectiveCyclePolicyRead.model_validate(payload)
+    assert "policy_kind" not in payload
+    assert "target_type" not in payload
     assert payload["version"] == 0
     assert payload["configuration"]["prompt"] == "Review the workspace."
     assert payload["configuration"]["schedule_human"]
@@ -478,7 +480,7 @@ async def test_preview_returns_normalized_field_aware_diff_without_writing(
     assert payload["warnings"][0]["code"] == "admitted_runs_unchanged"
     assert workspace.cycle.prompt == "Review the workspace."
     assert await workspace.session.scalar(
-        select(func.count(BehaviorChangeAudit.id))
+        select(func.count(CycleBehaviorChangeAudit.id))
     ) == 0
 
 
@@ -513,7 +515,7 @@ async def test_preview_rejects_invalid_policy_before_apply(
     assert error.lower() in str(caught.value.detail).lower()
     assert workspace.cycle.prompt == "Review the workspace."
     assert await workspace.session.scalar(
-        select(func.count(BehaviorChangeAudit.id))
+        select(func.count(CycleBehaviorChangeAudit.id))
     ) == 0
 
 
@@ -528,6 +530,10 @@ async def test_apply_updates_policy_audit_event_and_utc_source(api_workspace):
     )
 
     CyclePolicyApplyRead.model_validate(payload)
+    assert "policy_kind" not in payload["effective_policy"]
+    assert "target_type" not in payload["effective_policy"]
+    assert "policy_kind" not in payload["change"]
+    assert "target_type" not in payload["change"]
     assert payload["effective_policy"]["version"] == 1
     assert payload["effective_policy"]["configuration"]["prompt"] == (
         "Review incidents and owners."
@@ -559,7 +565,7 @@ async def test_apply_updates_policy_audit_event_and_utc_source(api_workspace):
             "target_idea_id": None,
         }
     ]
-    stored = await workspace.session.get(BehaviorChangeAudit, payload["change"]["id"])
+    stored = await workspace.session.get(CycleBehaviorChangeAudit, payload["change"]["id"])
     assert stored is not None
     assert stored.version == 1
 
@@ -591,7 +597,7 @@ async def test_apply_rejects_whitespace_only_rationale(api_workspace):
     assert caught.value.detail == "rationale is required"
     assert workspace.cycle.prompt == "Review the workspace."
     assert await workspace.session.scalar(
-        select(func.count(BehaviorChangeAudit.id))
+        select(func.count(CycleBehaviorChangeAudit.id))
     ) == 0
 
 
@@ -787,5 +793,5 @@ async def test_cross_workspace_read_and_apply_are_denied(api_workspace):
     assert apply_denied.value.detail == "Cycle not found"
     assert workspace.cycle.prompt == "Review the workspace."
     assert await workspace.session.scalar(
-        select(func.count(BehaviorChangeAudit.id))
+        select(func.count(CycleBehaviorChangeAudit.id))
     ) == 0

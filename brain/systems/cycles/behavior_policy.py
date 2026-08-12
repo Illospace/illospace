@@ -25,8 +25,8 @@ from sqlalchemy import func, select
 
 from brain.kernel.common.serialization import jsonable
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleGuidance,
     CycleRevision,
 )
@@ -60,9 +60,6 @@ __all__ = [
     "async_preview_cycle_policy_change",
     "async_preview_cycle_policy_revert",
 ]
-
-CYCLE_POLICY_KIND = "cycle"
-CYCLE_TARGET_TYPE = "cycle"
 
 CycleGuidanceValues: TypeAlias = list[str] | tuple[str, ...]
 _PatchValueT = TypeVar("_PatchValueT")
@@ -116,8 +113,6 @@ class _CyclePolicyRevert:
 @dataclass(frozen=True)
 class EffectiveCyclePolicy:
     workspace_id: str
-    policy_kind: str
-    target_type: str
     target_id: str
     version: int
     revision_id: int | None
@@ -136,8 +131,6 @@ class CyclePolicyPreview:
 @dataclass(frozen=True)
 class _CyclePolicyPreviewDigestPayload:
     workspace_id: str
-    policy_kind: str
-    target_type: str
     target_id: str
     expected_version: int
     before_snapshot: CyclePolicySnapshot
@@ -150,8 +143,6 @@ class _CyclePolicyPreviewDigestPayload:
 class BehaviorChangeRecord:
     id: int
     workspace_id: str
-    policy_kind: str
-    target_type: str
     target_id: str
     version: int
     actor_type: str
@@ -287,10 +278,8 @@ async def async_apply_cycle_policy_change(
             revision_id=revision.id,
         )
 
-        change = BehaviorChangeAudit(
+        change = CycleBehaviorChangeAudit(
             workspace_id=current.workspace_id,
-            policy_kind=CYCLE_POLICY_KIND,
-            target_type=CYCLE_TARGET_TYPE,
             target_id=str(cycle.id),
             version=current.version + 1,
             actor_type=actor.source_type,
@@ -317,8 +306,6 @@ async def async_apply_cycle_policy_change(
 
         effective = EffectiveCyclePolicy(
             workspace_id=current.workspace_id,
-            policy_kind=CYCLE_POLICY_KIND,
-            target_type=CYCLE_TARGET_TYPE,
             target_id=str(cycle.id),
             version=change.version,
             revision_id=revision.id,
@@ -346,9 +333,9 @@ async def async_list_cycle_policy_history(
     rows = list(
         (
             await session.scalars(
-                select(BehaviorChangeAudit)
+                select(CycleBehaviorChangeAudit)
                 .where(*_audit_target_conditions(cycle))
-                .order_by(BehaviorChangeAudit.version.desc())
+                .order_by(CycleBehaviorChangeAudit.version.desc())
                 .limit(clean_limit)
                 .offset(clean_offset)
             )
@@ -439,7 +426,7 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
     version = int(
         (
             await session.scalar(
-                select(func.coalesce(func.max(BehaviorChangeAudit.version), 0)).where(
+                select(func.coalesce(func.max(CycleBehaviorChangeAudit.version), 0)).where(
                     *_audit_target_conditions(cycle)
                 )
             )
@@ -454,8 +441,6 @@ async def _effective_policy(session, cycle: Cycle) -> EffectiveCyclePolicy:
     )
     return EffectiveCyclePolicy(
         workspace_id=_workspace_id(cycle),
-        policy_kind=CYCLE_POLICY_KIND,
-        target_type=CYCLE_TARGET_TYPE,
         target_id=str(cycle.id),
         version=version,
         revision_id=revision_id,
@@ -626,10 +611,10 @@ async def _load_revert_source(
     *,
     cycle: Cycle,
     change_id: int,
-) -> BehaviorChangeAudit:
+) -> CycleBehaviorChangeAudit:
     row = await session.scalar(
-        select(BehaviorChangeAudit).where(
-            BehaviorChangeAudit.id == change_id,
+        select(CycleBehaviorChangeAudit).where(
+            CycleBehaviorChangeAudit.id == change_id,
             *_audit_target_conditions(cycle),
         )
     )
@@ -647,8 +632,6 @@ def _preview_digest(
 ) -> str:
     payload = _CyclePolicyPreviewDigestPayload(
         workspace_id=current.workspace_id,
-        policy_kind=current.policy_kind,
-        target_type=current.target_type,
         target_id=current.target_id,
         expected_version=current.version,
         before_snapshot=current.snapshot,
@@ -671,15 +654,13 @@ def _aware_utc(value: datetime) -> datetime:
 
 
 def _record(
-    row: BehaviorChangeAudit,
+    row: CycleBehaviorChangeAudit,
     *,
     current_snapshot: CyclePolicySnapshot,
 ) -> BehaviorChangeRecord:
     return BehaviorChangeRecord(
         id=row.id,
         workspace_id=row.workspace_id,
-        policy_kind=row.policy_kind,
-        target_type=row.target_type,
         target_id=row.target_id,
         version=row.version,
         actor_type=row.actor_type,
@@ -703,9 +684,7 @@ def _record(
 
 def _audit_target_conditions(cycle: Cycle) -> tuple[Any, ...]:
     return (
-        BehaviorChangeAudit.policy_kind == CYCLE_POLICY_KIND,
-        BehaviorChangeAudit.target_type == CYCLE_TARGET_TYPE,
-        BehaviorChangeAudit.target_id == str(cycle.id),
+        CycleBehaviorChangeAudit.target_id == str(cycle.id),
     )
 
 

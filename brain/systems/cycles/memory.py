@@ -9,8 +9,8 @@ from sqlalchemy import func, select
 from brain.kernel.common.serialization import jsonable
 from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import (
-    BehaviorChangeAudit,
     Cycle,
+    CycleBehaviorChangeAudit,
     CycleGuidance,
     CycleOutputTarget,
     CycleRevision,
@@ -216,7 +216,7 @@ def _build_cycle_run_memory_snapshot(
     *,
     run: CycleRun | None = None,
     revision: CycleRevision | None,
-    behavior_change: BehaviorChangeAudit | None = None,
+    behavior_change: CycleBehaviorChangeAudit | None = None,
     guidance_rows: list[CycleGuidance],
     target_rows: list[CycleOutputTarget],
     degradation_tracking: dict | None = None,
@@ -534,12 +534,12 @@ async def _async_latest_cycle_revision(session, cycle_id: int) -> CycleRevision 
 async def _async_behavior_change_for_revision(
     session,
     revision_id: int | None,
-) -> BehaviorChangeAudit | None:
+) -> CycleBehaviorChangeAudit | None:
     if revision_id is None:
         return None
     return await session.scalar(
-        select(BehaviorChangeAudit).where(
-            BehaviorChangeAudit.cycle_revision_id == revision_id
+        select(CycleBehaviorChangeAudit).where(
+            CycleBehaviorChangeAudit.cycle_revision_id == revision_id
         )
     )
 

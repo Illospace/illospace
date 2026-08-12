@@ -63,6 +63,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0060_storage_policies.py",
     # Downgrade removes only the meetbot-session table introduced here.
     "0061_meetbot_sessions.py",
+    # Fresh baseline replay removes the empty historical table created by 0059.
+    "0062_cycle_behavior_change_audits.py",
 }
 
 
