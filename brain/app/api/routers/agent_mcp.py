@@ -18,7 +18,7 @@ from brain.app.api.routers.agent_bridge import (
     _run_trigger_if_requested,
     _thread_payload,
 )
-from brain.app.api.routers import agent_mcp_handoffs
+from brain.app.api.routers import agent_mcp_handoffs, agent_mcp_skills
 from brain.app.api.routers.agent_mcp_domains import DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.agent_mcp_identity import manage_identity, resolve_identities
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
@@ -26,8 +26,6 @@ from brain.app.mentions import classify_mention_intent
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.models.skill import Skill
-from brain.platform.db.repositories.skills import SkillRepository
 from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.cycles.access import CycleActor, cycle_scope_conditions, target_idea_scope_conditions
@@ -561,20 +559,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
             "limit": "integer",
         },
     },
-    "skills.get": {
-        "description": "Read one active stored Illo skill visible to the bridge user by stable id or exact name.",
-        "arguments": {
-            "skill_id": "integer",
-            "name": "string",
-        },
-    },
-    "skills.list": {
-        "description": (
-            "List active stored Illo skill ids, names, versions, and archive status "
-            "visible to the bridge user."
-        ),
-        "arguments": {},
-    },
+    **agent_mcp_skills.READ_CAPABILITIES,
     **agent_mcp_handoffs.READ_CAPABILITIES,
     "team.members.list": {
         "description": "List visible Illo team members.",
@@ -932,72 +917,6 @@ async def _read_cycles_inspect(
     return payload
 
 
-def _serialize_skill(skill: Skill) -> dict[str, Any]:
-    return {
-        "id": skill.id,
-        "name": skill.name,
-        "description": skill.description,
-        "procedure": skill.procedure,
-        "triggers": skill.triggers or [],
-        "guardrails": skill.guardrails or [],
-        "pitfalls": skill.pitfalls or [],
-        "refinements": skill.refinements or [],
-        "version": skill.version,
-        "archived": bool(skill.archived),
-        "level": skill.level,
-        "skill_type": skill.skill_type,
-        "maturity": skill.maturity,
-        "thinking_tier": skill.thinking_tier,
-        "builtin": bool(skill.builtin),
-        "skill_installation_id": skill.skill_installation_id,
-        "bundle_version_id": skill.bundle_version_id,
-        "bundle_digest": skill.bundle_digest,
-        "effective_digest": skill.effective_digest,
-        "source_kind": skill.source_kind,
-        "trust_level": skill.trust_level,
-    }
-
-
-def _serialize_skill_summary(skill: Skill) -> dict[str, Any]:
-    return {
-        "id": skill.id,
-        "name": skill.name,
-        "version": skill.version,
-        "archived": bool(skill.archived),
-    }
-
-
-async def _read_skill_get(
-    db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    skill_id = _clean_optional_int(arguments.get("skill_id"))
-    name = _clean_optional_string(arguments.get("name"))
-    if skill_id is None and name is None:
-        raise ValueError("skills.get requires skill_id or name")
-    skill = await SkillRepository(db).a_get_visible(
-        org_id=principal.org_id,
-        user_id=principal.owner_user_id,
-        skill_id=skill_id,
-        name=name,
-    )
-    if skill is None:
-        raise ValueError("Skill not found")
-    return {"skill": _serialize_skill(skill)}
-
-
-async def _read_skills_list(
-    db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
-) -> dict[str, Any]:
-    skills = await SkillRepository(db).a_list_visible(
-        org_id=principal.org_id,
-        user_id=principal.owner_user_id,
-    )
-    return {"skills": [_serialize_skill_summary(skill) for skill in skills]}
-
-
 async def _tool_read(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -1048,9 +967,9 @@ async def _tool_read(
     if capability == "cycles.inspect":
         return await _read_cycles_inspect(db, principal, capability_arguments)
     if capability == "skills.get":
-        return await _read_skill_get(db, principal, capability_arguments)
+        return await agent_mcp_skills.read_skill(db, principal, capability_arguments)
     if capability == "skills.list":
-        return await _read_skills_list(db, principal)
+        return await agent_mcp_skills.list_skills(db, principal)
     if capability == "handoff.get":
         return await agent_mcp_handoffs.read_handoff(db, principal, capability_arguments)
     if capability == "team.members.list":

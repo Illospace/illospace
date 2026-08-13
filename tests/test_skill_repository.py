@@ -7,7 +7,12 @@ from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler, SQLiteDDLCompile
 
 from brain.platform.db.models.skill import Skill
 from brain.platform.db.models.skill_bundle import SkillInstallation
-from brain.platform.db.repositories.skills import SkillRepository
+from brain.platform.db.repositories.skills import (
+    _SKILL_LIST_COLUMNS,
+    _SKILL_READ_COLUMNS,
+    SkillRepository,
+)
+from brain.platform.db.schemas.skills import SkillAgentRead, SkillAgentSummary
 
 
 def _patch_sqlite_for_pg_types():
@@ -150,6 +155,28 @@ async def test_visible_skills_are_scoped_to_system_org_and_user(repo, session):
         user_id="user-1",
         name="personal",
     ) is personal
+
+
+def test_agent_skill_contracts_match_repository_projections():
+    assert {column.key for column in _SKILL_READ_COLUMNS} == set(SkillAgentRead.model_fields)
+    assert {column.key for column in _SKILL_LIST_COLUMNS} == set(SkillAgentSummary.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("skill_id", "name"),
+    [
+        (None, None),
+        (1, "personal"),
+    ],
+)
+async def test_get_visible_requires_exactly_one_selector(repo, skill_id, name):
+    with pytest.raises(ValueError, match="Exactly one"):
+        await repo.a_get_visible(
+            org_id="org-1",
+            user_id="user-1",
+            skill_id=skill_id,
+            name=name,
+        )
 
 
 async def test_visible_skills_exclude_archived_or_disabled_rows(repo, session):

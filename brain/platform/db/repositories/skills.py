@@ -218,6 +218,8 @@ class SkillRepository(BaseRepository[Skill]):
         name: str | None = None,
     ) -> Skill | None:
         """Return one active skill installed for the user or system."""
+        if (skill_id is None) == (name is None):
+            raise ValueError("Exactly one of skill_id or name is required")
         stmt = select(Skill).where(
             _not_archived(),
             _visible_installation(org_id=org_id, user_id=user_id),
