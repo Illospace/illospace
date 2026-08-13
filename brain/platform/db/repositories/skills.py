@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import load_only, selectinload
 
 from brain.platform.db.models.skill import Skill, SkillExecution, SkillVersion
+from brain.platform.db.models.skill_bundle import SkillInstallation
 from brain.platform.db.repositories.base import BaseRepository
 
 
@@ -72,6 +73,13 @@ _SKILL_COMMAND_COLUMNS = (
     Skill.success_count,
 )
 
+_SKILL_LIST_COLUMNS = (
+    Skill.id,
+    Skill.name,
+    Skill.version,
+    Skill.archived,
+)
+
 
 def _active_skill_stmt(*, with_executions: bool = False):
     options = [load_only(*_SKILL_READ_COLUMNS)]
@@ -84,6 +92,34 @@ def _active_skill_stmt(*, with_executions: bool = False):
         .where(_not_archived())
         .order_by(Skill.use_count.desc())
         .options(*options)
+    )
+
+
+def _visible_installation(*, org_id: str, user_id: str):
+    return exists(
+        select(SkillInstallation.id).where(
+            SkillInstallation.skill_id == Skill.id,
+            SkillInstallation.enabled.is_(True),
+            SkillInstallation.review_status == "approved",
+            or_(
+                SkillInstallation.archived == False,  # noqa: E712
+                SkillInstallation.archived.is_(None),
+            ),
+            or_(
+                and_(
+                    SkillInstallation.enabled_scope == "system",
+                    SkillInstallation.org_id.is_(None),
+                    SkillInstallation.user_id.is_(None),
+                ),
+                and_(
+                    SkillInstallation.org_id == org_id,
+                    or_(
+                        SkillInstallation.user_id.is_(None),
+                        SkillInstallation.user_id == user_id,
+                    ),
+                ),
+            ),
+        )
     )
 
 
@@ -112,6 +148,19 @@ class SkillRepository(BaseRepository[Skill]):
     async def a_list_active_with_executions(self) -> Sequence[Skill]:
         """Return non-archived skills with executions eagerly loaded."""
         return (await self._session.scalars(_active_skill_stmt(with_executions=True))).all()
+
+    async def a_list_visible(self, *, org_id: str, user_id: str) -> Sequence[Skill]:
+        """Return active skills installed for the user or system."""
+        stmt = (
+            select(Skill)
+            .where(
+                _not_archived(),
+                _visible_installation(org_id=org_id, user_id=user_id),
+            )
+            .order_by(Skill.name, Skill.id)
+            .options(load_only(*_SKILL_LIST_COLUMNS))
+        )
+        return (await self._session.scalars(stmt)).all()
 
     async def a_list_active_for_dashboard(self) -> Sequence[Skill]:
         """Return dashboard skill rows without historical execution payloads."""
@@ -159,6 +208,25 @@ class SkillRepository(BaseRepository[Skill]):
         if skill is None:
             raise LookupError(f"Skill '{name}' not found")
         return skill
+
+    async def a_get_visible(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        skill_id: int | None = None,
+        name: str | None = None,
+    ) -> Skill | None:
+        """Return one active skill installed for the user or system."""
+        stmt = select(Skill).where(
+            _not_archived(),
+            _visible_installation(org_id=org_id, user_id=user_id),
+        )
+        if skill_id is not None:
+            stmt = stmt.where(Skill.id == skill_id)
+        if name is not None:
+            stmt = stmt.where(Skill.name == name)
+        return (await self._session.scalars(stmt.options(load_only(*_SKILL_READ_COLUMNS)))).first()
 
     # ------------------------------------------------------------------
     # Updates
