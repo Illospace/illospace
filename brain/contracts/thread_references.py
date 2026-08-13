@@ -7,7 +7,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-
+# This prefix marks an AgentRun thread reference. The API and chat-handler layers
+# previously called the same value a conversation ID; both names denote the value
+# written to AgentRun.thread_id.
 THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 INBOUND_THREAD_PREFIX = "inbound:"
 

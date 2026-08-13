@@ -363,7 +363,7 @@ def _thread_discussion_parent_thread_id(
     return thread_id
 
 
-def _thread_discussion_conversation_id(parent_thread_id: str) -> str:
+def _thread_discussion_thread_id(parent_thread_id: str) -> str:
     return f"{THREAD_DISCUSSION_THREAD_PREFIX}{parent_thread_id}"
 
 
@@ -601,7 +601,7 @@ async def _agent_run_request_for_thread_discussion(
     return AgentRunRequest(
         org_id=str(getattr(idea, "org_id", None) or trigger_org_id or "") or None,
         user_id=actor_user_id or getattr(idea, "user_id", None),
-        thread_id=_thread_discussion_conversation_id(parent_thread_id),
+        thread_id=_thread_discussion_thread_id(parent_thread_id),
         message=message,
         profile=profile,
         recipe=recipe,

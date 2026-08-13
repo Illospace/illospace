@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from brain.contracts.thread_references import THREAD_DISCUSSION_THREAD_PREFIX
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, _tool_failure_payload, logger
 
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 AI_TIMELINE_SURFACE = "ai_timeline"
-THREAD_DISCUSSION_CONVERSATION_PREFIX = "thread-discussion:"
 
 
 def _execution_metadata() -> dict[str, Any]:
@@ -101,8 +101,8 @@ def _first_nonempty(*values: Any) -> str:
 
 def _thread_id_from_discussion_conversation(value: Any) -> str:
     text = str(value or "").strip()
-    if text.startswith(THREAD_DISCUSSION_CONVERSATION_PREFIX):
-        return text.removeprefix(THREAD_DISCUSSION_CONVERSATION_PREFIX).strip()
+    if text.startswith(THREAD_DISCUSSION_THREAD_PREFIX):
+        return text.removeprefix(THREAD_DISCUSSION_THREAD_PREFIX).strip()
     return text
 
 
@@ -140,7 +140,7 @@ def _discussion_reply_allowed() -> bool:
         if isinstance(container.get("discussion_trigger"), dict):
             return True
     current_thread_id = str(_current_thread_id() or "").strip()
-    return current_thread_id.startswith(THREAD_DISCUSSION_CONVERSATION_PREFIX)
+    return current_thread_id.startswith(THREAD_DISCUSSION_THREAD_PREFIX)
 
 
 def _discussion_comment_payload(comment: Any) -> dict[str, Any]:
@@ -475,7 +475,7 @@ async def _handle_read_thread_discussion(
         failures = await public_failures_for_run_ids(
             uow.session,
             run_ids,
-            thread_id=f"{THREAD_DISCUSSION_CONVERSATION_PREFIX}{target_thread_id}",
+            thread_id=f"{THREAD_DISCUSSION_THREAD_PREFIX}{target_thread_id}",
             org_id=org_id,
         )
 
