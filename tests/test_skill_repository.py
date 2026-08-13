@@ -6,7 +6,13 @@ from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler, SQLiteDDLCompiler
 
 from brain.platform.db.models.skill import Skill
-from brain.platform.db.repositories.skills import SkillRepository
+from brain.platform.db.models.skill_bundle import SkillInstallation
+from brain.platform.db.repositories.skills import (
+    _SKILL_LIST_COLUMNS,
+    _SKILL_READ_COLUMNS,
+    SkillRepository,
+)
+from brain.platform.db.schemas.skills import SkillAgentRead, SkillAgentSummary
 
 
 def _patch_sqlite_for_pg_types():
@@ -15,6 +21,8 @@ def _patch_sqlite_for_pg_types():
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
     if not hasattr(SQLiteTypeCompiler, "visit_ARRAY"):
         SQLiteTypeCompiler.visit_ARRAY = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_uuid = lambda self, type_, **kw: "TEXT"
 
     # Patch DDL compiler to strip PG-specific casts from server_default
     _original = SQLiteDDLCompiler.get_column_default_string
@@ -31,7 +39,10 @@ def _patch_sqlite_for_pg_types():
 async def session(async_sqlite_session_factory):
     """In-memory SQLite — patches JSONB/ARRAY rendering for SQLite."""
     _patch_sqlite_for_pg_types()
-    return await async_sqlite_session_factory([Skill.__table__])
+    return await async_sqlite_session_factory([
+        Skill.__table__,
+        SkillInstallation.__table__,
+    ])
 
 
 @pytest.fixture
@@ -47,6 +58,34 @@ async def _make_skill(repo, session, name="test-skill", **kwargs):
     skill = await repo.a_create(name=name, **defaults)
     await session.flush()
     return skill
+
+
+async def _install_skill(
+    session,
+    skill,
+    *,
+    org_id=None,
+    user_id=None,
+    enabled_scope="user",
+    enabled=True,
+    archived=False,
+    review_status="approved",
+):
+    installation = SkillInstallation(
+        bundle_id=skill.id,
+        bundle_version_id=skill.id,
+        skill_id=skill.id,
+        org_id=org_id,
+        user_id=user_id,
+        installed_digest=f"sha256:{skill.id}",
+        enabled_scope=enabled_scope,
+        enabled=enabled,
+        archived=archived,
+        review_status=review_status,
+    )
+    session.add(installation)
+    await session.flush()
+    return installation
 
 
 async def test_list_active_excludes_archived(repo, session):
@@ -87,6 +126,89 @@ async def test_get_by_name(repo, session):
 
 async def test_get_by_name_not_found(repo):
     assert await repo.a_get_by_name("nonexistent") is None
+
+
+async def test_visible_skills_are_scoped_to_system_org_and_user(repo, session):
+    system = await _make_skill(repo, session, name="system")
+    org = await _make_skill(repo, session, name="org")
+    personal = await _make_skill(repo, session, name="personal")
+    other_user = await _make_skill(repo, session, name="other-user")
+    other_org = await _make_skill(repo, session, name="other-org")
+    unscoped = await _make_skill(repo, session, name="unscoped")
+    await _install_skill(session, system, enabled_scope="system")
+    await _install_skill(session, org, org_id="org-1", user_id=None, enabled_scope="org")
+    await _install_skill(session, personal, org_id="org-1", user_id="user-1")
+    await _install_skill(session, other_user, org_id="org-1", user_id="user-2")
+    await _install_skill(session, other_org, org_id="org-2", user_id="user-1")
+
+    visible = await repo.a_list_visible(org_id="org-1", user_id="user-1")
+
+    assert [skill.name for skill in visible] == ["org", "personal", "system"]
+    assert unscoped not in visible
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        skill_id=personal.id,
+    ) is personal
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        name="personal",
+    ) is personal
+
+
+def test_agent_skill_contracts_match_repository_projections():
+    assert {column.key for column in _SKILL_READ_COLUMNS} == set(SkillAgentRead.model_fields)
+    assert {column.key for column in _SKILL_LIST_COLUMNS} == set(SkillAgentSummary.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("skill_id", "name"),
+    [
+        (None, None),
+        (1, "personal"),
+    ],
+)
+async def test_get_visible_requires_exactly_one_selector(repo, skill_id, name):
+    with pytest.raises(ValueError, match="Exactly one"):
+        await repo.a_get_visible(
+            org_id="org-1",
+            user_id="user-1",
+            skill_id=skill_id,
+            name=name,
+        )
+
+
+async def test_visible_skills_exclude_archived_or_disabled_rows(repo, session):
+    archived_skill = await _make_skill(repo, session, name="archived-skill", archived=True)
+    disabled = await _make_skill(repo, session, name="disabled")
+    pending = await _make_skill(repo, session, name="pending")
+    archived_installation = await _make_skill(repo, session, name="archived-installation")
+    await _install_skill(session, archived_skill, org_id="org-1", user_id="user-1")
+    await _install_skill(session, disabled, org_id="org-1", user_id="user-1", enabled=False)
+    await _install_skill(
+        session,
+        pending,
+        org_id="org-1",
+        user_id="user-1",
+        review_status="pending",
+    )
+    await _install_skill(
+        session,
+        archived_installation,
+        org_id="org-1",
+        user_id="user-1",
+        archived=True,
+    )
+
+    visible = await repo.a_list_visible(org_id="org-1", user_id="user-1")
+
+    assert visible == []
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        skill_id=archived_skill.id,
+    ) is None
 
 
 async def test_get_by_name_or_raise_missing(repo):

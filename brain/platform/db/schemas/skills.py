@@ -76,6 +76,51 @@ class SkillRead(BaseModel):
     trust_level: SkillBundleTrustLevel = SkillBundleTrustLevel.PRIVATE_LOCAL
 
 
+class SkillAgentRead(BaseModel):
+    """Full stored skill exposed to personal agents without relationships."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+    id: int
+    name: str
+    description: str | None = None
+    procedure: str
+    version: int = 1
+    level: str = "cognitive"
+    skill_type: str = "skill"
+    maturity: str = "emerging"
+    confidence: float = 0.3
+    use_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    partial_count: int = 0
+    avg_duration_sec: float | None = None
+    last_used: datetime | None = None
+    pitfalls: list = []
+    refinements: list = []
+    triggers: list = []
+    guardrails: list = []
+    graduated_steps: list | None = []
+    auto_emerged: bool = False
+    builtin: bool = False
+    archived: bool = False
+    thinking_tier: str = "medium"
+    skill_installation_id: int | None = None
+    bundle_version_id: int | None = None
+    bundle_digest: str | None = None
+    overlay_revision: int | None = None
+    effective_digest: str | None = None
+    source_kind: SkillBundleSourceKind = SkillBundleSourceKind.LEGACY_DB
+    trust_level: SkillBundleTrustLevel = SkillBundleTrustLevel.PRIVATE_LOCAL
+
+
+class SkillAgentSummary(BaseModel):
+    """Stored skill catalog entry exposed to personal agents."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+    id: int
+    name: str
+    version: int = 1
+    archived: bool = False
+
+
 class SkillCreate(BaseModel):
     """Input validation for skill creation."""
     name: str

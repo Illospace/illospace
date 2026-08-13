@@ -18,7 +18,7 @@ from brain.app.api.routers.agent_bridge import (
     _run_trigger_if_requested,
     _thread_payload,
 )
-from brain.app.api.routers import agent_mcp_handoffs
+from brain.app.api.routers import agent_mcp_handoffs, agent_mcp_skills
 from brain.app.api.routers.agent_mcp_domains import DOMAIN_TOOL_HANDLERS
 from brain.app.api.routers.agent_mcp_identity import manage_identity, resolve_identities
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
@@ -178,7 +178,11 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, project_contexts.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
+                    "description": (
+                        "Read capability name, such as workspace.search, project_contexts.search, "
+                        "thread.get, skills.get, skills.list, handoff.get, team.members.list, "
+                        "domain.inspect, or capabilities."
+                    ),
                 },
                 "arguments": {
                     "type": "object",
@@ -555,6 +559,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
             "limit": "integer",
         },
     },
+    **agent_mcp_skills.READ_CAPABILITIES,
     **agent_mcp_handoffs.READ_CAPABILITIES,
     "team.members.list": {
         "description": "List visible Illo team members.",
@@ -961,6 +966,10 @@ async def _tool_read(
         return await _read_run_get(db, principal, capability_arguments)
     if capability == "cycles.inspect":
         return await _read_cycles_inspect(db, principal, capability_arguments)
+    if capability == "skills.get":
+        return await agent_mcp_skills.read_skill(db, principal, capability_arguments)
+    if capability == "skills.list":
+        return await agent_mcp_skills.list_skills(db, principal)
     if capability == "handoff.get":
         return await agent_mcp_handoffs.read_handoff(db, principal, capability_arguments)
     if capability == "team.members.list":
