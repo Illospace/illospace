@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from brain.contracts.thread_references import THREAD_DISCUSSION_THREAD_PREFIX
 from brain.platform.db.models.idea import Idea
 from brain.platform.integrations.provider_auth_preflight import (
     ProviderAuthBlockedPreflightResult,
@@ -41,7 +42,6 @@ from brain.systems.runs.store import AsyncAgentRunStore
 _VALID_MODEL_PROVIDERS = {"anthropic", "ollama", "openai"}
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
-THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 AGENT_RUN_CONTINUATION_TARGET = "agent_run_continuation"
 
 logger = logging.getLogger("work_intake")

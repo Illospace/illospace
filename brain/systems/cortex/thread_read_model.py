@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.contracts.thread_references import resolve_idea_thread_reference
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -45,15 +45,7 @@ def _summary_body(summary: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _idea_id_from_run_thread_id(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if text.startswith("thread-discussion:"):
-        text = text.split(":", 1)[1].strip()
-    if not text:
-        return None
-    try:
-        return str(UUID(text))
-    except (TypeError, ValueError):
-        return None
+    return resolve_idea_thread_reference(value).idea_id
 
 
 def preview_summary_from_handoff(summary: dict[str, Any] | None) -> str | None:

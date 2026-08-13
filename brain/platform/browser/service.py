@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from sqlalchemy import select
 
+from brain.contracts.thread_references import resolve_idea_thread_reference
 from brain.kernel.common.time import utcnow as _shared_utcnow
 
 from brain.platform.events import publish_safe
@@ -44,6 +45,12 @@ WORKSPACE_BROWSER_STATE_DIR = os.environ.get(
 )
 UPLOAD_DIR = BRAIN_ROOT / "uploads"
 HARNESS_RESULT_MARKER = "__ILLO_BROWSER_HARNESS_RESULT__"
+
+
+def _browser_idea_id(thread_reference: Any) -> str:
+    return resolve_idea_thread_reference(thread_reference).require_idea_id(
+        operation="Browser tools"
+    )
 
 
 def _utcnow() -> datetime:
@@ -1548,16 +1555,18 @@ class BrowserSessionService:
                 record.last_error = reason
 
     def get_idea_org_id(self, idea_id: str) -> str | None:
+        idea_id = _browser_idea_id(idea_id)
         for runtime in self._runtimes.values():
-            if runtime.idea_id == str(idea_id) and not runtime._closed:
+            if runtime.idea_id == idea_id and not runtime._closed:
                 return runtime.org_id
         return None
 
     async def get_idea_org_id_async(self, idea_id: str) -> str | None:
+        idea_id = _browser_idea_id(idea_id)
         try:
             async with UnitOfWork() as uow:
                 org_id = await uow.session.scalar(
-                    select(Idea.org_id).where(Idea.id == str(idea_id))
+                    select(Idea.org_id).where(Idea.id == idea_id)
                 )
         except Exception as exc:
             logger.debug("Failed to resolve browser session idea org idea=%s: %s", idea_id, exc)
@@ -1608,8 +1617,9 @@ class BrowserSessionService:
                 return None
             idea_org_id = normalized_org_id
             if idea_org_id is None:
+                idea_id = _browser_idea_id(record.idea_id)
                 idea_org_id = await uow.session.scalar(
-                    select(Idea.org_id).where(Idea.id == str(record.idea_id))
+                    select(Idea.org_id).where(Idea.id == idea_id)
                 )
             setattr(record, "_idea_org_id", str(idea_org_id) if idea_org_id else None)
             return record
@@ -1627,6 +1637,7 @@ class BrowserSessionService:
         allow_downloads: bool = False,
         allow_file_uploads: bool = True,
     ) -> BrowserSessionRuntime:
+        idea_id = _browser_idea_id(idea_id)
         async with self._runtime_lock:
             record = await self.get_active_session_record_async(idea_id)
             org_id = await self.get_idea_org_id_async(idea_id)
@@ -1742,8 +1753,9 @@ class BrowserSessionService:
         async with UnitOfWork() as uow:
             record = await uow.session.get(BrowserSession, session_id)
             if record is not None:
+                idea_id = _browser_idea_id(record.idea_id)
                 org_id = await uow.session.scalar(
-                    select(Idea.org_id).where(Idea.id == str(record.idea_id))
+                    select(Idea.org_id).where(Idea.id == idea_id)
                 )
                 setattr(record, "_idea_org_id", str(org_id) if org_id else None)
         if not record or not record.active:
@@ -1753,14 +1765,16 @@ class BrowserSessionService:
         return runtime
 
     def get_active_session_record(self, idea_id: str) -> BrowserSession | None:
+        idea_id = _browser_idea_id(idea_id)
         for runtime in self._runtimes.values():
-            if runtime.idea_id == str(idea_id) and not runtime._closed:
+            if runtime.idea_id == idea_id and not runtime._closed:
                 record = runtime._record
                 if getattr(record, "active", True):
                     return record
         return None
 
     async def get_active_session_record_async(self, idea_id: str) -> BrowserSession | None:
+        idea_id = _browser_idea_id(idea_id)
         record = self._load_active_session(idea_id)
         if inspect.isawaitable(record):
             return await record
@@ -1861,6 +1875,7 @@ class BrowserSessionService:
             raise
 
     async def _load_active_session(self, idea_id: str) -> BrowserSession | None:
+        idea_id = _browser_idea_id(idea_id)
         async with UnitOfWork() as uow:
             result = await uow.session.scalars(
                 select(BrowserSession)

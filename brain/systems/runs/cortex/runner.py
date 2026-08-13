@@ -19,6 +19,7 @@ import uuid
 
 from sqlalchemy import func, select
 
+from brain.contracts.thread_references import THREAD_DISCUSSION_THREAD_PREFIX
 from brain.kernel import config as brain_config
 from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
@@ -280,7 +281,6 @@ _TERMINAL_RUN_IDEA_STATUS = {
 }
 _AI_TIMELINE_SURFACES = {"ai_timeline", "thread_timeline", "cortex_thread", "main_thread"}
 _THREAD_DISCUSSION_SURFACE = "thread_discussion"
-_THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 _SLACK_SURFACE = "slack"
 _SLACK_REPLY_TOOL = "post_slack_reply"
 _SLACK_VISIBLE_ACTION_TOOLS = {_SLACK_REPLY_TOOL, "react_to_slack_message"}
@@ -318,7 +318,7 @@ def _run_is_thread_discussion_conversation(run: AgentRunRow) -> bool:
         if container.get("surface") == _THREAD_DISCUSSION_SURFACE:
             return True
     thread_id = str(getattr(run, "thread_id", "") or "")
-    return thread_id.startswith(_THREAD_DISCUSSION_THREAD_PREFIX)
+    return thread_id.startswith(THREAD_DISCUSSION_THREAD_PREFIX)
 
 
 def _run_surface_value(run: AgentRunRow, key: str) -> str:
@@ -540,8 +540,8 @@ def _run_discussion_thread_id(run: AgentRunRow) -> str:
             return value
     thread_id = str(getattr(run, "thread_id", "") or "")
     return (
-        thread_id[len(_THREAD_DISCUSSION_THREAD_PREFIX):]
-        if thread_id.startswith(_THREAD_DISCUSSION_THREAD_PREFIX)
+        thread_id[len(THREAD_DISCUSSION_THREAD_PREFIX):]
+        if thread_id.startswith(THREAD_DISCUSSION_THREAD_PREFIX)
         else ""
     )
 
