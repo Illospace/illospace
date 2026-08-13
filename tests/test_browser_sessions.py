@@ -14,6 +14,12 @@ from brain.app.api.main import app
 from brain.app.api.ws.auth import create_ws_token
 
 
+IDEA_HARNESS_ID = "00000000-0000-0000-0000-000000000101"
+IDEA_START_FAILURE_ID = "00000000-0000-0000-0000-000000000102"
+IDEA_DIRTY_ID = "00000000-0000-0000-0000-000000000103"
+IDEA_VISIBLE_ID = "00000000-0000-0000-0000-000000000104"
+
+
 class _FakeSession:
     async def run_sync(self, fn):
         return fn(self)
@@ -46,6 +52,87 @@ def _ws_token(user_id: str = "user-123", org_id: str = "org-123") -> str:
         session_id=f"session-{user_id}",
     )
     return token
+
+
+@pytest.mark.parametrize(
+    ("thread_reference", "expected_idea_id"),
+    [
+        (IDEA_HARNESS_ID, IDEA_HARNESS_ID),
+        (f"thread-discussion:{IDEA_HARNESS_ID}", IDEA_HARNESS_ID),
+    ],
+)
+def test_browser_context_resolves_idea_backed_thread_references(
+    thread_reference,
+    expected_idea_id,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import browser as browser_handlers
+
+    with bind_agent_context({"idea_id": thread_reference, "user_id": "user-123"}):
+        idea_id, user_id, run_id = browser_handlers._browser_session_context()
+
+    assert idea_id == expected_idea_id
+    assert user_id == "user-123"
+    assert run_id is None
+
+
+@pytest.mark.asyncio
+async def test_browser_open_rejects_headless_inbound_thread_before_session_query(monkeypatch):
+    from brain.contracts.thread_references import IdeaBackedThreadRequiredError
+    from brain.platform.browser import browser_sessions
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import browser as browser_handlers
+
+    create_session = AsyncMock()
+    monkeypatch.setattr(browser_sessions, "create_or_get_session", create_session)
+    inbound_thread_id = (
+        "inbound:c3c835df-b24d-407f-a5b3-92e8e9f4607d:"
+        "88e6143d-2e07-4c79-927c-fd319118dc27"
+    )
+
+    with bind_agent_context({"idea_id": inbound_thread_id, "user_id": "user-123"}):
+        with pytest.raises(
+            IdeaBackedThreadRequiredError,
+            match="idea-backed thread; this run is a headless inbound submission",
+        ):
+            await browser_handlers._handle_browser_session_open("https://docs.google.com")
+
+    create_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "service_call",
+    [
+        lambda service, idea_id: service.create_or_get_session(
+            idea_id=idea_id,
+            user_id="user-123",
+        ),
+        lambda service, idea_id: service.get_idea_org_id_async(idea_id),
+        lambda service, idea_id: service.get_active_session_record_async(idea_id),
+        lambda service, idea_id: service._load_active_session(idea_id),
+    ],
+)
+async def test_browser_service_rejects_inbound_thread_before_uuid_query(
+    monkeypatch,
+    service_call,
+):
+    from brain.contracts.thread_references import IdeaBackedThreadRequiredError
+    from brain.platform.browser.service import BrowserSessionService
+
+    class QueryingUOW:
+        async def __aenter__(self):
+            pytest.fail("browser service opened a database unit of work")
+
+    monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", QueryingUOW)
+    service = BrowserSessionService()
+    inbound_thread_id = (
+        "inbound:c3c835df-b24d-407f-a5b3-92e8e9f4607d:"
+        "88e6143d-2e07-4c79-927c-fd319118dc27"
+    )
+
+    with pytest.raises(IdeaBackedThreadRequiredError, match="headless inbound submission"):
+        await service_call(service, inbound_thread_id)
 
 
 def _allow_ws_browser_session(monkeypatch, ws_router, *, allowed_org_id: str = "org-123", active: bool = True):
@@ -572,7 +659,7 @@ async def test_browser_service_records_browser_harness_resource_summary(monkeypa
     monkeypatch.setattr(BrowserSessionRuntime, "start", fake_start)
 
     record = BrowserSession(
-        idea_id="idea-harness",
+        idea_id=IDEA_HARNESS_ID,
         user_id="user-123",
         run_id=77,
         current_url="https://example.com",
@@ -608,7 +695,7 @@ async def test_browser_service_records_browser_harness_resource_summary(monkeypa
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())
 
     runtime = await service.create_or_get_session(
-        idea_id="idea-harness",
+        idea_id=IDEA_HARNESS_ID,
         user_id="user-123",
         run_id=77,
         url=None,
@@ -644,7 +731,7 @@ async def test_browser_service_marks_start_failure_before_reraising(monkeypatch)
     monkeypatch.setattr(BrowserSessionRuntime, "_handle_runtime_error", fake_handle_error)
 
     record = BrowserSession(
-        idea_id="idea-start-fail",
+        idea_id=IDEA_START_FAILURE_ID,
         user_id="user-123",
         run_id=77,
         current_url=None,
@@ -679,7 +766,7 @@ async def test_browser_service_marks_start_failure_before_reraising(monkeypatch)
 
     with pytest.raises(RuntimeError, match="chrome missing"):
         await service.create_or_get_session(
-            idea_id="idea-start-fail",
+            idea_id=IDEA_START_FAILURE_ID,
             user_id="user-123",
             run_id=77,
             storage_mode="ephemeral",
@@ -696,7 +783,7 @@ async def test_browser_service_recycles_dirty_active_session_before_creating_new
 
     service = BrowserSessionService()
     dirty_record = BrowserSession(
-        idea_id="idea-dirty",
+        idea_id=IDEA_DIRTY_ID,
         user_id="user-123",
         run_id=41,
         current_url="https://example.com",
@@ -749,7 +836,7 @@ async def test_browser_service_recycles_dirty_active_session_before_creating_new
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())
 
     runtime = await service.create_or_get_session(
-        idea_id="idea-dirty",
+        idea_id=IDEA_DIRTY_ID,
         user_id="user-123",
         run_id=42,
         url=None,
@@ -816,7 +903,7 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())
 
     runtime = await service.create_or_get_session(
-        idea_id="idea-visible",
+        idea_id=IDEA_VISIBLE_ID,
         user_id="user-123",
         run_id=99,
         url="https://www.youtube.com",
@@ -827,7 +914,7 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
     assert captures == [("sess-visible", "created", "https://www.youtube.com")]
     assert tool_traces == [{
         "run_id": 99,
-        "idea_id": "idea-visible",
+        "idea_id": IDEA_VISIBLE_ID,
         "session_id": "sess-visible",
         "url": "https://www.youtube.com",
         "action": "open",

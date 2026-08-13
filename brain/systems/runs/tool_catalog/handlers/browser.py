@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from brain.contracts.thread_references import resolve_idea_thread_reference
 from brain.systems.runs.tool_catalog.handlers.common import *
 
 
@@ -87,13 +88,14 @@ async def _record_browser_snapshot_artifact(result: dict, *, source_tool: str) -
 
 
 def _browser_session_context() -> tuple[str, str | None, int | None]:
-    idea_id = getattr(_agent_context, "idea_id", None)
-    if not idea_id:
-        raise ValueError("No idea_id in context — browser tools only work during cortex runs")
+    thread_reference = getattr(_agent_context, "idea_id", None)
+    idea_id = resolve_idea_thread_reference(thread_reference).require_idea_id(
+        operation="Browser tools"
+    )
     user_id = getattr(_agent_context, "user_id", None)
     run = getattr(_agent_context, "run", None)
     run_id = getattr(run, "run_id", None) if run else None
-    return str(idea_id), str(user_id) if user_id else None, run_id
+    return idea_id, str(user_id) if user_id else None, run_id
 
 
 _TOOL_RESULT_CONTENT_KEY = "_tool_result_content"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from brain.contracts.thread_references import THREAD_DISCUSSION_THREAD_PREFIX
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime, cancel_event_is_set
 from brain.systems.runs.failures import failure_category_for_error, safe_terminal_run_message
 from brain.systems.runs.tools import wrap_tool_handlers
@@ -53,7 +54,6 @@ Runtime rules:
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
 _THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
 _THREAD_DISCUSSION_SURFACE = "thread_discussion"
-_THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 
 
 def build_fast_system_prompt(
@@ -101,7 +101,7 @@ def _originated_from_thread_discussion(
             return True
         if isinstance(container.get("discussion_trigger"), dict):
             return True
-    return thread_id.startswith(_THREAD_DISCUSSION_THREAD_PREFIX)
+    return thread_id.startswith(THREAD_DISCUSSION_THREAD_PREFIX)
 
 
 def fast_agent_tools_for_request(
