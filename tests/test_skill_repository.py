@@ -163,7 +163,7 @@ async def test_visible_skills_are_scoped_to_system_org_and_user(repo, session):
     ) is personal
 
 
-async def test_workspace_local_skill_is_visible_without_installation(repo, session):
+async def test_unbundled_private_skill_is_visible_without_installation(repo, session):
     local = await _make_skill(
         repo,
         session,

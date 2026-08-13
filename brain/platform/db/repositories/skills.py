@@ -123,10 +123,13 @@ def _visible_installation(*, org_id: str, user_id: str):
     )
 
 
-def _workspace_local_skill():
-    # The installation gate controls distributed skills. A private skill that
-    # never came through a bundle was authored in this workspace, so reading it
-    # here is not a distribution event.
+def _unbundled_private_skill():
+    # The installation gate controls DISTRIBUTED skills, so a skill that never
+    # came through a bundle is not a distribution event to read.
+    #
+    # This proves "unbundled and private", not ownership: `skills` carries no
+    # org_id/user_id, so a caller's workspace is not expressible here. Scoping
+    # these per org needs an owner column on the table, not a wider predicate.
     return and_(
         Skill.bundle_version_id.is_(None),
         Skill.trust_level == "private_local",
@@ -136,7 +139,7 @@ def _workspace_local_skill():
 def _visible_skill(*, org_id: str, user_id: str):
     return or_(
         _visible_installation(org_id=org_id, user_id=user_id),
-        _workspace_local_skill(),
+        _unbundled_private_skill(),
     )
 
 
