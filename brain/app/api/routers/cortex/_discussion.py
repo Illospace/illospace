@@ -14,6 +14,7 @@ from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user as _r
 from brain.app.api.routers.cortex._router import router
 from brain.app.api.routers.ws import ws_manager
 from brain.app.mentions import classify_mention_intent
+from brain.contracts.thread_references import THREAD_DISCUSSION_THREAD_PREFIX
 from brain.platform.db.models.idea import ThreadDiscussionComment
 from brain.platform.db.models.org import User
 from brain.systems.cortex.object_references import (
@@ -29,7 +30,6 @@ from brain.systems.runs.cortex.read_models import (
 
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
 THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
-THREAD_DISCUSSION_CONVERSATION_PREFIX = "thread-discussion:"
 
 
 class DiscussionCommentCreate(BaseModel):
@@ -146,7 +146,7 @@ async def _discussion_comment_payloads(
     failures = await public_failures_for_run_ids(
         db,
         run_ids,
-        thread_id=f"{THREAD_DISCUSSION_CONVERSATION_PREFIX}{thread_id}",
+        thread_id=f"{THREAD_DISCUSSION_THREAD_PREFIX}{thread_id}",
         org_id=org_id,
     )
     return [
