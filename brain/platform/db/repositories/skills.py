@@ -123,6 +123,23 @@ def _visible_installation(*, org_id: str, user_id: str):
     )
 
 
+def _workspace_local_skill():
+    # The installation gate controls distributed skills. A private skill that
+    # never came through a bundle was authored in this workspace, so reading it
+    # here is not a distribution event.
+    return and_(
+        Skill.bundle_version_id.is_(None),
+        Skill.trust_level == "private_local",
+    )
+
+
+def _visible_skill(*, org_id: str, user_id: str):
+    return or_(
+        _visible_installation(org_id=org_id, user_id=user_id),
+        _workspace_local_skill(),
+    )
+
+
 class SkillRepository(BaseRepository[Skill]):
     """CRUD + domain queries for Skill."""
 
@@ -150,12 +167,12 @@ class SkillRepository(BaseRepository[Skill]):
         return (await self._session.scalars(_active_skill_stmt(with_executions=True))).all()
 
     async def a_list_visible(self, *, org_id: str, user_id: str) -> Sequence[Skill]:
-        """Return active skills installed for the user or system."""
+        """Return active installed or workspace-local skills visible to the user."""
         stmt = (
             select(Skill)
             .where(
                 _not_archived(),
-                _visible_installation(org_id=org_id, user_id=user_id),
+                _visible_skill(org_id=org_id, user_id=user_id),
             )
             .order_by(Skill.name, Skill.id)
             .options(load_only(*_SKILL_LIST_COLUMNS))
@@ -217,12 +234,12 @@ class SkillRepository(BaseRepository[Skill]):
         skill_id: int | None = None,
         name: str | None = None,
     ) -> Skill | None:
-        """Return one active skill installed for the user or system."""
+        """Return one active installed or workspace-local skill visible to the user."""
         if (skill_id is None) == (name is None):
             raise ValueError("Exactly one of skill_id or name is required")
         stmt = select(Skill).where(
             _not_archived(),
-            _visible_installation(org_id=org_id, user_id=user_id),
+            _visible_skill(org_id=org_id, user_id=user_id),
         )
         if skill_id is not None:
             stmt = stmt.where(Skill.id == skill_id)

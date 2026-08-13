@@ -71,6 +71,7 @@ async def _install_skill(
     archived=False,
     review_status="approved",
 ):
+    skill.bundle_version_id = skill.id
     installation = SkillInstallation(
         bundle_id=skill.id,
         bundle_version_id=skill.id,
@@ -134,7 +135,12 @@ async def test_visible_skills_are_scoped_to_system_org_and_user(repo, session):
     personal = await _make_skill(repo, session, name="personal")
     other_user = await _make_skill(repo, session, name="other-user")
     other_org = await _make_skill(repo, session, name="other-org")
-    unscoped = await _make_skill(repo, session, name="unscoped")
+    unscoped = await _make_skill(
+        repo,
+        session,
+        name="unscoped",
+        bundle_version_id=999,
+    )
     await _install_skill(session, system, enabled_scope="system")
     await _install_skill(session, org, org_id="org-1", user_id=None, enabled_scope="org")
     await _install_skill(session, personal, org_id="org-1", user_id="user-1")
@@ -155,6 +161,57 @@ async def test_visible_skills_are_scoped_to_system_org_and_user(repo, session):
         user_id="user-1",
         name="personal",
     ) is personal
+
+
+async def test_workspace_local_skill_is_visible_without_installation(repo, session):
+    local = await _make_skill(
+        repo,
+        session,
+        name="runtime-authored",
+        bundle_version_id=None,
+        trust_level="private_local",
+    )
+    distributed = await _make_skill(
+        repo,
+        session,
+        name="distributed-without-installation",
+        bundle_version_id=999,
+        trust_level="private_local",
+    )
+
+    visible = await repo.a_list_visible(org_id="org-1", user_id="user-1")
+
+    assert visible == [local]
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        skill_id=local.id,
+    ) is local
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        name=local.name,
+    ) is local
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        skill_id=distributed.id,
+    ) is None
+
+    local.archived = True
+    await session.flush()
+
+    assert await repo.a_list_visible(org_id="org-1", user_id="user-1") == []
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        skill_id=local.id,
+    ) is None
+    assert await repo.a_get_visible(
+        org_id="org-1",
+        user_id="user-1",
+        name=local.name,
+    ) is None
 
 
 def test_agent_skill_contracts_match_repository_projections():
