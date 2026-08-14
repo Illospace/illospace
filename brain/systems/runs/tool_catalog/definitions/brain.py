@@ -862,8 +862,8 @@ BRAIN_TOOLS = [
     {
         "name": "manage_cycle",
         "description": (
-            "Create, update, delete, list, manually run, or orient workspace Cycles, which are recurring "
-            "Illo prompts/check-ins/reports or one-time reminders. This is the action tool. For answering questions about "
+            "Create, update, delete, list, manually run, or orient workspace Cycle schedules. A schedule can be "
+            "executed by Illo or declare an expected cadence for a personal agent. This is the action tool. For answering questions about "
             "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
             "'list', 'usage_summary', 'update', 'delete', 'run', 'add_guidance', 'add_output_target', "
             "'remove_output_target'. usage_summary is read-only and reports real token/cost burn from model API calls. "
@@ -895,7 +895,7 @@ BRAIN_TOOLS = [
                     "type": "string",
                     "description": "Optional operation name to inspect when action is help or schema.",
                 },
-                "id": {"type": "integer", "description": "Cycle id (required for update/delete/run)"},
+                "id": {"type": "integer", "description": "Cycle id (required for update/delete/run; optional exact selector for list)"},
                 "days": {
                     "type": "integer",
                     "minimum": 1,
@@ -908,8 +908,8 @@ BRAIN_TOOLS = [
                     "maximum": 500,
                     "description": "For usage_summary, cap the window to the most recent N Cycle runs.",
                 },
-                "name": {"type": "string", "description": "Cycle name"},
-                "prompt": {"type": "string", "description": "Prompt Illo should run each cycle"},
+                "name": {"type": "string", "description": "Cycle name; action=list resolves an exact name when supplied"},
+                "prompt": {"type": "string", "description": "Legacy embedded Cycle prompt. Optional when skill_ids supplies the instructions."},
                 "schedule_expr": {
                     "type": "string",
                     "description": "5-field cron expression like '0 8 * * *', or a one-time expression like 'at:2026-05-08T15:30:00-04:00'",
@@ -947,6 +947,20 @@ BRAIN_TOOLS = [
                         "Optional durable execution-policy key. Null means no "
                         "execution policy."
                     ),
+                },
+                "executor_binding": {
+                    "type": "string",
+                    "enum": ["illo-lane", "personal-agent"],
+                    "description": (
+                        "illo-lane lets Illo fire the cron. personal-agent records an expected "
+                        "cadence that Illo never fires."
+                    ),
+                },
+                "skill_ids": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1},
+                    "uniqueItems": True,
+                    "description": "Ordered workspace skill ids that supply schedule instructions and guardrails.",
                 },
                 "target_idea_id": {
                     "type": "string",

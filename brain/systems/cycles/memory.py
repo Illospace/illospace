@@ -53,6 +53,7 @@ from brain.systems.cycles.serializers import (
     serialize_cycle_output_target,
     serialize_cycle_revision,
 )
+from brain.systems.cycles.skill_refs import async_resolve_cycle_skill_snapshot
 from brain.systems.cycles.output_targets import default_output_target_specs
 from brain.systems.runs.token_usage import (
     async_summarize_run_tree_usage_in_savepoint,
@@ -193,6 +194,14 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
         getattr(cycle, "degradation_state", None),
         scheduled_for=getattr(run, "scheduled_for", None),
     )
+    existing_skill_snapshot = json_dict(
+        json_dict(getattr(run, "context_snapshot", None)).get("schedule_skills")
+    )
+    skill_snapshot = (
+        existing_skill_snapshot
+        if existing_skill_snapshot
+        else await async_resolve_cycle_skill_snapshot(session, cycle)
+    )
     snapshot = _build_cycle_run_memory_snapshot(
         cycle,
         run=run,
@@ -201,6 +210,7 @@ async def async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: Cy
         guidance_rows=guidance_rows,
         target_rows=target_rows,
         degradation_tracking=degradation_tracking,
+        skill_snapshot=skill_snapshot,
     )
 
     if snapshot["revision_id"] is not None:
@@ -220,6 +230,7 @@ def _build_cycle_run_memory_snapshot(
     guidance_rows: list[CycleGuidance],
     target_rows: list[CycleOutputTarget],
     degradation_tracking: dict | None = None,
+    skill_snapshot: dict[str, Any] | None = None,
 ) -> dict:
     output_targets = [serialize_cycle_output_target(target) for target in target_rows]
     _ensure_default_output_targets(cycle, output_targets)
@@ -272,6 +283,11 @@ def _build_cycle_run_memory_snapshot(
                         result_contract=result_contract,
                     )
                 ],
+                **(
+                    {"schedule_skills": skill_snapshot}
+                    if skill_snapshot is not None
+                    else {}
+                ),
                 **creator_payload(cycle),
             }
         ),

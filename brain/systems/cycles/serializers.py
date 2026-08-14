@@ -16,6 +16,7 @@ from brain.platform.db.models.cycle import (
 )
 from brain.systems.cycles.common import (
     REUSABLE_THREAD_EXECUTION_MODE,
+    cycle_executor_binding,
     creator_payload,
     json_dict,
     json_list,
@@ -42,6 +43,8 @@ _CYCLE_POLICY_EDITABLE_FIELDS = (
     "enabled",
     "model_override",
     "thinking_override",
+    "executor_binding",
+    "skill_ids",
     "guidance",
 )
 
@@ -383,6 +386,8 @@ def serialize_cycle(cycle: Cycle) -> dict:
         "model_override": cycle.model_override,
         "thinking_override": cycle.thinking_override,
         "execution_policy_key": getattr(cycle, "execution_policy_key", None),
+        "executor_binding": cycle_executor_binding(cycle),
+        "skill_ids": list(getattr(cycle, "skill_ids", None) or []),
         "execution_mode": REUSABLE_THREAD_EXECUTION_MODE,
         "target_idea_id": string_or_none(cycle.target_idea_id),
         "reopen_archived": True,

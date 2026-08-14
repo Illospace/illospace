@@ -4,7 +4,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -78,6 +89,12 @@ class Cycle(Base, TimestampMixin):
     """A workspace-owned recurring mission."""
 
     __tablename__ = "cycles"
+    __table_args__ = (
+        CheckConstraint(
+            "executor_binding IN ('illo-lane', 'personal-agent')",
+            name="ck_cycles_executor_binding",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(
@@ -118,6 +135,18 @@ class Cycle(Base, TimestampMixin):
         nullable=False,
         server_default="reuse_same_idea",
         default="reuse_same_idea",
+    )
+    executor_binding: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default="illo-lane",
+        default="illo-lane",
+    )
+    skill_ids: Mapped[list] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
     )
     target_idea_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("ideas.id", ondelete="SET NULL"), nullable=True, index=True

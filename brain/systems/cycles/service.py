@@ -33,6 +33,8 @@ from brain.systems.cycles.quota_preflight import (
 )
 from brain.systems.cycles.common import (
     MANUAL_CYCLE_ORIGIN,
+    ILLO_LANE_EXECUTOR_BINDING,
+    PERSONAL_AGENT_EXECUTOR_BINDING,
     MAX_CYCLE_TIMEOUT_SECONDS,
     MIN_CYCLE_TIMEOUT_SECONDS,
     REUSABLE_THREAD_EXECUTION_MODE,
@@ -40,6 +42,7 @@ from brain.systems.cycles.common import (
     SCHEDULED_DIGEST_RUN_KIND,
     THREAD_OUTPUT_TARGET_TYPE,
     canonical_execution_mode,
+    cycle_executor_binding,
     cycle_run_launch_context,
     json_dict,
     short_identifier,
@@ -451,6 +454,13 @@ def _record_capacity_disposition(
     run.context_snapshot = context_snapshot
 
 
+def _personal_cycle_run_is_scheduler_owned(cycle: Cycle, run: CycleRun) -> bool:
+    return (
+        cycle_executor_binding(cycle) == PERSONAL_AGENT_EXECUTOR_BINDING
+        and cycle_run_launch_context(run).get("origin") == SCHEDULED_CYCLE_ORIGIN
+    )
+
+
 async def async_claim_cycle_run(session, run_id: int) -> tuple[CycleRun, Cycle] | None:
     """Atomically claim one queued run under its owning Cycle's capacity lock."""
     result = await session.scalars(
@@ -499,6 +509,17 @@ async def async_claim_cycle_run(session, run_id: int) -> tuple[CycleRun, Cycle] 
             run.status = "failed"
             run.error = "Cycle deleted before run started"
             run.completed_at = datetime.now(timezone.utc)
+        await session.flush()
+        return None
+
+    if _personal_cycle_run_is_scheduler_owned(cycle, run):
+        await _finalize_cycle_run(
+            run,
+            cycle,
+            status="skipped",
+            skip_reason="personal_agent_executor",
+            session=session,
+        )
         await session.flush()
         return None
 
@@ -572,6 +593,14 @@ async def async_recover_stale_cycle_runs_once(
                         error="Cycle unavailable before stale queued run recovered",
                         session=uow.session,
                     )
+                elif _personal_cycle_run_is_scheduler_owned(cycle, run):
+                    await _finalize_stale_cycle_run(
+                        run,
+                        cycle,
+                        status="skipped",
+                        skip_reason="personal_agent_executor",
+                        session=uow.session,
+                    )
                 else:
                     executable_run_ids.append(run.id)
                 continue
@@ -634,6 +663,7 @@ async def _async_materialize_due_cycle_runs_once(
             .where(
                 Cycle.deleted_at.is_(None),
                 Cycle.enabled.is_(True),
+                Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
                 Cycle.next_run_at.is_not(None),
                 Cycle.next_run_at <= now,
             )
@@ -720,6 +750,7 @@ async def async_advance_cycle_schedule_past_gap(
             .where(
                 Cycle.deleted_at.is_(None),
                 Cycle.enabled.is_(True),
+                Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
                 Cycle.next_run_at.is_not(None),
                 Cycle.next_run_at < catch_up_before,
             )
@@ -795,6 +826,7 @@ async def async_wake_cycle_now(*, name: str, org_id: str | None = None) -> str:
             Cycle.name == name,
             Cycle.enabled.is_(True),
             Cycle.deleted_at.is_(None),
+            Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
         ]
         if org_id is not None:
             filters.append(Cycle.org_id == org_id)

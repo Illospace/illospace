@@ -4,7 +4,7 @@ from dataclasses import fields
 from datetime import datetime
 from typing import Any, get_args, get_type_hints
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, create_model
 
 from brain.systems.cycles.behavior_policy_contract import CyclePolicySnapshot
 from brain.systems.cycles.common import (
@@ -15,7 +15,7 @@ from brain.systems.cycles.common import (
 
 class CycleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=500)
-    prompt: str = Field(min_length=1, max_length=20000)
+    prompt: str | None = Field(default=None, max_length=20000)
     schedule_expr: str | None = Field(default=None, min_length=1, max_length=100)
     run_at: datetime | None = None
     timezone: str = Field(min_length=1, max_length=64)
@@ -30,6 +30,8 @@ class CycleCreate(BaseModel):
     model_override: str | None = None
     thinking_override: str | None = None
     execution_policy_key: str | None = Field(default=None, max_length=100)
+    executor_binding: str = Field(default="illo-lane", max_length=32)
+    skill_ids: list[StrictInt] = Field(default_factory=list)
     target_idea_id: str | None = None
     guidance: str | None = Field(default=None, max_length=20000)
     rationale: str | None = Field(default=None, max_length=5000)
@@ -37,7 +39,7 @@ class CycleCreate(BaseModel):
 
 class CycleUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=500)
-    prompt: str | None = Field(default=None, min_length=1, max_length=20000)
+    prompt: str | None = Field(default=None, max_length=20000)
     schedule_expr: str | None = Field(default=None, min_length=1, max_length=100)
     run_at: datetime | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
@@ -52,6 +54,8 @@ class CycleUpdate(BaseModel):
     model_override: str | None = None
     thinking_override: str | None = None
     execution_policy_key: str | None = Field(default=None, max_length=100)
+    executor_binding: str | None = Field(default=None, max_length=32)
+    skill_ids: list[StrictInt] | None = None
     target_idea_id: str | None = None
     guidance: str | None = Field(default=None, max_length=20000)
     rationale: str | None = Field(default=None, max_length=5000)
@@ -77,6 +81,8 @@ class CycleRead(BaseModel):
     model_override: str | None = None
     thinking_override: str | None = None
     execution_policy_key: str | None = None
+    executor_binding: str
+    skill_ids: list[int]
     execution_mode: str
     target_idea_id: str | None = None
     reopen_archived: bool
@@ -113,7 +119,7 @@ class CyclePolicyProposal(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str | None = Field(default=None, min_length=1, max_length=20000)
+    prompt: str | None = Field(default=None, max_length=20000)
     schedule_expr: str | None = Field(
         default=None,
         min_length=1,
@@ -123,6 +129,8 @@ class CyclePolicyProposal(BaseModel):
     enabled: bool | None = None
     model_override: str | None = None
     thinking_override: str | None = None
+    executor_binding: str | None = Field(default=None, max_length=32)
+    skill_ids: list[StrictInt] | None = None
     guidance: list[str] | None = None
 
 
