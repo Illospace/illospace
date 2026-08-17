@@ -361,14 +361,19 @@ a human action. This never-merge rule is absolute for staging→main.
 - `In Review`: non-draft PR is open and awaiting review, CI, or merge.
 - `Blocked`: failing CI, requested changes, unclear owner, missing info, or
   external dependency.
-- `Done`: linked PR merged or issue closed. For an alert-linked ticket (one
+- `Done`: a pull request with GitHub `merged == true`, or an issue with GitHub
+  `state == "closed"`. Never treat a merged pull request's raw closed state as
+  cancellation. For an alert-linked ticket (one
   with a `rollbar_item`), `Done` additionally requires the fix deployed to
   prod by current ancestry AND `verified=true` per **Deploy State on Read** —
   merged-to-staging is not done. A `Done` item must
   not appear in anyone's priority workset — see **Before Posting** and
   **Public Output**.
-- `Canceled` / `wontfix`: obsolete, duplicate, invalid, intentionally closed,
-  or not worth doing.
+- `Canceled` / `wontfix`: for a pull request, GitHub `state == "closed"` and
+  `merged` is not true; otherwise obsolete, duplicate, invalid, intentionally
+  closed, or not worth doing. Test `merged` for truth, never for `== false` —
+  a stored record can carry `merged: null` when the field was never read, and
+  an equality test silently drops that row on the floor.
 
 ## Identities
 

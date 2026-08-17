@@ -95,20 +95,31 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
         source_updated_at = comment.get("updated_at") or source_updated_at
 
     merge_hints = {}
+    summary_action = action
     if event == "pull_request":
+        merged = subject.get("merged") is True
+        if merged:
+            pr_outcome = "merged"
+        elif state == "closed":
+            pr_outcome = "closed_unmerged"
+        else:
+            pr_outcome = "open"
         merge_hints = {
-            "merged": subject.get("merged") is True,
+            "merged": merged,
+            "pr_outcome": pr_outcome,
             "base_ref": (subject.get("base") or {}).get("ref"),
             "head_ref": (subject.get("head") or {}).get("ref"),
             "merge_commit_sha": subject.get("merge_commit_sha"),
             "merged_at": subject.get("merged_at"),
         }
+        if pr_outcome == "merged":
+            summary_action = "merged"
 
     where = f" #{number}" if number else ""
     summary = (
-        f"GitHub {noun}{where} {action}: {title}".strip()
+        f"GitHub {noun}{where} {summary_action}: {title}".strip()
         if title
-        else f"GitHub {noun}{where} {action}".strip()
+        else f"GitHub {noun}{where} {summary_action}".strip()
     )
 
     return {
