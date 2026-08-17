@@ -18,8 +18,9 @@ compose() {
 }
 
 compose_env_value() {
-  local key="$1"
-  python3 - "$ENV_FILE" "$key" <<'PY'
+  local key="$1" python_bin
+  python_bin="$(worker_swap_python_bin)"
+  if ! "$python_bin" - "$ENV_FILE" "$key" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -39,6 +40,10 @@ for line in path.read_text(encoding="utf-8").splitlines():
     print(value)
     break
 PY
+  then
+    echo "Failed to read $key from $ENV_FILE with Python interpreter: $python_bin" >&2
+    return 1
+  fi
 }
 
 compose_profile_enabled() {
@@ -46,7 +51,7 @@ compose_profile_enabled() {
   if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
     profiles="$COMPOSE_PROFILES"
   else
-    profiles="$(compose_env_value COMPOSE_PROFILES)"
+    profiles="$(compose_env_value COMPOSE_PROFILES)" || return
   fi
   profiles=",${profiles// /,},"
   case "$profiles" in

@@ -98,7 +98,7 @@ need_command() {
 }
 
 need_command docker
-need_command python3
+need_command "$(worker_swap_python_bin)"
 
 if [ ! -f "$ENV_FILE" ]; then
   fail "missing $ENV_FILE; run deploy/scripts/init-secrets.sh"
@@ -128,7 +128,7 @@ for key in ILLO_PUBLIC_URL SECRET_KEY VAULT_MASTER_KEY DB_NAME DB_USER DB_PASSWO
 done
 
 if [ -n "${ILLO_PUBLIC_URL:-}" ]; then
-  if python3 - "$ILLO_PUBLIC_URL" <<'PY'
+  if "$(worker_swap_python_bin)" - "$ILLO_PUBLIC_URL" <<'PY'
 import sys
 from urllib.parse import urlparse
 
@@ -148,7 +148,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${GEMINI_API_KEY:-}${EMBEDDING
 fi
 
 if [ -n "${VAULT_MASTER_KEY:-}" ]; then
-  if python3 - "$VAULT_MASTER_KEY" <<'PY'
+  if "$(worker_swap_python_bin)" - "$VAULT_MASTER_KEY" <<'PY'
 import base64
 import sys
 

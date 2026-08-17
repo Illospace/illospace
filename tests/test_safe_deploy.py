@@ -590,6 +590,68 @@ def test_meetbot_profile_detection_honors_shell_precedence_wildcard_and_stopped_
     assert launcher_oneoff_only.returncode == 0
 
 
+def test_compose_env_value_reports_pinned_interpreter_failure(tmp_path):
+    runtime_lib = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "scripts"
+        / "compose-runtime-lib.sh"
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("COMPOSE_PROFILES=meetbot\n")
+    broken_python = tmp_path / "broken-python"
+    broken_python.write_text("#!/usr/bin/env bash\nexit 42\n")
+    broken_python.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{runtime_lib}"; compose_env_value COMPOSE_PROFILES',
+        ],
+        env={
+            **os.environ,
+            "ENV_FILE": str(env_file),
+            "WORKER_SWAP_PYTHON_BIN": str(broken_python),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert str(broken_python) in result.stderr
+    assert result.stdout == ""
+
+
+def test_compose_profile_is_disabled_when_env_key_is_absent(tmp_path):
+    runtime_lib = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "scripts"
+        / "compose-runtime-lib.sh"
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("SECRET_KEY=present\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'unset COMPOSE_PROFILES; source "{runtime_lib}"; compose_profile_enabled meetbot',
+        ],
+        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        | {
+            "ENV_FILE": str(env_file),
+            "WORKER_SWAP_PYTHON_BIN": sys.executable,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+
+
 def test_compose_worker_restart_asserts_exactly_one_running_worker():
     runtime_lib = Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "compose-runtime-lib.sh"
     script = f'''
