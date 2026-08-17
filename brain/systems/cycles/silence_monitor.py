@@ -1,4 +1,4 @@
-"""Alert when an enabled Cycle schedule misses its receipt window."""
+"""Orchestrate alerts when enabled Cycle schedules miss receipt windows."""
 from __future__ import annotations
 
 import asyncio
@@ -6,51 +6,27 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
-import os
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.time import assume_utc_optional
-from brain.platform.db.models.cycle import (
-    Cycle,
-    CycleFailureGuardLatch,
-    CycleRun,
+from brain.platform.db.repositories.cycle_silence import CycleSilenceRepository
+from brain.systems.cycles.silence_alerts import (
+    async_deliver_cycle_silence_alert,
 )
-from brain.systems.cycles.common import cycle_executor_binding
-from brain.systems.cycles.schedules import compute_latest_run_at
 from brain.systems.cycles.silence_policy import (
+    CycleSilenceCandidate,
     CycleSilencePolicy,
     async_cycle_silence_policy,
+    evaluate_cycle_silence_candidate,
 )
-from brain.systems.cortex.thread_links import public_app_base_url
 from brain.systems.failure_guard.core import FailureGuardTriggerKind
-from brain.systems.failure_guard.cycle_latches import (
-    async_release_cycle_alert_latch,
-    async_try_claim_cycle_alert_latch,
-)
-from brain.systems.failure_guard.slack_delivery import (
-    FailureAlertPresentation,
-    FailureAlertSubject,
-    SlackFailureAlertPolicy,
-    async_deliver_failure_alert,
-)
-from brain.systems.slack.client import slack_web_client_from_runtime
+from brain.systems.failure_guard.cycle_latches import CycleAlertLatchStore
 
 
 logger = logging.getLogger(__name__)
 
 CYCLE_MISSED_RECEIPT_TRIGGER_KIND = FailureGuardTriggerKind("missed_receipt")
-
-
-@dataclass(frozen=True, slots=True)
-class CycleSilenceCandidate:
-    cycle_id: int
-    name: str
-    binding: str
-    expected_at: datetime
-    last_receipt_at: datetime | None
-    grace_margin: timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,53 +45,11 @@ PolicyProvider = Callable[[AsyncSession], Awaitable[CycleSilencePolicy]]
 CandidateProvider = Callable[..., Awaitable[CycleSilenceObservation]]
 AlertClaim = Callable[..., Awaitable[bool]]
 AlertRelease = Callable[..., Awaitable[None]]
-AlertDelivery = Callable[..., Awaitable[None]]
+AlertDelivery = Callable[[CycleSilenceCandidate], Awaitable[None]]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _latest_receipt_subquery():
-    return (
-        select(func.max(CycleRun.completed_at))
-        .where(CycleRun.cycle_id == Cycle.id)
-        .correlate(Cycle)
-        .scalar_subquery()
-    )
-
-
-def _missed_receipt_candidate(
-    cycle: Cycle,
-    *,
-    last_receipt_at: datetime | None,
-    now: datetime,
-    grace_margin: timedelta,
-) -> CycleSilenceCandidate | None:
-    expected_at = compute_latest_run_at(
-        cycle.schedule_expr,
-        cycle.timezone,
-        at_or_before=now - grace_margin,
-    )
-    if expected_at is None:
-        return None
-    monitoring_started_at = assume_utc_optional(
-        getattr(cycle, "receipt_monitoring_started_at", None)
-        or getattr(cycle, "created_at", None)
-    )
-    if monitoring_started_at is None or expected_at < monitoring_started_at:
-        return None
-    normalized_receipt = assume_utc_optional(last_receipt_at)
-    if normalized_receipt is not None and normalized_receipt >= expected_at:
-        return None
-    return CycleSilenceCandidate(
-        cycle_id=int(cycle.id),
-        name=str(cycle.name),
-        binding=cycle_executor_binding(cycle),
-        expected_at=expected_at,
-        last_receipt_at=normalized_receipt,
-        grace_margin=grace_margin,
-    )
 
 
 async def async_cycle_silence_observation(
@@ -124,46 +58,28 @@ async def async_cycle_silence_observation(
     now: datetime,
     grace_margin: timedelta,
 ) -> CycleSilenceObservation:
-    """Read every enabled binding and its latest completed CycleRun receipt."""
-    latest_receipt = _latest_receipt_subquery()
-    rows = (
-        await session.execute(
-            select(Cycle, latest_receipt.label("last_receipt_at"))
-            .where(
-                Cycle.enabled.is_(True),
-                Cycle.deleted_at.is_(None),
-            )
-            .order_by(Cycle.id.asc())
-        )
-    ).all()
+    """Evaluate persisted receipt snapshots and read current alert edges."""
+    snapshots = await CycleSilenceRepository(session).list_receipt_snapshots()
     candidates: list[CycleSilenceCandidate] = []
-    for cycle, last_receipt_at in rows:
+    for snapshot in snapshots:
         try:
-            candidate = _missed_receipt_candidate(
-                cycle,
-                last_receipt_at=last_receipt_at,
+            candidate = evaluate_cycle_silence_candidate(
+                snapshot,
                 now=now,
                 grace_margin=grace_margin,
             )
         except ValueError:
             logger.exception(
                 "Cycle receipt window could not be evaluated: cycle_id=%s",
-                cycle.id,
+                snapshot.cycle_id,
             )
             continue
         if candidate is not None:
             candidates.append(candidate)
 
-    latched_cycle_ids = frozenset(
-        int(cycle_id)
-        for cycle_id in (
-            await session.scalars(
-                select(CycleFailureGuardLatch.cycle_id).where(
-                    CycleFailureGuardLatch.trigger_kind
-                    == str(CYCLE_MISSED_RECEIPT_TRIGGER_KIND)
-                )
-            )
-        ).all()
+    latched_cycle_ids = await CycleAlertLatchStore.load_cycle_ids_for_trigger(
+        session,
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
     )
     return CycleSilenceObservation(
         candidates=tuple(candidates),
@@ -179,11 +95,10 @@ async def _claim_cycle_silence_alert(
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     async with UnitOfWork() as uow:
-        return await async_try_claim_cycle_alert_latch(
-            uow.session,
-            cycle_id=cycle_id,
-            trigger_kind=CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
-            alerted_at=alerted_at,
+        store = CycleAlertLatchStore(session=uow.session, cycle_id=cycle_id)
+        return await store.try_claim_latch(
+            CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+            alerted_at,
         )
 
 
@@ -195,32 +110,11 @@ async def _release_cycle_silence_alert(
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     async with UnitOfWork() as uow:
-        await async_release_cycle_alert_latch(
-            uow.session,
-            cycle_id=cycle_id,
-            trigger_kind=CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+        store = CycleAlertLatchStore(session=uow.session, cycle_id=cycle_id)
+        await store.release_latch(
+            CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
             alerted_at=alerted_at,
         )
-
-
-def _minutes(duration: timedelta) -> int:
-    return int(duration.total_seconds() // 60)
-
-
-def _candidate_summary(candidate: CycleSilenceCandidate) -> str:
-    last_seen = (
-        candidate.last_receipt_at.isoformat()
-        if candidate.last_receipt_at is not None
-        else "never"
-    )
-    return "\n".join(
-        (
-            f"Binding: {candidate.binding}",
-            f"Expected receipt: {candidate.expected_at.isoformat()}",
-            f"Last receipt: {last_seen}",
-            f"Grace margin: {_minutes(candidate.grace_margin)}m",
-        )
-    )
 
 
 class CycleSilenceMonitor:
@@ -236,7 +130,7 @@ class CycleSilenceMonitor:
         candidate_provider: CandidateProvider = async_cycle_silence_observation,
         claim_alert: AlertClaim = _claim_cycle_silence_alert,
         release_alert: AlertRelease = _release_cycle_silence_alert,
-        deliver_alert: AlertDelivery = async_deliver_failure_alert,
+        deliver_alert: AlertDelivery = async_deliver_cycle_silence_alert,
     ) -> None:
         self._policy_provider = policy_provider
         self._candidate_provider = candidate_provider
@@ -313,7 +207,7 @@ class CycleSilenceMonitor:
             if not claimed:
                 continue
             try:
-                await self._deliver(candidate)
+                await self._deliver_alert(candidate)
             except Exception:  # noqa: BLE001 - release permits a later retry
                 logger.exception(
                     "Cycle receipt-silence Slack delivery failed: cycle_id=%s",
@@ -330,44 +224,9 @@ class CycleSilenceMonitor:
             alerted_cycle_ids=tuple(alerted_ids),
         )
 
-    async def _deliver(self, candidate: CycleSilenceCandidate) -> None:
-        last_seen = (
-            candidate.last_receipt_at.isoformat()
-            if candidate.last_receipt_at is not None
-            else "never"
-        )
-        await self._deliver_alert(
-            policy=SlackFailureAlertPolicy(
-                provide_client=slack_web_client_from_runtime,
-                requested_by=self.name,
-                reason="Deliver a missed Cycle receipt alert to the team.",
-                channel=(
-                    os.getenv("ILLO_CYCLE_FAILURE_ALERT_CHANNEL", "").strip()
-                    or "#alerts"
-                ),
-                unknown_error_text="Cycle receipt is missing",
-            ),
-            subject=FailureAlertSubject(
-                identity_label="Schedule",
-                identity=f"{candidate.name} (#{candidate.cycle_id})",
-                url_label="Schedule",
-                url=f"{public_app_base_url()}/cycles?cycle_id={candidate.cycle_id}",
-                link_label="open schedule state",
-            ),
-            presentation=FailureAlertPresentation(
-                title="Cycle schedule missed receipt",
-                summary=_candidate_summary(candidate),
-            ),
-            error_text=(
-                f"Expected a receipt at {candidate.expected_at.isoformat()}; "
-                f"last seen {last_seen}."
-            ),
-        )
-
 
 __all__ = [
     "CYCLE_MISSED_RECEIPT_TRIGGER_KIND",
-    "CycleSilenceCandidate",
     "CycleSilenceCheck",
     "CycleSilenceMonitor",
     "CycleSilenceObservation",

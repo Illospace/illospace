@@ -14,27 +14,29 @@ from brain.platform.db.models.cycle import (
     CycleRun,
 )
 from brain.platform.db.models.vault import VaultConfig
+from brain.platform.db.repositories.cycle_silence import CycleReceiptSnapshot
 from brain.systems.cycles.common import (
     ILLO_LANE_EXECUTOR_BINDING,
     PERSONAL_AGENT_EXECUTOR_BINDING,
 )
-from brain.systems.cycles.schedules import compute_latest_run_at
+from brain.systems.cycles.schedules import (
+    compute_latest_run_at,
+    compute_next_run_at,
+)
+from brain.systems.cycles.silence_alerts import async_deliver_cycle_silence_alert
 from brain.systems.cycles.silence_monitor import (
     CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
-    CycleSilenceCandidate,
     CycleSilenceMonitor,
     CycleSilenceObservation,
-    _missed_receipt_candidate,
 )
 from brain.systems.cycles.silence_policy import (
     CYCLE_SILENCE_RUNTIME_SETTINGS_KEY,
+    CycleSilenceCandidate,
     CycleSilencePolicy,
     async_cycle_silence_policy,
+    evaluate_cycle_silence_candidate,
 )
-from brain.systems.failure_guard.cycle_latches import (
-    async_release_cycle_alert_latch,
-    async_try_claim_cycle_alert_latch,
-)
+from brain.systems.failure_guard.cycle_latches import CycleAlertLatchStore
 
 
 NOW = datetime(2026, 8, 17, 13, 0, tzinfo=timezone.utc)
@@ -85,6 +87,29 @@ def _cycle(
     )
 
 
+def _silence_candidate(
+    cycle: Cycle,
+    *,
+    last_receipt_at: datetime | None,
+    now: datetime,
+    grace_margin: timedelta,
+) -> CycleSilenceCandidate | None:
+    return evaluate_cycle_silence_candidate(
+        CycleReceiptSnapshot(
+            cycle_id=cycle.id,
+            name=cycle.name,
+            executor_binding=cycle.executor_binding,
+            schedule_expr=cycle.schedule_expr,
+            timezone=cycle.timezone,
+            receipt_monitoring_started_at=cycle.receipt_monitoring_started_at,
+            created_at=cycle.created_at,
+            last_receipt_at=last_receipt_at,
+        ),
+        now=now,
+        grace_margin=grace_margin,
+    )
+
+
 class _FakeLatch:
     def __init__(self) -> None:
         self.cycle_ids: set[int] = set()
@@ -132,8 +157,14 @@ async def test_day_old_receipt_alert_names_schedule_binding_and_times(
     latch = _FakeLatch()
     deliveries = []
 
-    async def deliver(**kwargs):
+    async def capture_delivery(**kwargs):
         deliveries.append(kwargs)
+
+    async def deliver(candidate):
+        await async_deliver_cycle_silence_alert(
+            candidate,
+            deliver_alert=capture_delivery,
+        )
 
     monitor = CycleSilenceMonitor(
         claim_alert=latch.claim,
@@ -179,7 +210,7 @@ def test_weekday_every_two_hour_schedule_stays_quiet_all_week_when_healthy():
         )
         if latest_due is not None and latest_due >= cycle.receipt_monitoring_started_at:
             last_receipt_at = latest_due + timedelta(minutes=5)
-        candidate = _missed_receipt_candidate(
+        candidate = _silence_candidate(
             cycle,
             last_receipt_at=last_receipt_at,
             now=now,
@@ -205,7 +236,7 @@ def test_weekend_pause_does_not_treat_elapsed_wall_time_as_the_cadence():
             hours=hour
         )
         assert (
-            _missed_receipt_candidate(
+            _silence_candidate(
                 cycle,
                 last_receipt_at=friday_receipt,
                 now=weekend_now,
@@ -215,7 +246,7 @@ def test_weekend_pause_does_not_treat_elapsed_wall_time_as_the_cadence():
         )
 
     monday_late = datetime(2026, 8, 17, 4, 31, tzinfo=timezone.utc)
-    candidate = _missed_receipt_candidate(
+    candidate = _silence_candidate(
         cycle,
         last_receipt_at=friday_receipt,
         now=monday_late,
@@ -234,7 +265,7 @@ def test_long_cadence_does_not_alert_before_the_next_real_slot():
     august_receipt = datetime(2026, 8, 1, 9, 5, tzinfo=timezone.utc)
 
     assert (
-        _missed_receipt_candidate(
+        _silence_candidate(
             cycle,
             last_receipt_at=august_receipt,
             now=datetime(2026, 8, 31, 23, 59, tzinfo=timezone.utc),
@@ -243,7 +274,7 @@ def test_long_cadence_does_not_alert_before_the_next_real_slot():
         is None
     )
     assert (
-        _missed_receipt_candidate(
+        _silence_candidate(
             cycle,
             last_receipt_at=august_receipt,
             now=datetime(2026, 9, 1, 9, 31, tzinfo=timezone.utc),
@@ -260,7 +291,7 @@ def test_new_schedule_waits_for_its_first_post_creation_slot():
     )
 
     assert (
-        _missed_receipt_candidate(
+        _silence_candidate(
             cycle,
             last_receipt_at=None,
             now=NOW,
@@ -269,7 +300,7 @@ def test_new_schedule_waits_for_its_first_post_creation_slot():
         is None
     )
     assert (
-        _missed_receipt_candidate(
+        _silence_candidate(
             cycle,
             last_receipt_at=None,
             now=NOW + timedelta(days=1, minutes=31),
@@ -302,8 +333,8 @@ async def test_recovery_releases_latch_and_later_silence_realerts():
             latched_cycle_ids=frozenset(latch.cycle_ids),
         )
 
-    async def deliver(**kwargs):
-        deliveries.append(kwargs)
+    async def deliver(candidate):
+        deliveries.append(candidate)
 
     monitor = CycleSilenceMonitor(
         policy_provider=policy,
@@ -349,7 +380,7 @@ async def test_failed_delivery_releases_latch_for_the_next_tick():
             latched_cycle_ids=frozenset(latch.cycle_ids),
         )
 
-    async def deliver(**_kwargs):
+    async def deliver(_candidate):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -376,32 +407,40 @@ async def test_database_latch_claim_is_atomic_and_rearms(silence_session):
     silence_session.add(cycle)
     await silence_session.flush()
 
-    first = await async_try_claim_cycle_alert_latch(
-        silence_session,
-        cycle_id=cycle.id,
-        trigger_kind=CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
-        alerted_at=NOW,
+    store = CycleAlertLatchStore(session=silence_session, cycle_id=cycle.id)
+    first = await store.try_claim_latch(
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+        NOW,
     )
-    repeated = await async_try_claim_cycle_alert_latch(
-        silence_session,
-        cycle_id=cycle.id,
-        trigger_kind=CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+    repeated = await store.try_claim_latch(
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+        NOW + timedelta(minutes=5),
+    )
+    await store.release_latch(
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
         alerted_at=NOW + timedelta(minutes=5),
     )
-    await async_release_cycle_alert_latch(
-        silence_session,
-        cycle_id=cycle.id,
-        trigger_kind=CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+    fenced = await store.try_claim_latch(
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+        NOW + timedelta(minutes=10),
     )
-    rearmed = await async_try_claim_cycle_alert_latch(
+    latched_cycle_ids = await CycleAlertLatchStore.load_cycle_ids_for_trigger(
         silence_session,
-        cycle_id=cycle.id,
-        trigger_kind=CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
-        alerted_at=NOW + timedelta(hours=3),
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+    )
+    await store.release_latch(
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+        alerted_at=NOW,
+    )
+    rearmed = await store.try_claim_latch(
+        CYCLE_MISSED_RECEIPT_TRIGGER_KIND,
+        NOW + timedelta(hours=3),
     )
 
     assert first is True
     assert repeated is False
+    assert fenced is False
+    assert latched_cycle_ids == frozenset({cycle.id})
     assert rearmed is True
 
 
@@ -444,3 +483,22 @@ def test_exact_cron_boundary_is_included_in_latest_slot():
         "UTC",
         at_or_before=boundary,
     ) == boundary
+
+
+def test_forward_and_backward_slots_agree_across_dst_transition():
+    before_spring_forward = datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc)
+    after_spring_forward = datetime(2026, 3, 8, 13, 0, tzinfo=timezone.utc)
+
+    next_slot = compute_next_run_at(
+        "0 9 * * *",
+        "America/Toronto",
+        from_dt=before_spring_forward,
+    )
+    latest_slot = compute_latest_run_at(
+        "0 9 * * *",
+        "America/Toronto",
+        at_or_before=after_spring_forward,
+    )
+
+    assert next_slot == after_spring_forward
+    assert latest_slot == next_slot

@@ -72,6 +72,25 @@ def validate_timezone_name(name: str) -> str:
     return value
 
 
+def _cron_iterator(
+    schedule_expr: str,
+    timezone_name: str,
+    baseline: datetime,
+):
+    timezone_info = ZoneInfo(validate_timezone_name(timezone_name))
+    local_baseline = baseline.astimezone(timezone_info)
+    return (
+        croniter(validate_schedule_expr(schedule_expr), local_baseline),
+        timezone_info,
+    )
+
+
+def _normalize_cron_result(result: datetime, timezone_info: ZoneInfo) -> datetime:
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone_info)
+    return result.astimezone(timezone.utc)
+
+
 def compute_next_run_at(
     schedule_expr: str,
     timezone_name: str,
@@ -82,14 +101,16 @@ def compute_next_run_at(
         run_at = _parse_one_time_run_at(schedule_expr, timezone_name)
         return None if from_dt is not None and run_at <= from_dt else run_at
 
-    tz = ZoneInfo(validate_timezone_name(timezone_name))
     baseline = from_dt or datetime.now(timezone.utc)
-    local_baseline = baseline.astimezone(tz)
-    iterator = croniter(validate_schedule_expr(schedule_expr), local_baseline)
-    next_local = iterator.get_next(datetime)
-    if next_local.tzinfo is None:
-        next_local = next_local.replace(tzinfo=tz)
-    return next_local.astimezone(timezone.utc)
+    iterator, timezone_info = _cron_iterator(
+        schedule_expr,
+        timezone_name,
+        baseline,
+    )
+    return _normalize_cron_result(
+        iterator.get_next(datetime),
+        timezone_info,
+    )
 
 
 def compute_latest_run_at(
@@ -105,13 +126,15 @@ def compute_latest_run_at(
         run_at = _parse_one_time_run_at(schedule_expr, timezone_name)
         return run_at if run_at <= at_or_before else None
 
-    tz = ZoneInfo(validate_timezone_name(timezone_name))
-    local_baseline = at_or_before.astimezone(tz) + timedelta(microseconds=1)
-    iterator = croniter(validate_schedule_expr(schedule_expr), local_baseline)
-    previous_local = iterator.get_prev(datetime)
-    if previous_local.tzinfo is None:
-        previous_local = previous_local.replace(tzinfo=tz)
-    return previous_local.astimezone(timezone.utc)
+    iterator, timezone_info = _cron_iterator(
+        schedule_expr,
+        timezone_name,
+        at_or_before + timedelta(microseconds=1),
+    )
+    return _normalize_cron_result(
+        iterator.get_prev(datetime),
+        timezone_info,
+    )
 
 
 def humanize_schedule(schedule_expr: str, timezone_name: str) -> str:
