@@ -54,6 +54,8 @@ _DIRECT_REF_KINDS = {
     "project_profile_id": "project_context",
     "handoff_id": "launch_handoff",
     "source_id": "memory_source",
+    "curation_source_id": "memory_source",
+    "replacement_source_id": "memory_source",
     "span_id": "memory_span",
     "span_ids": "memory_span",
     "content_node_id": "memory_node",
