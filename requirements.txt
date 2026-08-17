@@ -40,3 +40,6 @@ accelerate>=1.0
 # production image too; the "Local" voice provider degrades to unavailable if
 # this is somehow missing.
 faster-whisper>=1.0
+
+# Test safety
+pytest-timeout>=2.4

@@ -12,8 +12,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_LIB = ROOT / "deploy" / "scripts" / "compose-runtime-lib.sh"
+SIMULATOR_TIMEOUT_SECONDS = 5
 
 
 def _simulator(
@@ -187,8 +190,48 @@ echo "RUNNING=$(compose ps --status running -q worker 2>/dev/null | sort | paste
 '''
 
 
-def _run(script: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+def _run(script: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=SIMULATOR_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = (
+            exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        )
+        stderr = (
+            exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        )
+        pytest.fail(
+            f"worker-swap simulator did not exit within {SIMULATOR_TIMEOUT_SECONDS}s\n"
+            f"--- captured stdout ---\n{stdout or ''}\n"
+            f"--- captured stderr ---\n{stderr or ''}",
+            pytrace=False,
+        )
+
+
+def test_run_fails_with_captured_output_when_simulator_times_out(monkeypatch):
+    def time_out(*args, **kwargs):
+        assert kwargs["timeout"] == SIMULATOR_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=kwargs["timeout"],
+            output=b"simulator stdout\n",
+            stderr=b"simulator stderr\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _run("exit 0")
+
+    message = str(failure.value)
+    assert "did not exit within 5s" in message
+    assert "simulator stdout" in message
+    assert "simulator stderr" in message
 
 
 def _calls(state: Path) -> str:
