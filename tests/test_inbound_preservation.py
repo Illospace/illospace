@@ -368,6 +368,65 @@ async def test_preservation_submission_with_explicit_memory_evidence_reconciles_
     assert "memory_source" in {ref["kind"] for ref in receipt.tool_use["attribution"]["mutated_target_refs"]}
 
 
+async def test_preservation_submission_with_memory_supersede_edge_reconciles_processed(session):
+    principal = await _seed_connection(session)
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.memory",
+            "desired_outcome": "preserve_knowledge",
+            "message": "Preserve this correction to an existing memory.",
+            "source": {"source_tool": "codex"},
+            "idempotency_key": "codex:submission:memory-supersede-evidence",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    store = AsyncAgentRunStore(session)
+    run_id = int(handling["run_id"])
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    await store.append_event(
+        run_event(
+            run_id,
+            "run.tool_completed",
+            {
+                "tool_name": "memory_supersede",
+                "args": {"old_node": 2153, "new_node": 2160},
+                "result": json.dumps(
+                    {
+                        "action": "supersede",
+                        "old_node": 2153,
+                        "new_node": 2160,
+                        "edge_id": 11658,
+                    }
+                ),
+            },
+            root_run_id=run_id,
+        )
+    )
+    await store.append_final_answer_once(run_id, "Superseded the stale memory.", root_run_id=run_id)
+    await store.set_status(run_id, RunStatus.COMPLETED)
+
+    event = await session.get(InboundEventRow, result["event_id"])
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+
+    assert event is not None
+    assert event.status == "processed"
+    assert event.error is None
+    evidence = event.action_result["handling"]["evidence_contract"]
+    assert evidence["status"] == "satisfied"
+    assert "memory_supersede" in evidence["acceptable_tools"]
+    assert "memory_edge" in evidence["acceptable_target_kinds"]
+    assert evidence["tool_names"] == ["memory_supersede"]
+    assert evidence["mutated_target_refs"] == [
+        {"kind": "memory_edge", "id": "11658", "source": "memory_supersede"}
+    ]
+    assert receipt.status == "processed"
+
+
 async def test_get_result_lazily_reconciles_completed_submission_run(session):
     principal = await _seed_connection(session)
     result = await inbound.submit_inbound_envelope(
