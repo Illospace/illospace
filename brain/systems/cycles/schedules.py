@@ -1,7 +1,7 @@
 """Cycle schedule parsing and presentation."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -90,6 +90,28 @@ def compute_next_run_at(
     if next_local.tzinfo is None:
         next_local = next_local.replace(tzinfo=tz)
     return next_local.astimezone(timezone.utc)
+
+
+def compute_latest_run_at(
+    schedule_expr: str,
+    timezone_name: str,
+    *,
+    at_or_before: datetime,
+) -> datetime | None:
+    """Return the latest schedule slot on or before one aware instant."""
+    if at_or_before.tzinfo is None:
+        raise ValueError("at_or_before must be timezone-aware")
+    if is_one_time_schedule_expr(schedule_expr):
+        run_at = _parse_one_time_run_at(schedule_expr, timezone_name)
+        return run_at if run_at <= at_or_before else None
+
+    tz = ZoneInfo(validate_timezone_name(timezone_name))
+    local_baseline = at_or_before.astimezone(tz) + timedelta(microseconds=1)
+    iterator = croniter(validate_schedule_expr(schedule_expr), local_baseline)
+    previous_local = iterator.get_prev(datetime)
+    if previous_local.tzinfo is None:
+        previous_local = previous_local.replace(tzinfo=tz)
+    return previous_local.astimezone(timezone.utc)
 
 
 def humanize_schedule(schedule_expr: str, timezone_name: str) -> str:

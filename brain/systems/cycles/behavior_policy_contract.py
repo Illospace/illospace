@@ -111,6 +111,7 @@ class CyclePolicySnapshot:
     def apply_to(self, cycle: Cycle) -> None:
         """Apply this policy explicitly to its live Cycle fields."""
 
+        applied_at = datetime.now(timezone.utc)
         for field_name in self.configuration_field_names():
             setattr(cycle, field_name, deepcopy(getattr(self, field_name)))
         cycle.execution_mode = canonical_execution_mode()
@@ -119,7 +120,8 @@ class CyclePolicySnapshot:
             cycle.schedule_expr,
             cycle.timezone,
         )
-        cycle.updated_at = datetime.now(timezone.utc)
+        cycle.receipt_monitoring_started_at = applied_at
+        cycle.updated_at = applied_at
 
     def validated(self) -> CyclePolicySnapshot:
         """Return a normalized snapshot or raise for an invalid policy."""
