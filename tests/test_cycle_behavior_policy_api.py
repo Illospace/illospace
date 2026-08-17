@@ -307,6 +307,8 @@ async def test_production_response_model_matches_snapshot_contract():
         ("model_override", False),
         ("thinking_override", False),
         ("execution_policy_key", False),
+        ("executor_binding", True),
+        ("skill_ids", True),
         ("target_idea_id", False),
     )
     assert tuple(CyclePolicyConfigurationRead.model_fields) == (
@@ -314,7 +316,7 @@ async def test_production_response_model_matches_snapshot_contract():
         "schedule_human",
         *snapshot_configuration_fields[3:],
     )
-    assert len(CyclePolicyConfigurationRead.model_fields) == 13
+    assert len(CyclePolicyConfigurationRead.model_fields) == 15
     assert tuple(CyclePolicyProposal.model_fields) == (
         "prompt",
         "schedule_expr",
@@ -322,6 +324,8 @@ async def test_production_response_model_matches_snapshot_contract():
         "enabled",
         "model_override",
         "thinking_override",
+        "executor_binding",
+        "skill_ids",
         "guidance",
     )
 

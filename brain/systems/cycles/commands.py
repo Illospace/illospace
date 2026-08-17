@@ -15,8 +15,10 @@ from brain.systems.cycles.behavior_policy import (
     async_preview_cycle_policy_change,
 )
 from brain.systems.cycles.common import (
+    ILLO_LANE_EXECUTOR_BINDING,
     canonical_execution_mode,
     validate_cycle_timeout_seconds,
+    validate_executor_binding,
     validate_model_override,
     validate_nonempty_trimmed,
     validate_thinking_override,
@@ -37,6 +39,11 @@ from brain.systems.cycles.schedules import (
     validate_schedule_expr,
     validate_timezone_name,
 )
+from brain.systems.cycles.skill_refs import (
+    validate_cycle_prompt,
+    validate_cycle_skill_ids,
+)
+
 
 def _validated_max_concurrency(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -49,7 +56,7 @@ async def async_create_cycle(
     *,
     actor: CycleActor,
     name: str,
-    prompt: str,
+    prompt: str | None,
     timezone_name: str,
     schedule_expr: str | None = None,
     run_at=None,
@@ -59,10 +66,13 @@ async def async_create_cycle(
     model_override: str | None = None,
     thinking_override: str | None = None,
     execution_policy_key: str | None = None,
+    executor_binding: str = ILLO_LANE_EXECUTOR_BINDING,
+    skill_ids: list[int] | None = None,
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
 ) -> Cycle:
+    validated_skill_ids = validate_cycle_skill_ids(skill_ids)
     validated_execution_policy_key = validate_cycle_execution_policy_key(
         execution_policy_key
     )
@@ -76,7 +86,7 @@ async def async_create_cycle(
         maintainer_type=actor.source_type,
         maintainer_id=actor.revision_source_id,
         name=validate_nonempty_trimmed(name, "name"),
-        prompt=validate_nonempty_trimmed(prompt, "prompt"),
+        prompt=validate_cycle_prompt(prompt, skill_ids=validated_skill_ids),
         schedule_expr=expr,
         timezone=tz_name,
         enabled=enabled,
@@ -86,6 +96,8 @@ async def async_create_cycle(
         thinking_override=validate_thinking_override(thinking_override),
         execution_policy_key=validated_execution_policy_key,
         execution_mode=canonical_execution_mode(),
+        executor_binding=validate_executor_binding(executor_binding),
+        skill_ids=validated_skill_ids,
         target_idea_id=target_idea_id,
         reopen_archived=True,
         next_run_at=compute_next_run_at(expr, tz_name),
@@ -134,6 +146,8 @@ async def async_update_cycle(
     model_override=UNSET_CYCLE_FIELD,
     thinking_override=UNSET_CYCLE_FIELD,
     execution_policy_key=UNSET_CYCLE_FIELD,
+    executor_binding=UNSET_CYCLE_FIELD,
+    skill_ids=UNSET_CYCLE_FIELD,
     target_idea_id=UNSET_CYCLE_FIELD,
     guidance: str | None = None,
     rationale: str | None = None,
@@ -160,6 +174,8 @@ async def async_update_cycle(
         model_override=_policy_field(model_override),
         thinking_override=_policy_field(thinking_override),
         execution_policy_key=_policy_field(execution_policy_key),
+        executor_binding=_policy_field(executor_binding),
+        skill_ids=_policy_field(skill_ids),
         target_idea_id=_policy_field(target_idea_id),
         guidance_additions=(
             [guidance] if guidance else UNSET_CYCLE_FIELD

@@ -314,13 +314,39 @@ async def test_read_preview_apply_history_and_human_audit_envelope(policy_worksp
     assert change.before_snapshot == preview.before.snapshot
     assert change.after_snapshot == preview.after_snapshot
     stored_change = await workspace.session.get(CycleBehaviorChangeAudit, change.id)
-    assert stored_change.before_snapshot["snapshot_version"] == 1
-    assert stored_change.after_snapshot["snapshot_version"] == 1
+    assert stored_change.before_snapshot["snapshot_version"] == 2
+    assert stored_change.after_snapshot["snapshot_version"] == 2
     assert change.changed_fields == preview.changed_fields
     assert change.cycle_revision_id == applied.revision.id
     assert isinstance(change.applied_at, datetime)
     assert change.applied_at.tzinfo is not None
     assert change.reverted_from_id is None
+
+
+async def test_policy_can_replace_embedded_prompt_with_skill_references(
+    policy_workspace,
+):
+    workspace = policy_workspace
+
+    preview, applied = await _preview_and_apply(
+        workspace,
+        CyclePolicyPatch(
+            prompt="",
+            executor_binding="personal-agent",
+            skill_ids=[17, 23],
+        ),
+    )
+
+    assert preview.changed_fields == (
+        "executor_binding",
+        "prompt",
+        "skill_ids",
+    )
+    assert workspace.cycle.prompt == ""
+    assert workspace.cycle.executor_binding == "personal-agent"
+    assert workspace.cycle.skill_ids == [17, 23]
+    assert applied.effective_policy.snapshot.prompt == ""
+    assert applied.effective_policy.snapshot.skill_ids == [17, 23]
 
 
 async def test_stale_version_and_stale_digest_return_latest_policy(policy_workspace):
@@ -593,8 +619,8 @@ async def test_revert_decodes_stored_snapshot_across_schema_changes(policy_works
         CycleBehaviorChangeAudit,
         reverted.change.id,
     )
-    assert new_stored_change.before_snapshot["snapshot_version"] == 1
-    assert new_stored_change.after_snapshot["snapshot_version"] == 1
+    assert new_stored_change.before_snapshot["snapshot_version"] == 2
+    assert new_stored_change.after_snapshot["snapshot_version"] == 2
 
 
 async def test_revert_decodes_snapshot_written_before_versioning(policy_workspace):

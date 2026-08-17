@@ -18,8 +18,10 @@ from brain.systems.cycles.access import (
 )
 from brain.systems.cycles.common import (
     AGENT_TRIGGERED_CYCLE_ORIGIN,
+    ILLO_LANE_EXECUTOR_BINDING,
     OFF_SLOT_MATERIAL_ALERT_RUN_KIND,
     validate_cycle_timeout_seconds,
+    validate_executor_binding,
 )
 from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.commands import (
@@ -39,6 +41,7 @@ from brain.systems.cycles.serializers import (
     serialize_cycle_output_target,
 )
 from brain.systems.cycles.service import async_run_cycle_now
+from brain.systems.cycles.skill_refs import validate_cycle_skill_ids
 from brain.systems.runs.token_usage import (
     async_summarize_run_trees_usage,
     merge_usage_totals,
@@ -61,6 +64,8 @@ class ManageCycleArgs:
     model_override: str | None = None
     thinking_override: str | None = None
     execution_policy_key: Any = UNSET_CYCLE_FIELD
+    executor_binding: Any = UNSET_CYCLE_FIELD
+    skill_ids: Any = UNSET_CYCLE_FIELD
     target_idea_id: str | None = None
     guidance: str | None = None
     rationale: str | None = None
@@ -96,6 +101,8 @@ async def _handle_manage_cycle(
     model_override: str | None = None,
     thinking_override: str | None = None,
     execution_policy_key=UNSET_CYCLE_FIELD,
+    executor_binding=UNSET_CYCLE_FIELD,
+    skill_ids=UNSET_CYCLE_FIELD,
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
@@ -121,6 +128,8 @@ async def _handle_manage_cycle(
         model_override=model_override,
         thinking_override=thinking_override,
         execution_policy_key=execution_policy_key,
+        executor_binding=executor_binding,
+        skill_ids=skill_ids,
         target_idea_id=target_idea_id,
         guidance=guidance,
         rationale=rationale,
@@ -148,6 +157,8 @@ async def _handle_manage_cycle_async(
     model_override: str | None = None,
     thinking_override: str | None = None,
     execution_policy_key=UNSET_CYCLE_FIELD,
+    executor_binding=UNSET_CYCLE_FIELD,
+    skill_ids=UNSET_CYCLE_FIELD,
     target_idea_id: str | None = None,
     guidance: str | None = None,
     rationale: str | None = None,
@@ -184,6 +195,8 @@ async def _handle_manage_cycle_async(
         model_override=model_override,
         thinking_override=thinking_override,
         execution_policy_key=execution_policy_key,
+        executor_binding=executor_binding,
+        skill_ids=skill_ids,
         target_idea_id=target_idea_id,
         guidance=guidance,
         rationale=rationale,
@@ -210,13 +223,29 @@ async def _handle_manage_cycle_async(
 
 
 async def _action_list(ctx: ManageCycleContext) -> dict[str, Any]:
+    args = ctx.args
+    name = _optional_text(args.name)
+    if args.id is not None and name is not None:
+        raise ValueError("list accepts only one of id or name")
     async with UnitOfWork() as uow:
-        result = await uow.session.scalars(
+        statement = (
             select(Cycle)
             .where(*cycle_scope_conditions(ctx.actor))
             .order_by(Cycle.created_at.desc())
         )
-        return {"cycles": [serialize_cycle(cycle) for cycle in result.all()]}
+        if args.id is not None:
+            statement = statement.where(Cycle.id == args.id)
+        elif name is not None:
+            statement = statement.where(Cycle.name == name)
+        rows = list((await uow.session.scalars(statement)).all())
+        if args.id is None and name is None:
+            return {"cycles": [serialize_cycle(cycle) for cycle in rows]}
+        if not rows:
+            selector = f"id {args.id}" if args.id is not None else f"name '{name}'"
+            raise ValueError(f"Cycle {selector} not found")
+        if len(rows) > 1:
+            raise ValueError(f"Cycle name '{name}' is ambiguous; use id")
+        return {"cycle": serialize_cycle(rows[0])}
 
 
 def _window_value(value: int | None, *, field: str, maximum: int) -> int | None:
@@ -299,6 +328,16 @@ async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
         if args.timeout_seconds is UNSET_CYCLE_FIELD
         else validate_cycle_timeout_seconds(args.timeout_seconds)
     )
+    executor_binding = (
+        ILLO_LANE_EXECUTOR_BINDING
+        if args.executor_binding is UNSET_CYCLE_FIELD
+        else validate_executor_binding(args.executor_binding)
+    )
+    skill_ids = (
+        []
+        if args.skill_ids is UNSET_CYCLE_FIELD
+        else validate_cycle_skill_ids(args.skill_ids)
+    )
     async with UnitOfWork() as uow:
         await _validate_target_idea(uow.session, args.target_idea_id, ctx.actor)
         cycle = await async_create_cycle(
@@ -318,6 +357,8 @@ async def _action_create(ctx: ManageCycleContext) -> dict[str, Any]:
                 if args.execution_policy_key is UNSET_CYCLE_FIELD
                 else _optional_text(args.execution_policy_key)
             ),
+            executor_binding=executor_binding,
+            skill_ids=skill_ids,
             target_idea_id=_optional_text(args.target_idea_id),
             guidance=_optional_text(args.guidance),
             rationale=_optional_text(args.rationale),
@@ -332,6 +373,12 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
     timeout_seconds = args.timeout_seconds
     if timeout_seconds is not UNSET_CYCLE_FIELD:
         timeout_seconds = validate_cycle_timeout_seconds(timeout_seconds)
+    executor_binding = args.executor_binding
+    if executor_binding is not UNSET_CYCLE_FIELD:
+        executor_binding = validate_executor_binding(executor_binding)
+    skill_ids = args.skill_ids
+    if skill_ids is not UNSET_CYCLE_FIELD:
+        skill_ids = validate_cycle_skill_ids(skill_ids)
     async with UnitOfWork() as uow:
         cycle = await _load_cycle(uow.session, ctx.actor, args.id)
         update_target_idea_id = _optional_text(args.target_idea_id)
@@ -342,7 +389,7 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
             cycle,
             actor=ctx.actor,
             name=_patch_text(args.name),
-            prompt=_patch_text(args.prompt),
+            prompt=_patch_prompt(args.prompt),
             timezone_name=_patch_text(args.timezone),
             schedule_expr=_patch_text(args.schedule_expr),
             run_at=_patch_text(args.run_at),
@@ -351,6 +398,8 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
             model_override=_patch_value(args.model_override),
             thinking_override=_patch_text(args.thinking_override),
             execution_policy_key=args.execution_policy_key,
+            executor_binding=executor_binding,
+            skill_ids=skill_ids,
             target_idea_id=_patch_text(args.target_idea_id),
             guidance=_optional_text(args.guidance),
             rationale=_optional_text(args.rationale),
@@ -496,6 +545,10 @@ def _patch_value(value):
 
 def _patch_text(value: str | None):
     return UNSET_CYCLE_FIELD if value is None else _optional_text(value)
+
+
+def _patch_prompt(value: str | None):
+    return UNSET_CYCLE_FIELD if value is None else str(value).strip()
 
 
 def _int_required(value: str | None, field_name: str) -> int:

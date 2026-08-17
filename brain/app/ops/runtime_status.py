@@ -14,6 +14,7 @@ from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.stale_run_reaper import agent_run_maintenance_snapshot
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.cycle import Cycle
+from brain.systems.cycles.common import ILLO_LANE_EXECUTOR_BINDING
 from brain.systems.runs.cortex.queue_health import (
     QueueHealth,
     queued_backlog_health_snapshot_async,
@@ -256,6 +257,7 @@ async def async_runtime_status_snapshot(
             .where(
                 Cycle.enabled.is_(True),
                 Cycle.deleted_at.is_(None),
+                Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
                 Cycle.next_run_at.is_not(None),
                 Cycle.next_run_at < captured_at,
             )
@@ -266,6 +268,7 @@ async def async_runtime_status_snapshot(
         select(func.min(Cycle.next_run_at)).where(
             Cycle.enabled.is_(True),
             Cycle.deleted_at.is_(None),
+            Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
             Cycle.next_run_at.is_not(None),
             Cycle.next_run_at < captured_at,
         )
@@ -277,6 +280,7 @@ async def async_runtime_status_snapshot(
                 .where(
                     Cycle.enabled.is_(True),
                     Cycle.deleted_at.is_(None),
+                    Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
                     Cycle.next_run_at.is_not(None),
                     Cycle.next_run_at < captured_at,
                 )

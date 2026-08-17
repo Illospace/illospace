@@ -221,6 +221,8 @@ async def create_cycle(
             model_override=body.model_override,
             thinking_override=body.thinking_override,
             execution_policy_key=body.execution_policy_key,
+            executor_binding=body.executor_binding,
+            skill_ids=body.skill_ids,
             target_idea_id=body.target_idea_id,
             guidance=body.guidance,
             rationale=body.rationale,
@@ -277,6 +279,10 @@ async def update_cycle(
             execution_policy_key=updates.get(
                 "execution_policy_key", UNSET_CYCLE_FIELD
             ),
+            executor_binding=updates.get(
+                "executor_binding", UNSET_CYCLE_FIELD
+            ),
+            skill_ids=updates.get("skill_ids", UNSET_CYCLE_FIELD),
             target_idea_id=updates.get("target_idea_id", UNSET_CYCLE_FIELD),
             guidance=updates.get("guidance"),
             rationale=updates.get("rationale"),
