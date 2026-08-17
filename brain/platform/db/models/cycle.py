@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -147,6 +148,11 @@ class Cycle(Base, TimestampMixin):
         nullable=False,
         server_default=text("'[]'::jsonb"),
         default=list,
+    )
+    receipt_monitoring_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     target_idea_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("ideas.id", ondelete="SET NULL"), nullable=True, index=True

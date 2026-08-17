@@ -252,6 +252,41 @@ async def test_lifespan_hosts_stale_run_reaper_outside_daemon():
     assert api_main._stale_run_reaper_task is None
 
 
+@pytest.mark.asyncio
+async def test_lifespan_hosts_cycle_silence_monitor_outside_executors():
+    monitor_started = asyncio.Event()
+
+    async def monitor_loop():
+        monitor_started.set()
+        await asyncio.Future()
+
+    monitor = MagicMock()
+    monitor.name = "cycle_silence_monitor"
+    monitor.run = monitor_loop
+
+    with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
+        with patch("brain.app.api.main._should_start_run_event_consumer", return_value=False):
+            with patch("brain.platform.events.set_publisher"):
+                with patch(
+                    "brain.app.api.main._ensure_starting_skill_bundle",
+                    new=AsyncMock(),
+                ):
+                    with patch(
+                        "brain.app.api.main.CycleSilenceMonitor",
+                        return_value=monitor,
+                    ) as monitor_type:
+                        async with api_main.lifespan(app):
+                            await asyncio.wait_for(monitor_started.wait(), timeout=1)
+                            assert api_main._cycle_silence_monitor_task is not None
+                            assert (
+                                api_main._cycle_silence_monitor_task.get_name()
+                                == "cycle_silence_monitor"
+                            )
+
+    monitor_type.assert_called_once_with()
+    assert api_main._cycle_silence_monitor_task is None
+
+
 def test_inline_runner_honors_launcher_dispatcher_env(monkeypatch):
     monkeypatch.delenv("CORTEX_INLINE_RUNNER", raising=False)
     monkeypatch.setenv("CORTEX_INLINE_DISPATCHER", "1")

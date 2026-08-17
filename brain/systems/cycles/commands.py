@@ -72,6 +72,7 @@ async def async_create_cycle(
     guidance: str | None = None,
     rationale: str | None = None,
 ) -> Cycle:
+    monitoring_started_at = datetime.now(timezone.utc)
     validated_skill_ids = validate_cycle_skill_ids(skill_ids)
     validated_execution_policy_key = validate_cycle_execution_policy_key(
         execution_policy_key
@@ -98,9 +99,14 @@ async def async_create_cycle(
         execution_mode=canonical_execution_mode(),
         executor_binding=validate_executor_binding(executor_binding),
         skill_ids=validated_skill_ids,
+        receipt_monitoring_started_at=monitoring_started_at,
         target_idea_id=target_idea_id,
         reopen_archived=True,
-        next_run_at=compute_next_run_at(expr, tz_name),
+        next_run_at=compute_next_run_at(
+            expr,
+            tz_name,
+            from_dt=monitoring_started_at,
+        ),
     )
     session.add(cycle)
     await session.flush()
