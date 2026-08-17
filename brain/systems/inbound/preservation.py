@@ -59,7 +59,6 @@ PRESERVATION_ACCEPTABLE_TARGET_KINDS = (
     "memory_source",
     "memory_node",
     "memory_assertion",
-    "memory_edge",
     "domain_record",
     "domain",
     "project_context",
