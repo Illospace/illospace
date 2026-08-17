@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 PYTHON_BIN="$ROOT/venv/bin/python3"
-WORKER_SWAP_PYTHON_BIN="$PYTHON_BIN"
+DEPLOY_PYTHON_BIN="$PYTHON_BIN"
 
 source "$ROOT/deploy/scripts/worker-swap-lib.sh"
 

@@ -62,9 +62,16 @@ COMPOSE_RUNTIME_WORKER_DRAIN_TIMEOUT_SECONDS="${ILLO_COMPOSE_WORKER_DRAIN_TIMEOU
 source "$SCRIPT_DIR/compose-runtime-lib.sh"
 
 MEETBOT_ENABLED=0
-if compose_service_enabled meetbot; then
-  MEETBOT_ENABLED=1
-fi
+meetbot_status=0
+compose_service_enabled meetbot || meetbot_status=$?
+case "$meetbot_status" in
+  0) MEETBOT_ENABLED=1 ;;
+  1) ;;
+  *)
+    echo "Could not determine whether meetbot is enabled." >&2
+    exit "$meetbot_status"
+    ;;
+esac
 
 non_worker_services() {
   printf '%s\n' api scheduler web

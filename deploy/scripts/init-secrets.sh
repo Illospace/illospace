@@ -7,6 +7,9 @@ COMPOSE_DIR="$ROOT/deploy/compose"
 ENV_FILE="$COMPOSE_DIR/.env"
 EXAMPLE_FILE="$COMPOSE_DIR/.env.production.example"
 
+source "$SCRIPT_DIR/deploy-python-lib.sh"
+DEPLOY_PYTHON="$(deploy_python_bin)"
+
 PUBLIC_URL=""
 DOMAIN=""
 PRINT_NEXT=1
@@ -74,7 +77,7 @@ if [ ! -f "$ENV_FILE" ]; then
   cp "$EXAMPLE_FILE" "$ENV_FILE"
 fi
 
-python3 - "$ENV_FILE" "$DOMAIN" "$PUBLIC_URL" <<'PY'
+"$DEPLOY_PYTHON" - "$ENV_FILE" "$DOMAIN" "$PUBLIC_URL" <<'PY'
 from __future__ import annotations
 
 import base64
