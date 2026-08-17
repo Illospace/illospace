@@ -7,7 +7,8 @@ COMPOSE_DIR="$ROOT/deploy/compose"
 ENV_FILE="$COMPOSE_DIR/.env"
 EXAMPLE_FILE="$COMPOSE_DIR/.env.production.example"
 
-source "$SCRIPT_DIR/worker-swap-lib.sh"
+source "$SCRIPT_DIR/deploy-python-lib.sh"
+DEPLOY_PYTHON="$(deploy_python_bin)"
 
 PUBLIC_URL=""
 DOMAIN=""
@@ -76,7 +77,7 @@ if [ ! -f "$ENV_FILE" ]; then
   cp "$EXAMPLE_FILE" "$ENV_FILE"
 fi
 
-"$(worker_swap_python_bin)" - "$ENV_FILE" "$DOMAIN" "$PUBLIC_URL" <<'PY'
+"$DEPLOY_PYTHON" - "$ENV_FILE" "$DOMAIN" "$PUBLIC_URL" <<'PY'
 from __future__ import annotations
 
 import base64

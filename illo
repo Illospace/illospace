@@ -266,11 +266,10 @@ launcher_python_bin() {
   fi
 }
 
+if [ -z "${DEPLOY_PYTHON_BIN:-}" ] && [ -z "${WORKER_SWAP_PYTHON_BIN:-}" ]; then
+  DEPLOY_PYTHON_BIN="$(launcher_python_bin)"
+fi
 source "$ROOT/deploy/scripts/worker-swap-lib.sh"
-
-worker_swap_python_bin() {
-  launcher_python_bin
-}
 
 production_env_file_path() {
   if [ -n "${ILLO_PRODUCTION_ENV_FILE:-}" ]; then

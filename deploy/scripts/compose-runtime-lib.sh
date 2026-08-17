@@ -5,8 +5,8 @@ ROOT="${ROOT:-$(cd "$COMPOSE_RUNTIME_LIB_DIR/../.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/deploy/compose/docker-compose.yml}"
 ENV_FILE="${ENV_FILE:-${ILLO_COMPOSE_ENV_FILE:-$ROOT/deploy/compose/.env}}"
 RUNTIME_SERVICE_CATALOG="${RUNTIME_SERVICE_CATALOG:-$ROOT/deploy/compose/runtime-services.json}"
-WORKER_SWAP_PYTHON_BIN="${WORKER_SWAP_PYTHON_BIN:-python3}"
 
+source "$COMPOSE_RUNTIME_LIB_DIR/deploy-python-lib.sh"
 source "$COMPOSE_RUNTIME_LIB_DIR/worker-swap-lib.sh"
 source "$COMPOSE_RUNTIME_LIB_DIR/worker-lifecycle-lib.sh"
 
@@ -19,7 +19,7 @@ compose() {
 
 compose_env_value() {
   local key="$1" python_bin
-  python_bin="$(worker_swap_python_bin)"
+  python_bin="$(deploy_python_bin)"
   if ! "$python_bin" - "$ENV_FILE" "$key" <<'PY'
 from pathlib import Path
 import re
@@ -42,10 +42,12 @@ for line in path.read_text(encoding="utf-8").splitlines():
 PY
   then
     echo "Failed to read $key from $ENV_FILE with Python interpreter: $python_bin" >&2
-    return 1
+    return 2
   fi
 }
 
+# Exit status contract for compose_profile_enabled and compose_service_enabled:
+# 0 means enabled, 1 means disabled, and 2 or greater means an operational error.
 compose_profile_enabled() {
   local profile="$1" profiles
   if [ "${COMPOSE_PROFILES+x}" = "x" ]; then
@@ -62,8 +64,13 @@ compose_profile_enabled() {
 }
 
 compose_service_enabled() {
-  local service="$1" profile="${2:-$1}"
-  compose_profile_enabled "$profile" && return 0
+  local service="$1" profile="${2:-$1}" profile_status
+  if compose_profile_enabled "$profile"; then
+    return 0
+  else
+    profile_status=$?
+  fi
+  [ "$profile_status" -eq 1 ] || return "$profile_status"
   [ -n "$(compose_service_container_id "$service")" ]
 }
 

@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 COMPOSE_FILE="$ROOT/deploy/compose/docker-compose.yml"
 
-source "$SCRIPT_DIR/worker-swap-lib.sh"
+source "$SCRIPT_DIR/deploy-python-lib.sh"
+DEPLOY_PYTHON="$(deploy_python_bin)"
 
 BUILD=0
 KEEP_RUNNING=0
@@ -62,7 +63,7 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 pick_free_port() {
-  "$(worker_swap_python_bin)" - <<'PY'
+  "$DEPLOY_PYTHON" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -90,7 +91,7 @@ else
   esac
 fi
 
-"$(worker_swap_python_bin)" - "$ENV_FILE" "$PROJECT_NAME" "$SMOKE_API_PORT" "$SMOKE_WEB_PORT" <<'PY'
+"$DEPLOY_PYTHON" - "$ENV_FILE" "$PROJECT_NAME" "$SMOKE_API_PORT" "$SMOKE_WEB_PORT" <<'PY'
 from __future__ import annotations
 
 import re

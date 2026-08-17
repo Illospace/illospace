@@ -124,6 +124,9 @@ def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     ).read_text()
 
     assert 'source "$ROOT/deploy/scripts/worker-swap-lib.sh"' in content
+    assert 'DEPLOY_PYTHON_BIN="$PYTHON_BIN"' in content
+    assert "worker_swap_python_bin()" in worker_swap_lib
+    assert "deploy_python_bin" in worker_swap_lib
     assert "worker_swap_snapshot" in content
     assert "restart_or_drain_worker" in content
     assert "start_worker_handoff" in content
@@ -590,7 +593,7 @@ def test_meetbot_profile_detection_honors_shell_precedence_wildcard_and_stopped_
     assert launcher_oneoff_only.returncode == 0
 
 
-def test_compose_env_value_reports_pinned_interpreter_failure(tmp_path):
+def test_compose_service_enabled_propagates_legacy_interpreter_failure(tmp_path):
     runtime_lib = (
         Path(__file__).resolve().parents[1]
         / "deploy"
@@ -607,10 +610,18 @@ def test_compose_env_value_reports_pinned_interpreter_failure(tmp_path):
         [
             "bash",
             "-c",
-            f'source "{runtime_lib}"; compose_env_value COMPOSE_PROFILES',
+            (
+                f'unset COMPOSE_PROFILES; source "{runtime_lib}"; '
+                'compose() { printf "unexpected container fallback\\n"; }; '
+                "compose_service_enabled meetbot"
+            ),
         ],
         env={
-            **os.environ,
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"COMPOSE_PROFILES", "DEPLOY_PYTHON_BIN", "WORKER_SWAP_PYTHON_BIN"}
+        }
+        | {
             "ENV_FILE": str(env_file),
             "WORKER_SWAP_PYTHON_BIN": str(broken_python),
         },
@@ -618,7 +629,7 @@ def test_compose_env_value_reports_pinned_interpreter_failure(tmp_path):
         text=True,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 2
     assert str(broken_python) in result.stderr
     assert result.stdout == ""
 
@@ -639,10 +650,14 @@ def test_compose_profile_is_disabled_when_env_key_is_absent(tmp_path):
             "-c",
             f'unset COMPOSE_PROFILES; source "{runtime_lib}"; compose_profile_enabled meetbot',
         ],
-        env={key: value for key, value in os.environ.items() if key != "COMPOSE_PROFILES"}
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"COMPOSE_PROFILES", "DEPLOY_PYTHON_BIN", "WORKER_SWAP_PYTHON_BIN"}
+        }
         | {
             "ENV_FILE": str(env_file),
-            "WORKER_SWAP_PYTHON_BIN": sys.executable,
+            "DEPLOY_PYTHON_BIN": sys.executable,
         },
         capture_output=True,
         text=True,
