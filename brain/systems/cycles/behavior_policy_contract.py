@@ -11,7 +11,9 @@ from brain.kernel.common.serialization import jsonable
 from brain.platform.db.models.cycle import Cycle, CycleGuidance
 from brain.systems.cycles.common import (
     canonical_execution_mode,
+    cycle_executor_binding,
     validate_cycle_timeout_seconds,
+    validate_executor_binding,
     validate_model_override,
     validate_nonempty_trimmed,
     validate_thinking_override,
@@ -23,6 +25,10 @@ from brain.systems.cycles.schedules import (
     compute_next_run_at,
     validate_schedule_expr,
     validate_timezone_name,
+)
+from brain.systems.cycles.skill_refs import (
+    validate_cycle_prompt,
+    validate_cycle_skill_ids,
 )
 
 __all__ = [
@@ -49,7 +55,7 @@ class CyclePolicySnapshot:
     Scalar fields use the same name on the snapshot, Cycle, and patch.
     """
 
-    SNAPSHOT_VERSION: ClassVar[int] = 1
+    SNAPSHOT_VERSION: ClassVar[int] = 2
 
     name: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
     prompt: str = dataclass_field(metadata={_PATCH_IGNORE_NONE: True})
@@ -62,6 +68,8 @@ class CyclePolicySnapshot:
     model_override: str | None
     thinking_override: str | None
     execution_policy_key: str | None
+    executor_binding: str
+    skill_ids: list[int]
     target_idea_id: str | None
     guidance: list[str]
 
@@ -80,7 +88,7 @@ class CyclePolicySnapshot:
         """Build the effective policy from the live Cycle read model."""
 
         values = {
-            field.name: deepcopy(getattr(cycle, field.name))
+            field.name: deepcopy(getattr(cycle, field.name, None))
             for field in fields(cls)
             if field.name != "guidance"
         }
@@ -90,6 +98,8 @@ class CyclePolicySnapshot:
         )
         values["enabled"] = bool(values["enabled"])
         values["retry_policy"] = dict(values["retry_policy"] or {})
+        values["executor_binding"] = cycle_executor_binding(cycle)
+        values["skill_ids"] = validate_cycle_skill_ids(values["skill_ids"])
         values["target_idea_id"] = (
             str(values["target_idea_id"])
             if values["target_idea_id"] is not None
@@ -121,6 +131,7 @@ class CyclePolicySnapshot:
             raise ValueError("retry_policy must be an object")
         if not isinstance(self.guidance, (list, tuple)):
             raise ValueError("guidance must be a list of strings")
+        skill_ids = validate_cycle_skill_ids(self.skill_ids)
         retry_policy = cast(
             dict[str, JsonValue],
             jsonable(deepcopy(self.retry_policy)),
@@ -134,7 +145,7 @@ class CyclePolicySnapshot:
         return replace(
             self,
             name=validate_nonempty_trimmed(self.name, "name"),
-            prompt=validate_nonempty_trimmed(self.prompt, "prompt"),
+            prompt=validate_cycle_prompt(self.prompt, skill_ids=skill_ids),
             schedule_expr=validate_schedule_expr(
                 self.schedule_expr,
                 timezone_name,
@@ -149,6 +160,8 @@ class CyclePolicySnapshot:
             execution_policy_key=validate_cycle_execution_policy_key(
                 self.execution_policy_key
             ),
+            executor_binding=validate_executor_binding(self.executor_binding),
+            skill_ids=skill_ids,
             target_idea_id=(
                 str(self.target_idea_id)
                 if self.target_idea_id is not None

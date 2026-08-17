@@ -820,6 +820,15 @@ def test_manage_cycle_schema_matches_canonical_runtime_policy():
     assert "live per-Cycle agent-run deadline" in tool["description"]
     assert "add_guidance" in properties["action"]["enum"]
     assert "add_output_target" in properties["action"]["enum"]
+    assert properties["executor_binding"]["enum"] == [
+        "illo-lane",
+        "personal-agent",
+    ]
+    assert properties["skill_ids"]["items"] == {
+        "type": "integer",
+        "minimum": 1,
+    }
+    assert properties["skill_ids"]["uniqueItems"] is True
     assert properties["run_kind"]["enum"] == [
         "scheduled_digest",
         "off_slot_material_alert",

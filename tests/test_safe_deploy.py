@@ -124,6 +124,9 @@ def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     ).read_text()
 
     assert 'source "$ROOT/deploy/scripts/worker-swap-lib.sh"' in content
+    assert 'DEPLOY_PYTHON_BIN="$PYTHON_BIN"' in content
+    assert "worker_swap_python_bin()" in worker_swap_lib
+    assert "deploy_python_bin" in worker_swap_lib
     assert "worker_swap_snapshot" in content
     assert "restart_or_drain_worker" in content
     assert "start_worker_handoff" in content
@@ -588,6 +591,80 @@ def test_meetbot_profile_detection_honors_shell_precedence_wildcard_and_stopped_
         text=True,
     )
     assert launcher_oneoff_only.returncode == 0
+
+
+def test_compose_service_enabled_propagates_legacy_interpreter_failure(tmp_path):
+    runtime_lib = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "scripts"
+        / "compose-runtime-lib.sh"
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("COMPOSE_PROFILES=meetbot\n")
+    broken_python = tmp_path / "broken-python"
+    broken_python.write_text("#!/usr/bin/env bash\nexit 42\n")
+    broken_python.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'unset COMPOSE_PROFILES; source "{runtime_lib}"; '
+                'compose() { printf "unexpected container fallback\\n"; }; '
+                "compose_service_enabled meetbot"
+            ),
+        ],
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"COMPOSE_PROFILES", "DEPLOY_PYTHON_BIN", "WORKER_SWAP_PYTHON_BIN"}
+        }
+        | {
+            "ENV_FILE": str(env_file),
+            "WORKER_SWAP_PYTHON_BIN": str(broken_python),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert str(broken_python) in result.stderr
+    assert result.stdout == ""
+
+
+def test_compose_profile_is_disabled_when_env_key_is_absent(tmp_path):
+    runtime_lib = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "scripts"
+        / "compose-runtime-lib.sh"
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text("SECRET_KEY=present\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'unset COMPOSE_PROFILES; source "{runtime_lib}"; compose_profile_enabled meetbot',
+        ],
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"COMPOSE_PROFILES", "DEPLOY_PYTHON_BIN", "WORKER_SWAP_PYTHON_BIN"}
+        }
+        | {
+            "ENV_FILE": str(env_file),
+            "DEPLOY_PYTHON_BIN": sys.executable,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
 
 
 def test_compose_worker_restart_asserts_exactly_one_running_worker():

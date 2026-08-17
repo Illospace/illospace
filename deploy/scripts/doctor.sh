@@ -10,6 +10,7 @@ ENV_FILE="${ILLO_COMPOSE_ENV_FILE:-$COMPOSE_DIR/.env}"
 # Provides compose() plus the shared stack invariants.
 source "$SCRIPT_DIR/compose-runtime-lib.sh"
 source "$SCRIPT_DIR/agent-run-queue-health-lib.sh"
+DEPLOY_PYTHON="$(deploy_python_bin)"
 
 # Doctor runs after a deploy, so it holds the updater to the same standard as
 # the always-on services; a bare monitor does not (a missing updater does not
@@ -98,7 +99,7 @@ need_command() {
 }
 
 need_command docker
-need_command python3
+need_command "$DEPLOY_PYTHON"
 
 if [ ! -f "$ENV_FILE" ]; then
   fail "missing $ENV_FILE; run deploy/scripts/init-secrets.sh"
@@ -128,7 +129,7 @@ for key in ILLO_PUBLIC_URL SECRET_KEY VAULT_MASTER_KEY DB_NAME DB_USER DB_PASSWO
 done
 
 if [ -n "${ILLO_PUBLIC_URL:-}" ]; then
-  if python3 - "$ILLO_PUBLIC_URL" <<'PY'
+  if "$DEPLOY_PYTHON" - "$ILLO_PUBLIC_URL" <<'PY'
 import sys
 from urllib.parse import urlparse
 
@@ -148,7 +149,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${GEMINI_API_KEY:-}${EMBEDDING
 fi
 
 if [ -n "${VAULT_MASTER_KEY:-}" ]; then
-  if python3 - "$VAULT_MASTER_KEY" <<'PY'
+  if "$DEPLOY_PYTHON" - "$VAULT_MASTER_KEY" <<'PY'
 import base64
 import sys
 
@@ -248,9 +249,13 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
     fi
 
     meetbot_expected=0
-    if compose_service_enabled meetbot; then
-      meetbot_expected=1
-    fi
+    meetbot_status=0
+    compose_service_enabled meetbot || meetbot_status=$?
+    case "$meetbot_status" in
+      0) meetbot_expected=1 ;;
+      1) ;;
+      *) fail "could not determine whether meetbot is enabled" ;;
+    esac
 
     services_to_check="$DOCTOR_REQUIRED_SERVICES"
     if [ "$meetbot_expected" = "1" ]; then

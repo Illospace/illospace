@@ -59,20 +59,24 @@ _ACTION_MANIFEST_TOOL_NAMES = action_manifest_tool_names()
 
 _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
     "manage_cycle": {
-        "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
+        "list": {
+            "required": [],
+            "optional": ["id", "name"],
+            "effect": "read all schedules or resolve one by id or exact name",
+        },
         "usage_summary": {
             "required": [],
             "optional": ["id", "days", "run_limit"],
             "effect": "read token and estimated-cost usage by cycle",
         },
         "create": {
-            "required": ["name", "prompt", "timezone", "schedule_expr or run_at"],
-            "optional": ["enabled", "timeout_seconds", "target_idea_id", "model_override", "thinking_override", "execution_policy_key", "guidance", "rationale"],
+            "required": ["name", "timezone", "schedule_expr or run_at", "prompt or skill_ids"],
+            "optional": ["enabled", "timeout_seconds", "target_idea_id", "model_override", "thinking_override", "execution_policy_key", "executor_binding", "skill_ids", "guidance", "rationale"],
             "effect": "create a recurring cycle or one-time reminder",
         },
         "update": {
             "required": ["id"],
-            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "timeout_seconds", "target_idea_id", "execution_policy_key", "guidance", "rationale"],
+            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "timeout_seconds", "target_idea_id", "execution_policy_key", "executor_binding", "skill_ids", "guidance", "rationale"],
             "effect": "change an existing cycle",
         },
         "delete": {"required": ["id"], "optional": [], "effect": "archive/disable a cycle"},

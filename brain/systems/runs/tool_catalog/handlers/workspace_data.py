@@ -1310,6 +1310,8 @@ async def _query_cycles(
             "timezone": cycle.timezone,
             "enabled": bool(cycle.enabled),
             "execution_policy_key": cycle.execution_policy_key,
+            "executor_binding": getattr(cycle, "executor_binding", None) or "illo-lane",
+            "skill_ids": list(getattr(cycle, "skill_ids", None) or []),
             "target_idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
             "idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
             **_thread_link_fields(idea, cycle.target_idea_id),

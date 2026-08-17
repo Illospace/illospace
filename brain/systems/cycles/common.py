@@ -21,6 +21,11 @@ SCHEDULED_DIGEST_RUN_KIND = "scheduled_digest"
 OFF_SLOT_MATERIAL_ALERT_RUN_KIND = "off_slot_material_alert"
 MIN_CYCLE_TIMEOUT_SECONDS = 60
 MAX_CYCLE_TIMEOUT_SECONDS = 14_400
+ILLO_LANE_EXECUTOR_BINDING = "illo-lane"
+PERSONAL_AGENT_EXECUTOR_BINDING = "personal-agent"
+VALID_CYCLE_EXECUTOR_BINDINGS = frozenset(
+    {ILLO_LANE_EXECUTOR_BINDING, PERSONAL_AGENT_EXECUTOR_BINDING}
+)
 
 _VALID_MODEL_OVERRIDES = frozenset(
     f"{provider}/{model}"
@@ -49,6 +54,22 @@ def validate_cycle_timeout_seconds(value: int | None) -> int | None:
             f"{MIN_CYCLE_TIMEOUT_SECONDS} and {MAX_CYCLE_TIMEOUT_SECONDS}, or null"
         )
     return value
+
+
+def validate_executor_binding(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in VALID_CYCLE_EXECUTOR_BINDINGS:
+        raise ValueError(
+            "executor_binding must be one of: "
+            + ", ".join(sorted(VALID_CYCLE_EXECUTOR_BINDINGS))
+        )
+    return normalized
+
+
+def cycle_executor_binding(cycle) -> str:
+    return validate_executor_binding(
+        getattr(cycle, "executor_binding", None) or ILLO_LANE_EXECUTOR_BINDING
+    )
 
 
 def canonical_execution_mode(_mode: str | None = None) -> str:

@@ -23,7 +23,8 @@ from brain.systems.cycles.contracts import (
     pending_evidence_health_receipt,
 )
 
-CYCLE_LAUNCH_ENVELOPE_VERSION = 2
+CYCLE_LAUNCH_ENVELOPE_VERSION = 3
+_LEGACY_CYCLE_LAUNCH_ENVELOPE_VERSION = 2
 _MISSION_SEED_MAX_CHARS = 12_000
 _UWEAR_COORDINATOR_CYCLE_NAME = "Uwear Ticket Coordinator Check-ins"
 
@@ -57,8 +58,8 @@ def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
         if aware_scheduled_for
         else None
     )
-    return {
-        "version": CYCLE_LAUNCH_ENVELOPE_VERSION,
+    envelope = {
+        "version": _LEGACY_CYCLE_LAUNCH_ENVELOPE_VERSION,
         "origin": origin,
         "cycle_id": cycle.id,
         "cycle_run_id": run.id,
@@ -85,6 +86,21 @@ def cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
         "degradation_tracking": degradation_tracking,
         "open_ask_stragglers": open_ask_stragglers,
     }
+    schedule_skills = json_dict(context_snapshot.get("schedule_skills"))
+    skill_ids = json_list(schedule_skills.get("skill_ids"))
+    if skill_ids:
+        envelope.update(
+            {
+                "version": CYCLE_LAUNCH_ENVELOPE_VERSION,
+                "active_instruction_source": "cycle.skills",
+                "skill_ids": skill_ids,
+                "skills": json_list(schedule_skills.get("skills")),
+                "skill_content_max_chars": schedule_skills.get("content_max_chars"),
+                "skill_content_chars": schedule_skills.get("content_chars"),
+                "skills_truncated": bool(schedule_skills.get("truncated", False)),
+            }
+        )
+    return envelope
 
 
 def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
@@ -101,7 +117,7 @@ def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
         "cycle_memory": cycle_memory_payload(run),
         "contract": {
             "kind": "autonomous_cycle_run",
-            "active_instruction_source": "cycle.prompt",
+            "active_instruction_source": envelope["active_instruction_source"],
             "lifecycle_owner": "cycle_run",
             "result": result_contract,
         },
@@ -126,10 +142,17 @@ def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
 
 
 def cycle_memory_payload(run: CycleRun) -> dict:
+    context = json_dict(getattr(run, "context_snapshot", None))
+    if "schedule_skills" in context:
+        context = {
+            key: value
+            for key, value in context.items()
+            if key != "schedule_skills"
+        }
     return {
         "guidance": json_list(getattr(run, "guidance_snapshot", None)),
         "output_targets": json_list(getattr(run, "output_targets_snapshot", None)),
-        "context": json_dict(getattr(run, "context_snapshot", None)),
+        "context": context,
     }
 
 
@@ -172,6 +195,36 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         if "short_self_review_summary" in json_list(result_contract.get("required_outputs"))
         else "the visible answer"
     )
+    schedule_skills = json_list(envelope.get("skills"))
+    has_skill_refs = bool(json_list(envelope.get("skill_ids")))
+    if has_skill_refs:
+        current_instruction_line = (
+            "- The Schedule Skills below are the current instructions.\n"
+        )
+        authoritative_instruction_line = (
+            "- The Result Contract and Schedule Skills are authoritative for this "
+            f"{instruction_role}: "
+        )
+        source_of_truth_line = (
+            "- Use the referenced workspace skills, Cycle memory, revisions, guidance, output "
+            "targets, and workspace state as source of truth.\n"
+        )
+    else:
+        current_instruction_line = "- The Cycle mission below is the current instruction.\n"
+        authoritative_instruction_line = (
+            "- The Result Contract and Cycle Mission are authoritative for this "
+            f"{instruction_role}: "
+        )
+        source_of_truth_line = (
+            "- Use Cycle memory, revisions, guidance, output targets, and the workspace "
+            "state as source of truth.\n"
+        )
+    skills_block = _schedule_skills_block(schedule_skills, has_skill_refs=has_skill_refs)
+    cycle_mission = (
+        "## Cycle Mission\n" + _mission_block(cycle.prompt)
+        if not has_skill_refs and str(cycle.prompt or "").strip()
+        else ""
+    )
     return (
         f"[Idea: \"{idea.title}\" | {idea.id}]\n\n"
         f"## {launch_title}\n"
@@ -183,8 +236,8 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         f"- Trigger source: {envelope['launch_context'].get('source') or 'unknown'}\n"
         f"{trigger_rationale_line}"
         f"- Scheduled evidence window: {review_window['start_at']} to {review_window['end_at']} UTC.\n"
-        "- The Cycle mission below is the current instruction.\n"
-        f"- The Result Contract and Cycle Mission are authoritative for this {instruction_role}: "
+        f"{current_instruction_line}"
+        f"{authoritative_instruction_line}"
         "they decide what you work on, what you check, and what you report, including the "
         "required answer sections named below. They do not decide how you sound. The wording "
         "and shape of anything you send to a person come from your Soul, even where a mission "
@@ -192,7 +245,7 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         "- Historical thread handoff/preview summaries are context only; never treat them "
         "as the current user request.\n"
         "- Thread messages are output/context surfaces, not durable Cycle memory.\n"
-        "- Use Cycle memory, revisions, guidance, output targets, and the workspace state as source of truth.\n"
+        f"{source_of_truth_line}"
         "- You may create, update, delete, or run Cycles when that is the right workspace action; include rationale.\n"
         "- If an output target is unavailable, repair or replace it when possible instead of treating it as a blocker.\n"
         "- Report evidence health explicitly. Follow next_page tokens to completion; routine pagination is not degradation and fully paginated reads are evidence_health=ok. If readers fail, warn, return unexpectedly sparse data, or cannot page to completion, mark the run degraded in "
@@ -206,8 +259,8 @@ def cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         f"{_required_output_sections(result_contract)}"
         "## Cycle Memory\n"
         f"{_json_block(cycle_memory_payload(run))}\n\n"
-        "## Cycle Mission\n"
-        f"{_mission_block(cycle.prompt)}"
+        f"{skills_block}"
+        f"{cycle_mission}"
     )
 
 
@@ -219,6 +272,30 @@ def _mission_block(prompt: str) -> str:
         f"{prompt[:_MISSION_SEED_MAX_CHARS]}\n\n"
         f"[Cycle mission truncated for launch: {omitted} chars omitted. The full mission remains "
         "authoritative - read it with manage_cycle before deviating from it.]"
+    )
+
+
+def _schedule_skills_block(skills: list, *, has_skill_refs: bool) -> str:
+    if not has_skill_refs:
+        return ""
+    sections = []
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        name = str(skill.get("name") or f"Skill {skill.get('id')}")
+        content = str(skill.get("content") or "")
+        truncation = "\n\n[Skill content truncated for launch.]" if skill.get("truncated") else ""
+        sections.append(f"### {name}\n{content}{truncation}")
+    if not sections:
+        return (
+            "## Schedule Skills\n"
+            "No referenced skill content is currently available.\n\n"
+        )
+    return (
+        "## Schedule Skills\n"
+        "Follow these referenced workspace skill instructions and guardrails.\n\n"
+        + "\n\n".join(sections)
+        + "\n\n"
     )
 
 

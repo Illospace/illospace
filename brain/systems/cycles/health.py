@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.systems.cycles.common import ILLO_LANE_EXECUTOR_BINDING
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUS_VALUES
 
 
@@ -70,6 +71,7 @@ async def async_legacy_cycle_backlog_snapshot(
     due_cycle_clause = and_(
         Cycle.deleted_at.is_(None),
         Cycle.enabled.is_(True),
+        Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
         Cycle.next_run_at.is_not(None),
         Cycle.next_run_at <= stale_cutoff,
     )

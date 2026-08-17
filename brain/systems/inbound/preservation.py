@@ -45,6 +45,7 @@ PRESERVATION_OUTCOME_VALUES = frozenset(
 )
 PRESERVATION_ACCEPTABLE_TOOLS = (
     "memory_ingest_source",
+    "memory_supersede",
     "brain_encode",
     "manage_domain",
     "manage_project",

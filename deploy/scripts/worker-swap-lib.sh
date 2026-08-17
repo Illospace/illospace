@@ -2,20 +2,23 @@
 
 # Shared worker-swap snapshot parsing, presentation, and decision helpers.
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deploy-python-lib.sh"
+
+# Backward-compatible name for callers outside this repository.
 worker_swap_python_bin() {
-  printf '%s\n' "${WORKER_SWAP_PYTHON_BIN:-python3}"
+  deploy_python_bin
 }
 
 worker_swap_contract() {
   local python_bin
-  python_bin="$(worker_swap_python_bin)"
+  python_bin="$(deploy_python_bin)"
   PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     "$python_bin" -m brain.contracts.worker_swap "$@"
 }
 
 worker_swap_snapshot_acquire() {
   local python_bin
-  python_bin="$(worker_swap_python_bin)"
+  python_bin="$(deploy_python_bin)"
   PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     "$python_bin" -m brain.app.cli.worker_swap_snapshot
 }
