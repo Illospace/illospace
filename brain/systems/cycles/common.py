@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import and_
+from sqlalchemy.sql.elements import ColumnElement
+
+from brain.platform.db.models.cycle import Cycle
 from brain.platform.providers.model_policy import (
     EFFORT_TIER_SET,
     PROVIDER_MODEL_OPTIONS,
@@ -69,6 +73,22 @@ def validate_executor_binding(value: str | None) -> str:
 def cycle_executor_binding(cycle) -> str:
     return validate_executor_binding(
         getattr(cycle, "executor_binding", None) or ILLO_LANE_EXECUTOR_BINDING
+    )
+
+
+def due_illo_lane_cycle_clause(
+    cutoff: datetime, *, inclusive: bool
+) -> ColumnElement[bool]:
+    """Select enabled, scheduled illo-lane cycles due by ``cutoff``."""
+    next_run_at_clause = (
+        Cycle.next_run_at <= cutoff if inclusive else Cycle.next_run_at < cutoff
+    )
+    return and_(
+        Cycle.deleted_at.is_(None),
+        Cycle.enabled.is_(True),
+        Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
+        Cycle.next_run_at.is_not(None),
+        next_run_at_clause,
     )
 
 

@@ -19,7 +19,10 @@ from brain.platform.db.models.cycle import (
 from brain.systems.cycles import commands, health as cycle_health
 from brain.systems.cycles import prompts, service, skill_refs
 from brain.systems.cycles.access import CycleActor
-from brain.systems.cycles.common import MANUAL_CYCLE_ORIGIN
+from brain.systems.cycles.common import (
+    MANUAL_CYCLE_ORIGIN,
+    due_illo_lane_cycle_clause,
+)
 from brain.systems.runs.execution_context import bind_agent_context
 from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
 
@@ -126,6 +129,32 @@ def _schedule(*, binding: str, next_run_at: datetime) -> Cycle:
         skill_ids=[17] if binding == "personal-agent" else [],
         next_run_at=next_run_at,
     )
+
+
+@pytest.mark.asyncio
+async def test_due_illo_lane_cycle_clause_preserves_cutoff_boundary(schedule_session):
+    cutoff = datetime.now(timezone.utc).replace(microsecond=0)
+    cycle = _schedule(binding="illo-lane", next_run_at=cutoff)
+    schedule_session.add(cycle)
+    await schedule_session.flush()
+
+    strict_ids = (
+        await schedule_session.scalars(
+            select(Cycle.id).where(
+                due_illo_lane_cycle_clause(cutoff, inclusive=False)
+            )
+        )
+    ).all()
+    inclusive_ids = (
+        await schedule_session.scalars(
+            select(Cycle.id).where(
+                due_illo_lane_cycle_clause(cutoff, inclusive=True)
+            )
+        )
+    ).all()
+
+    assert strict_ids == []
+    assert inclusive_ids == [cycle.id]
 
 
 @pytest.mark.asyncio
