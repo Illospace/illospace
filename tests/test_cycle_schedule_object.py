@@ -19,10 +19,8 @@ from brain.platform.db.models.cycle import (
 from brain.systems.cycles import commands, health as cycle_health
 from brain.systems.cycles import prompts, service, skill_refs
 from brain.systems.cycles.access import CycleActor
-from brain.systems.cycles.common import (
-    MANUAL_CYCLE_ORIGIN,
-    due_illo_lane_cycle_clause,
-)
+from brain.systems.cycles.common import MANUAL_CYCLE_ORIGIN
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.runs.execution_context import bind_agent_context
 from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
 

@@ -14,7 +14,7 @@ from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.stale_run_reaper import agent_run_maintenance_snapshot
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.cycle import Cycle
-from brain.systems.cycles.common import due_illo_lane_cycle_clause
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.runs.cortex.queue_health import (
     QueueHealth,
     queued_backlog_health_snapshot_async,

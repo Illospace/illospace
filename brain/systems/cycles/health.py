@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import Cycle, CycleRun
-from brain.systems.cycles.common import due_illo_lane_cycle_clause
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUS_VALUES
 
 

@@ -44,12 +44,12 @@ from brain.systems.cycles.common import (
     canonical_execution_mode,
     cycle_executor_binding,
     cycle_run_launch_context,
-    due_illo_lane_cycle_clause,
     json_dict,
     short_identifier,
     validate_nonempty_trimmed,
     validate_thinking_override,
 )
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.contract_gate import (
     async_prepare_cycle_run_visible_finalization,
