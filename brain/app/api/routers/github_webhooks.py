@@ -15,10 +15,11 @@ Config (env):
                                    ingestion authority; Slice 3 assignment then
                                    re-routes ownership (business/product → Reda).
 
-Activation is a deliberate step: register with
-``app.include_router(github_webhooks.router)`` once the GitHub App (PR #265) is
-live and the two env vars are set. It is intentionally NOT auto-registered so it
-cannot affect app startup before then.
+This router is always mounted: ``brain/app/api/main.py`` registers it at app
+startup (#279). Configuration is enforced per request, not at import or mount
+time — until BOTH env vars above are set (and the configured connection row
+exists), ``POST /webhooks/github`` answers HTTP 503, so mounting before the
+GitHub App is configured is inert and cannot affect app startup.
 """
 
 from __future__ import annotations
