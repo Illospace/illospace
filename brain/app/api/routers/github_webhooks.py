@@ -15,12 +15,13 @@ Config (env):
                                    ingestion authority; Slice 3 assignment then
                                    re-routes ownership (business/product → Reda).
 
-The router is mounted unconditionally in ``brain/app/api/main.py`` and
-self-gates instead of gating registration: a missing secret answers 503
-outright; with a secret set, requests are still verified and parsed first
-(401 bad signature, 400 malformed JSON, 202 unsupported event) and a missing
-connection id answers 503 before any envelope is submitted. An unconfigured
-deployment therefore never ingests a GitHub event.
+This router is always mounted: ``brain/app/api/main.py`` registers it at app
+startup (#279). Configuration is enforced per request, not at import or mount
+time: a missing secret answers 503 outright; with a secret set, requests are
+still verified and parsed first (401 bad signature, 400 malformed JSON, 202
+unsupported event), and a missing connection id or connection row answers 503
+before any envelope is submitted. An unconfigured deployment therefore never
+ingests a GitHub event.
 """
 
 from __future__ import annotations

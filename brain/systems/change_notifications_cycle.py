@@ -6,9 +6,18 @@ here we only read ``domain_events`` since the last run, count the unclaimed pool
 and post the resulting messages. ``post`` is injectable so the orchestration is
 testable without Slack.
 
-Wiring (runtime): register a cycle whose program calls
+Wiring (runtime): nothing calls ``run_notify_cycle`` in production today — no
+cycle is registered for it; its only callers are its tests
+(``tests/test_change_notifications.py``). The sweeps it wraps run through other
+paths instead: the alert-resolution harvest is a tracker-maintenance step
+(``brain/systems/tracker_maintenance.py``), and obligation-notice delivery is
+driven from ``brain/systems/runs/obligation_notices.py`` itself. The team-digest
+responsibility lives with the coordinator cycle — see the "Team Digest Contract"
+in ``brain/systems/skills/builtin_skill_bundles/uwear-engineering-triage/SKILL.md``.
+
+If this module is ever activated, register a cycle whose program calls
 ``run_notify_cycle(session, org_id=…, channel_id=<the team channel>,
-since=<cycle.last_run_at>)`` on its cadence (default ~30 min). Urgent items post
+since=<cycle.last_run_at>)`` on its cadence (~30 min). Urgent items post
 immediately; a quiet interval posts nothing. The channel is the team channel Illo
 already works in — not a new channel, not DMs.
 """
