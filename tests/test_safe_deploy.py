@@ -466,7 +466,7 @@ def test_meetbot_changes_build_publish_update_and_report_the_running_commit():
     doctor = (root / "deploy" / "scripts" / "doctor.sh").read_text()
     dockerfile = (root / "deploy" / "docker" / "meetbot.Dockerfile").read_text()
     compose = (root / "deploy" / "compose" / "docker-compose.yml").read_text()
-    spec = (root / "specs" / "meetbot" / "README.md").read_text()
+    spec = (root / "specs" / "done" / "meetbot" / "README.md").read_text()
 
     assert '      meetbot: ${{ steps.selected.outputs.meetbot }}' in workflow
     assert '              - "meetbot/**"' in workflow

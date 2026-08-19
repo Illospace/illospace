@@ -15,10 +15,9 @@ Config (env):
                                    ingestion authority; Slice 3 assignment then
                                    re-routes ownership (business/product → Reda).
 
-Activation is a deliberate step: register with
-``app.include_router(github_webhooks.router)`` once the GitHub App (PR #265) is
-live and the two env vars are set. It is intentionally NOT auto-registered so it
-cannot affect app startup before then.
+The router is mounted unconditionally in ``brain/app/api/main.py`` and
+self-gates: until both env vars are set it answers 503 without touching the
+pipeline, so an unconfigured deployment cannot ingest or fail on GitHub events.
 """
 
 from __future__ import annotations

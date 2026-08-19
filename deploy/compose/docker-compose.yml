@@ -52,14 +52,14 @@ x-illo-env: &illo-env
   ILLO_WORKSPACE_TOOLS_STATUS_FILE: /data/private/workspace-tools/status.json
   ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE: /data/private/workspace-tools/heartbeat.json
   ILLO_WORKSPACE_TOOLS_LOG_PATH: /data/private/logs/illo-workspace-tools.log
-  # Lifecycle activation (specs/illo-lifecycle): assignment rules, unclaimed
+  # Lifecycle activation (specs/done/illo-lifecycle): assignment rules, unclaimed
   # pool, and GitHub webhook ingress. Empty default = feature off.
   ILLO_BUSINESS_OWNER_USER_ID: ${ILLO_BUSINESS_OWNER_USER_ID:-}
   ILLO_PRODUCT_OWNER_USER_ID: ${ILLO_PRODUCT_OWNER_USER_ID:-}
   ILLO_REPO_OWNERS: ${ILLO_REPO_OWNERS:-}
   ILLO_UNCLAIMED_POOL_USER_ID: ${ILLO_UNCLAIMED_POOL_USER_ID:-}
-  # Handoff packets (specs/illo-handoff-packets): per-member launch targets.
-  # Empty default = codex for everyone (mint.py's config-with-default).
+  # Launch-handoff targets (specs/done/illo-handoff-packets); the automatic
+  # packet lane is retired and this var currently has no reader.
   ILLO_MEMBER_AGENT_TARGETS: ${ILLO_MEMBER_AGENT_TARGETS:-}
   ILLO_GITHUB_WEBHOOK_SECRET: ${ILLO_GITHUB_WEBHOOK_SECRET:-}
   ILLO_GITHUB_CONNECTION_ID: ${ILLO_GITHUB_CONNECTION_ID:-}

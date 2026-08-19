@@ -418,7 +418,7 @@ app.include_router(agent_bridge.router)
 app.include_router(agent_mcp.router)
 app.include_router(webhooks.router)
 # GitHub webhook ingress; self-gates with 503 until ILLO_GITHUB_WEBHOOK_SECRET
-# and ILLO_GITHUB_CONNECTION_ID are configured (specs/illo-lifecycle Slice 1).
+# and ILLO_GITHUB_CONNECTION_ID are configured (specs/done/illo-lifecycle).
 app.include_router(github_webhooks.router)
 app.include_router(link_previews.router)
 app.include_router(launch_handoffs.router)
