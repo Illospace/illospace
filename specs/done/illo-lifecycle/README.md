@@ -31,8 +31,8 @@ determinism is cheap, and honest where it is not:
   (`derive_deploy_state(s)`, `unmerged|staging|deployed`),
   `deploy_state_github.py` (`observe_ancestry`: GitHub compare
   `identical|behind` ⇒ contained), `deploy_record_contract.py`
-  (`DEPLOY_EVIDENCE_FIELDS` = fix_pr, fix_merge_sha, verified, verified_at;
-  `RETIRED_DEPLOY_FIELDS` hidden at every read boundary). Two consumers: the
+  (the stored deploy facts are exactly fix_pr, fix_merge_sha, verified,
+  verified_at; `RETIRED_DEPLOY_FIELDS` hidden at every read boundary). Two consumers: the
   always-on `check_fix_deploy_state` tool and the staging-only closure sweep
   (`staging_only_closure.py`, scheduled via `tracker_maintenance.py`).
 
