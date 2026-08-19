@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from brain.systems.cortex.thread_links import (
     canonicalize_thread_reference,
     extract_thread_reference_values,
@@ -17,10 +15,6 @@ from brain.systems.cortex.thread_read_model import (
 )
 from brain.systems.cortex.object_references import store_object_references_for_source
 from brain.systems.launch_handoffs import (
-    TARGET_CLAUDE,
-    TARGET_CODEX,
-    LaunchHandoffError,
-    agent_target_for_member,
     claude_prompt_for_handoff,
     codex_deep_link_for_handoff,
     extract_launch_handoff_reference_values,
@@ -28,7 +22,6 @@ from brain.systems.launch_handoffs import (
     launch_handoff_reference_payload,
     launch_handoff_route_for_id,
     launch_handoff_url_for_id,
-    parse_member_agent_targets,
 )
 
 
@@ -144,32 +137,6 @@ def test_launch_handoff_preview_and_codex_prompt_are_compact(monkeypatch):
     assert "`illo_read`" in claude_prompt
     assert "`handoff.get`" in claude_prompt
     assert f'{{"handoff_id":"{HANDOFF_ID}"}}' in claude_prompt
-
-
-def test_parse_member_agent_targets_uses_canonical_uuid_keys():
-    claude_user = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
-    codex_user = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-
-    targets = parse_member_agent_targets(
-        f" {claude_user}=Claude, {codex_user}=codex "
-    )
-
-    assert targets == {
-        claude_user.lower(): TARGET_CLAUDE,
-        codex_user: TARGET_CODEX,
-    }
-    assert agent_target_for_member(claude_user, targets) == TARGET_CLAUDE
-    assert agent_target_for_member(None, targets) == TARGET_CODEX
-
-
-def test_parse_member_agent_targets_rejects_non_uuid_keys():
-    with pytest.raises(LaunchHandoffError, match="user id must be a UUID"):
-        parse_member_agent_targets("reda=claude")
-
-
-def test_parse_member_agent_targets_accepts_empty_configuration():
-    assert parse_member_agent_targets("") == {}
-    assert parse_member_agent_targets(None) == {}
 
 
 def test_preview_summary_from_handoff_compacts_runtime_checkpoint():

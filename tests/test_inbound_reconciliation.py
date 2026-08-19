@@ -47,8 +47,7 @@ async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
 @pytest.fixture(autouse=True)
 def _hermetic_assignment_env(monkeypatch):
     for key in ("ILLO_BUSINESS_OWNER_USER_ID", "ILLO_PRODUCT_OWNER_USER_ID",
-                "ILLO_REPO_OWNERS", "ILLO_UNCLAIMED_POOL_USER_ID",
-                "ILLO_MEMBER_AGENT_TARGETS"):
+                "ILLO_REPO_OWNERS", "ILLO_UNCLAIMED_POOL_USER_ID"):
         monkeypatch.delenv(key, raising=False)
 
 

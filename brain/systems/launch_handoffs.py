@@ -204,46 +204,6 @@ def _is_actionable(row: LaunchHandoff, now: datetime) -> bool:
     return row.status == "open" and (expires_at is None or expires_at > now)
 
 
-def parse_member_agent_targets(raw: str | None) -> dict[str, str]:
-    """Parse ``ILLO_MEMBER_AGENT_TARGETS`` into canonical UUID-keyed targets."""
-    targets: dict[str, str] = {}
-    for chunk in str(raw or "").split(","):
-        entry = chunk.strip()
-        if not entry:
-            continue
-        if "=" not in entry:
-            raise LaunchHandoffError(
-                "ILLO_MEMBER_AGENT_TARGETS entries must use <user-uuid>=<target>"
-            )
-        user_id, target = (part.strip() for part in entry.split("=", 1))
-        try:
-            canonical_user_id = str(uuid.UUID(user_id))
-        except ValueError as exc:
-            raise LaunchHandoffError(
-                f"ILLO_MEMBER_AGENT_TARGETS user id must be a UUID: {user_id or '<empty>'}"
-            ) from exc
-        if not target:
-            raise LaunchHandoffError(
-                f"ILLO_MEMBER_AGENT_TARGETS target is empty for user {canonical_user_id}"
-            )
-        targets[canonical_user_id] = target.lower()
-    return targets
-
-
-def agent_target_for_member(
-    user_id: Any,
-    targets: dict[str, str],
-    *,
-    default: str = TARGET_CODEX,
-) -> str:
-    """Look up a member's configured target, falling back for unknown owners."""
-    canonical_user_id = _uuid_or_none(user_id)
-    fallback = (_clean_optional_string(default) or TARGET_CODEX).lower()
-    if not canonical_user_id:
-        return fallback
-    return (_clean_optional_string(targets.get(canonical_user_id)) or fallback).lower()
-
-
 def _strip_candidate(value: Any) -> str:
     cleaned = str(value or "").strip()
     while cleaned and cleaned[-1] in _TRAILING_PUNCTUATION:

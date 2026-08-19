@@ -58,9 +58,6 @@ x-illo-env: &illo-env
   ILLO_PRODUCT_OWNER_USER_ID: ${ILLO_PRODUCT_OWNER_USER_ID:-}
   ILLO_REPO_OWNERS: ${ILLO_REPO_OWNERS:-}
   ILLO_UNCLAIMED_POOL_USER_ID: ${ILLO_UNCLAIMED_POOL_USER_ID:-}
-  # Handoff packets (specs/illo-handoff-packets): per-member launch targets.
-  # Empty default = codex for everyone (mint.py's config-with-default).
-  ILLO_MEMBER_AGENT_TARGETS: ${ILLO_MEMBER_AGENT_TARGETS:-}
   ILLO_GITHUB_WEBHOOK_SECRET: ${ILLO_GITHUB_WEBHOOK_SECRET:-}
   ILLO_GITHUB_CONNECTION_ID: ${ILLO_GITHUB_CONNECTION_ID:-}
 x-backend-service: &backend-service
