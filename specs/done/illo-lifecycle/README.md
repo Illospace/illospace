@@ -11,7 +11,8 @@ and what the plan predicted wrong.*
 Four owner modules that make Illo's triage lifecycle deterministic where
 determinism is cheap, and honest where it is not:
 
-- **Webhook freshness** — `brain/systems/inbound/github_webhook.py` (pure
+- **Webhook ingress** (the planned "freshness contract" on top of it never
+  landed — see below) — `brain/systems/inbound/github_webhook.py` (pure
   envelope core: `verify_signature`, `github_event_to_envelope`) behind
   `POST /webhooks/github` (`brain/app/api/routers/github_webhooks.py`,
   mounted in `main.py`; self-gates with 503 until
@@ -45,10 +46,14 @@ ownership, the deploy-state read ladder, digest contract) lives in the
 
 - **Rules decide only what is safely mechanical.** The engineering
   three-way routing stays *prose*, deliberately: `default_rules()` registers
-  only BUSINESS/PRODUCT routes, and
-  `tests/test_assignment.py::test_engineering_is_not_auto_routed` pins that.
-  A keyword heuristic must never yank an engineering ticket between Reda,
-  Axel and JB; judgment stays in the runtime playbook. The text heuristic
+  BUSINESS/PRODUCT domain routes plus an env-driven repo→owner table
+  (`ILLO_REPO_OWNERS`, empty by default in compose) — no engineering
+  *keyword* route exists in code, and
+  `tests/test_assignment.py::test_engineering_is_not_auto_routed` pins the
+  keyword side (it does not cover repo rules; those route whatever an
+  operator explicitly configures). A keyword heuristic must never yank an
+  engineering ticket between Reda, Axel and JB; judgment stays in the runtime
+  playbook. The text heuristic
   drives ownership only on the GitHub lane (`repo` present) so a stray word
   in a Slack message cannot re-route an item.
 - **Deploy state is derivable, so it is derived.** The original slice 05
@@ -70,7 +75,8 @@ ownership, the deploy-state read ladder, digest contract) lives in the
 
 ## Invariants (enforced, with the enforcement point)
 
-1. Engineering is not auto-routed (`assignment.py` + test above); explicit
+1. Engineering is never keyword-auto-routed (`assignment.py` + test above;
+   env-configured repo rules are the one sanctioned exception); explicit
    GitHub assignee always wins; builder-first ownership; business/product/
    website = Reda exclusively; never assign a PR reviewer (SKILL.md +
    `soul.py` Coordination block).

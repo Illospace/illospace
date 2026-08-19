@@ -16,8 +16,11 @@ Config (env):
                                    re-routes ownership (business/product → Reda).
 
 The router is mounted unconditionally in ``brain/app/api/main.py`` and
-self-gates: until both env vars are set it answers 503 without touching the
-pipeline, so an unconfigured deployment cannot ingest or fail on GitHub events.
+self-gates instead of gating registration: a missing secret answers 503
+outright; with a secret set, requests are still verified and parsed first
+(401 bad signature, 400 malformed JSON, 202 unsupported event) and a missing
+connection id answers 503 before any envelope is submitted. An unconfigured
+deployment therefore never ingests a GitHub event.
 """
 
 from __future__ import annotations

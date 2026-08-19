@@ -71,12 +71,17 @@ whole service be tested with a faked engine and no browser.
 
 ## Invariants (what must stay true)
 
-1. **Silence is structural, not behavioral.** The browser context is created
-   with `permissions=[]` (`engine.py`) — a page that never receives the
-   permission cannot transmit audio/video. The mute pass is best-effort
-   logging only. Corollary (from live failure #648): **absence of a Meet
-   control is a normal state, never an error** — a permissionless bot gets no
-   mute button.
+1. **Silence is layered, not a single switch.** The browser context is
+   created with `permissions=[]` (`engine.py`), the container has no real
+   capture hardware, and the launch flags
+   `--use-fake-ui-for-media-stream`/`--use-fake-device-for-media-stream` mean
+   any stream that did open would carry a synthetic test source, never a
+   microphone. The in-code comment calls `permissions=[]` alone "the real
+   silence guarantee" — that overstates it, because the fake-UI flag bypasses
+   the media prompt; the layering is the guarantee. The mute pass is
+   best-effort logging only. Corollary (from live failure #648): **absence of
+   a Meet control is a normal state, never an error** — a permissionless bot
+   gets no mute button.
 2. **Never claim success on page load.** `captions_flowing` is reachable only
    from an observed caption DOM mutation (`session.py` raises otherwise); the
    status graph is a legality table (`_ALLOWED_TRANSITIONS`). Admitted with no
