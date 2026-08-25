@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.time import assume_utc_optional
 from brain.platform.db.models.cycle import Cycle, CycleRun
-from brain.systems.cycles.common import ILLO_LANE_EXECUTOR_BINDING
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUS_VALUES
 
 
@@ -68,21 +68,16 @@ async def async_legacy_cycle_backlog_snapshot(
 ) -> LegacyCycleBacklogSnapshot:
     now = now or _utc_now()
     stale_cutoff = now - timedelta(minutes=stale_after_minutes)
-    due_cycle_clause = and_(
-        Cycle.deleted_at.is_(None),
-        Cycle.enabled.is_(True),
-        Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
-        Cycle.next_run_at.is_not(None),
-        Cycle.next_run_at <= stale_cutoff,
-    )
     due_cycle_count = await session.scalar(
-        select(func.count()).select_from(Cycle).where(due_cycle_clause)
+        select(func.count())
+        .select_from(Cycle)
+        .where(due_illo_lane_cycle_clause(stale_cutoff, inclusive=True))
     ) or 0
     stale_due_cycles = list(
         (
             await session.scalars(
                 select(Cycle)
-                .where(due_cycle_clause)
+                .where(due_illo_lane_cycle_clause(stale_cutoff, inclusive=True))
                 .order_by(Cycle.next_run_at.asc())
                 .limit(sample_limit)
             )

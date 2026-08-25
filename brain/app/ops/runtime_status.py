@@ -14,7 +14,7 @@ from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.app.scheduler.stale_run_reaper import agent_run_maintenance_snapshot
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.cycle import Cycle
-from brain.systems.cycles.common import ILLO_LANE_EXECUTOR_BINDING
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.runs.cortex.queue_health import (
     QueueHealth,
     queued_backlog_health_snapshot_async,
@@ -254,36 +254,20 @@ async def async_runtime_status_snapshot(
         await session.scalar(
             select(func.count())
             .select_from(Cycle)
-            .where(
-                Cycle.enabled.is_(True),
-                Cycle.deleted_at.is_(None),
-                Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
-                Cycle.next_run_at.is_not(None),
-                Cycle.next_run_at < captured_at,
-            )
+            .where(due_illo_lane_cycle_clause(captured_at, inclusive=False))
         )
         or 0
     )
     oldest_overdue_cycle_at = await session.scalar(
         select(func.min(Cycle.next_run_at)).where(
-            Cycle.enabled.is_(True),
-            Cycle.deleted_at.is_(None),
-            Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
-            Cycle.next_run_at.is_not(None),
-            Cycle.next_run_at < captured_at,
+            due_illo_lane_cycle_clause(captured_at, inclusive=False)
         )
     )
     overdue_cycles = list(
         (
             await session.scalars(
                 select(Cycle)
-                .where(
-                    Cycle.enabled.is_(True),
-                    Cycle.deleted_at.is_(None),
-                    Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
-                    Cycle.next_run_at.is_not(None),
-                    Cycle.next_run_at < captured_at,
-                )
+                .where(due_illo_lane_cycle_clause(captured_at, inclusive=False))
                 .order_by(Cycle.next_run_at.asc())
                 .limit(20)
             )
