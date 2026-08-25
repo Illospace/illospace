@@ -74,10 +74,12 @@ class PlaywrightMeetEngine:
             # contract, not a caption-language preference; spoken French stays separate.
             context_options: dict[str, object] = {
                 "viewport": {"width": 1280, "height": 720},
-                # Deliberately NO microphone/camera permission grant: a page
-                # that never receives the permission structurally cannot send
-                # audio or video, which is the real silence guarantee. The
-                # mute-toggle pass below is best-effort cosmetics on top.
+                # Media silence is layered. Chromium's fake-UI flag bypasses
+                # prompts, so no single layer is the guarantee: Playwright applies
+                # an empty permission override, fake-device substitutes synthetic
+                # sources, and the container exposes no real capture hardware. The
+                # Meet mute pass below adds UI defense in depth. The join can
+                # continue without a grant through _dismiss_media_prompt.
                 "permissions": [],
                 "locale": self._config.ui_locale,
                 "extra_http_headers": {
@@ -384,12 +386,12 @@ async def _ensure_media_muted(
     off_selectors: tuple[str, ...],
     on_selectors: tuple[str, ...],
 ) -> None:
-    """Best-effort toggle-off; never a join precondition.
+    """Best-effort Meet-level toggle-off; never a join precondition.
 
-    The context grants no microphone/camera permission, so the page cannot
-    transmit either way. A bot with no device sees NO mute control at all —
-    absence is the normal permissionless state, not an error (first live
-    join failed here when this raised).
+    The context permission override, synthetic sources, and container isolation
+    operate below this UI control. When media access is unavailable, Meet can
+    omit the control altogether; absence is not an error (the first live join
+    failed here when this raised).
     """
 
     if await first_visible(page, on_selectors) is not None:
