@@ -11,18 +11,9 @@ from collections.abc import Mapping
 from typing import Any
 
 
-DEPLOY_EVIDENCE_FIELDS = frozenset(
-    {
-        "fix_pr",
-        "fix_merge_sha",
-        "verified",
-        "verified_at",
-    }
-)
-
 # These fields belonged to the retired persisted deploy-state model. They are
-# hidden unconditionally at read boundaries until the re-runnable backfill
-# removes them.
+# hidden unconditionally at serialization and record-to-text read boundaries
+# until the re-runnable backfill removes them.
 RETIRED_DEPLOY_FIELDS = frozenset(
     {
         "deploy_state",
@@ -30,10 +21,6 @@ RETIRED_DEPLOY_FIELDS = frozenset(
         "fix_merged_at",
         "promotion_recommended_at",
     }
-)
-
-DEPLOY_FIELDS_HIDDEN_FROM_RECORD_PROSE = (
-    DEPLOY_EVIDENCE_FIELDS | RETIRED_DEPLOY_FIELDS
 )
 
 

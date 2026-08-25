@@ -450,6 +450,66 @@ async def test_domain_records_connector_advances_and_resumes_watermark_with_id_t
     ) == ["domain_record:1", "domain_record:2", "domain_record:3"]
 
 
+async def test_domain_records_connector_hides_retired_deploy_fields_from_text(
+    session,
+):
+    updated_at = datetime(2026, 8, 19, 12, 30, tzinfo=timezone.utc)
+    retired_values = {
+        "deploy_state": "legacy-staging",
+        "deployed_at": "2026-08-18T10:00:00+00:00",
+        "fix_merged_at": "2026-08-18T09:00:00+00:00",
+        "promotion_recommended_at": "2026-08-18T09:30:00+00:00",
+    }
+    session.add_all(
+        [
+            Domain(
+                id=845,
+                org_id=_ORG_ID,
+                slug="deploy-tracker",
+                name="Deploy Tracker",
+                created_at=updated_at,
+                updated_at=updated_at,
+            ),
+            DomainObjectType(
+                id=845,
+                domain_id=845,
+                key="ticket",
+                name="Ticket",
+                created_at=updated_at,
+                updated_at=updated_at,
+            ),
+            DomainRecord(
+                id=845,
+                org_id=_ORG_ID,
+                domain_id=845,
+                object_type_id=845,
+                title="Legacy deploy record",
+                data={"summary": "Safe tracker context", **retired_values},
+                search_text=" ".join(
+                    [
+                        "Legacy deploy record",
+                        *(f"{key} {value}" for key, value in retired_values.items()),
+                    ]
+                ),
+                version=1,
+                created_at=updated_at,
+                updated_at=updated_at,
+            ),
+        ]
+    )
+    await session.flush()
+
+    result = await DomainRecordsConnector().enumerate_changed(session, {})
+
+    assert len(result.drafts) == 1
+    draft = result.drafts[0]
+    rendered = f"{draft.summary}\n{draft.raw_text}"
+    assert "Safe tracker context" in rendered
+    for key, value in retired_values.items():
+        assert key not in rendered
+        assert value not in rendered
+
+
 async def test_memory_connector_mirrors_only_shared_source_backed_memories(
     session,
     embedding_runtime,
