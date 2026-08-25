@@ -143,6 +143,22 @@ def test_uwear_triage_chantier_primary_digest_keeps_person_coverage():
     assert "outcome summary in the goal's language" in procedure
 
 
+def test_uwear_triage_routes_pull_request_outcomes_to_terminal_tracker_statuses():
+    from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / "uwear-engineering-triage")
+    states = bundle.skill_markdown.split("## States", 1)[1].split("## Identities", 1)[0]
+    contract = " ".join(states.split())
+
+    assert '`pr_outcome == "merged"`' in contract
+    assert "`Done`" in contract
+    assert '"PR merged on GitHub."' in contract
+    assert '`pr_outcome == "closed_unmerged"`' in contract
+    assert "`Canceled`" in contract
+    assert '"PR closed on GitHub without merge; no further review action."' in contract
+
+
 def test_uwear_triage_scheduled_memory_contract():
     from brain.systems.skills.builtin import BUILTIN_SKILL_BUNDLE_ROOT
     from brain.systems.skills.bundles import load_skill_bundle
