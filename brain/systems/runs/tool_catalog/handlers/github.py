@@ -1535,90 +1535,6 @@ async def _handle_check_fix_deploy_state(
     return _indeterminate_deploy_result(repo_slug, error=last_error)
 
 
-async def github_read_ref_for_backend(
-    *,
-    repo_slug: str,
-    number: int,
-    org_id: str,
-    user_id: str | None = None,
-) -> dict[str, Any] | None:
-    """Read one issue/PR for BACKEND callers (e.g. dossier gathering).
-
-    Reuses the handler-owned token candidates with EXPLICIT org context (no
-    run ``_agent_context`` exists on backend paths) and the ordered-read
-    preference. Returns a FLAT contract — ``{kind, title, body, state,
-    body_total_chars, checks?}`` — or ``None`` when every candidate saw a
-    genuine 404 on both the PR and exact-issue endpoints. Auth/permission
-    errors fall through to the next candidate; other errors propagate.
-
-    NOTE: candidate resolution may write vault access-audit rows. That write
-    belongs to the auth owner, not to this backend read path.
-    """
-    from brain.systems.cortex.project_context.github import (
-        async_get_issue,
-        async_get_pull_request,
-    )
-
-    candidates = await _github_token_candidates(
-        repo_slug=repo_slug,
-        token_secret_key=None,
-        org_id=org_id,
-        user_id=user_id,
-    )
-    read_candidates = _ordered_read_candidates(
-        candidates, repo_slug=repo_slug, state=_github_read_state()
-    )
-    if not read_candidates:
-        raise GitHubConnectorError(status_code=401, message="No GitHub token candidates were available")
-
-    clean_number = int(number)
-    last_error: GitHubConnectorError | None = None
-    saw_not_found = False
-    for candidate in read_candidates:
-        token = candidate.get("token")
-        try:
-            wrapper = await async_get_pull_request(repo_slug, clean_number, token=token)
-            detail = dict(wrapper.get("pull_request") or {})
-            return {
-                "kind": "github_pr",
-                "title": detail.get("title"),
-                "body": detail.get("body"),
-                "state": detail.get("state"),
-                "body_total_chars": int(wrapper.get("body_total_chars") or 0),
-                "checks": wrapper.get("checks"),
-            }
-        except GitHubConnectorError as exc:
-            if exc.status_code != 404:
-                last_error = exc
-                if exc.status_code in {401, 403}:
-                    continue
-                raise
-        # PR endpoint 404 → the ref may be a plain issue; exact read, same token.
-        try:
-            wrapper = await async_get_issue(repo_slug, clean_number, token=token)
-            issue = dict(wrapper.get("issue") or {})
-            return {
-                "kind": "github_issue",
-                "title": issue.get("title"),
-                "body": issue.get("body"),
-                "state": issue.get("state"),
-                "body_total_chars": int(issue.get("body_total_chars") or 0),
-            }
-        except GitHubConnectorError as exc:
-            if exc.status_code == 404:
-                saw_not_found = True
-                continue
-            last_error = exc
-            if exc.status_code in {401, 403}:
-                continue
-            raise
-    if saw_not_found:
-        return None
-    if last_error is not None:
-        raise last_error
-    return None
-
-
 async def github_issue_closure_for_backend(
     *,
     repo_slug: str,
@@ -1776,5 +1692,4 @@ __all__ = [
     "_handle_update_github_issue",
     "github_deploy_states_for_backend",
     "github_issue_closure_for_backend",
-    "github_read_ref_for_backend",
 ]

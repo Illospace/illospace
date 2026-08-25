@@ -461,30 +461,8 @@ async def summarize_inbound_run_attribution(
     }
 
 
-def durable_work_refs(attribution: Mapping[str, Any] | None) -> list[dict[str, str]]:
-    """Mutated refs proving the run created or routed durable WORK.
-
-    Only refs of work-item kinds count, and refs produced by conversational
-    tools (``side_effect_class == "chat_message"``) never do. A Slack reply
-    is an answer, not routed work.
-    """
-    out: list[dict[str, str]] = []
-    for ref in (attribution or {}).get("mutated_target_refs") or []:
-        if not isinstance(ref, Mapping):
-            continue
-        if str(ref.get("kind") or "") not in WORK_ITEM_REF_KINDS:
-            continue
-        source = str(ref.get("source") or "")
-        registration = get_tool_registration(source) if source else None
-        if _enum_value(getattr(registration, "side_effect_class", "")) == "chat_message":
-            continue
-        out.append({str(key): str(value) for key, value in ref.items()})
-    return out
-
-
 __all__ = [
     "WORK_ITEM_REF_KINDS",
     "collect_result_refs",
-    "durable_work_refs",
     "summarize_inbound_run_attribution",
 ]
