@@ -103,6 +103,20 @@ _GITHUB_ARTIFACT_KINDS = {
     "comment": "github_issue_comment",
 }
 
+# Canonical id encodings for the kinds above. Keep every GitHub ref id built
+# here so the encoding stays one decision: an issue or pull request is
+# "owner/repo#number", and a comment appends its own id because many comments
+# share one issue number. A reader splits on ":comment:" to recover the issue.
+_GITHUB_COMMENT_REF_INFIX = ":comment:"
+
+
+def _github_artifact_ref_id(repo: str, number: int) -> str:
+    return f"{repo}#{number}"
+
+
+def _github_comment_ref_id(repo: str, issue_number: int, comment_id: int) -> str:
+    return f"{_github_artifact_ref_id(repo, issue_number)}{_GITHUB_COMMENT_REF_INFIX}{comment_id}"
+
 # Ref kinds that represent routed/created WORK (something a teammate or
 # their agent picks up), as opposed to conversation, memory, or plumbing
 # state. This mirrors how preservation.py filters mutated refs by kind.
@@ -268,7 +282,13 @@ def _add_github_artifact_ref(
             str(artifact.get("type") or artifact_key).strip() or artifact_key
         )
         if number > 0 and kind is not None:
-            _add_ref(refs, seen, kind=kind, value=f"{repo}#{number}", source=source)
+            _add_ref(
+                refs,
+                seen,
+                kind=kind,
+                value=_github_artifact_ref_id(repo, number),
+                source=source,
+            )
 
     comment = value.get("comment")
     if not isinstance(comment, Mapping):
@@ -284,7 +304,7 @@ def _add_github_artifact_ref(
         refs,
         seen,
         kind=_GITHUB_ARTIFACT_KINDS["comment"],
-        value=f"{repo}#{issue_number}:comment:{comment_id}",
+        value=_github_comment_ref_id(repo, issue_number, comment_id),
         source=source,
     )
 

@@ -84,6 +84,27 @@ async def test_created_pull_request_ref_kind(session):
     assert "github_pull_request" in kinds
 
 
+async def test_created_pull_request_top_level_payload_ref_kind(session):
+    # async_create_repo_pull_request returns {"repo", "pull_request": {...}},
+    # not the nested {"issue": {...}} shape the other PR test covers.
+    run_id = await _seed_run(session)
+    session.add(_tool_event(run_id, 1, "create_github_pull_request", {
+        "repo": "uwear-ai/uwear-website",
+        "pull_request": {"type": "pull_request", "number": 220},
+    }))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+
+    assert {
+        "kind": "github_pull_request",
+        "id": "uwear-ai/uwear-website#220",
+        "source": "create_github_pull_request",
+    } in attribution["mutated_target_refs"]
+
+
 async def test_github_issue_comment_becomes_a_mutated_ref(session):
     run_id = await _seed_run(session)
     session.add(_tool_event(run_id, 1, "add_github_issue_comment", {
