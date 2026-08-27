@@ -93,12 +93,14 @@ _OBJECT_REF_KINDS = {
 }
 
 # GitHub artifacts come back as {"repo": "owner/name", "issue": {"type",
-# "number", ...}} (the connector's payload contract), not as *_id keys, so
-# the maps above cannot see them. Without this extraction a run whose whole
-# outcome is a filed issue reports no durable refs at all.
+# "number", ...}} or {"repo": "owner/name", "issue_number": N, "comment":
+# {"id", ...}} (the connector payload contracts), not as *_id keys, so the
+# maps above cannot see them. Without this extraction a run whose whole
+# outcome is a filed issue or posted comment reports no durable refs at all.
 _GITHUB_ARTIFACT_KINDS = {
     "issue": "github_issue",
     "pull_request": "github_pull_request",
+    "comment": "github_issue_comment",
 }
 
 # Ref kinds that represent routed/created WORK (something a teammate or
@@ -251,19 +253,40 @@ def _add_github_artifact_ref(
     source: str,
 ) -> None:
     repo = str(value.get("repo") or "").strip()
-    issue = value.get("issue")
-    if repo.count("/") != 1 or not isinstance(issue, Mapping):
+    if repo.count("/") != 1:
+        return
+
+    for artifact_key in ("issue", "pull_request"):
+        artifact = value.get(artifact_key)
+        if not isinstance(artifact, Mapping):
+            continue
+        try:
+            number = int(str(artifact.get("number") or "").strip())
+        except (TypeError, ValueError):
+            continue
+        kind = _GITHUB_ARTIFACT_KINDS.get(
+            str(artifact.get("type") or artifact_key).strip() or artifact_key
+        )
+        if number > 0 and kind is not None:
+            _add_ref(refs, seen, kind=kind, value=f"{repo}#{number}", source=source)
+
+    comment = value.get("comment")
+    if not isinstance(comment, Mapping):
         return
     try:
-        number = int(str(issue.get("number") or "").strip())
+        issue_number = int(str(value.get("issue_number") or "").strip())
+        comment_id = int(str(comment.get("id") or "").strip())
     except (TypeError, ValueError):
         return
-    if number < 1:
+    if issue_number < 1 or comment_id < 1:
         return
-    kind = _GITHUB_ARTIFACT_KINDS.get(str(issue.get("type") or "issue").strip() or "issue")
-    if kind is None:
-        return
-    _add_ref(refs, seen, kind=kind, value=f"{repo}#{number}", source=source)
+    _add_ref(
+        refs,
+        seen,
+        kind=_GITHUB_ARTIFACT_KINDS["comment"],
+        value=f"{repo}#{issue_number}:comment:{comment_id}",
+        source=source,
+    )
 
 
 def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, str]], *, source: str) -> None:

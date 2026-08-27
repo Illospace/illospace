@@ -84,6 +84,35 @@ async def test_created_pull_request_ref_kind(session):
     assert "github_pull_request" in kinds
 
 
+async def test_github_issue_comment_becomes_a_mutated_ref(session):
+    run_id = await _seed_run(session)
+    session.add(_tool_event(run_id, 1, "add_github_issue_comment", {
+        "repo": "uwear-ai/uwear-backend",
+        "issue_number": 1884,
+        "comment": {
+            "id": 5440364747,
+            "node_id": "IC_kwDOLtZ_Ds8AAAABREVgyw",
+            "html_url": (
+                "https://github.com/uwear-ai/uwear-backend/issues/1884"
+                "#issuecomment-5440364747"
+            ),
+        },
+    }))
+    await session.flush()
+
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED
+    )
+
+    assert attribution["mutated_target_refs"] == [
+        {
+            "kind": "github_issue_comment",
+            "id": "uwear-ai/uwear-backend#1884:comment:5440364747",
+            "source": "add_github_issue_comment",
+        }
+    ]
+
+
 def test_work_item_vocabulary_is_the_expected_set():
     assert WORK_ITEM_REF_KINDS == {
         "github_issue", "github_pull_request", "idea", "domain_record",
