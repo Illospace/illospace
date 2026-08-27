@@ -13,6 +13,18 @@ _GITHUB_PREFIX_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Canonical GitHub artifact ref encodings. Keep these import-safe so tool
+# handlers can emit refs and downstream readers can decode the same format.
+_GITHUB_COMMENT_REF_INFIX = ":comment:"
+
+
+def _github_artifact_ref_id(repo: str, number: int) -> str:
+    return f"{repo}#{number}"
+
+
+def _github_comment_ref_id(repo: str, issue_number: int, comment_id: int) -> str:
+    return f"{_github_artifact_ref_id(repo, issue_number)}{_GITHUB_COMMENT_REF_INFIX}{comment_id}"
+
 
 @dataclass
 class GitHubConnectorError(Exception):
@@ -46,4 +58,9 @@ def parse_github_repo_slug(value: str) -> str | None:
     return f"{owner}/{repo}"
 
 
-__all__ = ["GitHubConnectorError", "parse_github_repo_slug"]
+__all__ = [
+    "GitHubConnectorError",
+    "_github_artifact_ref_id",
+    "_github_comment_ref_id",
+    "parse_github_repo_slug",
+]

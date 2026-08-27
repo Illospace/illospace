@@ -50,6 +50,7 @@ from brain.systems.deploy_state_github import (
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
+from brain.systems.runs.tool_catalog.result_refs import emit_explicit_tool_result_refs
 from brain.systems.vault import (
     VAULT_AGENT_ACCESS_AVAILABLE,
     async_get_secret,
@@ -703,6 +704,7 @@ async def _handle_create_github_issue(
         payload["token_key_name"] = candidate.get("key_name")
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
+        emit_explicit_tool_result_refs("create_github_issue", payload)
         if resolved_origin_ref:
             from brain.systems.runs.slack_delivery import (
                 OpenAskArtifact,
@@ -878,6 +880,7 @@ async def _handle_create_github_pull_request(
             payload["outcome"] = result.outcome
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
+        emit_explicit_tool_result_refs("create_github_pull_request", payload)
         return json.dumps(payload, default=str)
 
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
@@ -952,6 +955,7 @@ async def _handle_add_github_issue_comment(
         payload["token_key_name"] = candidate.get("key_name")
         if fallback_status_code is not None:
             payload["fallback_from_status_code"] = fallback_status_code
+        emit_explicit_tool_result_refs("add_github_issue_comment", payload)
         return json.dumps(payload, default=str)
 
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
@@ -1098,6 +1102,7 @@ async def _handle_update_github_issue(
             payload["fallback_from_status_code"] = fallback_status_code
         if _update_has_only_auth_failures(payload):
             payload["no_write_token"] = True
+        emit_explicit_tool_result_refs("update_github_issue", payload)
         return json.dumps(payload, default=str)
 
     if last_error is not None:

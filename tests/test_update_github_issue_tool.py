@@ -242,6 +242,9 @@ async def test_handler_reuses_create_issue_vault_app_write_lane_and_surfaces_rea
 
     assert payload["status"] == "applied"
     assert payload["issue"]["assignees"] == [{"login": "new-owner"}]
+    assert payload["mutated_target_refs"] == [
+        {"kind": "github_issue", "id": "Illospace/illospace#369"}
+    ]
     assert payload["token_source"] == "project_binding:GITHUB_TOKEN"
     resolve.assert_awaited_once()
     assert resolve.await_args.kwargs == {

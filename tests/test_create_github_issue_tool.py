@@ -70,6 +70,9 @@ async def test_create_github_issue_happy_path_opens_real_issue():
     payload = json.loads(result)
     assert payload["repo"] == "uwear-ai/uwear-backend"
     assert payload["issue"]["number"] == 321
+    assert payload["mutated_target_refs"] == [
+        {"kind": "github_issue", "id": "uwear-ai/uwear-backend#321"}
+    ]
     assert payload["token_source"] == "project_binding:GITHUB_TOKEN"
     create.assert_awaited_once()
     assert create.await_args.args == ("uwear-ai/uwear-backend",)
