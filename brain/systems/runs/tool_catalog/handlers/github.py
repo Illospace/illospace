@@ -7,7 +7,12 @@ import json
 import re
 from typing import Any, Hashable, Mapping
 
-from brain.contracts.github import parse_github_repo_slug
+from brain.contracts.github import (
+    github_issue_comment_ref,
+    github_issue_ref,
+    github_pull_request_ref,
+    parse_github_repo_slug,
+)
 from brain.kernel.common.pagination import InvalidPageToken
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
@@ -50,7 +55,6 @@ from brain.systems.deploy_state_github import (
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
-from brain.systems.runs.tool_catalog.result_refs import emit_explicit_tool_result_refs
 from brain.systems.vault import (
     VAULT_AGENT_ACCESS_AVAILABLE,
     async_get_secret,
@@ -704,7 +708,10 @@ async def _handle_create_github_issue(
         payload["token_key_name"] = candidate.get("key_name")
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
-        emit_explicit_tool_result_refs("create_github_issue", payload)
+        issue = payload.get("issue")
+        issue_number = _positive_int(issue.get("number")) if isinstance(issue, Mapping) else None
+        if issue_number is not None:
+            payload["mutated_target_refs"] = [github_issue_ref(repo_slug, issue_number)]
         if resolved_origin_ref:
             from brain.systems.runs.slack_delivery import (
                 OpenAskArtifact,
@@ -880,7 +887,11 @@ async def _handle_create_github_pull_request(
             payload["outcome"] = result.outcome
         if last_error is not None:
             payload["fallback_from_status_code"] = last_error.status_code
-        emit_explicit_tool_result_refs("create_github_pull_request", payload)
+        pull_request_number = _positive_int(result.number)
+        if pull_request_number is not None:
+            payload["mutated_target_refs"] = [
+                github_pull_request_ref(repo_slug, pull_request_number)
+            ]
         return json.dumps(payload, default=str)
 
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
@@ -955,7 +966,12 @@ async def _handle_add_github_issue_comment(
         payload["token_key_name"] = candidate.get("key_name")
         if fallback_status_code is not None:
             payload["fallback_from_status_code"] = fallback_status_code
-        emit_explicit_tool_result_refs("add_github_issue_comment", payload)
+        comment = payload.get("comment")
+        comment_id = _positive_int(comment.get("id")) if isinstance(comment, Mapping) else None
+        if comment_id is not None:
+            payload["mutated_target_refs"] = [
+                github_issue_comment_ref(repo_slug, clean_issue_number, comment_id)
+            ]
         return json.dumps(payload, default=str)
 
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
@@ -1102,7 +1118,12 @@ async def _handle_update_github_issue(
             payload["fallback_from_status_code"] = fallback_status_code
         if _update_has_only_auth_failures(payload):
             payload["no_write_token"] = True
-        emit_explicit_tool_result_refs("update_github_issue", payload)
+        issue = payload.get("issue")
+        updated_issue_number = (
+            _positive_int(issue.get("number")) if isinstance(issue, Mapping) else None
+        )
+        if updated_issue_number is not None:
+            payload["mutated_target_refs"] = [github_issue_ref(repo_slug, updated_issue_number)]
         return json.dumps(payload, default=str)
 
     if last_error is not None:

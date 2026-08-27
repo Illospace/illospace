@@ -18,12 +18,27 @@ _GITHUB_PREFIX_RE = re.compile(
 _GITHUB_COMMENT_REF_INFIX = ":comment:"
 
 
-def _github_artifact_ref_id(repo: str, number: int) -> str:
-    return f"{repo}#{number}"
+def github_artifact_ref_id(repo_slug: str, number: int) -> str:
+    return f"{repo_slug}#{number}"
 
 
-def _github_comment_ref_id(repo: str, issue_number: int, comment_id: int) -> str:
-    return f"{_github_artifact_ref_id(repo, issue_number)}{_GITHUB_COMMENT_REF_INFIX}{comment_id}"
+def github_comment_ref_id(repo_slug: str, issue_number: int, comment_id: int) -> str:
+    return f"{github_artifact_ref_id(repo_slug, issue_number)}{_GITHUB_COMMENT_REF_INFIX}{comment_id}"
+
+
+def github_issue_ref(repo_slug: str, number: int) -> dict[str, str]:
+    return {"kind": "github_issue", "id": github_artifact_ref_id(repo_slug, number)}
+
+
+def github_pull_request_ref(repo_slug: str, number: int) -> dict[str, str]:
+    return {"kind": "github_pull_request", "id": github_artifact_ref_id(repo_slug, number)}
+
+
+def github_issue_comment_ref(repo_slug: str, issue_number: int, comment_id: int) -> dict[str, str]:
+    return {
+        "kind": "github_issue_comment",
+        "id": github_comment_ref_id(repo_slug, issue_number, comment_id),
+    }
 
 
 @dataclass
@@ -60,7 +75,10 @@ def parse_github_repo_slug(value: str) -> str | None:
 
 __all__ = [
     "GitHubConnectorError",
-    "_github_artifact_ref_id",
-    "_github_comment_ref_id",
+    "github_artifact_ref_id",
+    "github_comment_ref_id",
+    "github_issue_comment_ref",
+    "github_issue_ref",
+    "github_pull_request_ref",
     "parse_github_repo_slug",
 ]
