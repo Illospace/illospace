@@ -70,6 +70,11 @@ PRESERVATION_ACCEPTABLE_TARGET_KINDS = (
 PRESERVATION_MISSING_REASON = (
     "Preservation was requested, but the completed Illo run did not produce durable storage evidence."
 )
+PRESERVATION_NON_DURABLE_REASON = (
+    "Preservation was requested, but the completed Illo run mutated only a non-durable surface. "
+    "Use an Illo-owned memory, domain, project, handoff, thread, artifact, or workspace-app surface "
+    "to preserve the knowledge."
+)
 
 
 @dataclass(frozen=True)
@@ -249,10 +254,13 @@ def preservation_evidence_result(
 
     acceptable_kinds = {str(kind) for kind in result["acceptable_target_kinds"]}
     acceptable_tools = {str(tool) for tool in result["acceptable_tools"]}
-    mutated_refs = [
+    observed_mutated_refs = [
         dict(ref)
         for ref in attribution.get("mutated_target_refs", [])
-        if str(ref.get("kind") or "") in acceptable_kinds
+        if isinstance(ref, Mapping)
+    ]
+    mutated_refs = [
+        ref for ref in observed_mutated_refs if str(ref.get("kind") or "") in acceptable_kinds
     ]
     tool_names = [str(tool) for tool in attribution.get("tool_names", [])]
     matching_tools = [tool for tool in tool_names if tool in acceptable_tools]
@@ -263,7 +271,14 @@ def preservation_evidence_result(
         return result
 
     result["status"] = "missing"
-    result["reason"] = PRESERVATION_MISSING_REASON
+    non_durable_refs = [
+        ref for ref in observed_mutated_refs if str(ref.get("kind") or "") not in acceptable_kinds
+    ]
+    if non_durable_refs:
+        result["reason"] = PRESERVATION_NON_DURABLE_REASON
+        result["non_durable_target_refs"] = non_durable_refs
+    else:
+        result["reason"] = PRESERVATION_MISSING_REASON
     result["tool_names"] = matching_tools or tool_names
     result["mutated_target_refs"] = []
     return result
@@ -273,6 +288,7 @@ __all__ = [
     "PRESERVATION_ACCEPTABLE_TARGET_KINDS",
     "PRESERVATION_ACCEPTABLE_TOOLS",
     "PRESERVATION_MISSING_REASON",
+    "PRESERVATION_NON_DURABLE_REASON",
     "submission_preservation_contract",
     "submission_preservation_prompt_lines",
     "preservation_contract_from_run_metadata",

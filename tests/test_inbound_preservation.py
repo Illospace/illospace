@@ -17,6 +17,7 @@ from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundE
 from brain.platform.db.models.org import Org, User
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
+from brain.systems.inbound.preservation import PRESERVATION_MISSING_REASON
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -304,11 +305,92 @@ async def test_preservation_submission_without_durable_evidence_stays_actionable
     assert event.status == "review_required"
     assert event.action_result["handling"]["status"] == "needs_action"
     assert event.action_result["handling"]["run_status"] == "completed"
-    assert event.action_result["handling"]["evidence_contract"]["status"] == "missing"
+    evidence = event.action_result["handling"]["evidence_contract"]
+    assert evidence["status"] == "missing"
+    assert evidence["reason"] == PRESERVATION_MISSING_REASON
+    assert "non_durable_target_refs" not in evidence
     assert "did not produce durable storage evidence" in event.error
     assert receipt.status == "review_required"
     assert receipt.tool_use["status"] == "needs_action"
     assert receipt.tool_use["evidence_contract"]["status"] == "missing"
+
+
+async def test_preservation_submission_with_github_comment_names_non_durable_evidence(session):
+    principal = await _seed_connection(session)
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.session-preserve",
+            "desired_outcome": "preserve_knowledge",
+            "message": "Preserve this diagnosis for later use.",
+            "source": {"source_tool": "codex"},
+            "idempotency_key": "codex:submission:github-comment-evidence",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    store = AsyncAgentRunStore(session)
+    run_id = int(handling["run_id"])
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    await store.append_event(
+        run_event(
+            run_id,
+            "run.tool_completed",
+            {
+                "tool_name": "add_github_issue_comment",
+                "args": {
+                    "repo": "uwear-ai/uwear-backend",
+                    "issue_number": 1884,
+                    "body": "Durable diagnosis.",
+                },
+                "result": json.dumps(
+                    {
+                        "repo": "uwear-ai/uwear-backend",
+                        "issue_number": 1884,
+                        "comment": {
+                            "id": 5440364747,
+                            "node_id": "IC_kwDOLtZ_Ds8AAAABREVgyw",
+                            "html_url": (
+                                "https://github.com/uwear-ai/uwear-backend/issues/1884"
+                                "#issuecomment-5440364747"
+                            ),
+                        },
+                    }
+                ),
+            },
+            root_run_id=run_id,
+        )
+    )
+    await store.append_final_answer_once(
+        run_id,
+        "Preserved the diagnosis on GitHub issue #1884.",
+        root_run_id=run_id,
+    )
+    await store.set_status(run_id, RunStatus.COMPLETED)
+
+    event = await session.get(InboundEventRow, result["event_id"])
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+
+    assert event is not None
+    assert event.status == "review_required"
+    evidence = event.action_result["handling"]["evidence_contract"]
+    expected_ref = {
+        "kind": "github_issue_comment",
+        "id": "uwear-ai/uwear-backend#1884:comment:5440364747",
+        "source": "add_github_issue_comment",
+    }
+    assert evidence["status"] == "missing"
+    assert evidence["mutated_target_refs"] == []
+    assert evidence["non_durable_target_refs"] == [expected_ref]
+    assert evidence["reason"] != PRESERVATION_MISSING_REASON
+    assert "non-durable surface" in evidence["reason"]
+    assert "Illo-owned" in evidence["reason"]
+    assert receipt.status == "review_required"
+    assert receipt.tool_use["evidence_contract"]["non_durable_target_refs"] == [expected_ref]
+    assert receipt.tool_use["attribution"]["mutated_target_refs"] == [expected_ref]
 
 
 async def test_preservation_submission_with_explicit_memory_evidence_reconciles_processed(session):
@@ -363,6 +445,7 @@ async def test_preservation_submission_with_explicit_memory_evidence_reconciles_
     assert event.error is None
     evidence = event.action_result["handling"]["evidence_contract"]
     assert evidence["status"] == "satisfied"
+    assert "non_durable_target_refs" not in evidence
     assert {"kind": "memory_source", "id": "91", "source": "memory_ingest_source"} in evidence["mutated_target_refs"]
     assert receipt.status == "processed"
     assert "memory_source" in {ref["kind"] for ref in receipt.tool_use["attribution"]["mutated_target_refs"]}
