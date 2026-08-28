@@ -19,6 +19,7 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
 from brain.systems.inbound.preservation import PRESERVATION_MISSING_REASON
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 
@@ -631,12 +632,16 @@ async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(s
     store = AsyncAgentRunStore(session)
     await store.set_status(run_id, RunStatus.STARTING)
     await store.set_status(run_id, RunStatus.RUNNING)
+    await store.append_event(
+        run_event(run_id, "run.tool_started", {"tool_name": "workspace_search"})
+    )
     raw_diagnostic = "provider failed with token=receipt-secret"
+    exception_type = type("Erreur_accentuée" + ("e" * 90), (RuntimeError,), {})
     await AsyncAgentRunEngine(session, recipes={}).fail(
         run_id,
         raw_diagnostic,
-        failure_stage="agent_execution",
-        exception_class="RuntimeError",
+        failure_stage=RunFailureStage.AGENT_EXECUTION,
+        exception_type=exception_type,
     )
 
     payload = await _tool_get_result(session, principal, {"event_id": result["event_id"]})
@@ -650,8 +655,10 @@ async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(s
         **public_failure,
         "diagnostic": {
             "stage": "agent_execution",
-            "exception_class": "RuntimeError",
-            "tool_execution_started": False,
+            "stage_state": "known",
+            "exception_class": exception_type.__name__,
+            "exception_class_state": "known",
+            "tool_execution_started": True,
             "terminal": True,
             "retry_scheduled": False,
         },
@@ -663,3 +670,32 @@ async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(s
     assert payload["replacement_run_id"] is None
     assert payload["retry_lineage"] is None
     assert raw_diagnostic not in json.dumps(payload)
+
+    await store.update_metadata(
+        run_id,
+        {
+            "failure": {
+                "category": "internal",
+                "stage": "sk_live_abc123DEF456token",
+                "exception_class": "private_exception_token",
+            }
+        },
+    )
+
+    withheld_payload = await _tool_get_result(
+        session,
+        principal,
+        {"event_id": result["event_id"]},
+    )
+
+    assert withheld_payload["failure"]["diagnostic"] == {
+        "stage": "unknown",
+        "stage_state": "redacted",
+        "exception_class": None,
+        "exception_class_state": "redacted",
+        "tool_execution_started": True,
+        "terminal": True,
+        "retry_scheduled": False,
+    }
+    assert "sk_live_abc123DEF456token" not in json.dumps(withheld_payload)
+    assert "private_exception_token" not in json.dumps(withheld_payload)

@@ -31,6 +31,10 @@ from brain.systems.runs.evidence_health import (
 )
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
@@ -1240,7 +1244,7 @@ async def _async_materialize_project_context(run_id: int) -> tuple[bool, dict[st
         return False, await _mark_run_failed_after_runner_error_async(
             int(run_id),
             message,
-            failure_stage="project_context_materialization",
+            failure_stage=RunFailureStage.PROJECT_CONTEXT_MATERIALIZATION,
             final_answer=(
                 "I could not start this run because the selected Project Context did not "
                 f"provide a usable workspace. {details}"
@@ -1263,8 +1267,8 @@ async def _mark_run_failed_after_runner_error_async(
     error: str,
     *,
     final_answer: str | None = None,
-    failure_stage: str = "runner_execution",
-    exception_class: str | None = None,
+    failure_stage: RunFailureStage = RunFailureStage.RUNNER_EXECUTION,
+    exception_type: type[BaseException] | None = None,
 ) -> dict[str, Any] | None:
     async with _unit_of_work_factory()() as uow:
         store = AsyncAgentRunStore(uow.session)
@@ -1282,8 +1286,10 @@ async def _mark_run_failed_after_runner_error_async(
                 {
                     "failure": {
                         "category": category.value,
-                        "stage": failure_stage,
-                        **({"exception_class": exception_class} if exception_class else {}),
+                        **failure_diagnostic_metadata(
+                            stage=failure_stage,
+                            exception_type=exception_type,
+                        ),
                     }
                 },
             )
@@ -1333,8 +1339,8 @@ def _mark_run_failed_after_runner_error(
     error: str,
     *,
     final_answer: str | None = None,
-    failure_stage: str = "runner_execution",
-    exception_class: str | None = None,
+    failure_stage: RunFailureStage = RunFailureStage.RUNNER_EXECUTION,
+    exception_type: type[BaseException] | None = None,
 ) -> dict[str, Any] | None:
     return asyncio.run(
         _mark_run_failed_after_runner_error_async(
@@ -1342,16 +1348,16 @@ def _mark_run_failed_after_runner_error(
             error,
             final_answer=final_answer,
             failure_stage=failure_stage,
-            exception_class=exception_class,
+            exception_type=exception_type,
         )
     )
 
 
 async def _process_claimed_run_async(run_id: int) -> bool:
-    failure_stage = "runner_execution"
+    failure_stage = RunFailureStage.RUNNER_EXECUTION
     try:
         async with _run_heartbeat_async(int(run_id)):
-            failure_stage = "project_context_materialization"
+            failure_stage = RunFailureStage.PROJECT_CONTEXT_MATERIALIZATION
             context_ready, status_payload = await _async_materialize_project_context(int(run_id))
             if not context_ready:
                 await _finalize_cycle_run_if_needed_async(
@@ -1363,10 +1369,13 @@ async def _process_claimed_run_async(run_id: int) -> bool:
                     publish_safe("status_change", status_payload)
                 return True
             status_payload = None
-            failure_stage = "recipe_execution"
+            failure_stage = RunFailureStage.RECIPE_EXECUTION
             async with _unit_of_work_factory()() as uow:
                 completed_run = await _engine_for_session(uow.session).run_existing(int(run_id))
-                completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
+                failure_stage = RunFailureStage.RUNNER_SETTLEMENT
+                completed_status = str(
+                    getattr(completed_run.status, "value", completed_run.status) or ""
+                )
                 if completed_status in {"completed", "failed"}:
                     from brain.systems.cycles.contract_gate import (
                         async_prepare_cycle_run_visible_finalization,
@@ -1378,7 +1387,6 @@ async def _process_claimed_run_async(run_id: int) -> bool:
                         provider_errors_only=completed_status == "failed",
                     )
                 status_payload = await _settle_terminal_root_run_async(uow.session, int(run_id))
-                failure_stage = "runner_settlement"
             await _finalize_cycle_run_if_needed_async(int(run_id), status=completed_status)
         if status_payload:
             publish_safe("status_change", status_payload)
@@ -1397,7 +1405,7 @@ async def _process_claimed_run_async(run_id: int) -> bool:
                 int(run_id),
                 str(failure),
                 failure_stage=failure_stage,
-                exception_class=type(failure.original).__name__,
+                exception_type=type(failure.original),
             )
             await _finalize_cycle_run_if_needed_async(
                 int(run_id),

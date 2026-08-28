@@ -1,0 +1,169 @@
+"""Typed persistence and read projection for terminal run diagnostics."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
+
+
+_DIAGNOSTIC_SCHEMA = "typed_v1"
+_TOOL_EXECUTION_EVENT_TYPES = frozenset(
+    {"run.tool_started", "run.tool_completed", "run.tool_failed"}
+)
+
+
+class RunFailureStage(str, Enum):
+    """Closed set of terminal failure stages written by run producers."""
+
+    RUNNER_EXECUTION = "runner_execution"
+    PROJECT_CONTEXT_MATERIALIZATION = "project_context_materialization"
+    RECIPE_EXECUTION = "recipe_execution"
+    AGENT_EXECUTION = "agent_execution"
+    COMPLETION_VERIFICATION = "completion_verification"
+    RUNNER_SETTLEMENT = "runner_settlement"
+    UNKNOWN = "unknown"
+
+
+class DiagnosticValueState(str, Enum):
+    """Whether a projected diagnostic value is usable by the caller."""
+
+    KNOWN = "known"
+    UNKNOWN = "unknown"
+    REDACTED = "redacted"
+
+
+@dataclass(frozen=True)
+class RunFailureDiagnostic:
+    """Safe typed projection of one failed run's diagnostic metadata."""
+
+    stage: RunFailureStage
+    stage_state: DiagnosticValueState
+    exception_class: str | None
+    exception_class_state: DiagnosticValueState
+    tool_execution_started: bool
+    terminal: bool = True
+    retry_scheduled: bool = False
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage.value,
+            "stage_state": self.stage_state.value,
+            "exception_class": self.exception_class,
+            "exception_class_state": self.exception_class_state.value,
+            "tool_execution_started": self.tool_execution_started,
+            "terminal": self.terminal,
+            "retry_scheduled": self.retry_scheduled,
+        }
+
+
+def failure_diagnostic_metadata(
+    *,
+    stage: RunFailureStage,
+    exception_type: type[BaseException] | None = None,
+) -> dict[str, Any]:
+    """Encode diagnostics that came from typed run producers."""
+
+    if not isinstance(stage, RunFailureStage):
+        raise TypeError("failure stage must be a RunFailureStage")
+    if stage is RunFailureStage.UNKNOWN:
+        raise ValueError("failure producers cannot write an unknown stage")
+    if exception_type is not None and (
+        not isinstance(exception_type, type)
+        or not issubclass(exception_type, BaseException)
+    ):
+        raise TypeError("exception type must be a BaseException class")
+    return {
+        "diagnostic_schema": _DIAGNOSTIC_SCHEMA,
+        "stage": stage.value,
+        **(
+            {"exception_class": exception_type.__name__}
+            if exception_type is not None
+            else {}
+        ),
+    }
+
+
+def _stage_projection(
+    failure_metadata: Mapping[str, Any],
+) -> tuple[RunFailureStage, DiagnosticValueState]:
+    if "stage" not in failure_metadata:
+        return RunFailureStage.UNKNOWN, DiagnosticValueState.UNKNOWN
+    try:
+        stage = RunFailureStage(failure_metadata["stage"])
+    except (TypeError, ValueError):
+        return RunFailureStage.UNKNOWN, DiagnosticValueState.REDACTED
+    if stage is RunFailureStage.UNKNOWN:
+        return stage, DiagnosticValueState.UNKNOWN
+    return stage, DiagnosticValueState.KNOWN
+
+
+def _exception_class_projection(
+    failure_metadata: Mapping[str, Any],
+) -> tuple[str | None, DiagnosticValueState]:
+    if "exception_class" not in failure_metadata:
+        return None, DiagnosticValueState.UNKNOWN
+    exception_class = failure_metadata.get("exception_class")
+    if (
+        failure_metadata.get("diagnostic_schema") != _DIAGNOSTIC_SCHEMA
+        or not isinstance(exception_class, str)
+        or not exception_class
+    ):
+        return None, DiagnosticValueState.REDACTED
+    return exception_class, DiagnosticValueState.KNOWN
+
+
+async def read_run_failure_diagnostic(
+    session: AsyncSession,
+    *,
+    run: AgentRunRow,
+) -> RunFailureDiagnostic | None:
+    """Read the canonical diagnostic projection for a failed run."""
+
+    run_status = getattr(run.status, "value", run.status)
+    if str(run_status or "") != "failed":
+        return None
+
+    event_types = (
+        await session.scalars(
+            select(AgentRunEventRow.event_type).where(
+                AgentRunEventRow.run_id == int(run.id),
+                AgentRunEventRow.event_type.in_(_TOOL_EXECUTION_EVENT_TYPES),
+            )
+        )
+    ).all()
+    metadata = run.metadata_ if isinstance(run.metadata_, Mapping) else {}
+    stored_failure = metadata.get("failure")
+    failure_metadata = stored_failure if isinstance(stored_failure, Mapping) else {}
+    stage, stage_state = _stage_projection(failure_metadata)
+    exception_class, exception_class_state = _exception_class_projection(
+        failure_metadata
+    )
+    return RunFailureDiagnostic(
+        stage=stage,
+        stage_state=stage_state,
+        exception_class=exception_class,
+        exception_class_state=exception_class_state,
+        tool_execution_started=any(
+            str(event_type or "") in _TOOL_EXECUTION_EVENT_TYPES
+            for event_type in event_types
+        ),
+        # Replacement retries have their own current run. A still-failed run
+        # is terminal and has no retry scheduled on this run identity.
+        retry_scheduled=False,
+    )
+
+
+__all__ = [
+    "DiagnosticValueState",
+    "RunFailureDiagnostic",
+    "RunFailureStage",
+    "failure_diagnostic_metadata",
+    "read_run_failure_diagnostic",
+]

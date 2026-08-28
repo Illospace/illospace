@@ -16,6 +16,10 @@ from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.failures import (
     RunFailureCategory,
     coerce_failure_category,
@@ -53,8 +57,8 @@ class RunRecipeResult:
     # Optional user-safe text. Failed runs must never put raw errors here.
     final_output: str | None = None
     failure_category: RunFailureCategory | str | None = None
-    failure_stage: str | None = None
-    exception_class: str | None = None
+    failure_stage: RunFailureStage | None = None
+    exception_type: type[BaseException] | None = None
     artifacts: tuple = ()
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
 
@@ -303,8 +307,8 @@ class AsyncAgentRunEngine:
                 error,
                 final_output=result.final_output,
                 failure_category=result.failure_category or failure_category_for_error(error),
-                failure_stage=result.failure_stage or "recipe_execution",
-                exception_class=result.exception_class,
+                failure_stage=result.failure_stage or RunFailureStage.RECIPE_EXECUTION,
+                exception_type=result.exception_type,
                 execution_claim=execution_claim,
             )
         if result_status == RunStatus.CANCELED:
@@ -372,8 +376,8 @@ class AsyncAgentRunEngine:
                 f"Chantier declare failed: {failure}",
                 final_output=safe_terminal_run_message(RunStatus.FAILED, RunFailureCategory.INTERNAL),
                 failure_category=RunFailureCategory.INTERNAL,
-                failure_stage="completion_verification",
-                exception_class=type(exc).__name__,
+                failure_stage=RunFailureStage.COMPLETION_VERIFICATION,
+                exception_type=type(exc),
                 execution_claim=execution_claim,
             )
         if guarantee is not None:
@@ -430,8 +434,8 @@ class AsyncAgentRunEngine:
         *,
         final_output: str | None = None,
         failure_category: RunFailureCategory | str | None = None,
-        failure_stage: str = "recipe_execution",
-        exception_class: str | None = None,
+        failure_stage: RunFailureStage = RunFailureStage.RECIPE_EXECUTION,
+        exception_type: type[BaseException] | None = None,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
         row = await self._prepare_terminal_write(run_id)
@@ -441,8 +445,10 @@ class AsyncAgentRunEngine:
             category = coerce_failure_category(failure_category or failure_category_for_error(error))
             failure_metadata = {
                 "category": category.value,
-                "stage": failure_stage,
-                **({"exception_class": exception_class} if exception_class else {}),
+                **failure_diagnostic_metadata(
+                    stage=failure_stage,
+                    exception_type=exception_type,
+                ),
             }
             await self.store.update_metadata(
                 run_id,

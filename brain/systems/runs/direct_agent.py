@@ -1150,7 +1150,7 @@ def _make_result(
     termination: LoopTermination | None = None,
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
     effective_routing: dict[str, Any] | None = None,
-    error_type: str | None = None,
+    exception_type: type[BaseException] | None = None,
 ) -> AgentResult:
     """Construct an AgentResult with common fields."""
     return _runtime_make_result(
@@ -1161,7 +1161,7 @@ def _make_result(
         start_time,
         tool_calls,
         error=error,
-        error_type=error_type,
+        exception_type=exception_type,
         worker_results=worker_results,
         termination=termination,
         post_completion_tasks=post_completion_tasks,
@@ -2204,7 +2204,7 @@ async def run_agent_async(
                 start_time,
                 state.tool_calls_made,
                 error=f"API error: {e}",
-                error_type=type(e).__name__,
+                exception_type=type(e),
                 effective_routing=effective_routing,
             )
         logger.error("Agent %s: error: %s", session_id, e)
@@ -2216,7 +2216,7 @@ async def run_agent_async(
             start_time,
             state.tool_calls_made,
             error=str(e),
-            error_type=type(e).__name__,
+            exception_type=type(e),
             effective_routing=effective_routing,
         )
 

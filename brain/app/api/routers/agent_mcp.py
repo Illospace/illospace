@@ -63,7 +63,6 @@ from brain.systems.runs.cortex.read_models import (
     public_run_debug_event_payload,
     run_stream_payload,
 )
-from brain.systems.runs.failures import public_run_failure
 from brain.systems.runs.tool_event_read_model import tool_call_summary
 
 
@@ -1366,20 +1365,7 @@ async def _tool_get_result(
     )
     if result.mutated_inbound:
         await db.commit()
-    payload = result.payload
-    if isinstance(payload.get("failure"), dict):
-        return payload
-    for candidate in (
-        payload.get("event"),
-        payload.get("latest_receipt"),
-    ):
-        failure = dict(candidate.get("failure") or {}) if isinstance(candidate, dict) else {}
-        if not failure:
-            continue
-        public_failure = public_run_failure(failure.get("status"), failure.get("category"))
-        if public_failure is not None:
-            return {**payload, "failure": public_failure}
-    return payload
+    return result.payload
 
 
 async def _add_thread_trigger_result_if_needed(

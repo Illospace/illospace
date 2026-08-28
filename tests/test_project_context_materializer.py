@@ -1399,6 +1399,7 @@ def test_project_context_root_uses_workspace_root_in_deploy(monkeypatch, tmp_pat
 
 
 def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
+    from brain.systems.runs.failure_diagnostic import RunFailureStage
     from brain.systems.runs.cortex import runner
 
     run = SimpleNamespace(
@@ -1466,7 +1467,7 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
     assert captured["run_id"] == 49
     assert "Project Context unavailable" in captured["error"]
     assert "did not provide a usable workspace" in captured["final_answer"]
-    assert captured["failure_stage"] == "project_context_materialization"
+    assert captured["failure_stage"] == RunFailureStage.PROJECT_CONTEXT_MATERIALIZATION
     public_activity = record_activity.await_args_list[-1]
     assert public_activity.args[2] == "Project context unavailable"
     assert public_activity.kwargs["issue_count"] == 1
