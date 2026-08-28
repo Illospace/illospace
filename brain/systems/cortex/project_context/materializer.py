@@ -393,7 +393,11 @@ def _git_output(cwd: Path, *args: str) -> str | None:
 
 
 def _existing_git_checkout(destination: Path, slug: str, branch: str | None) -> dict[str, str] | None:
-    """Return metadata for an existing checkout without mutating local state."""
+    """Return metadata for an existing checkout without mutating local state.
+
+    BLOCKING: reaches ``check_output_sync`` via ``_git_output``. Async callers
+    MUST go through ``run_blocking`` (see #860).
+    """
 
     if not destination.exists():
         return None
@@ -444,6 +448,12 @@ def _clone_github_repo(
     token: str | None,
     branch: str | None,
 ) -> dict[str, str]:
+    """Clone a GitHub repo. BLOCKING: rmtree, mkdir, git subprocess, git reads.
+
+    Async callers MUST go through ``run_blocking``. Calling this directly from a
+    coroutine freezes the whole worker for the clone's duration, which trips the
+    queue-stall watchdog and restart-loops the process (see #860).
+    """
     if destination.exists():
         shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -144,7 +144,11 @@ async def test_github_clone_keeps_event_loop_responsive(tmp_path, monkeypatch):
 
     def fake_run_subprocess(command, **_kwargs):
         clone_started.set()
-        released_by_event_loop.append(release_clone.wait(timeout=1))
+        # The timeout is deadlock protection, not a timing assertion: only the
+        # event loop can set release_clone, so if the clone were still running
+        # ON the loop this returns False instead of hanging the suite. Keep it
+        # generous — a tight bound here would flake on a loaded CI box.
+        released_by_event_loop.append(release_clone.wait(timeout=30))
         Path(command[-1]).mkdir(parents=True)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -155,15 +159,13 @@ async def test_github_clone_keeps_event_loop_responsive(tmp_path, monkeypatch):
             return "abc123"
         return None
 
-    async def record_loop_progress():
+    async def release_once_loop_is_responsive():
+        # This coroutine can only make progress while the clone is in flight if
+        # the clone is NOT holding the event loop. That is the whole assertion:
+        # no sleeps, no tick counting, just "did the loop keep scheduling".
         while not clone_started.is_set():
             await asyncio.sleep(0)
-        ticks = 0
-        for _ in range(3):
-            await asyncio.sleep(0.01)
-            ticks += 1
         release_clone.set()
-        return ticks
 
     monkeypatch.setattr(materializer, "run_subprocess_sync", fake_run_subprocess)
     monkeypatch.setattr(materializer, "_git_output", fake_git_output)
@@ -175,14 +177,14 @@ async def test_github_clone_keeps_event_loop_responsive(tmp_path, monkeypatch):
         "uri": "https://github.com/example-org/example-repo",
         "branch": "main",
     }
-    materialization, ticks = await asyncio.gather(
+    materialization, _ = await asyncio.gather(
         materializer._materialize_resource(
             resource,
             workspace_root=tmp_path,
             user_id=None,
             org_id=None,
         ),
-        record_loop_progress(),
+        release_once_loop_is_responsive(),
     )
 
     workspace, error = materialization
@@ -191,7 +193,7 @@ async def test_github_clone_keeps_event_loop_responsive(tmp_path, monkeypatch):
         "name": "example-org/example-repo",
         "path": str(tmp_path / ".illo-project-context" / "github" / "example-org" / "example-repo"),
     }
-    assert ticks == 3
+    # False here means the clone blocked the loop until the timeout expired.
     assert released_by_event_loop == [True]
 
 
