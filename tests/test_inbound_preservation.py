@@ -19,6 +19,10 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
 from brain.systems.inbound.preservation import PRESERVATION_MISSING_REASON
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 
@@ -605,3 +609,144 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
     assert payload["handling_status"] == "completed"
     assert payload["run_status"] == "completed"
     assert payload["evidence_status"] == "not_required"
+
+
+async def test_get_result_failed_preservation_reports_exception_class_states(session):
+    from brain.app.api.routers.agent_mcp import _tool_get_result
+    from brain.systems.runs.engine import AsyncAgentRunEngine
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    principal = await _seed_connection(session)
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.memory",
+            "desired_outcome": "preserve_knowledge",
+            "message": "Preserve this durable finding.",
+            "source": {"source_tool": "codex"},
+            "idempotency_key": "codex:submission:failed-result-diagnostic",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    run_id = int(handling["run_id"])
+    store = AsyncAgentRunStore(session)
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    await store.append_event(
+        run_event(run_id, "run.tool_started", {"tool_name": "workspace_search"})
+    )
+    raw_diagnostic = "provider failed with token=receipt-secret"
+    exception_type = ValueError
+    await AsyncAgentRunEngine(session, recipes={}).fail(
+        run_id,
+        raw_diagnostic,
+        failure_stage=RunFailureStage.AGENT_EXECUTION,
+        exception_type=exception_type,
+    )
+
+    payload = await _tool_get_result(session, principal, {"event_id": result["event_id"]})
+
+    public_failure = {
+        "status": "failed",
+        "category": "internal",
+        "message": DEFAULT_FAILED_RUN_MESSAGE,
+    }
+    assert payload["failure"] == {
+        **public_failure,
+        "diagnostic": {
+            "stage": "agent_execution",
+            "stage_state": "known",
+            "exception_class": exception_type.__name__,
+            "exception_class_state": "known",
+            "tool_execution_started": True,
+            "terminal": True,
+            "retry_scheduled": False,
+        },
+    }
+    assert payload["event"]["failure"] == public_failure
+    assert payload["run_status"] == "failed"
+    assert payload["evidence_status"] == "failed"
+    assert payload["retry_attempt"] is None
+    assert payload["replacement_run_id"] is None
+    assert payload["retry_lineage"] is None
+    assert raw_diagnostic not in json.dumps(payload)
+
+    synthesized_exception = type(
+        "sk_live_abc123DEF456token",
+        (Exception,),
+        {},
+    )
+    synthesized_metadata = failure_diagnostic_metadata(
+        stage=RunFailureStage.AGENT_EXECUTION,
+        exception_type=synthesized_exception,
+    )
+    assert "exception_class" not in synthesized_metadata
+    await store.update_metadata(
+        run_id,
+        {"failure": {"category": "internal", **synthesized_metadata}},
+    )
+
+    redacted_payload = await _tool_get_result(
+        session,
+        principal,
+        {"event_id": result["event_id"]},
+    )
+
+    assert redacted_payload["failure"]["diagnostic"]["exception_class"] is None
+    assert (
+        redacted_payload["failure"]["diagnostic"]["exception_class_state"]
+        == "redacted"
+    )
+
+    absent_metadata = failure_diagnostic_metadata(
+        stage=RunFailureStage.AGENT_EXECUTION,
+    )
+    await store.update_metadata(
+        run_id,
+        {"failure": {"category": "internal", **absent_metadata}},
+    )
+
+    absent_payload = await _tool_get_result(
+        session,
+        principal,
+        {"event_id": result["event_id"]},
+    )
+
+    assert absent_payload["failure"]["diagnostic"]["exception_class"] is None
+    assert (
+        absent_payload["failure"]["diagnostic"]["exception_class_state"]
+        == "unknown"
+    )
+
+    await store.update_metadata(
+        run_id,
+        {
+            "failure": {
+                "category": "internal",
+                "diagnostic_schema": "typed_v1",
+                "stage": "sk_live_abc123DEF456token",
+                "exception_class": "private_exception_token",
+            }
+        },
+    )
+
+    withheld_payload = await _tool_get_result(
+        session,
+        principal,
+        {"event_id": result["event_id"]},
+    )
+
+    assert withheld_payload["failure"]["diagnostic"] == {
+        "stage": "unknown",
+        "stage_state": "redacted",
+        "exception_class": None,
+        "exception_class_state": "redacted",
+        "tool_execution_started": True,
+        "terminal": True,
+        "retry_scheduled": False,
+    }
+    assert "sk_live_abc123DEF456token" not in json.dumps(withheld_payload)
+    assert "private_exception_token" not in json.dumps(withheld_payload)

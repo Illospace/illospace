@@ -7,6 +7,7 @@ from typing import Any
 
 from brain.contracts.thread_references import THREAD_DISCUSSION_THREAD_PREFIX
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime, cancel_event_is_set
+from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.failures import failure_category_for_error, safe_terminal_run_message
 from brain.systems.runs.tools import wrap_tool_handlers
 from brain.systems.runs.status import RunStatus
@@ -258,6 +259,8 @@ class FastRecipe(BaseRunRecipe):
                 error=str(exc),
                 final_output=safe_terminal_run_message(RunStatus.FAILED, category),
                 failure_category=category,
+                failure_stage=RunFailureStage.AGENT_EXECUTION,
+                exception_type=type(exc),
                 status=RunStatus.FAILED,
             )
 
@@ -275,6 +278,8 @@ class FastRecipe(BaseRunRecipe):
                 error=error,
                 final_output=safe_terminal_run_message(status, category),
                 failure_category=category,
+                failure_stage=RunFailureStage.AGENT_EXECUTION,
+                exception_type=getattr(result, "exception_type", None),
                 status=status,
                 post_completion_tasks=tuple(getattr(result, "post_completion_tasks", ()) or ()),
             )

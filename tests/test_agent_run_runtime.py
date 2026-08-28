@@ -492,15 +492,24 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
 
 async def test_fast_recipe_discards_partial_deltas_when_provider_result_fails(monkeypatch):
     from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+    from brain.systems.runs.failure_diagnostic import RunFailureStage
     from brain.systems.runs.recipes.fast import FastRecipe
     from brain.systems.runs.status import RunStatus
 
     raw_delta = "partial provider diagnostic token=fast-stream-secret"
     raw_error = "peer closed connection without sending complete message body"
 
+    class RemoteProtocolError(RuntimeError):
+        pass
+
     async def fake_invoke(spec):
         await spec.on_stream_delta(raw_delta)
-        return SimpleNamespace(output=raw_delta, success=False, error=raw_error)
+        return SimpleNamespace(
+            output=raw_delta,
+            success=False,
+            error=raw_error,
+            exception_type=RemoteProtocolError,
+        )
 
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
@@ -513,6 +522,8 @@ async def test_fast_recipe_discards_partial_deltas_when_provider_result_fails(mo
     assert result.status == RunStatus.FAILED
     assert result.error == raw_error
     assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
+    assert result.failure_stage == RunFailureStage.AGENT_EXECUTION
+    assert result.exception_type is RemoteProtocolError
     assert raw_delta not in streamed
     assert raw_error not in streamed
 

@@ -1743,7 +1743,11 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
     assert result == {"run_id": run.id}
     assert row is not None
     assert row.status == RunStatus.FAILED.value
-    assert row.metadata_["failure"] == {"category": "upstream"}
+    assert row.metadata_["failure"] == {
+        "category": "upstream",
+        "diagnostic_schema": "typed_v1",
+        "stage": "runner_execution",
+    }
     assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
@@ -1874,7 +1878,11 @@ async def test_runner_commit_failure_rolls_back_then_settles_in_fresh_uow(
         return None
 
     monkeypatch.setattr(runner, "_unit_of_work_factory", lambda: CommitAwareUoW)
-    monkeypatch.setattr(runner, "_engine_for_session", lambda session: CompletingEngine(session))
+    monkeypatch.setattr(
+        runner,
+        "_engine_for_session",
+        lambda session: CompletingEngine(session),
+    )
     monkeypatch.setattr(runner, "_run_heartbeat_async", heartbeat)
     monkeypatch.setattr(runner, "_async_materialize_project_context", materialize)
     monkeypatch.setattr(runner, "_settle_terminal_root_run_async", no_settlement)
@@ -1902,9 +1910,121 @@ async def test_runner_commit_failure_rolls_back_then_settles_in_fresh_uow(
     assert opened_uows == 2
     assert row is not None
     assert row.status == RunStatus.FAILED.value
+    assert row.metadata_["failure"] == {
+        "category": "internal",
+        "diagnostic_schema": "typed_v1",
+        "stage": "runner_settlement",
+        "exception_class": "RuntimeError",
+        "exception_module": "builtins",
+    }
     assert failed_event.payload["error"] == (
         "run_execution_failed: RuntimeError: commit exploded"
     )
+
+
+@pytest.mark.parametrize("failure_boundary", ("contract_gate", "settlement"))
+async def test_runner_finalization_failures_use_runner_settlement_stage(
+    monkeypatch,
+    session_factory,
+    failure_boundary,
+):
+    from contextlib import asynccontextmanager
+
+    from brain.systems.runs.cortex import runner
+
+    setup_session = session_factory()
+    store = AsyncAgentRunStore(setup_session)
+    run = await store.create_run(
+        _run_request(
+            thread_id=f"thread-{failure_boundary}-failure",
+            message=f"{failure_boundary} failure",
+        )
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+    await setup_session.commit()
+    await setup_session.close()
+
+    class TestUoW:
+        def __init__(self):
+            self.session = session_factory()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            try:
+                if exc_type is None:
+                    await self.session.commit()
+                else:
+                    await self.session.rollback()
+            finally:
+                await self.session.close()
+
+    class CompletingEngine:
+        def __init__(self, session):
+            self.session = session
+
+        async def run_existing(self, run_id):
+            row = await self.session.get(AgentRunRow, int(run_id))
+            assert row is not None
+            row.status = RunStatus.COMPLETED.value
+            return SimpleNamespace(status=RunStatus.COMPLETED)
+
+    @asynccontextmanager
+    async def heartbeat(_run_id):
+        yield
+
+    async def materialize(_run_id):
+        return True, None
+
+    settlement_calls = 0
+
+    async def settle(_session, _run_id):
+        nonlocal settlement_calls
+        settlement_calls += 1
+        if failure_boundary == "settlement" and settlement_calls == 1:
+            raise RuntimeError("settlement exploded")
+        return None
+
+    async def contract_gate(*_args, **_kwargs):
+        if failure_boundary == "contract_gate":
+            raise RuntimeError("contract gate exploded")
+
+    async def no_cycle_finalization(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runner, "_unit_of_work_factory", lambda: TestUoW)
+    monkeypatch.setattr(
+        runner,
+        "_engine_for_session",
+        lambda session: CompletingEngine(session),
+    )
+    monkeypatch.setattr(runner, "_run_heartbeat_async", heartbeat)
+    monkeypatch.setattr(runner, "_async_materialize_project_context", materialize)
+    monkeypatch.setattr(runner, "_settle_terminal_root_run_async", settle)
+    monkeypatch.setattr(runner, "_finalize_cycle_run_if_needed_async", no_cycle_finalization)
+    monkeypatch.setattr(
+        "brain.systems.cycles.contract_gate.async_prepare_cycle_run_visible_finalization",
+        contract_gate,
+    )
+
+    processed = await runner._process_claimed_run_async(run.id)
+
+    inspection_session = session_factory()
+    row = await inspection_session.get(AgentRunRow, run.id)
+    await inspection_session.close()
+
+    assert processed is False
+    assert row is not None
+    assert row.status == RunStatus.FAILED.value
+    assert row.metadata_["failure"] == {
+        "category": "internal",
+        "diagnostic_schema": "typed_v1",
+        "stage": "runner_settlement",
+        "exception_class": "RuntimeError",
+        "exception_module": "builtins",
+    }
 
 
 async def test_oversized_system_admission_error_reaches_run_failed_event(
@@ -2037,7 +2157,11 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     )
 
     assert result.status == RunStatus.FAILED
-    assert result.metadata["failure"] == {"category": "upstream"}
+    assert result.metadata["failure"] == {
+        "category": "upstream",
+        "diagnostic_schema": "typed_v1",
+        "stage": "agent_execution",
+    }
     assert [artifact.text for artifact in final_answers] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert all(raw_error not in str(artifact.text) for artifact in final_answers)
 

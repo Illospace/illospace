@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
+from brain.systems.runs.failure_diagnostic import read_run_failure_diagnostic
 
 
 @dataclass(frozen=True)
@@ -50,11 +51,14 @@ async def read_inbound_submission_result(
     action_result = dict(event.action_result or {})
     handling = _result_handling(action_result)
     reconciled = False
+    current_run = None
     current_run_status = None
     selected_run_id = _run_id(handling.get("run_id"))
     if selected_run_id is not None:
-        run = await session.get(AgentRunRow, selected_run_id)
-        current_run_status = getattr(run, "status", None) if run is not None else None
+        current_run = await session.get(AgentRunRow, selected_run_id)
+        current_run_status = (
+            getattr(current_run, "status", None) if current_run is not None else None
+        )
         receipt = await reconcile_inbound_triage_run(session, selected_run_id)
         reconciled = receipt is not None
         if reconciled:
@@ -68,7 +72,9 @@ async def read_inbound_submission_result(
     current_run_id = _run_id(handling.get("run_id"))
     if current_run_id is not None and current_run_id != selected_run_id:
         current_run = await session.get(AgentRunRow, current_run_id)
-        current_run_status = getattr(current_run, "status", None) if current_run is not None else None
+        current_run_status = (
+            getattr(current_run, "status", None) if current_run is not None else None
+        )
 
     receipts = await inbound_admin.list_receipts(
         session,
@@ -90,6 +96,18 @@ async def read_inbound_submission_result(
         or ("pending" if requires_evidence else "not_required")
     )
     latest_receipt = receipt_payloads[0] if receipt_payloads else None
+    failure = next(
+        (
+            dict(candidate["failure"])
+            for candidate in (event_payload, latest_receipt)
+            if isinstance(candidate, dict) and isinstance(candidate.get("failure"), dict)
+        ),
+        None,
+    )
+    if failure is not None and current_run is not None:
+        diagnostic = await read_run_failure_diagnostic(session, run=current_run)
+        if diagnostic is not None:
+            failure["diagnostic"] = diagnostic.as_payload()
     return InboundSubmissionResult(
         payload={
             "event_id": str(event.id),
@@ -109,6 +127,7 @@ async def read_inbound_submission_result(
             "event": event_payload,
             "latest_receipt": latest_receipt,
             "receipts": receipt_payloads,
+            **({"failure": failure} if failure is not None else {}),
         },
         mutated_inbound=reconciled,
     )

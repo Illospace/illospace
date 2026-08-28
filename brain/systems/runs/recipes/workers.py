@@ -14,6 +14,7 @@ from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
+from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.failures import failure_category_for_error, public_run_failure
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import (
@@ -224,6 +225,7 @@ class WorkerRecipe(BaseRunRecipe):
             status = RunStatus.FAILED
             failure_category = failure_category_for_error(exc)
             failure = public_run_failure(status, failure_category)
+            exception_type = type(exc)
             output = ""
             post_completion_tasks = ()
         else:
@@ -246,6 +248,7 @@ class WorkerRecipe(BaseRunRecipe):
             error = None
             failure_category = None
             failure = None
+            exception_type = None
             if status == RunStatus.FAILED:
                 error = (
                     safe_provider_error_sentinel(detected_provider_error)
@@ -258,6 +261,7 @@ class WorkerRecipe(BaseRunRecipe):
                 )
                 failure_category = failure_category_for_error(error)
                 failure = public_run_failure(status, failure_category)
+                exception_type = getattr(result, "exception_type", None)
                 output = ""
             post_completion_tasks = tuple(getattr(result, "post_completion_tasks", ()) or ())
         await _record_effective_routing(runtime, effective_routing)
@@ -287,6 +291,12 @@ class WorkerRecipe(BaseRunRecipe):
             error=error,
             final_output=public_output if status == RunStatus.FAILED else None,
             failure_category=failure_category,
+            failure_stage=(
+                RunFailureStage.AGENT_EXECUTION
+                if status == RunStatus.FAILED
+                else None
+            ),
+            exception_type=exception_type,
             artifacts=(worker_result,),
             post_completion_tasks=post_completion_tasks,
         )

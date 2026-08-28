@@ -113,7 +113,7 @@ def test_cli_and_checker_public_error_values_use_safe_failure_projectors():
         (
             "brain/app/api/routers/agent_mcp.py",
             "_tool_get_result",
-            {"public_run_failure"},
+            {"read_inbound_submission_result"},
         ),
         (
             "brain/systems/runs/recipes/workers.py",
