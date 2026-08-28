@@ -75,7 +75,7 @@ class TestEventToEnvelope:
         assert "Login is broken" in env["summary"]
         assert env["payload"] is payload  # full payload carried for the projection
 
-    def test_pull_request_closed(self):
+    def test_pull_request_merged(self):
         payload = {
             "action": "closed",
             "repository": {"full_name": "o/r"},
@@ -92,11 +92,73 @@ class TestEventToEnvelope:
         assert env["hints"]["state"] == "closed"
         assert env["hints"]["number"] == 7
         assert env["hints"]["merged"] is True
+        assert env["hints"]["pr_outcome"] == "merged"
         assert env["hints"]["base_ref"] == "main"
         assert env["hints"]["head_ref"] == "staging"
         assert env["hints"]["merge_commit_sha"] == "abc123"
         assert env["hints"]["merged_at"] == "2026-07-08T11:01:00Z"
+        assert env["hints"]["action"] == "closed"
+        assert env["summary"] == "GitHub pull request #7 merged: Add feature"
+        assert "closed" not in env["summary"]
         assert env["idempotency_key"] is None  # no delivery id
+
+    def test_pull_request_closed_unmerged(self):
+        payload = {
+            "action": "closed",
+            "repository": {"full_name": "o/r"},
+            "pull_request": {
+                "number": 8,
+                "title": "Drop feature",
+                "state": "closed",
+                "merged": False,
+                "merged_at": None,
+            },
+        }
+        env = github_event_to_envelope("pull_request", payload)
+        assert env["hints"]["action"] == "closed"
+        assert env["hints"]["state"] == "closed"
+        assert env["hints"]["merged"] is False
+        assert env["hints"]["merged_at"] is None
+        assert env["hints"]["pr_outcome"] == "closed_unmerged"
+        assert env["summary"] == "GitHub pull request #8 closed: Drop feature"
+
+    def test_pull_request_closed_without_merged_field(self):
+        # A stored/replayed payload can omit `merged` entirely. Absent must read
+        # as "not merged" rather than as merged, so the outcome stays truthful.
+        payload = {
+            "action": "closed",
+            "repository": {"full_name": "o/r"},
+            "pull_request": {
+                "number": 10,
+                "title": "Stale payload",
+                "state": "closed",
+            },
+        }
+        env = github_event_to_envelope("pull_request", payload)
+        assert env["hints"]["merged"] is False
+        assert env["hints"]["merged_at"] is None
+        assert env["hints"]["pr_outcome"] == "closed_unmerged"
+        assert env["summary"] == "GitHub pull request #10 closed: Stale payload"
+
+    def test_pull_request_opened(self):
+        payload = {
+            "action": "opened",
+            "repository": {"full_name": "o/r"},
+            "pull_request": {
+                "number": 9,
+                "title": "Try feature",
+                "state": "open",
+                "merged": False,
+                "merged_at": None,
+            },
+        }
+        env = github_event_to_envelope("pull_request", payload)
+        assert env["hints"]["action"] == "opened"
+        assert env["hints"]["state"] == "open"
+        assert env["hints"]["merged"] is False
+        assert env["hints"]["merged_at"] is None
+        assert env["hints"]["pr_outcome"] == "open"
+        assert env["summary"] == "GitHub pull request #9 opened: Try feature"
 
     def test_issue_comment_anchors_on_issue_keeps_comment_details(self):
         payload = {

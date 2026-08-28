@@ -49,6 +49,7 @@ from brain.systems.cycles.common import (
     validate_nonempty_trimmed,
     validate_thinking_override,
 )
+from brain.systems.cycles.queries import due_illo_lane_cycle_clause
 from brain.systems.cycles.contracts import normalize_cycle_run_kind
 from brain.systems.cycles.contract_gate import (
     async_prepare_cycle_run_visible_finalization,
@@ -660,13 +661,7 @@ async def _async_materialize_due_cycle_runs_once(
     async with UnitOfWork() as uow:
         stmt = (
             select(Cycle)
-            .where(
-                Cycle.deleted_at.is_(None),
-                Cycle.enabled.is_(True),
-                Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
-                Cycle.next_run_at.is_not(None),
-                Cycle.next_run_at <= now,
-            )
+            .where(due_illo_lane_cycle_clause(now, inclusive=True))
             .order_by(Cycle.next_run_at.asc())
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -747,13 +742,7 @@ async def async_advance_cycle_schedule_past_gap(
     cycles = (
         await session.scalars(
             select(Cycle)
-            .where(
-                Cycle.deleted_at.is_(None),
-                Cycle.enabled.is_(True),
-                Cycle.executor_binding == ILLO_LANE_EXECUTOR_BINDING,
-                Cycle.next_run_at.is_not(None),
-                Cycle.next_run_at < catch_up_before,
-            )
+            .where(due_illo_lane_cycle_clause(catch_up_before, inclusive=False))
             .order_by(Cycle.next_run_at.asc(), Cycle.id.asc())
             .with_for_update()
         )

@@ -52,7 +52,7 @@ x-illo-env: &illo-env
   ILLO_WORKSPACE_TOOLS_STATUS_FILE: /data/private/workspace-tools/status.json
   ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE: /data/private/workspace-tools/heartbeat.json
   ILLO_WORKSPACE_TOOLS_LOG_PATH: /data/private/logs/illo-workspace-tools.log
-  # Lifecycle activation (specs/illo-lifecycle): assignment rules, unclaimed
+  # Lifecycle activation (specs/done/illo-lifecycle): assignment rules, unclaimed
   # pool, and GitHub webhook ingress. Empty default = feature off.
   ILLO_BUSINESS_OWNER_USER_ID: ${ILLO_BUSINESS_OWNER_USER_ID:-}
   ILLO_PRODUCT_OWNER_USER_ID: ${ILLO_PRODUCT_OWNER_USER_ID:-}

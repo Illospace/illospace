@@ -17,9 +17,11 @@ Config (env):
 
 This router is always mounted: ``brain/app/api/main.py`` registers it at app
 startup (#279). Configuration is enforced per request, not at import or mount
-time — until BOTH env vars above are set (and the configured connection row
-exists), ``POST /webhooks/github`` answers HTTP 503, so mounting before the
-GitHub App is configured is inert and cannot affect app startup.
+time: a missing secret answers 503 outright; with a secret set, requests are
+still verified and parsed first (401 bad signature, 400 malformed JSON, 202
+unsupported event), and a missing connection id or connection row answers 503
+before any envelope is submitted. An unconfigured deployment therefore never
+ingests a GitHub event.
 """
 
 from __future__ import annotations
