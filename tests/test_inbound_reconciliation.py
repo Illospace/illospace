@@ -18,6 +18,10 @@ from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundE
 from brain.platform.db.models.org import User
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -72,6 +76,26 @@ def _slack_envelope() -> dict:
         },
         "hints": {},
     }
+
+
+async def _set_failed_run(
+    store: AsyncAgentRunStore,
+    run_id: int,
+    *,
+    reason: str,
+) -> None:
+    await store.update_metadata(
+        run_id,
+        {
+            "failure": {
+                "category": "internal",
+                **failure_diagnostic_metadata(
+                    stage=RunFailureStage.AGENT_EXECUTION
+                ),
+            }
+        },
+    )
+    await store.set_status(run_id, RunStatus.FAILED, reason=reason)
 
 
 async def _seed_slack_lane(
@@ -158,9 +182,9 @@ async def test_transient_failed_monitor_run_readmits_once_and_replacement_replie
     )
 
     store = AsyncAgentRunStore(session)
-    await store.set_status(
+    await _set_failed_run(
+        store,
         original_run_id,
-        RunStatus.FAILED,
         reason=failure_reason,
     )
 
@@ -232,17 +256,17 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
         run_status="running",
     )
     store = AsyncAgentRunStore(session)
-    await store.set_status(
+    await _set_failed_run(
+        store,
         original_run_id,
-        RunStatus.FAILED,
         reason=failure_reason,
     )
     replacement = (await session.scalars(
         select(AgentRunRow).where(AgentRunRow.id != original_run_id)
     )).one()
-    await store.set_status(
+    await _set_failed_run(
+        store,
         replacement.id,
-        RunStatus.FAILED,
         reason=failure_reason,
     )
     await reconcile_inbound_triage_run(session, replacement.id)
@@ -272,9 +296,9 @@ async def test_non_transient_failed_monitor_run_is_not_readmitted(session):
         run_status="running",
     )
 
-    await AsyncAgentRunStore(session).set_status(
+    await _set_failed_run(
+        AsyncAgentRunStore(session),
         original_run_id,
-        RunStatus.FAILED,
         reason="Refused because the requested operation violates policy",
     )
 

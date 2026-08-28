@@ -40,6 +40,10 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound import service as inbound
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -841,7 +845,13 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
         idempotency_key="jira:PROJ-2:updated",
     )
     run = await session.get(AgentRunRow, int(triage["run_id"]))
-    run.metadata_ = {**dict(run.metadata_ or {}), "failure": {"category": "upstream"}}
+    run.metadata_ = {
+        **dict(run.metadata_ or {}),
+        "failure": {
+            "category": "upstream",
+            **failure_diagnostic_metadata(stage=RunFailureStage.AGENT_EXECUTION),
+        },
+    }
     await _finish_triage_run(
         session,
         triage,

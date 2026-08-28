@@ -18,6 +18,12 @@ from sqlalchemy.schema import CreateTable
 
 from brain.systems.runs.domain import AgentRunRequest as _AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime, StaticAnswerRecipe
+from brain.systems.runs.failure_diagnostic import (
+    DiagnosticValueState,
+    RunFailureStage,
+    failure_diagnostic_metadata,
+    read_run_failure_diagnostic,
+)
 from brain.contracts.statuses import (
     OPEN_RUN_STATUS_VALUES,
     RUN_STATUS_VALUES,
@@ -913,6 +919,18 @@ async def test_stale_status_cas_preserves_live_owner_and_prior_batch_changes(tmp
             (row.updated_at, row.execution_token, int(row.execution_attempt or 0))
             for row in stale_rows
         ]
+        failed_metadata = [
+            {
+                **dict(row.metadata_ or {}),
+                "failure": {
+                    "category": "internal",
+                    **failure_diagnostic_metadata(
+                        stage=RunFailureStage.RUNNER_EXECUTION
+                    ),
+                },
+            }
+            for row in stale_rows
+        ]
 
         async with factory() as live_session:
             live_store = AsyncAgentRunStore(live_session)
@@ -926,6 +944,7 @@ async def test_stale_status_cas_preserves_live_owner_and_prior_batch_changes(tmp
             expected_updated_at=expected[0][0],
             expected_execution_token=expected[0][1],
             expected_execution_attempt=expected[0][2],
+            metadata_update=failed_metadata[0],
             rollback_on_conflict=False,
         )
         second, second_changed = await stale_store.set_status_with_result(
@@ -935,6 +954,7 @@ async def test_stale_status_cas_preserves_live_owner_and_prior_batch_changes(tmp
             expected_updated_at=expected[1][0],
             expected_execution_token=expected[1][1],
             expected_execution_attempt=expected[1][2],
+            metadata_update=failed_metadata[1],
             rollback_on_conflict=False,
         )
         assert first_changed is True
@@ -1629,6 +1649,10 @@ async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory
     row = await session.get(AgentRunRow, result.id)
     assert row is not None
     assert row.status == RunStatus.FAILED.value
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_EXECUTION
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
     status_events = (
         await session.scalars(
             select(AgentRunEventRow)
@@ -1640,6 +1664,54 @@ async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory
         )
     ).all()
     assert status_events[-1].payload["reason"] == "AgentRun missing workspace org_id"
+
+
+async def test_store_rejects_failed_transition_without_typed_diagnostic(
+    session_factory,
+):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-failure-invariant", message="fail safely")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+
+    with pytest.raises(
+        ValueError,
+        match="failed AgentRun transitions require typed failure diagnostic metadata",
+    ):
+        await store.set_status(run.id, RunStatus.FAILED, reason="untyped failure")
+
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    assert row.status == RunStatus.RUNNING.value
+
+
+async def test_engine_complete_failed_status_uses_typed_settlement_diagnostic(
+    session_factory,
+):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-failed-completion", message="settle safely")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+
+    result = await AsyncAgentRunEngine(session, recipes={}).complete(
+        run.id,
+        output="settlement failed",
+        status=RunStatus.FAILED,
+    )
+
+    assert result.status == RunStatus.FAILED
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_SETTLEMENT
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
 
 
 async def test_claim_and_completion_are_idempotent(session_factory):
@@ -1748,6 +1820,10 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
         "diagnostic_schema": "typed_v1",
         "stage": "runner_execution",
     }
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_EXECUTION
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
     assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))

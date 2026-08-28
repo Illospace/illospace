@@ -237,10 +237,11 @@ class AsyncAgentRunEngine:
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)
         if not str(row.org_id or "").strip():
-            return await self.store.set_status(
+            return await self.fail(
                 row.id,
-                RunStatus.FAILED,
-                reason="AgentRun missing workspace org_id",
+                "AgentRun missing workspace org_id",
+                failure_category=RunFailureCategory.INTERNAL,
+                failure_stage=RunFailureStage.RUNNER_EXECUTION,
                 execution_claim=execution_claim,
             )
         request = AgentRunRequest(
@@ -338,6 +339,13 @@ class AsyncAgentRunEngine:
         status: RunStatus = RunStatus.COMPLETED,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
+        if status == RunStatus.FAILED:
+            return await self.fail(
+                run_id,
+                output or "run_failed_during_completion",
+                failure_stage=RunFailureStage.RUNNER_SETTLEMENT,
+                execution_claim=execution_claim,
+            )
         row = await self.store.require_run(run_id)
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)

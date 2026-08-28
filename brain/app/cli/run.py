@@ -25,6 +25,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text as sa_text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.task_domain import TaskDomain, classify_task_domain
 # ============================================================
 # Inline Allowlist
@@ -329,6 +333,14 @@ async def complete_run(session, run_id: int, outcome: str, notes: str = None) ->
         "failure": "failed",
         "cancelled": "canceled",
     }.get(outcome, "completed")
+    metadata_patch = {"outcome": outcome, "outcome_notes": notes}
+    if status == "failed":
+        metadata_patch["failure"] = {
+            "category": "internal",
+            **failure_diagnostic_metadata(
+                stage=RunFailureStage.RUNNER_SETTLEMENT,
+            ),
+        }
     await session.execute(sa_text("""
         UPDATE agent_runs
         SET status = :status,
@@ -339,7 +351,7 @@ async def complete_run(session, run_id: int, outcome: str, notes: str = None) ->
         WHERE id = :id
     """), {
         "status": status,
-        "metadata_patch": json.dumps({"outcome": outcome, "outcome_notes": notes}),
+        "metadata_patch": json.dumps(metadata_patch),
         "id": run_id,
     })
 

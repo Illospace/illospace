@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -33,6 +33,10 @@ from brain.systems.runs.domain import (
     RunRecipe,
 )
 from brain.systems.runs.events import run_event, status_changed_event
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.failures import safe_terminal_run_message
 from brain.systems.runs.ids import trace_id_for_run_id
 from brain.systems.runs.status import (
@@ -69,6 +73,23 @@ _CHILD_CREATION_TOKEN_METADATA_KEY = "parent_step_creation_token"
 _DEADLOCK_RETRY_ATTEMPTS = 3
 _DEADLOCK_RETRY_BASE_SECONDS = 0.05
 _UNSET = object()
+
+
+def _require_typed_failure_metadata(metadata: object) -> None:
+    run_metadata = metadata if isinstance(metadata, Mapping) else {}
+    failure = run_metadata.get("failure")
+    failure_metadata = failure if isinstance(failure, Mapping) else {}
+    try:
+        stage = RunFailureStage(failure_metadata.get("stage"))
+        expected = failure_diagnostic_metadata(stage=stage)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "failed AgentRun transitions require typed failure diagnostic metadata"
+        ) from exc
+    if any(failure_metadata.get(key) != value for key, value in expected.items()):
+        raise ValueError(
+            "failed AgentRun transitions require typed failure diagnostic metadata"
+        )
 
 
 def _agent_run_deadline_seconds() -> int:
@@ -1285,6 +1306,10 @@ class AsyncAgentRunStore:
             if execution_claim is not None:
                 await self.assert_execution_claim(execution_claim)
             return to_domain(row), False
+        if target == RunStatus.FAILED:
+            _require_typed_failure_metadata(
+                metadata_update if metadata_update is not None else row.metadata_
+            )
         now = transitioned_at or datetime.now(timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
