@@ -12,7 +12,7 @@ import tempfile
 from typing import Any
 
 from brain.contracts.github import parse_github_repo_slug
-from brain.platform.async_io import check_output_sync, run_subprocess_sync
+from brain.platform.async_io import check_output_sync, run_blocking, run_subprocess_sync
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.drafts import load_draft_metadata, sync_draft_from_root
@@ -393,7 +393,11 @@ def _git_output(cwd: Path, *args: str) -> str | None:
 
 
 def _existing_git_checkout(destination: Path, slug: str, branch: str | None) -> dict[str, str] | None:
-    """Return metadata for an existing checkout without mutating local state."""
+    """Return metadata for an existing checkout without mutating local state.
+
+    BLOCKING: reaches ``check_output_sync`` via ``_git_output``. Async callers
+    MUST go through ``run_blocking`` (see #860).
+    """
 
     if not destination.exists():
         return None
@@ -444,6 +448,12 @@ def _clone_github_repo(
     token: str | None,
     branch: str | None,
 ) -> dict[str, str]:
+    """Clone a GitHub repo. BLOCKING: rmtree, mkdir, git subprocess, git reads.
+
+    Async callers MUST go through ``run_blocking``. Calling this directly from a
+    coroutine freezes the whole worker for the clone's duration, which trips the
+    queue-stall watchdog and restart-loops the process (see #860).
+    """
     if destination.exists():
         shutil.rmtree(destination, ignore_errors=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -799,7 +809,7 @@ async def _materialize_resource(
 
     destination = _safe_repo_destination(workspace_root, slug)
     branch = _clean_text(resource.get("branch") or resource.get("default_branch") or resource.get("branch_hint"))
-    existing_checkout = _existing_git_checkout(destination, slug, branch)
+    existing_checkout = await run_blocking(_existing_git_checkout, destination, slug, branch)
     if existing_checkout:
         clone = existing_checkout
         repo_path = Path(clone["path"])
@@ -847,7 +857,7 @@ async def _materialize_resource(
             errors.append(prefix + token_error)
             continue
         try:
-            clone = _clone_github_repo(slug, destination, token=token, branch=branch)
+            clone = await run_blocking(_clone_github_repo, slug, destination, token=token, branch=branch)
         except Exception as exc:
             prefix = f"Vault key {key_name}: " if key_name else "public clone: "
             errors.append(prefix + _sanitize_git_error(str(exc)))
