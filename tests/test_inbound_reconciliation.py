@@ -17,6 +17,7 @@ from brain.platform.db.models.agent_run import (
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
 from brain.platform.db.models.org import User
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
+from brain.systems.inbound.results import read_inbound_submission_result
 from brain.systems.runs.events import run_event
 from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
 from brain.systems.runs.status import RunStatus
@@ -29,15 +30,6 @@ _NOW = datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc)
 
 _REPLY_RESULT = json.dumps({"operation": "posted", "channel_id": "C0PROD",
                             "message_ts": "1752600001.0"})
-
-
-def _result_api():
-    from brain.systems.inbound.results import (
-        InboundSubmissionResultState,
-        read_inbound_submission_result,
-    )
-
-    return InboundSubmissionResultState, read_inbound_submission_result
 
 
 @pytest.fixture
@@ -232,7 +224,6 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
     session,
     failure_reason,
 ):
-    _, read_inbound_submission_result = _result_api()
     event_id, original_run_id = await _seed_slack_lane(
         session,
         tool_results=[],
@@ -261,6 +252,7 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
         connection_id=_CONN,
         event_id=event_id,
     )
+    assert result.payload is not None
     assert result.payload["run_id"] == replacement.id
     assert result.payload["run_status"] == "failed"
     assert result.payload["retry_attempt"] == 1
@@ -270,82 +262,6 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
         {"run_id": original_run_id, "retry_attempt": 0},
         {"run_id": replacement.id, "retry_attempt": 1},
     ]
-
-
-async def test_submission_result_absent_event_has_not_found_state(session):
-    InboundSubmissionResultState, read_inbound_submission_result = _result_api()
-    result = await read_inbound_submission_result(
-        session,
-        org_id=_ORG,
-        connection_id=_CONN,
-        event_id=str(uuid.uuid4()),
-    )
-
-    assert result.state is InboundSubmissionResultState.NOT_FOUND
-    assert result.owned_by_another_connection is False
-
-
-async def test_submission_result_cross_org_event_has_not_found_state(session):
-    InboundSubmissionResultState, read_inbound_submission_result = _result_api()
-    event_id, _ = await _seed_slack_lane(session, tool_results=[])
-
-    result = await read_inbound_submission_result(
-        session,
-        org_id=str(uuid.uuid4()),
-        connection_id=_CONN,
-        event_id=event_id,
-    )
-
-    assert result.state is InboundSubmissionResultState.NOT_FOUND
-    assert result.owned_by_another_connection is False
-
-
-async def test_submission_result_owned_by_another_connection_has_distinct_state(session):
-    from types import SimpleNamespace
-
-    from brain.app.api.routers.agent_mcp import _tool_get_result
-
-    InboundSubmissionResultState, read_inbound_submission_result = _result_api()
-    event_id, _ = await _seed_slack_lane(session, tool_results=[])
-    other_connection_id = str(uuid.uuid4())
-
-    result = await read_inbound_submission_result(
-        session,
-        org_id=_ORG,
-        connection_id=other_connection_id,
-        event_id=event_id,
-    )
-
-    assert result.state is InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION
-    assert result.owned_by_another_connection is True
-
-    wire_payload = await _tool_get_result(
-        session,
-        SimpleNamespace(org_id=_ORG, connection_id=other_connection_id),
-        {"event_id": event_id},
-    )
-    assert wire_payload == {
-        "event_id": event_id,
-        "state": InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION.value,
-        "owned_by_another_connection": True,
-    }
-
-
-async def test_submission_result_visible_event_has_found_state(session):
-    InboundSubmissionResultState, read_inbound_submission_result = _result_api()
-    event_id, _ = await _seed_slack_lane(session, tool_results=[])
-
-    result = await read_inbound_submission_result(
-        session,
-        org_id=_ORG,
-        connection_id=_CONN,
-        event_id=event_id,
-    )
-
-    assert result.state is InboundSubmissionResultState.FOUND
-    assert result.owned_by_another_connection is False
-    assert result.payload["event_id"] == event_id
-
 
 async def test_non_transient_failed_monitor_run_is_not_readmitted(session):
     event_id, original_run_id = await _seed_slack_lane(

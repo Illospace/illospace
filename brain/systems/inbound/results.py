@@ -25,9 +25,13 @@ class InboundSubmissionResultState(str, Enum):
 @dataclass(frozen=True)
 class InboundSubmissionResult:
     state: InboundSubmissionResultState
-    payload: dict[str, Any]
-    owned_by_another_connection: bool = False
+    payload: dict[str, Any] | None = None
     mutated_inbound: bool = False
+
+    def __post_init__(self) -> None:
+        has_payload = self.payload is not None
+        if has_payload != (self.state is InboundSubmissionResultState.FOUND):
+            raise ValueError("payload must be present if and only if state is FOUND")
 
 
 def _result_handling(action_result: dict[str, Any]) -> dict[str, Any]:
@@ -63,14 +67,11 @@ async def read_inbound_submission_result(
         )
     except inbound_admin.InboundAdminError:
         return InboundSubmissionResult(
-            payload={},
             state=InboundSubmissionResultState.NOT_FOUND,
         )
     if str(event.connection_id) != str(connection_id):
         return InboundSubmissionResult(
-            payload={},
             state=InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION,
-            owned_by_another_connection=True,
         )
 
     action_result = dict(event.action_result or {})

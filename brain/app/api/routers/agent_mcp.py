@@ -1374,8 +1374,9 @@ async def _tool_get_result(
         return {
             "event_id": event_id,
             "state": result.state.value,
-            "owned_by_another_connection": result.owned_by_another_connection,
+            "owned_by_another_connection": True,
         }
+    assert result.payload is not None
     return result.payload
 
 
