@@ -54,7 +54,10 @@ from brain.systems.cycles.serializers import (
 from brain.systems.cycles.service import async_run_cycle_now
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
-from brain.systems.inbound.results import read_inbound_submission_result
+from brain.systems.inbound.results import (
+    InboundSubmissionResultState,
+    read_inbound_submission_result,
+)
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 from brain.systems.knowledge.search import search_knowledge
 from brain.systems.runs.cortex.read_models import (
@@ -1365,6 +1368,15 @@ async def _tool_get_result(
     )
     if result.mutated_inbound:
         await db.commit()
+    if result.state is InboundSubmissionResultState.NOT_FOUND:
+        raise ValueError("Inbound event not found")
+    if result.state is InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION:
+        return {
+            "event_id": event_id,
+            "state": result.state.value,
+            "owned_by_another_connection": True,
+        }
+    assert result.payload is not None
     return result.payload
 
 

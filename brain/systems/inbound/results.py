@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,10 +14,24 @@ from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.runs.failure_diagnostic import read_run_failure_diagnostic
 
 
+class InboundSubmissionResultState(str, Enum):
+    """Whether an inbound event result is visible to the caller."""
+
+    FOUND = "found"
+    NOT_FOUND = "not_found"
+    NOT_VISIBLE_TO_CONNECTION = "not_visible_to_connection"
+
+
 @dataclass(frozen=True)
 class InboundSubmissionResult:
-    payload: dict[str, Any]
+    state: InboundSubmissionResultState
+    payload: dict[str, Any] | None = None
     mutated_inbound: bool = False
+
+    def __post_init__(self) -> None:
+        has_payload = self.payload is not None
+        if has_payload != (self.state is InboundSubmissionResultState.FOUND):
+            raise ValueError("payload must be present if and only if state is FOUND")
 
 
 def _result_handling(action_result: dict[str, Any]) -> dict[str, Any]:
@@ -44,9 +59,20 @@ async def read_inbound_submission_result(
     include_payload: bool = True,
     limit: int = 25,
 ) -> InboundSubmissionResult:
-    event = await inbound_admin.require_event_for_org(session, org_id=org_id, event_id=event_id)
+    try:
+        event = await inbound_admin.require_event_for_org(
+            session,
+            org_id=org_id,
+            event_id=event_id,
+        )
+    except inbound_admin.InboundAdminError:
+        return InboundSubmissionResult(
+            state=InboundSubmissionResultState.NOT_FOUND,
+        )
     if str(event.connection_id) != str(connection_id):
-        raise ValueError("Inbound event not found")
+        return InboundSubmissionResult(
+            state=InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION,
+        )
 
     action_result = dict(event.action_result or {})
     handling = _result_handling(action_result)
@@ -109,6 +135,7 @@ async def read_inbound_submission_result(
         if diagnostic is not None:
             failure["diagnostic"] = diagnostic.as_payload()
     return InboundSubmissionResult(
+        state=InboundSubmissionResultState.FOUND,
         payload={
             "event_id": str(event.id),
             "submission_id": str(event.id),
@@ -133,4 +160,8 @@ async def read_inbound_submission_result(
     )
 
 
-__all__ = ["InboundSubmissionResult", "read_inbound_submission_result"]
+__all__ = [
+    "InboundSubmissionResult",
+    "InboundSubmissionResultState",
+    "read_inbound_submission_result",
+]
