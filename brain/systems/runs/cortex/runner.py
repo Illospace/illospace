@@ -31,10 +31,7 @@ from brain.systems.runs.evidence_health import (
 )
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
-from brain.systems.runs.failure_diagnostic import (
-    RunFailureStage,
-    failure_diagnostic_metadata,
-)
+from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
@@ -1281,18 +1278,6 @@ async def _mark_run_failed_after_runner_error_async(
         if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
             category = failure_category_for_error(error)
             failure = public_run_failure(RunStatus.FAILED, category)
-            await store.update_metadata(
-                int(run_id),
-                {
-                    "failure": {
-                        "category": category.value,
-                        **failure_diagnostic_metadata(
-                            stage=failure_stage,
-                            exception_type=exception_type,
-                        ),
-                    }
-                },
-            )
             if final_answer:
                 # ``final_answer`` is an intent signal from runner setup code. It
                 # can contain materializer diagnostics, so only persist the
@@ -1322,7 +1307,13 @@ async def _mark_run_failed_after_runner_error_async(
                     root_run_id=row.root_run_id,
                 )
             )
-            await store.set_status(int(run_id), RunStatus.FAILED, reason=error[:500])
+            await store.fail_run(
+                int(run_id),
+                category=category,
+                stage=failure_stage,
+                reason=error[:500],
+                exception_type=exception_type,
+            )
             from brain.systems.runs.chantier_continuation import (
                 queue_worker_continuation_for_terminal_run,
             )

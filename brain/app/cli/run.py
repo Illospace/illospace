@@ -27,8 +27,9 @@ from sqlalchemy import text as sa_text
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runs.failure_diagnostic import (
     RunFailureStage,
-    failure_diagnostic_metadata,
+    run_failure_metadata,
 )
+from brain.systems.runs.failures import RunFailureCategory
 from brain.systems.task_domain import TaskDomain, classify_task_domain
 # ============================================================
 # Inline Allowlist
@@ -335,12 +336,10 @@ async def complete_run(session, run_id: int, outcome: str, notes: str = None) ->
     }.get(outcome, "completed")
     metadata_patch = {"outcome": outcome, "outcome_notes": notes}
     if status == "failed":
-        metadata_patch["failure"] = {
-            "category": "internal",
-            **failure_diagnostic_metadata(
-                stage=RunFailureStage.RUNNER_SETTLEMENT,
-            ),
-        }
+        metadata_patch["failure"] = run_failure_metadata(
+            category=RunFailureCategory.INTERNAL,
+            stage=RunFailureStage.RUNNER_SETTLEMENT,
+        )
     await session.execute(sa_text("""
         UPDATE agent_runs
         SET status = :status,

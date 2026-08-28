@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
+from brain.systems.runs.failures import RunFailureCategory
 
 
 _DIAGNOSTIC_SCHEMA = "typed_v1"
@@ -119,6 +120,25 @@ def failure_diagnostic_metadata(
     }
 
 
+def run_failure_metadata(
+    *,
+    category: RunFailureCategory,
+    stage: RunFailureStage,
+    exception_type: type[BaseException] | None = None,
+) -> dict[str, Any]:
+    """Encode the complete persisted envelope for one failed run."""
+
+    if not isinstance(category, RunFailureCategory):
+        raise TypeError("failure category must be a RunFailureCategory")
+    return {
+        "category": category.value,
+        **failure_diagnostic_metadata(
+            stage=stage,
+            exception_type=exception_type,
+        ),
+    }
+
+
 def _stage_projection(
     failure_metadata: Mapping[str, Any],
 ) -> tuple[RunFailureStage, DiagnosticValueState]:
@@ -205,4 +225,5 @@ __all__ = [
     "RunFailureStage",
     "failure_diagnostic_metadata",
     "read_run_failure_diagnostic",
+    "run_failure_metadata",
 ]

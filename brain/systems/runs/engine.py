@@ -16,10 +16,7 @@ from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
-from brain.systems.runs.failure_diagnostic import (
-    RunFailureStage,
-    failure_diagnostic_metadata,
-)
+from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.failures import (
     RunFailureCategory,
     coerce_failure_category,
@@ -451,22 +448,13 @@ class AsyncAgentRunEngine:
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
             category = coerce_failure_category(failure_category or failure_category_for_error(error))
-            failure_metadata = {
-                "category": category.value,
-                **failure_diagnostic_metadata(
-                    stage=failure_stage,
-                    exception_type=exception_type,
-                ),
-            }
-            await self.store.update_metadata(
-                run_id,
-                {"failure": failure_metadata},
-            )
             safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
-            failed = await self.store.set_status(
+            failed = await self.store.fail_run(
                 run_id,
-                RunStatus.FAILED,
+                category=category,
+                stage=failure_stage,
                 reason=safe_error,
+                exception_type=exception_type,
                 execution_claim=execution_claim,
             )
             if failed.status != RunStatus.FAILED:

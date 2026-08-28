@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -35,9 +35,9 @@ from brain.systems.runs.domain import (
 from brain.systems.runs.events import run_event, status_changed_event
 from brain.systems.runs.failure_diagnostic import (
     RunFailureStage,
-    failure_diagnostic_metadata,
+    run_failure_metadata,
 )
-from brain.systems.runs.failures import safe_terminal_run_message
+from brain.systems.runs.failures import RunFailureCategory, safe_terminal_run_message
 from brain.systems.runs.ids import trace_id_for_run_id
 from brain.systems.runs.status import (
     RunStatus,
@@ -73,23 +73,6 @@ _CHILD_CREATION_TOKEN_METADATA_KEY = "parent_step_creation_token"
 _DEADLOCK_RETRY_ATTEMPTS = 3
 _DEADLOCK_RETRY_BASE_SECONDS = 0.05
 _UNSET = object()
-
-
-def _require_typed_failure_metadata(metadata: object) -> None:
-    run_metadata = metadata if isinstance(metadata, Mapping) else {}
-    failure = run_metadata.get("failure")
-    failure_metadata = failure if isinstance(failure, Mapping) else {}
-    try:
-        stage = RunFailureStage(failure_metadata.get("stage"))
-        expected = failure_diagnostic_metadata(stage=stage)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "failed AgentRun transitions require typed failure diagnostic metadata"
-        ) from exc
-    if any(failure_metadata.get(key) != value for key, value in expected.items()):
-        raise ValueError(
-            "failed AgentRun transitions require typed failure diagnostic metadata"
-        )
 
 
 def _agent_run_deadline_seconds() -> int:
@@ -1071,6 +1054,84 @@ class AsyncAgentRunStore:
         )
         return run
 
+    async def fail_run(
+        self,
+        run_id: int,
+        *,
+        category: RunFailureCategory,
+        stage: RunFailureStage,
+        reason: str | None = None,
+        exception_type: type[BaseException] | None = None,
+        execution_claim: ExecutionClaim | None = None,
+    ) -> AgentRun:
+        """Atomically persist a typed failure envelope and failed status."""
+
+        run, _changed = await self.fail_run_with_result(
+            run_id,
+            category=category,
+            stage=stage,
+            reason=reason,
+            exception_type=exception_type,
+            execution_claim=execution_claim,
+        )
+        return run
+
+    async def fail_run_with_result(
+        self,
+        run_id: int,
+        *,
+        category: RunFailureCategory,
+        stage: RunFailureStage,
+        reason: str | None = None,
+        exception_type: type[BaseException] | None = None,
+        execution_claim: ExecutionClaim | None = None,
+        expected_updated_at: datetime | None | object = _UNSET,
+        expected_execution_token: str | None | object = _UNSET,
+        expected_execution_attempt: int | object = _UNSET,
+        rollback_on_conflict: bool = True,
+        transitioned_at: datetime | None = None,
+        before_status_events: tuple[AgentRunEvent, ...] = (),
+        after_status_events: tuple[AgentRunEvent, ...] = (),
+    ) -> tuple[AgentRun, bool]:
+        """Typed failed transition with compare-and-set result reporting."""
+
+        if execution_claim is not None and execution_claim.lost.is_set():
+            raise ExecutionClaimLost(
+                f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
+            )
+        row = await self._locked_run(run_id)
+        metadata = dict(row.metadata_ or {})
+        try:
+            metadata["failure"] = run_failure_metadata(
+                category=category,
+                stage=stage,
+                exception_type=exception_type,
+            )
+        except (TypeError, ValueError):
+            logger.critical(
+                "AgentRun %s received malformed typed failure fields; "
+                "using internal settlement fallback",
+                run_id,
+            )
+            metadata["failure"] = run_failure_metadata(
+                category=RunFailureCategory.INTERNAL,
+                stage=RunFailureStage.RUNNER_SETTLEMENT,
+            )
+        return await self._set_status_on_locked_run(
+            row,
+            RunStatus.FAILED,
+            reason=reason,
+            execution_claim=execution_claim,
+            expected_updated_at=expected_updated_at,
+            expected_execution_token=expected_execution_token,
+            expected_execution_attempt=expected_execution_attempt,
+            rollback_on_conflict=rollback_on_conflict,
+            transitioned_at=transitioned_at,
+            metadata_update=metadata,
+            before_status_events=before_status_events,
+            after_status_events=after_status_events,
+        )
+
     async def interrupt_and_requeue(
         self,
         run_id: int,
@@ -1242,6 +1303,26 @@ class AsyncAgentRunStore:
         before_status_events: tuple[AgentRunEvent, ...] = (),
         after_status_events: tuple[AgentRunEvent, ...] = (),
     ) -> tuple[AgentRun, bool]:
+        if status == RunStatus.FAILED or status == RunStatus.FAILED.value:
+            logger.critical(
+                "AgentRun %s used generic set_status for FAILED; "
+                "using typed internal settlement fallback",
+                run_id,
+            )
+            return await self.fail_run_with_result(
+                run_id,
+                category=RunFailureCategory.INTERNAL,
+                stage=RunFailureStage.RUNNER_SETTLEMENT,
+                reason=reason,
+                execution_claim=execution_claim,
+                expected_updated_at=expected_updated_at,
+                expected_execution_token=expected_execution_token,
+                expected_execution_attempt=expected_execution_attempt,
+                rollback_on_conflict=rollback_on_conflict,
+                transitioned_at=transitioned_at,
+                before_status_events=before_status_events,
+                after_status_events=after_status_events,
+            )
         if execution_claim is not None and execution_claim.lost.is_set():
             raise ExecutionClaimLost(
                 f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
@@ -1306,10 +1387,6 @@ class AsyncAgentRunStore:
             if execution_claim is not None:
                 await self.assert_execution_claim(execution_claim)
             return to_domain(row), False
-        if target == RunStatus.FAILED:
-            _require_typed_failure_metadata(
-                metadata_update if metadata_update is not None else row.metadata_
-            )
         now = transitioned_at or datetime.now(timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
