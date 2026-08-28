@@ -19,6 +19,8 @@ from brain.platform.db.models.org import User
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.inbound.results import read_inbound_submission_result
 from brain.systems.runs.events import run_event
+from brain.systems.runs.failure_diagnostic import RunFailureStage
+from brain.systems.runs.failures import RunFailureCategory
 from brain.systems.runs.interactive_reply import INTERACTIVE_TRANSPORT_FALLBACK_MESSAGE
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
@@ -158,9 +160,10 @@ async def test_transient_failed_monitor_run_readmits_once_and_replacement_replie
     )
 
     store = AsyncAgentRunStore(session)
-    await store.set_status(
+    await store.fail_run(
         original_run_id,
-        RunStatus.FAILED,
+        category=RunFailureCategory.INTERNAL,
+        stage=RunFailureStage.AGENT_EXECUTION,
         reason=failure_reason,
     )
 
@@ -230,17 +233,19 @@ async def test_second_transient_failure_is_terminal_and_result_shows_retry_linea
         run_status="running",
     )
     store = AsyncAgentRunStore(session)
-    await store.set_status(
+    await store.fail_run(
         original_run_id,
-        RunStatus.FAILED,
+        category=RunFailureCategory.INTERNAL,
+        stage=RunFailureStage.AGENT_EXECUTION,
         reason=failure_reason,
     )
     replacement = (await session.scalars(
         select(AgentRunRow).where(AgentRunRow.id != original_run_id)
     )).one()
-    await store.set_status(
+    await store.fail_run(
         replacement.id,
-        RunStatus.FAILED,
+        category=RunFailureCategory.INTERNAL,
+        stage=RunFailureStage.AGENT_EXECUTION,
         reason=failure_reason,
     )
     await reconcile_inbound_triage_run(session, replacement.id)
@@ -270,9 +275,10 @@ async def test_non_transient_failed_monitor_run_is_not_readmitted(session):
         run_status="running",
     )
 
-    await AsyncAgentRunStore(session).set_status(
+    await AsyncAgentRunStore(session).fail_run(
         original_run_id,
-        RunStatus.FAILED,
+        category=RunFailureCategory.INTERNAL,
+        stage=RunFailureStage.AGENT_EXECUTION,
         reason="Refused because the requested operation violates policy",
     )
 

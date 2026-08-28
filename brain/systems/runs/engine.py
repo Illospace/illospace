@@ -16,10 +16,7 @@ from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
-from brain.systems.runs.failure_diagnostic import (
-    RunFailureStage,
-    failure_diagnostic_metadata,
-)
+from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.failures import (
     RunFailureCategory,
     coerce_failure_category,
@@ -237,10 +234,11 @@ class AsyncAgentRunEngine:
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)
         if not str(row.org_id or "").strip():
-            return await self.store.set_status(
+            return await self.fail(
                 row.id,
-                RunStatus.FAILED,
-                reason="AgentRun missing workspace org_id",
+                "AgentRun missing workspace org_id",
+                failure_category=RunFailureCategory.INTERNAL,
+                failure_stage=RunFailureStage.RUNNER_EXECUTION,
                 execution_claim=execution_claim,
             )
         request = AgentRunRequest(
@@ -338,6 +336,13 @@ class AsyncAgentRunEngine:
         status: RunStatus = RunStatus.COMPLETED,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
+        if status == RunStatus.FAILED:
+            return await self.fail(
+                run_id,
+                output or "run_failed_during_completion",
+                failure_stage=RunFailureStage.RUNNER_SETTLEMENT,
+                execution_claim=execution_claim,
+            )
         row = await self.store.require_run(run_id)
         if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
             return to_domain(row)
@@ -443,22 +448,13 @@ class AsyncAgentRunEngine:
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
             category = coerce_failure_category(failure_category or failure_category_for_error(error))
-            failure_metadata = {
-                "category": category.value,
-                **failure_diagnostic_metadata(
-                    stage=failure_stage,
-                    exception_type=exception_type,
-                ),
-            }
-            await self.store.update_metadata(
-                run_id,
-                {"failure": failure_metadata},
-            )
             safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
-            failed = await self.store.set_status(
+            failed = await self.store.fail_run(
                 run_id,
-                RunStatus.FAILED,
+                category=category,
+                stage=failure_stage,
                 reason=safe_error,
+                exception_type=exception_type,
                 execution_claim=execution_claim,
             )
             if failed.status != RunStatus.FAILED:

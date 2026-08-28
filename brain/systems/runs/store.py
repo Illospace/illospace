@@ -33,7 +33,11 @@ from brain.systems.runs.domain import (
     RunRecipe,
 )
 from brain.systems.runs.events import run_event, status_changed_event
-from brain.systems.runs.failures import safe_terminal_run_message
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    run_failure_metadata,
+)
+from brain.systems.runs.failures import RunFailureCategory, safe_terminal_run_message
 from brain.systems.runs.ids import trace_id_for_run_id
 from brain.systems.runs.status import (
     RunStatus,
@@ -1050,6 +1054,84 @@ class AsyncAgentRunStore:
         )
         return run
 
+    async def fail_run(
+        self,
+        run_id: int,
+        *,
+        category: RunFailureCategory,
+        stage: RunFailureStage,
+        reason: str | None = None,
+        exception_type: type[BaseException] | None = None,
+        execution_claim: ExecutionClaim | None = None,
+    ) -> AgentRun:
+        """Atomically persist a typed failure envelope and failed status."""
+
+        run, _changed = await self.fail_run_with_result(
+            run_id,
+            category=category,
+            stage=stage,
+            reason=reason,
+            exception_type=exception_type,
+            execution_claim=execution_claim,
+        )
+        return run
+
+    async def fail_run_with_result(
+        self,
+        run_id: int,
+        *,
+        category: RunFailureCategory,
+        stage: RunFailureStage,
+        reason: str | None = None,
+        exception_type: type[BaseException] | None = None,
+        execution_claim: ExecutionClaim | None = None,
+        expected_updated_at: datetime | None | object = _UNSET,
+        expected_execution_token: str | None | object = _UNSET,
+        expected_execution_attempt: int | object = _UNSET,
+        rollback_on_conflict: bool = True,
+        transitioned_at: datetime | None = None,
+        before_status_events: tuple[AgentRunEvent, ...] = (),
+        after_status_events: tuple[AgentRunEvent, ...] = (),
+    ) -> tuple[AgentRun, bool]:
+        """Typed failed transition with compare-and-set result reporting."""
+
+        if execution_claim is not None and execution_claim.lost.is_set():
+            raise ExecutionClaimLost(
+                f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"
+            )
+        row = await self._locked_run(run_id)
+        metadata = dict(row.metadata_ or {})
+        try:
+            metadata["failure"] = run_failure_metadata(
+                category=category,
+                stage=stage,
+                exception_type=exception_type,
+            )
+        except (TypeError, ValueError):
+            logger.critical(
+                "AgentRun %s received malformed typed failure fields; "
+                "using internal settlement fallback",
+                run_id,
+            )
+            metadata["failure"] = run_failure_metadata(
+                category=RunFailureCategory.INTERNAL,
+                stage=RunFailureStage.RUNNER_SETTLEMENT,
+            )
+        return await self._set_status_on_locked_run(
+            row,
+            RunStatus.FAILED,
+            reason=reason,
+            execution_claim=execution_claim,
+            expected_updated_at=expected_updated_at,
+            expected_execution_token=expected_execution_token,
+            expected_execution_attempt=expected_execution_attempt,
+            rollback_on_conflict=rollback_on_conflict,
+            transitioned_at=transitioned_at,
+            metadata_update=metadata,
+            before_status_events=before_status_events,
+            after_status_events=after_status_events,
+        )
+
     async def interrupt_and_requeue(
         self,
         run_id: int,
@@ -1221,6 +1303,26 @@ class AsyncAgentRunStore:
         before_status_events: tuple[AgentRunEvent, ...] = (),
         after_status_events: tuple[AgentRunEvent, ...] = (),
     ) -> tuple[AgentRun, bool]:
+        if status == RunStatus.FAILED or status == RunStatus.FAILED.value:
+            logger.critical(
+                "AgentRun %s used generic set_status for FAILED; "
+                "using typed internal settlement fallback",
+                run_id,
+            )
+            return await self.fail_run_with_result(
+                run_id,
+                category=RunFailureCategory.INTERNAL,
+                stage=RunFailureStage.RUNNER_SETTLEMENT,
+                reason=reason,
+                execution_claim=execution_claim,
+                expected_updated_at=expected_updated_at,
+                expected_execution_token=expected_execution_token,
+                expected_execution_attempt=expected_execution_attempt,
+                rollback_on_conflict=rollback_on_conflict,
+                transitioned_at=transitioned_at,
+                before_status_events=before_status_events,
+                after_status_events=after_status_events,
+            )
         if execution_claim is not None and execution_claim.lost.is_set():
             raise ExecutionClaimLost(
                 f"AgentRun {run_id} execution claim {execution_claim.attempt} is no longer current"

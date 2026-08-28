@@ -282,6 +282,47 @@ class TestCompleteHook:
         assert mock_session.execute.call_count >= 2
         assert result == {"run_id": 42, "outcome": "success"}
 
+    async def test_complete_failure_writes_known_settlement_diagnostic(self):
+        from types import SimpleNamespace
+
+        from brain.app.cli.run import complete_run
+        from brain.systems.runs.failure_diagnostic import (
+            DiagnosticValueState,
+            RunFailureStage,
+            read_run_failure_diagnostic,
+        )
+
+        mock_session = MagicMock()
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = {
+            "id": 42,
+            "metadata": {"legacy_source": "cli.run"},
+        }
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        result = await complete_run(
+            mock_session,
+            run_id=42,
+            outcome="failure",
+            notes="worker reported failure",
+        )
+
+        update_params = mock_session.execute.await_args_list[1].args[1]
+        metadata = json.loads(update_params["metadata_patch"])
+        projection_session = MagicMock()
+        projected_events = MagicMock()
+        projected_events.all.return_value = []
+        projection_session.scalars = AsyncMock(return_value=projected_events)
+        diagnostic = await read_run_failure_diagnostic(
+            projection_session,
+            run=SimpleNamespace(id=42, status="failed", metadata_=metadata),
+        )
+
+        assert result == {"run_id": 42, "outcome": "failure"}
+        assert diagnostic is not None
+        assert diagnostic.stage == RunFailureStage.RUNNER_SETTLEMENT
+        assert diagnostic.stage_state == DiagnosticValueState.KNOWN
+
     async def test_complete_with_invalid_id(self):
         mock_session = MagicMock()
         mock_result = MagicMock()
