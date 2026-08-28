@@ -11,7 +11,7 @@ and it drives domain-appropriate quality bars, routing, and assignment.
 This is the single owner of the domain axis — other subsystems classify through
 ``classify_task_domain`` rather than growing their own domain vocabulary.
 
-Precedence (see ``specs/illo-lifecycle``): an explicit policy/repo prior wins;
+Precedence (see ``specs/done/illo-lifecycle``): an explicit policy/repo prior wins;
 the keyword heuristic only runs when no prior is given. The heuristic is a
 best-effort fallback for text-only callers — the accurate signal is the
 repo/policy prior available in the triage path. Ambiguous text resolves to

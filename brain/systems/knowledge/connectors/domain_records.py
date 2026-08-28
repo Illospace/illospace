@@ -10,6 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
 from brain.platform.db.models.domain import Domain, DomainObjectType, DomainRecord
+from brain.systems.deploy_record_contract import (
+    deploy_ticket_object_keys,
+    record_data_for_serialization,
+)
 from brain.systems.knowledge.connectors.base import (
     KnowledgeDraft,
     KnowledgeEnumeration,
@@ -55,10 +59,20 @@ class DomainRecordsConnector:
                 ensure_ascii=False,
                 sort_keys=True,
             )
+            record_data = (
+                record.data if isinstance(record.data, dict) else {}
+            )
+            serialized_data = record_data_for_serialization(
+                object_type.key,
+                record_data,
+            )
             raw_text = str(record.search_text or "").strip()
-            if not raw_text:
+            if object_type.key in deploy_ticket_object_keys() or not raw_text:
+                # search_text is cached and can retain retired searchable fields
+                # after the record data is cleaned. Rebuild tracker text from the
+                # same safe data used by external serializers.
                 raw_text = json.dumps(
-                    record.data if isinstance(record.data, dict) else {},
+                    serialized_data,
                     default=str,
                     ensure_ascii=False,
                     sort_keys=True,

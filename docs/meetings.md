@@ -3,7 +3,7 @@
 Meetbot is an optional Illospace service that joins one Google Meet as a visible,
 muted notetaker. It reads live captions. It does not record or process meeting
 audio. The build contract and HTTP details remain in
-[`specs/meetbot/README.md`](../specs/meetbot/README.md).
+[`specs/done/meetbot/README.md`](../specs/done/meetbot/README.md).
 
 ## Google account bootstrap
 
@@ -46,7 +46,7 @@ Send Illo the Meet link in a Slack message or the web workspace, and ask it to
 join. This message is the only thing that starts a join.
 
 Illo does not watch calendars. A calendar invite alone never starts a join. This
-is a deliberate [non-goal](../specs/meetbot/README.md#non-goals-v1). Illo joins
+is a deliberate [non-goal](../specs/done/meetbot/README.md#non-goals-v1). Illo joins
 one meeting at a time.
 
 ## Admission and consent

@@ -1,6 +1,6 @@
 # DB Schema Simplification Backlog
 
-Last updated: 2026-05-12
+Last updated: 2026-08-19
 
 Goal: reduce the PostgreSQL schema by removing unused legacy tables, without direct production deletes. Every removal must go through Alembic and must remove runtime code references first.
 
@@ -32,7 +32,7 @@ All approved simplification work is now grouped into a single Alembic migration:
 | Done | `brain_prompts` | BrainPrompt model, brain prompt API routes, generator pipeline, scheduler step, and model test refs removed | `py_compile` OK; no runtime brain prompt refs found | Consolidated migration refuses drop if non-empty |
 | Done | Emotion system | Emotion API/model/repository, memory emotional embeddings, CLI/MCP/session hooks, dashboard, and pipeline emotion logic removed | `py_compile` OK; no runtime emotion refs found outside migration | Drops `emotional_snapshots` and emotion columns |
 | Keep | `scheduler_jobs`, `scheduler_runs`, `scheduler_run_steps`, `scheduler_leases` | Keep for planned cron replacement | n/a | Scheduler is the structured replacement for `cron_jobs`; do not simplify yet |
-| Pending | Apply migration | Runtime code is ready | Not applied to remote DB | Prod DB unchanged until Alembic runs |
+| Done | Apply migration | Runtime code is ready | Migration chain is past `0003` in every deployment (head `0064` as of 2026-08-19) | Applied; the chain guarantees it |
 
 ## Later Candidates
 
