@@ -9,6 +9,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.contracts.github import (
+    github_issue_comment_ref,
+    github_issue_ref,
+    github_pull_request_ref,
+)
 from brain.platform.db.models.agent_run import AgentRunEventRow
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get_tool_registration
@@ -91,31 +96,6 @@ _OBJECT_REF_KINDS = {
     "event": "inbound_event",
     "run": "agent_run",
 }
-
-# GitHub artifacts come back as {"repo": "owner/name", "issue": {"type",
-# "number", ...}} or {"repo": "owner/name", "issue_number": N, "comment":
-# {"id", ...}} (the connector payload contracts), not as *_id keys, so the
-# maps above cannot see them. Without this extraction a run whose whole
-# outcome is a filed issue or posted comment reports no durable refs at all.
-_GITHUB_ARTIFACT_KINDS = {
-    "issue": "github_issue",
-    "pull_request": "github_pull_request",
-    "comment": "github_issue_comment",
-}
-
-# Canonical id encodings for the kinds above. Keep every GitHub ref id built
-# here so the encoding stays one decision: an issue or pull request is
-# "owner/repo#number", and a comment appends its own id because many comments
-# share one issue number. A reader splits on ":comment:" to recover the issue.
-_GITHUB_COMMENT_REF_INFIX = ":comment:"
-
-
-def _github_artifact_ref_id(repo: str, number: int) -> str:
-    return f"{repo}#{number}"
-
-
-def _github_comment_ref_id(repo: str, issue_number: int, comment_id: int) -> str:
-    return f"{_github_artifact_ref_id(repo, issue_number)}{_GITHUB_COMMENT_REF_INFIX}{comment_id}"
 
 # Ref kinds that represent routed/created WORK (something a teammate or
 # their agent picks up), as opposed to conversation, memory, or plumbing
@@ -259,61 +239,10 @@ def _add_explicit_ref_values(
     _add_explicit_ref(refs, seen, value=value, source=source)
 
 
-def _add_github_artifact_ref(
-    refs: list[dict[str, str]],
-    seen: set[tuple[str, str]],
-    *,
-    value: Mapping[str, Any],
-    source: str,
-) -> None:
-    repo = str(value.get("repo") or "").strip()
-    if repo.count("/") != 1:
-        return
-
-    for artifact_key in ("issue", "pull_request"):
-        artifact = value.get(artifact_key)
-        if not isinstance(artifact, Mapping):
-            continue
-        try:
-            number = int(str(artifact.get("number") or "").strip())
-        except (TypeError, ValueError):
-            continue
-        kind = _GITHUB_ARTIFACT_KINDS.get(
-            str(artifact.get("type") or artifact_key).strip() or artifact_key
-        )
-        if number > 0 and kind is not None:
-            _add_ref(
-                refs,
-                seen,
-                kind=kind,
-                value=_github_artifact_ref_id(repo, number),
-                source=source,
-            )
-
-    comment = value.get("comment")
-    if not isinstance(comment, Mapping):
-        return
-    try:
-        issue_number = int(str(value.get("issue_number") or "").strip())
-        comment_id = int(str(comment.get("id") or "").strip())
-    except (TypeError, ValueError):
-        return
-    if issue_number < 1 or comment_id < 1:
-        return
-    _add_ref(
-        refs,
-        seen,
-        kind=_GITHUB_ARTIFACT_KINDS["comment"],
-        value=_github_comment_ref_id(repo, issue_number, comment_id),
-        source=source,
-    )
-
-
 def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, str]], *, source: str) -> None:
     if len(refs) >= _MAX_TARGET_REFS:
         return
     if isinstance(value, Mapping):
-        _add_github_artifact_ref(refs, seen, value=value, source=source)
         for key, child in value.items():
             key_text = str(key)
             if key_text in _EXPLICIT_REF_KEYS:
@@ -345,13 +274,100 @@ def collect_result_refs(result: Any, *, source: str) -> list[dict[str, str]]:
     return refs
 
 
+_LEGACY_GITHUB_RESULT_TOOLS = frozenset(
+    {
+        "add_github_issue_comment",
+        "create_github_issue",
+        "create_github_pull_request",
+        "update_github_issue",
+    }
+)
+
+
+def _legacy_github_result_refs(tool_name: str, result: Any) -> list[dict[str, str]]:
+    """Read GitHub refs only from run events persisted before ``0f3fa6f0``.
+
+    This compatibility path is frozen: it must not learn a new result shape.
+    New GitHub result shapes must emit ``mutated_target_refs`` in their tool
+    handler. Delete this function when no run events predating ``0f3fa6f0``
+    remain readable.
+    """
+    if not isinstance(result, Mapping) or "mutated_target_refs" in result:
+        return []
+    repo_slug = str(result.get("repo") or "").strip()
+    if repo_slug.count("/") != 1:
+        return []
+
+    def positive_int(value: Any) -> int | None:
+        try:
+            number = int(str(value or "").strip())
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    if tool_name in {"create_github_issue", "update_github_issue"}:
+        issue = result.get("issue")
+        if not isinstance(issue, Mapping):
+            return []
+        number = positive_int(issue.get("number"))
+        artifact_type = str(issue.get("type") or "issue").strip() or "issue"
+        if number is None or artifact_type not in {"issue", "pull_request"}:
+            return []
+        ref = (
+            github_pull_request_ref(repo_slug, number)
+            if artifact_type == "pull_request"
+            else github_issue_ref(repo_slug, number)
+        )
+        return [ref]
+
+    if tool_name == "create_github_pull_request":
+        pull_request = result.get("pull_request")
+        if isinstance(pull_request, Mapping):
+            number = positive_int(pull_request.get("number"))
+            artifact_type = (
+                str(pull_request.get("type") or "pull_request").strip() or "pull_request"
+            )
+        else:
+            number = positive_int(result.get("number"))
+            artifact_type = "pull_request"
+        if number is None or artifact_type not in {"issue", "pull_request"}:
+            return []
+        ref = (
+            github_issue_ref(repo_slug, number)
+            if artifact_type == "issue"
+            else github_pull_request_ref(repo_slug, number)
+        )
+        return [ref]
+
+    if tool_name == "add_github_issue_comment":
+        comment = result.get("comment")
+        issue_number = positive_int(result.get("issue_number"))
+        comment_id = positive_int(comment.get("id")) if isinstance(comment, Mapping) else None
+        if issue_number is not None and comment_id is not None:
+            return [github_issue_comment_ref(repo_slug, issue_number, comment_id)]
+
+    return []
+
+
 def _target_refs(tool_events: list[AgentRunEventRow]) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for row in tool_events:
         payload = _json_dict(row.payload)
         source = _tool_name(payload) or "tool_result"
-        _collect_refs(_tool_result(payload), refs, seen, source=source)
+        result = _tool_result(payload)
+        if (
+            source in _LEGACY_GITHUB_RESULT_TOOLS
+            and isinstance(result, Mapping)
+            and "mutated_target_refs" not in result
+        ):
+            _add_explicit_ref_values(
+                refs,
+                seen,
+                value=_legacy_github_result_refs(source, result),
+                source=source,
+            )
+        _collect_refs(result, refs, seen, source=source)
         # Full-fidelity channel: refs the executor extracted from the
         # complete result before the stored preview truncated it.
         _add_explicit_ref_values(refs, seen, value=payload.get("result_refs"), source=source)

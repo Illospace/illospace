@@ -121,6 +121,12 @@ async def test_create_github_pull_request_happy_path_opens_real_pull_request():
 
     payload = json.loads(result)
     assert payload == {
+        "mutated_target_refs": [
+            {
+                "kind": "github_pull_request",
+                "id": "uwear-ai/uwear-backend#842",
+            }
+        ],
         "repo": "uwear-ai/uwear-backend",
         "number": 842,
         "html_url": "https://github.com/uwear-ai/uwear-backend/pull/842",

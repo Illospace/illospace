@@ -134,6 +134,12 @@ async def test_handler_uses_project_app_write_identity_and_auth_fallback():
         )
 
     assert payload["comment"]["id"] == 4321
+    assert payload["mutated_target_refs"] == [
+        {
+            "kind": "github_issue_comment",
+            "id": "Illospace/illospace#390:comment:4321",
+        }
+    ]
     assert payload["token_source"] == "project_binding:GITHUB_TOKEN__SECONDARY"
     assert payload["fallback_from_status_code"] == 403
     assert attempts == ["rejected-token", "healthy-token"]
