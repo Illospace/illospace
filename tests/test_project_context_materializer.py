@@ -1448,8 +1448,13 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
         )),
     )
 
-    async def fake_mark_failed(run_id, error, *, final_answer=None):
-        captured.update({"run_id": run_id, "error": error, "final_answer": final_answer})
+    async def fake_mark_failed(run_id, error, *, final_answer=None, failure_stage=None):
+        captured.update({
+            "run_id": run_id,
+            "error": error,
+            "final_answer": final_answer,
+            "failure_stage": failure_stage,
+        })
         return {"idea_id": "idea-3", "new_status": "failed"}
 
     monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error_async", fake_mark_failed)
@@ -1461,6 +1466,7 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
     assert captured["run_id"] == 49
     assert "Project Context unavailable" in captured["error"]
     assert "did not provide a usable workspace" in captured["final_answer"]
+    assert captured["failure_stage"] == "project_context_materialization"
     public_activity = record_activity.await_args_list[-1]
     assert public_activity.args[2] == "Project context unavailable"
     assert public_activity.kwargs["issue_count"] == 1

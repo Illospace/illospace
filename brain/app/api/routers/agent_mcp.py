@@ -1367,6 +1367,8 @@ async def _tool_get_result(
     if result.mutated_inbound:
         await db.commit()
     payload = result.payload
+    if isinstance(payload.get("failure"), dict):
+        return payload
     for candidate in (
         payload.get("event"),
         payload.get("latest_receipt"),

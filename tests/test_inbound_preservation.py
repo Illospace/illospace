@@ -605,3 +605,61 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
     assert payload["handling_status"] == "completed"
     assert payload["run_status"] == "completed"
     assert payload["evidence_status"] == "not_required"
+
+
+async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(session):
+    from brain.app.api.routers.agent_mcp import _tool_get_result
+    from brain.systems.runs.engine import AsyncAgentRunEngine
+    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
+
+    principal = await _seed_connection(session)
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.memory",
+            "desired_outcome": "preserve_knowledge",
+            "message": "Preserve this durable finding.",
+            "source": {"source_tool": "codex"},
+            "idempotency_key": "codex:submission:failed-result-diagnostic",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    run_id = int(handling["run_id"])
+    store = AsyncAgentRunStore(session)
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    raw_diagnostic = "provider failed with token=receipt-secret"
+    await AsyncAgentRunEngine(session, recipes={}).fail(
+        run_id,
+        raw_diagnostic,
+        failure_stage="agent_execution",
+        exception_class="RuntimeError",
+    )
+
+    payload = await _tool_get_result(session, principal, {"event_id": result["event_id"]})
+
+    public_failure = {
+        "status": "failed",
+        "category": "internal",
+        "message": DEFAULT_FAILED_RUN_MESSAGE,
+    }
+    assert payload["failure"] == {
+        **public_failure,
+        "diagnostic": {
+            "stage": "agent_execution",
+            "exception_class": "RuntimeError",
+            "tool_execution_started": False,
+            "terminal": True,
+            "retry_scheduled": False,
+        },
+    }
+    assert payload["event"]["failure"] == public_failure
+    assert payload["run_status"] == "failed"
+    assert payload["evidence_status"] == "failed"
+    assert payload["retry_attempt"] is None
+    assert payload["replacement_run_id"] is None
+    assert payload["retry_lineage"] is None
+    assert raw_diagnostic not in json.dumps(payload)

@@ -258,6 +258,8 @@ class FastRecipe(BaseRunRecipe):
                 error=str(exc),
                 final_output=safe_terminal_run_message(RunStatus.FAILED, category),
                 failure_category=category,
+                failure_stage="agent_execution",
+                exception_class=type(exc).__name__,
                 status=RunStatus.FAILED,
             )
 
@@ -275,6 +277,8 @@ class FastRecipe(BaseRunRecipe):
                 error=error,
                 final_output=safe_terminal_run_message(status, category),
                 failure_category=category,
+                failure_stage="agent_execution",
+                exception_class=getattr(result, "error_type", None),
                 status=status,
                 post_completion_tasks=tuple(getattr(result, "post_completion_tasks", ()) or ()),
             )

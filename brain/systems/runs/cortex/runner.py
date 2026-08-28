@@ -1240,6 +1240,7 @@ async def _async_materialize_project_context(run_id: int) -> tuple[bool, dict[st
         return False, await _mark_run_failed_after_runner_error_async(
             int(run_id),
             message,
+            failure_stage="project_context_materialization",
             final_answer=(
                 "I could not start this run because the selected Project Context did not "
                 f"provide a usable workspace. {details}"
@@ -1262,6 +1263,8 @@ async def _mark_run_failed_after_runner_error_async(
     error: str,
     *,
     final_answer: str | None = None,
+    failure_stage: str = "runner_execution",
+    exception_class: str | None = None,
 ) -> dict[str, Any] | None:
     async with _unit_of_work_factory()() as uow:
         store = AsyncAgentRunStore(uow.session)
@@ -1276,7 +1279,13 @@ async def _mark_run_failed_after_runner_error_async(
             failure = public_run_failure(RunStatus.FAILED, category)
             await store.update_metadata(
                 int(run_id),
-                {"failure": {"category": category.value}},
+                {
+                    "failure": {
+                        "category": category.value,
+                        "stage": failure_stage,
+                        **({"exception_class": exception_class} if exception_class else {}),
+                    }
+                },
             )
             if final_answer:
                 # ``final_answer`` is an intent signal from runner setup code. It
@@ -1324,19 +1333,25 @@ def _mark_run_failed_after_runner_error(
     error: str,
     *,
     final_answer: str | None = None,
+    failure_stage: str = "runner_execution",
+    exception_class: str | None = None,
 ) -> dict[str, Any] | None:
     return asyncio.run(
         _mark_run_failed_after_runner_error_async(
             int(run_id),
             error,
             final_answer=final_answer,
+            failure_stage=failure_stage,
+            exception_class=exception_class,
         )
     )
 
 
 async def _process_claimed_run_async(run_id: int) -> bool:
+    failure_stage = "runner_execution"
     try:
         async with _run_heartbeat_async(int(run_id)):
+            failure_stage = "project_context_materialization"
             context_ready, status_payload = await _async_materialize_project_context(int(run_id))
             if not context_ready:
                 await _finalize_cycle_run_if_needed_async(
@@ -1348,6 +1363,7 @@ async def _process_claimed_run_async(run_id: int) -> bool:
                     publish_safe("status_change", status_payload)
                 return True
             status_payload = None
+            failure_stage = "recipe_execution"
             async with _unit_of_work_factory()() as uow:
                 completed_run = await _engine_for_session(uow.session).run_existing(int(run_id))
                 completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
@@ -1362,6 +1378,7 @@ async def _process_claimed_run_async(run_id: int) -> bool:
                         provider_errors_only=completed_status == "failed",
                     )
                 status_payload = await _settle_terminal_root_run_async(uow.session, int(run_id))
+                failure_stage = "runner_settlement"
             await _finalize_cycle_run_if_needed_async(int(run_id), status=completed_status)
         if status_payload:
             publish_safe("status_change", status_payload)
@@ -1379,6 +1396,8 @@ async def _process_claimed_run_async(run_id: int) -> bool:
             status_payload = await _mark_run_failed_after_runner_error_async(
                 int(run_id),
                 str(failure),
+                failure_stage=failure_stage,
+                exception_class=type(failure.original).__name__,
             )
             await _finalize_cycle_run_if_needed_async(
                 int(run_id),

@@ -500,7 +500,12 @@ async def test_fast_recipe_discards_partial_deltas_when_provider_result_fails(mo
 
     async def fake_invoke(spec):
         await spec.on_stream_delta(raw_delta)
-        return SimpleNamespace(output=raw_delta, success=False, error=raw_error)
+        return SimpleNamespace(
+            output=raw_delta,
+            success=False,
+            error=raw_error,
+            error_type="RemoteProtocolError",
+        )
 
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda _role: [])
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **_kwargs: {})
@@ -513,6 +518,8 @@ async def test_fast_recipe_discards_partial_deltas_when_provider_result_fails(mo
     assert result.status == RunStatus.FAILED
     assert result.error == raw_error
     assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
+    assert result.failure_stage == "agent_execution"
+    assert result.exception_class == "RemoteProtocolError"
     assert raw_delta not in streamed
     assert raw_error not in streamed
 

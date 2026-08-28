@@ -1743,7 +1743,10 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
     assert result == {"run_id": run.id}
     assert row is not None
     assert row.status == RunStatus.FAILED.value
-    assert row.metadata_["failure"] == {"category": "upstream"}
+    assert row.metadata_["failure"] == {
+        "category": "upstream",
+        "stage": "runner_execution",
+    }
     assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
@@ -1902,6 +1905,11 @@ async def test_runner_commit_failure_rolls_back_then_settles_in_fresh_uow(
     assert opened_uows == 2
     assert row is not None
     assert row.status == RunStatus.FAILED.value
+    assert row.metadata_["failure"] == {
+        "category": "internal",
+        "stage": "runner_settlement",
+        "exception_class": "RuntimeError",
+    }
     assert failed_event.payload["error"] == (
         "run_execution_failed: RuntimeError: commit exploded"
     )
@@ -2037,7 +2045,10 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     )
 
     assert result.status == RunStatus.FAILED
-    assert result.metadata["failure"] == {"category": "upstream"}
+    assert result.metadata["failure"] == {
+        "category": "upstream",
+        "stage": "agent_execution",
+    }
     assert [artifact.text for artifact in final_answers] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert all(raw_error not in str(artifact.text) for artifact in final_answers)
 
