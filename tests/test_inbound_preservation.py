@@ -19,7 +19,10 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
 from brain.systems.inbound.preservation import PRESERVATION_MISSING_REASON
 from brain.systems.runs.events import run_event
-from brain.systems.runs.failure_diagnostic import RunFailureStage
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_diagnostic_metadata,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 
@@ -608,7 +611,7 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
     assert payload["evidence_status"] == "not_required"
 
 
-async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(session):
+async def test_get_result_failed_preservation_reports_exception_class_states(session):
     from brain.app.api.routers.agent_mcp import _tool_get_result
     from brain.systems.runs.engine import AsyncAgentRunEngine
     from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
@@ -636,7 +639,7 @@ async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(s
         run_event(run_id, "run.tool_started", {"tool_name": "workspace_search"})
     )
     raw_diagnostic = "provider failed with token=receipt-secret"
-    exception_type = type("Erreur_accentuée" + ("e" * 90), (RuntimeError,), {})
+    exception_type = ValueError
     await AsyncAgentRunEngine(session, recipes={}).fail(
         run_id,
         raw_diagnostic,
@@ -671,11 +674,59 @@ async def test_get_result_failed_preservation_has_safe_programmatic_diagnostic(s
     assert payload["retry_lineage"] is None
     assert raw_diagnostic not in json.dumps(payload)
 
+    synthesized_exception = type(
+        "sk_live_abc123DEF456token",
+        (Exception,),
+        {},
+    )
+    synthesized_metadata = failure_diagnostic_metadata(
+        stage=RunFailureStage.AGENT_EXECUTION,
+        exception_type=synthesized_exception,
+    )
+    assert "exception_class" not in synthesized_metadata
+    await store.update_metadata(
+        run_id,
+        {"failure": {"category": "internal", **synthesized_metadata}},
+    )
+
+    redacted_payload = await _tool_get_result(
+        session,
+        principal,
+        {"event_id": result["event_id"]},
+    )
+
+    assert redacted_payload["failure"]["diagnostic"]["exception_class"] is None
+    assert (
+        redacted_payload["failure"]["diagnostic"]["exception_class_state"]
+        == "redacted"
+    )
+
+    absent_metadata = failure_diagnostic_metadata(
+        stage=RunFailureStage.AGENT_EXECUTION,
+    )
+    await store.update_metadata(
+        run_id,
+        {"failure": {"category": "internal", **absent_metadata}},
+    )
+
+    absent_payload = await _tool_get_result(
+        session,
+        principal,
+        {"event_id": result["event_id"]},
+    )
+
+    assert absent_payload["failure"]["diagnostic"]["exception_class"] is None
+    assert (
+        absent_payload["failure"]["diagnostic"]["exception_class_state"]
+        == "unknown"
+    )
+
     await store.update_metadata(
         run_id,
         {
             "failure": {
                 "category": "internal",
+                "diagnostic_schema": "typed_v1",
                 "stage": "sk_live_abc123DEF456token",
                 "exception_class": "private_exception_token",
             }

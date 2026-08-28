@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -14,6 +15,22 @@ from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 
 
 _DIAGNOSTIC_SCHEMA = "typed_v1"
+_EXCEPTION_CLASS_WITHHELD = "exception_class_withheld"
+
+
+def _module_level_exception_type(
+    module_name: object,
+    class_name: str,
+) -> type[BaseException] | None:
+    if not isinstance(module_name, str):
+        return None
+    module = sys.modules.get(module_name)
+    candidate = getattr(module, class_name, None) if module is not None else None
+    if not isinstance(candidate, type) or not issubclass(candidate, BaseException):
+        return None
+    return candidate
+
+
 _TOOL_EXECUTION_EVENT_TYPES = frozenset(
     {"run.tool_started", "run.tool_completed", "run.tool_failed"}
 )
@@ -79,11 +96,23 @@ def failure_diagnostic_metadata(
         or not issubclass(exception_type, BaseException)
     ):
         raise TypeError("exception type must be a BaseException class")
+    exception_is_module_level = exception_type is not None and (
+        _module_level_exception_type(
+            exception_type.__module__,
+            exception_type.__name__,
+        )
+        is exception_type
+    )
     return {
         "diagnostic_schema": _DIAGNOSTIC_SCHEMA,
         "stage": stage.value,
         **(
-            {"exception_class": exception_type.__name__}
+            {
+                "exception_class": exception_type.__name__,
+                "exception_module": exception_type.__module__,
+            }
+            if exception_is_module_level
+            else {_EXCEPTION_CLASS_WITHHELD: True}
             if exception_type is not None
             else {}
         ),
@@ -108,12 +137,22 @@ def _exception_class_projection(
     failure_metadata: Mapping[str, Any],
 ) -> tuple[str | None, DiagnosticValueState]:
     if "exception_class" not in failure_metadata:
+        if (
+            failure_metadata.get("diagnostic_schema") == _DIAGNOSTIC_SCHEMA
+            and failure_metadata.get(_EXCEPTION_CLASS_WITHHELD) is True
+        ):
+            return None, DiagnosticValueState.REDACTED
         return None, DiagnosticValueState.UNKNOWN
     exception_class = failure_metadata.get("exception_class")
     if (
         failure_metadata.get("diagnostic_schema") != _DIAGNOSTIC_SCHEMA
         or not isinstance(exception_class, str)
         or not exception_class
+        or _module_level_exception_type(
+            failure_metadata.get("exception_module"),
+            exception_class,
+        )
+        is None
     ):
         return None, DiagnosticValueState.REDACTED
     return exception_class, DiagnosticValueState.KNOWN

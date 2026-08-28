@@ -1915,6 +1915,7 @@ async def test_runner_commit_failure_rolls_back_then_settles_in_fresh_uow(
         "diagnostic_schema": "typed_v1",
         "stage": "runner_settlement",
         "exception_class": "RuntimeError",
+        "exception_module": "builtins",
     }
     assert failed_event.payload["error"] == (
         "run_execution_failed: RuntimeError: commit exploded"
@@ -2022,6 +2023,7 @@ async def test_runner_finalization_failures_use_runner_settlement_stage(
         "diagnostic_schema": "typed_v1",
         "stage": "runner_settlement",
         "exception_class": "RuntimeError",
+        "exception_module": "builtins",
     }
 
 
