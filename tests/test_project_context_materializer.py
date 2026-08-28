@@ -1,4 +1,6 @@
+import asyncio
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -131,6 +133,66 @@ def test_github_clone_uses_lightweight_command_and_configurable_timeout(tmp_path
     assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
     assert calls[0]["env"]["ILLO_GITHUB_PROJECT_CONTEXT_TOKEN"] == "secret-token"
     assert "secret-token" not in " ".join(calls[0]["command"])
+
+
+async def test_github_clone_keeps_event_loop_responsive(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+
+    clone_started = threading.Event()
+    release_clone = threading.Event()
+    released_by_event_loop = []
+
+    def fake_run_subprocess(command, **_kwargs):
+        clone_started.set()
+        released_by_event_loop.append(release_clone.wait(timeout=1))
+        Path(command[-1]).mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_git_output(_cwd, *args):
+        if args == ("branch", "--show-current"):
+            return "main"
+        if args == ("rev-parse", "HEAD"):
+            return "abc123"
+        return None
+
+    async def record_loop_progress():
+        while not clone_started.is_set():
+            await asyncio.sleep(0)
+        ticks = 0
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+            ticks += 1
+        release_clone.set()
+        return ticks
+
+    monkeypatch.setattr(materializer, "run_subprocess_sync", fake_run_subprocess)
+    monkeypatch.setattr(materializer, "_git_output", fake_git_output)
+
+    resource = {
+        "kind": "repo",
+        "name": "example-org/example-repo",
+        "repo": "example-org/example-repo",
+        "uri": "https://github.com/example-org/example-repo",
+        "branch": "main",
+    }
+    materialization, ticks = await asyncio.gather(
+        materializer._materialize_resource(
+            resource,
+            workspace_root=tmp_path,
+            user_id=None,
+            org_id=None,
+        ),
+        record_loop_progress(),
+    )
+
+    workspace, error = materialization
+    assert error is None
+    assert workspace == {
+        "name": "example-org/example-repo",
+        "path": str(tmp_path / ".illo-project-context" / "github" / "example-org" / "example-repo"),
+    }
+    assert ticks == 3
+    assert released_by_event_loop == [True]
 
 
 def test_github_clone_timeout_env_is_bounded(monkeypatch):
