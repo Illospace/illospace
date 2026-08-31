@@ -828,12 +828,16 @@ def _make_async_tool_wrapper(
     annotations: dict[str, Any] = {"return": str}
     namespace: dict[str, Any] = {
         "_run": None,
-        "__omitted": _OMITTED_TOOL_ARGUMENT,
         "json": json,
         "Any": Any,
     }
 
     async def _run(**kwargs):
+        kwargs = {
+            name: value
+            for name, value in kwargs.items()
+            if value is not _OMITTED_TOOL_ARGUMENT
+        }
         try:
             result = await async_invoke_tool_handler(
                 handler,
@@ -896,8 +900,7 @@ def _make_async_tool_wrapper(
     kwargs_expr = ", ".join(f"'{name}': {name}" for name, _ in properties)
     function_src = (
         f"async def {tool_name}({signature_args}):\n"
-        f"    kwargs = {{key: value for key, value in {{{kwargs_expr}}}.items() if value is not __omitted}}\n"
-        f"    return await _run(**kwargs)\n"
+        f"    return await _run(**{{{kwargs_expr}}})\n"
     )
     exec_namespace = dict(namespace)
     exec(function_src, exec_namespace)  # noqa: S102 - controlled local generation from trusted schema
