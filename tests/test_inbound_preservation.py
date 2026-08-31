@@ -23,6 +23,10 @@ from brain.systems.runs.failure_diagnostic import (
     RunFailureStage,
     failure_diagnostic_metadata,
 )
+from brain.systems.runs.failures import (
+    DEFAULT_FAILED_RUN_MESSAGE,
+    PRESERVATION_SETUP_FAILED_RUN_MESSAGE,
+)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 
@@ -614,7 +618,6 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
 async def test_get_result_failed_preservation_reports_exception_class_states(session):
     from brain.app.api.routers.agent_mcp import _tool_get_result
     from brain.systems.runs.engine import AsyncAgentRunEngine
-    from brain.systems.runs.failures import DEFAULT_FAILED_RUN_MESSAGE
 
     principal = await _seed_connection(session)
     result = await inbound.submit_inbound_envelope(
@@ -750,3 +753,66 @@ async def test_get_result_failed_preservation_reports_exception_class_states(ses
     }
     assert "sk_live_abc123DEF456token" not in json.dumps(withheld_payload)
     assert "private_exception_token" not in json.dumps(withheld_payload)
+
+
+async def test_codex_session_preservation_pre_tool_failure_is_actionable(session):
+    from brain.app.api.routers.agent_mcp import _tool_get_result
+    from brain.systems.runs.engine import AsyncAgentRunEngine
+
+    principal = await _seed_connection(session)
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.session-preserve",
+            "desired_outcome": "preserve_knowledge",
+            "message": "Preserve the reusable result of Illospace issue #868.",
+            "source": {
+                "source_tool": "codex",
+                "repo": "Illospace/illospace",
+                "branch": "illo-qa/868-preserve-knowledge-preflight",
+                "session_id": "session-868",
+                "run_id": "run-868",
+                "task_title": "Fix preserve_knowledge pre-tool failures",
+                "files_touched": ["brain/systems/inbound/preservation.py"],
+                "repository": "https://github.com/Illospace/illospace",
+                "issue": "https://github.com/Illospace/illospace/issues/868",
+                "pull_request": "https://github.com/Illospace/illospace/pull/866",
+            },
+            "idempotency_key": "codex:session-preserve:issue-868",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    run_id = int(handling["run_id"])
+    run = await session.get(AgentRunRow, run_id)
+    assert run is not None
+    assert run.metadata_["submission"]["source"]["source_tool"] == "codex"
+    assert "memory_ingest_source" in run.metadata_["submission"]["preservation"]["acceptable_tools"]
+    store = AsyncAgentRunStore(session)
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    await AsyncAgentRunEngine(session, recipes={}).fail(
+        run_id,
+        "direct agent failed before its first tool call",
+        final_output=DEFAULT_FAILED_RUN_MESSAGE,
+        failure_stage=RunFailureStage.AGENT_EXECUTION,
+        exception_type=RuntimeError,
+    )
+
+    payload = await _tool_get_result(session, principal, {"event_id": result["event_id"]})
+
+    assert payload["failure"]["category"] == "preservation_setup"
+    assert payload["failure"]["message"] == PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+    assert payload["failure"]["message"] != DEFAULT_FAILED_RUN_MESSAGE
+    assert payload["failure"]["diagnostic"] == {
+        "stage": "agent_execution",
+        "stage_state": "known",
+        "exception_class": "RuntimeError",
+        "exception_class_state": "known",
+        "tool_execution_started": False,
+        "terminal": True,
+        "retry_scheduled": False,
+    }
+    assert payload["evidence_status"] == "failed"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from brain.platform.integrations.provider_error_sentinel import provider_error_kind
 from brain.platform.integrations.providers import is_transient_transport_disconnect
@@ -15,6 +16,7 @@ class RunFailureCategory(str, Enum):
     INTERNAL = "internal"
     UPSTREAM = "upstream"
     VERIFICATION = "verification"
+    PRESERVATION_SETUP = "preservation_setup"
 
 
 class PublicRunFailure(TypedDict):
@@ -29,6 +31,11 @@ UPSTREAM_FAILED_RUN_MESSAGE = (
 )
 VERIFICATION_FAILED_RUN_MESSAGE = (
     "I couldn't safely verify this and it is still open — I will come back."
+)
+PRESERVATION_SETUP_FAILED_RUN_MESSAGE = (
+    "Illo could not start the preservation workflow before a durable-storage tool ran. "
+    "Retry this submission with the same idempotency key. If it fails again, check the "
+    "run provider and preservation-tool configuration."
 )
 CANCELED_RUN_MESSAGE = (
     "That run was canceled before it finished, but the ask is still open — I will come back."
@@ -54,6 +61,42 @@ def failure_category_for_error(error: BaseException | str | None) -> RunFailureC
     return RunFailureCategory.INTERNAL
 
 
+def run_requires_durable_preservation(metadata: Mapping[str, Any] | None) -> bool:
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    submission = metadata.get("submission")
+    submission = submission if isinstance(submission, Mapping) else {}
+    preservation = submission.get("preservation")
+    preservation = preservation if isinstance(preservation, Mapping) else {}
+    return preservation.get("requires_durable_evidence") is True
+
+
+def failure_category_for_run_context(
+    category: RunFailureCategory | str | None,
+    *,
+    metadata: Mapping[str, Any] | None,
+    tool_execution_started: bool,
+    failure_stage: Any,
+) -> RunFailureCategory:
+    """Classify an internal pre-tool preservation failure as actionable setup work."""
+
+    resolved = coerce_failure_category(category)
+    stage = str(getattr(failure_stage, "value", failure_stage) or "")
+    if (
+        resolved == RunFailureCategory.INTERNAL
+        and run_requires_durable_preservation(metadata)
+        and not tool_execution_started
+        and stage
+        in {
+            "runner_execution",
+            "project_context_materialization",
+            "recipe_execution",
+            "agent_execution",
+        }
+    ):
+        return RunFailureCategory.PRESERVATION_SETUP
+    return resolved
+
+
 def safe_terminal_run_message(
     status: RunStatus | str | None,
     category: RunFailureCategory | str | None = None,
@@ -76,6 +119,8 @@ def safe_terminal_run_message(
         return UPSTREAM_FAILED_RUN_MESSAGE
     if failure_category == RunFailureCategory.VERIFICATION:
         return VERIFICATION_FAILED_RUN_MESSAGE
+    if failure_category == RunFailureCategory.PRESERVATION_SETUP:
+        return PRESERVATION_SETUP_FAILED_RUN_MESSAGE
     return DEFAULT_FAILED_RUN_MESSAGE
 
 
@@ -123,12 +168,15 @@ __all__ = [
     "DEFAULT_FAILED_RUN_MESSAGE",
     "EXPIRED_RUN_MESSAGE",
     "PublicRunFailure",
+    "PRESERVATION_SETUP_FAILED_RUN_MESSAGE",
     "RunFailureCategory",
     "UPSTREAM_FAILED_RUN_MESSAGE",
     "VERIFICATION_FAILED_RUN_MESSAGE",
     "coerce_failure_category",
     "failure_category_for_error",
+    "failure_category_for_run_context",
     "public_run_failure",
+    "run_requires_durable_preservation",
     "safe_terminal_run_message",
     "terminal_run_notice_condition",
 ]

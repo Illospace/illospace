@@ -21,6 +21,8 @@ from brain.systems.runs.failures import (
     RunFailureCategory,
     coerce_failure_category,
     failure_category_for_error,
+    failure_category_for_run_context,
+    run_requires_durable_preservation,
     safe_terminal_run_message,
 )
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -448,6 +450,24 @@ class AsyncAgentRunEngine:
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
             category = coerce_failure_category(failure_category or failure_category_for_error(error))
+            tool_execution_started = False
+            if run_requires_durable_preservation(row.metadata_):
+                for event_type in (
+                    "run.tool_started",
+                    "run.tool_completed",
+                    "run.tool_failed",
+                ):
+                    if await self.store.has_event_type(run_id, event_type):
+                        tool_execution_started = True
+                        break
+            category = failure_category_for_run_context(
+                category,
+                metadata=row.metadata_,
+                tool_execution_started=tool_execution_started,
+                failure_stage=failure_stage,
+            )
+            if category == RunFailureCategory.PRESERVATION_SETUP and final_output:
+                final_output = safe_terminal_run_message(RunStatus.FAILED, category)
             safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))
             failed = await self.store.fail_run(
                 run_id,

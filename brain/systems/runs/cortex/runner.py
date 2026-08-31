@@ -35,7 +35,9 @@ from brain.systems.runs.failure_diagnostic import RunFailureStage
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
+    failure_category_for_run_context,
     public_run_failure,
+    run_requires_durable_preservation,
     safe_terminal_run_message,
     terminal_run_notice_condition,
 )
@@ -1277,6 +1279,22 @@ async def _mark_run_failed_after_runner_error_async(
             )
         if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
             category = failure_category_for_error(error)
+            tool_execution_started = False
+            if run_requires_durable_preservation(row.metadata_):
+                for event_type in (
+                    "run.tool_started",
+                    "run.tool_completed",
+                    "run.tool_failed",
+                ):
+                    if await store.has_event_type(int(run_id), event_type):
+                        tool_execution_started = True
+                        break
+            category = failure_category_for_run_context(
+                category,
+                metadata=row.metadata_,
+                tool_execution_started=tool_execution_started,
+                failure_stage=failure_stage,
+            )
             failure = public_run_failure(RunStatus.FAILED, category)
             if final_answer:
                 # ``final_answer`` is an intent signal from runner setup code. It

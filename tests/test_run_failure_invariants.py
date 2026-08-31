@@ -14,7 +14,13 @@ from brain.systems.runs.failure_diagnostic import (
     read_run_failure_diagnostic,
     run_failure_metadata,
 )
-from brain.systems.runs.failures import RunFailureCategory
+from brain.systems.runs.failures import (
+    DEFAULT_FAILED_RUN_MESSAGE,
+    RunFailureCategory,
+    failure_category_for_run_context,
+    safe_terminal_run_message,
+)
+from brain.systems.runs.status import RunStatus
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +112,32 @@ def test_failure_envelope_builder_rejects_inconsistent_types() -> None:
             stage=RunFailureStage.RUNNER_EXECUTION,
             exception_type=RuntimeError("not a class"),  # type: ignore[arg-type]
         )
+
+
+def test_pre_tool_preservation_failure_cannot_be_unknown_and_generic() -> None:
+    category = failure_category_for_run_context(
+        RunFailureCategory.INTERNAL,
+        metadata={
+            "submission": {
+                "preservation": {"requires_durable_evidence": True},
+            }
+        },
+        tool_execution_started=False,
+        failure_stage=RunFailureStage.AGENT_EXECUTION,
+    )
+    envelope = run_failure_metadata(
+        category=category,
+        stage=RunFailureStage.AGENT_EXECUTION,
+    )
+    message = safe_terminal_run_message(RunStatus.FAILED, category)
+
+    assert category == RunFailureCategory.PRESERVATION_SETUP
+    assert envelope["stage"] == RunFailureStage.AGENT_EXECUTION.value
+    assert message != DEFAULT_FAILED_RUN_MESSAGE
+    assert not (
+        envelope["stage"] == RunFailureStage.UNKNOWN.value
+        and message == DEFAULT_FAILED_RUN_MESSAGE
+    )
 
 
 async def test_reader_redacts_inconsistent_exception_identity() -> None:
