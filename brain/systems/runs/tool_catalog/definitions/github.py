@@ -239,7 +239,10 @@ GITHUB_TOOLS = [
         "name": "update_github_issue",
         "description": (
             "Update an EXISTING real GitHub issue via the GitHub API. This can transfer ownership, "
-            "change labels, open or close the issue, and edit its title or body. Each requested "
+            "change labels, open or close the issue, and edit its title or body. Only repo and "
+            "issue_number are required. Every other field is optional; omit a field to leave it "
+            "unchanged. Placeholder values such as 'preserve' or 'unchanged' are rejected, not "
+            "applied. Each requested "
             "field is applied independently, followed by an exact issue read-back. The result "
             "reports applied and failed fields separately, so a partial update is never presented "
             "as total success. This uses the same project-bound GitHub App write identity as issue "

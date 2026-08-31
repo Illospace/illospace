@@ -62,6 +62,9 @@ def test_update_github_issue_is_registered_with_all_supported_fields():
         "body",
     } <= properties.keys()
     assert properties["state"]["enum"] == ["open", "closed"]
+    assert "Only repo and issue_number are required" in definition["description"]
+    assert "omit a field to leave it unchanged" in definition["description"]
+    assert "rejected, not applied" in definition["description"]
 
     registration = get_tool_registration("update_github_issue")
     assert registration is not None
@@ -256,6 +259,65 @@ async def test_handler_reuses_create_issue_vault_app_write_lane_and_surfaces_rea
     }
     update.assert_awaited_once()
     assert update.await_args.kwargs["token"] == "minted-installation-token"
+
+
+@pytest.mark.asyncio
+async def test_handler_assignee_only_update_leaves_title_body_and_labels_untouched():
+    read_back = _updated_issue(assignees=["new-owner"], labels=["existing-label"])
+
+    async def request(_client, method, path, **kwargs):
+        if method == "GET":
+            return read_back
+        return {}
+
+    candidates = [{
+        "key_name": None,
+        "token": "minted-installation-token",
+        "source": "project_binding:GITHUB_TOKEN",
+    }]
+    with patch(
+        f"{_H}._github_token_candidates",
+        new=AsyncMock(return_value=candidates),
+    ), patch(
+        f"{_C}._async_request",
+        new=AsyncMock(side_effect=request),
+    ) as github_request:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace",
+            issue_number=369,
+            assignees_add=["new-owner"],
+        ))
+
+    assert payload["status"] == "applied"
+    assert payload["issue"]["title"] == "Updated title"
+    assert payload["issue"]["body"] == "Updated body"
+    assert [label["name"] for label in payload["issue"]["labels"]] == ["existing-label"]
+    assert [(call.args[1], call.args[2]) for call in github_request.await_args_list] == [
+        ("POST", "/repos/Illospace/illospace/issues/369/assignees"),
+        ("GET", "/repos/Illospace/illospace/issues/369"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("field_name", "value"), [
+    ("title", " preserve "),
+    ("body", "PRESERVE"),
+])
+async def test_handler_rejects_placeholder_text_without_writing(field_name, value):
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock()) as candidates, patch(
+        f"{_H}.async_update_repo_issue",
+        new=AsyncMock(),
+    ) as update:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace",
+            issue_number=369,
+            **{field_name: value},
+        ))
+
+    assert payload["status_code"] == 422
+    assert f"omit {field_name} to leave it unchanged" in payload["error"]
+    candidates.assert_not_awaited()
+    update.assert_not_awaited()
 
 
 @pytest.mark.asyncio

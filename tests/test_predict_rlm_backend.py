@@ -153,7 +153,7 @@ def test_get_agent_worker_backend_settings_falls_back_when_deno_missing(monkeypa
     assert settings.fallback_reason == "deno is not installed on the server"
 
 
-async def test_make_async_tool_wrapper_puts_required_params_before_defaulted_ones():
+async def test_make_async_tool_wrapper_omits_missing_args_and_honors_schema_defaults():
     from brain.systems.runs.predict_rlm_backend import _make_async_tool_wrapper
 
     captured = {}
@@ -172,6 +172,7 @@ async def test_make_async_tool_wrapper_puts_required_params_before_defaulted_one
                 "type": "object",
                 "properties": {
                     "optional_first": {"type": "integer", "default": 7},
+                    "omitted_optional": {"type": "string"},
                     "required_second": {"type": "string"},
                 },
                 "required": ["required_second"],
@@ -185,7 +186,15 @@ async def test_make_async_tool_wrapper_puts_required_params_before_defaulted_one
     )
 
     signature = inspect.signature(wrapper)
-    assert list(signature.parameters) == ["required_second", "optional_first"]
+    assert list(signature.parameters) == [
+        "required_second",
+        "optional_first",
+        "omitted_optional",
+    ]
+    assert signature.parameters["required_second"].annotation is str
+    assert signature.parameters["optional_first"].annotation == int | None
+    assert signature.parameters["omitted_optional"].annotation == str | None
+    assert signature.parameters["omitted_optional"].default is None
 
     result = await wrapper(required_second="hello")
 

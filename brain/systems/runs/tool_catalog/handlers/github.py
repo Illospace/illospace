@@ -991,6 +991,20 @@ def _update_has_only_auth_failures(payload: dict[str, Any]) -> bool:
     return bool(status_codes) and status_codes <= {401, 403, 404}
 
 
+_ISSUE_UPDATE_PLACEHOLDERS = frozenset({
+    "preserve",
+    "unchanged",
+    "keep",
+    "same",
+    "no change",
+    "nochange",
+    "<unchanged>",
+    "null",
+    "none",
+    "n/a",
+})
+
+
 async def _handle_update_github_issue(
     repo: str | None = None,
     issue_number: int | None = None,
@@ -1026,6 +1040,15 @@ async def _handle_update_github_issue(
             "error": "update_github_issue state must be open or closed",
             "status_code": 422,
         })
+    for field_name, value in (("title", title), ("body", body)):
+        if value is not None and str(value).strip().lower() in _ISSUE_UPDATE_PLACEHOLDERS:
+            return json.dumps({
+                "error": (
+                    f"update_github_issue {field_name} cannot be a placeholder; "
+                    f"omit {field_name} to leave it unchanged"
+                ),
+                "status_code": 422,
+            })
     clean_title = str(title).strip() if title is not None else None
     if title is not None and not clean_title:
         return json.dumps({
