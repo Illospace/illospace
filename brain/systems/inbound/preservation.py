@@ -228,6 +228,15 @@ def preservation_contract_from_run_metadata(metadata: Mapping[str, Any]) -> dict
     return _json_dict(submission.get("preservation"))
 
 
+def run_requires_durable_preservation(
+    metadata: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether a run carries the durable-preservation contract."""
+
+    contract = preservation_contract_from_run_metadata(_json_dict(metadata))
+    return contract.get("requires_durable_evidence") is True
+
+
 def preservation_evidence_result(
     contract: Mapping[str, Any] | None,
     *,
@@ -292,5 +301,6 @@ __all__ = [
     "submission_preservation_contract",
     "submission_preservation_prompt_lines",
     "preservation_contract_from_run_metadata",
+    "run_requires_durable_preservation",
     "preservation_evidence_result",
 ]

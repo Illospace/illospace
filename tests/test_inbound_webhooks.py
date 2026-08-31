@@ -40,7 +40,8 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound import service as inbound
 from brain.systems.runs.events import run_event
-from brain.systems.runs.failures import UPSTREAM_FAILED_RUN_MESSAGE
+from brain.systems.runs.failure_diagnostic import RunFailureStage
+from brain.systems.runs.failures import RunFailureCategory, UPSTREAM_FAILED_RUN_MESSAGE
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.user_domains.service import AsyncDomainService
@@ -455,13 +456,22 @@ async def _finish_triage_run(
     status: RunStatus,
     final_answer: str,
     reason: str | None = None,
+    failure_category: RunFailureCategory = RunFailureCategory.INTERNAL,
 ) -> None:
     store = AsyncAgentRunStore(session)
     run_id = int(triage["run_id"])
     await store.set_status(run_id, RunStatus.STARTING)
     await store.set_status(run_id, RunStatus.RUNNING)
     await store.append_final_answer_once(run_id, final_answer, root_run_id=run_id)
-    await store.set_status(run_id, status, reason=reason)
+    if status == RunStatus.FAILED:
+        await store.fail_run(
+            run_id,
+            category=failure_category,
+            stage=RunFailureStage.AGENT_EXECUTION,
+            reason=reason,
+        )
+    else:
+        await store.set_status(run_id, status, reason=reason)
 
 
 async def test_webhook_requires_authenticated_source_identity(session):
@@ -840,14 +850,13 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
         issue_key="PROJ-2",
         idempotency_key="jira:PROJ-2:updated",
     )
-    run = await session.get(AgentRunRow, int(triage["run_id"]))
-    run.metadata_ = {**dict(run.metadata_ or {}), "failure": {"category": "upstream"}}
     await _finish_triage_run(
         session,
         triage,
         status=RunStatus.FAILED,
         final_answer=raw_diagnostic,
         reason="triage worker crashed",
+        failure_category=RunFailureCategory.UPSTREAM,
     )
 
     event = (await session.scalars(select(InboundEventRow))).one()

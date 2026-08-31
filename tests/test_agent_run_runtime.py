@@ -522,7 +522,8 @@ async def test_fast_recipe_discards_partial_deltas_when_provider_result_fails(mo
     assert result.status == RunStatus.FAILED
     assert result.error == raw_error
     assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
-    assert result.failure_stage == RunFailureStage.AGENT_EXECUTION
+    assert result.classified_failure is not None
+    assert result.classified_failure.stage == RunFailureStage.AGENT_EXECUTION
     assert result.exception_type is RemoteProtocolError
     assert raw_delta not in streamed
     assert raw_error not in streamed
@@ -574,7 +575,8 @@ async def test_fast_interactive_slack_transport_failure_returns_plain_language_f
     assert calls == [replay_index]
     assert result.status.value == "failed"
     assert result.error == raw_error
-    assert result.failure_category == RunFailureCategory.UPSTREAM
+    assert result.classified_failure is not None
+    assert result.classified_failure.category == RunFailureCategory.UPSTREAM
     assert result.final_output == UPSTREAM_FAILED_RUN_MESSAGE
     assert result.output == ""
     assert raw_error not in result.final_output
@@ -607,7 +609,8 @@ async def test_fast_interactive_slack_logic_failure_is_not_rewritten_or_retried(
     assert calls == ["invoke"]
     assert result.status.value == "failed"
     assert result.error == logic_error
-    assert result.failure_category == RunFailureCategory.INTERNAL
+    assert result.classified_failure is not None
+    assert result.classified_failure.category == RunFailureCategory.INTERNAL
     assert result.final_output == DEFAULT_FAILED_RUN_MESSAGE
     assert result.output == ""
     assert logic_error not in result.final_output

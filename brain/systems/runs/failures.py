@@ -15,6 +15,7 @@ class RunFailureCategory(str, Enum):
     INTERNAL = "internal"
     UPSTREAM = "upstream"
     VERIFICATION = "verification"
+    PRESERVATION_SETUP = "preservation_setup"
 
 
 class PublicRunFailure(TypedDict):
@@ -29,6 +30,11 @@ UPSTREAM_FAILED_RUN_MESSAGE = (
 )
 VERIFICATION_FAILED_RUN_MESSAGE = (
     "I couldn't safely verify this and it is still open — I will come back."
+)
+PRESERVATION_SETUP_FAILED_RUN_MESSAGE = (
+    "Illo could not start the preservation workflow before a durable-storage tool ran. "
+    "Retry this submission with the same idempotency key. If it fails again, check the "
+    "run provider and preservation-tool configuration."
 )
 CANCELED_RUN_MESSAGE = (
     "That run was canceled before it finished, but the ask is still open — I will come back."
@@ -76,6 +82,8 @@ def safe_terminal_run_message(
         return UPSTREAM_FAILED_RUN_MESSAGE
     if failure_category == RunFailureCategory.VERIFICATION:
         return VERIFICATION_FAILED_RUN_MESSAGE
+    if failure_category == RunFailureCategory.PRESERVATION_SETUP:
+        return PRESERVATION_SETUP_FAILED_RUN_MESSAGE
     return DEFAULT_FAILED_RUN_MESSAGE
 
 
@@ -123,6 +131,7 @@ __all__ = [
     "DEFAULT_FAILED_RUN_MESSAGE",
     "EXPIRED_RUN_MESSAGE",
     "PublicRunFailure",
+    "PRESERVATION_SETUP_FAILED_RUN_MESSAGE",
     "RunFailureCategory",
     "UPSTREAM_FAILED_RUN_MESSAGE",
     "VERIFICATION_FAILED_RUN_MESSAGE",

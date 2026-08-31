@@ -18,6 +18,12 @@ from sqlalchemy.schema import CreateTable
 
 from brain.systems.runs.domain import AgentRunRequest as _AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime, StaticAnswerRecipe
+from brain.systems.runs.failure_diagnostic import (
+    DiagnosticValueState,
+    RunFailureStage,
+    read_run_failure_diagnostic,
+)
+from brain.systems.runs.failures import RunFailureCategory
 from brain.contracts.statuses import (
     OPEN_RUN_STATUS_VALUES,
     RUN_STATUS_VALUES,
@@ -913,24 +919,25 @@ async def test_stale_status_cas_preserves_live_owner_and_prior_batch_changes(tmp
             (row.updated_at, row.execution_token, int(row.execution_attempt or 0))
             for row in stale_rows
         ]
-
         async with factory() as live_session:
             live_store = AsyncAgentRunStore(live_session)
             assert await live_store.heartbeat_run(runs[1], now=now, reason="owner_is_alive")
             await live_session.commit()
 
-        _first, first_changed = await stale_store.set_status_with_result(
+        _first, first_changed = await stale_store.fail_run_with_result(
             runs[0],
-            RunStatus.FAILED,
+            category=RunFailureCategory.INTERNAL,
+            stage=RunFailureStage.RUNNER_EXECUTION,
             reason="runner_heartbeat_stale",
             expected_updated_at=expected[0][0],
             expected_execution_token=expected[0][1],
             expected_execution_attempt=expected[0][2],
             rollback_on_conflict=False,
         )
-        second, second_changed = await stale_store.set_status_with_result(
+        second, second_changed = await stale_store.fail_run_with_result(
             runs[1],
-            RunStatus.FAILED,
+            category=RunFailureCategory.INTERNAL,
+            stage=RunFailureStage.RUNNER_EXECUTION,
             reason="runner_heartbeat_stale",
             expected_updated_at=expected[1][0],
             expected_execution_token=expected[1][1],
@@ -1629,6 +1636,10 @@ async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory
     row = await session.get(AgentRunRow, result.id)
     assert row is not None
     assert row.status == RunStatus.FAILED.value
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_EXECUTION
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
     status_events = (
         await session.scalars(
             select(AgentRunEventRow)
@@ -1640,6 +1651,87 @@ async def test_runtime_fails_legacy_run_without_workspace_org_id(session_factory
         )
     ).all()
     assert status_events[-1].payload["reason"] == "AgentRun missing workspace org_id"
+
+
+async def test_generic_failed_transition_lands_typed_instead_of_stranding(
+    caplog,
+    session_factory,
+):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-failure-invariant", message="fail safely")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+
+    with caplog.at_level("CRITICAL"):
+        await store.set_status(run.id, RunStatus.FAILED, reason="untyped failure")
+
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    assert row.status == RunStatus.FAILED.value
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_SETTLEMENT
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
+    assert "used generic set_status for FAILED" in caplog.text
+
+
+async def test_malformed_typed_failure_lands_typed_instead_of_stranding(
+    caplog,
+    session_factory,
+):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-malformed-failure", message="fail safely")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+
+    with caplog.at_level("CRITICAL"):
+        result = await store.fail_run(
+            run.id,
+            category=RunFailureCategory.INTERNAL,
+            stage=RunFailureStage.UNKNOWN,
+            reason="malformed failure",
+        )
+
+    row = await session.get(AgentRunRow, run.id)
+    assert result.status == RunStatus.FAILED
+    assert row is not None
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_SETTLEMENT
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
+    assert "received malformed typed failure fields" in caplog.text
+
+
+async def test_engine_complete_failed_status_uses_typed_settlement_diagnostic(
+    session_factory,
+):
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    run = await store.create_run(
+        _run_request(thread_id="thread-failed-completion", message="settle safely")
+    )
+    await store.set_status(run.id, RunStatus.STARTING)
+    await store.set_status(run.id, RunStatus.RUNNING)
+
+    result = await AsyncAgentRunEngine(session, recipes={}).complete(
+        run.id,
+        output="settlement failed",
+        status=RunStatus.FAILED,
+    )
+
+    assert result.status == RunStatus.FAILED
+    row = await session.get(AgentRunRow, run.id)
+    assert row is not None
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_SETTLEMENT
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
 
 
 async def test_claim_and_completion_are_idempotent(session_factory):
@@ -1748,6 +1840,10 @@ async def test_runner_setup_failure_never_persists_diagnostic_as_public_output(
         "diagnostic_schema": "typed_v1",
         "stage": "runner_execution",
     }
+    diagnostic = await read_run_failure_diagnostic(session, run=row)
+    assert diagnostic is not None
+    assert diagnostic.stage == RunFailureStage.RUNNER_EXECUTION
+    assert diagnostic.stage_state == DiagnosticValueState.KNOWN
     assert [artifact.text for artifact in artifacts] == [UPSTREAM_FAILED_RUN_MESSAGE]
     assert [event.payload for event in text_events] == [{"text": UPSTREAM_FAILED_RUN_MESSAGE}]
     assert all(raw_diagnostic not in str(value) for value in (artifacts, text_events))
@@ -2179,6 +2275,72 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     assert failed_events[-1].payload["failure_category"] == "upstream"
     assert text_completed_events[-1].payload["text"] == UPSTREAM_FAILED_RUN_MESSAGE
     assert all(raw_error not in str(event.payload) for event in text_completed_events)
+
+
+async def test_worker_failure_receipt_matches_terminal_preservation_category(
+    monkeypatch,
+    session_factory,
+):
+    from brain.systems.runs.failures import PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    async def fake_invoke(_spec):
+        return SimpleNamespace(output="", success=False, error="worker failed")
+
+    async def no_usage(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.build_agent_tools",
+        lambda _role: [],
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.build_tool_handlers",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.invoke_direct_agent_async",
+        fake_invoke,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.async_summarize_run_usage_in_savepoint",
+        no_usage,
+    )
+
+    session = session_factory()
+    result = await AsyncAgentRunEngine(
+        session,
+        recipes={RunRecipe.WORKER.value: WorkerRecipe()},
+    ).run(
+        _run_request(
+            thread_id="thread-preservation-receipt",
+            message="Preserve this result.",
+            recipe=RunRecipe.WORKER,
+            model_policy={"model": "openai/gpt-5.6-sol", "thinking": "high"},
+            metadata={
+                "submission": {
+                    "preservation": {"requires_durable_evidence": True},
+                },
+            },
+        )
+    )
+
+    worker_receipt = (
+        await session.scalars(
+            select(AgentRunArtifactRow).where(
+                AgentRunArtifactRow.run_id == result.id,
+                AgentRunArtifactRow.artifact_type == "worker_result",
+            )
+        )
+    ).one()
+
+    terminal_category = result.metadata["failure"]["category"]
+    assert terminal_category == "preservation_setup"
+    assert worker_receipt.payload["failure"]["category"] == terminal_category
+    assert worker_receipt.payload["failure"]["message"] == (
+        PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+    )
+    assert worker_receipt.text == PRESERVATION_SETUP_FAILED_RUN_MESSAGE
 
 
 async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(session_factory):
