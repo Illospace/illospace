@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.metadata
+import inspect
 import json
 import logging
 import os
@@ -792,6 +793,9 @@ def _tool_parameter_annotation(schema: dict[str, Any]) -> type:
     return _SCHEMA_TYPE_MAP.get(raw_type, str)
 
 
+_OMITTED_TOOL_ARGUMENT = object()
+
+
 def _tool_docstring(tool_name: str, definition: dict[str, Any]) -> str:
     lines = [definition.get("description") or f"Invoke the {tool_name} Illo tool."]
     properties = (definition.get("input_schema") or {}).get("properties") or {}
@@ -824,6 +828,7 @@ def _make_async_tool_wrapper(
     annotations: dict[str, Any] = {"return": str}
     namespace: dict[str, Any] = {
         "_run": None,
+        "__omitted": _OMITTED_TOOL_ARGUMENT,
         "json": json,
         "Any": Any,
     }
@@ -877,23 +882,34 @@ def _make_async_tool_wrapper(
     for param_name, schema in ordered_properties:
         default = schema.get("default", ...)
         annotation = _tool_parameter_annotation(schema)
-        annotations[param_name] = annotation
         if param_name in required and default is ...:
+            annotations[param_name] = annotation
             params.append(param_name)
         else:
-            namespace[f"__default_{param_name}"] = None if default is ... else default
+            annotations[param_name] = annotation | None
+            namespace[f"__default_{param_name}"] = (
+                _OMITTED_TOOL_ARGUMENT if default is ... else default
+            )
             params.append(f"{param_name}=__default_{param_name}")
 
     signature_args = ", ".join(params)
     kwargs_expr = ", ".join(f"'{name}': {name}" for name, _ in properties)
     function_src = (
         f"async def {tool_name}({signature_args}):\n"
-        f"    return await _run(**{{{kwargs_expr}}})\n"
+        f"    kwargs = {{key: value for key, value in {{{kwargs_expr}}}.items() if value is not __omitted}}\n"
+        f"    return await _run(**kwargs)\n"
     )
     exec_namespace = dict(namespace)
     exec(function_src, exec_namespace)  # noqa: S102 - controlled local generation from trusted schema
     fn = exec_namespace[tool_name]
     fn.__annotations__ = annotations
+    signature = inspect.signature(fn)
+    fn.__signature__ = signature.replace(parameters=[
+        parameter.replace(default=None)
+        if parameter.default is _OMITTED_TOOL_ARGUMENT
+        else parameter
+        for parameter in signature.parameters.values()
+    ])
     fn.__doc__ = _tool_docstring(tool_name, definition)
     return fn
 
