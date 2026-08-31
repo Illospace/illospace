@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from enum import Enum
-from typing import Any, TypedDict
+from typing import TypedDict
 
 from brain.platform.integrations.provider_error_sentinel import provider_error_kind
 from brain.platform.integrations.providers import is_transient_transport_disconnect
@@ -59,42 +58,6 @@ def failure_category_for_error(error: BaseException | str | None) -> RunFailureC
     if is_transient_transport_disconnect(error) or provider_error_kind(error):
         return RunFailureCategory.UPSTREAM
     return RunFailureCategory.INTERNAL
-
-
-def run_requires_durable_preservation(metadata: Mapping[str, Any] | None) -> bool:
-    metadata = metadata if isinstance(metadata, Mapping) else {}
-    submission = metadata.get("submission")
-    submission = submission if isinstance(submission, Mapping) else {}
-    preservation = submission.get("preservation")
-    preservation = preservation if isinstance(preservation, Mapping) else {}
-    return preservation.get("requires_durable_evidence") is True
-
-
-def failure_category_for_run_context(
-    category: RunFailureCategory | str | None,
-    *,
-    metadata: Mapping[str, Any] | None,
-    tool_execution_started: bool,
-    failure_stage: Any,
-) -> RunFailureCategory:
-    """Classify an internal pre-tool preservation failure as actionable setup work."""
-
-    resolved = coerce_failure_category(category)
-    stage = str(getattr(failure_stage, "value", failure_stage) or "")
-    if (
-        resolved == RunFailureCategory.INTERNAL
-        and run_requires_durable_preservation(metadata)
-        and not tool_execution_started
-        and stage
-        in {
-            "runner_execution",
-            "project_context_materialization",
-            "recipe_execution",
-            "agent_execution",
-        }
-    ):
-        return RunFailureCategory.PRESERVATION_SETUP
-    return resolved
 
 
 def safe_terminal_run_message(
@@ -174,9 +137,7 @@ __all__ = [
     "VERIFICATION_FAILED_RUN_MESSAGE",
     "coerce_failure_category",
     "failure_category_for_error",
-    "failure_category_for_run_context",
     "public_run_failure",
-    "run_requires_durable_preservation",
     "safe_terminal_run_message",
     "terminal_run_notice_condition",
 ]

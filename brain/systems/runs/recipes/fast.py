@@ -255,11 +255,17 @@ class FastRecipe(BaseRunRecipe):
         except Exception as exc:
             logger.exception("fast_recipe_failed", extra={"run_id": runtime.run.id})
             category = failure_category_for_error(exc)
+            classified_failure = await runtime.classify_failure(
+                category,
+                stage=RunFailureStage.AGENT_EXECUTION,
+            )
             return RunRecipeResult(
                 error=str(exc),
-                final_output=safe_terminal_run_message(RunStatus.FAILED, category),
-                failure_category=category,
-                failure_stage=RunFailureStage.AGENT_EXECUTION,
+                final_output=safe_terminal_run_message(
+                    RunStatus.FAILED,
+                    classified_failure.category,
+                ),
+                classified_failure=classified_failure,
                 exception_type=type(exc),
                 status=RunStatus.FAILED,
             )
@@ -274,11 +280,17 @@ class FastRecipe(BaseRunRecipe):
         if status == RunStatus.FAILED:
             error = str(result_error or output or "fast_recipe_failed")
             category = failure_category_for_error(error)
+            classified_failure = await runtime.classify_failure(
+                category,
+                stage=RunFailureStage.AGENT_EXECUTION,
+            )
             return RunRecipeResult(
                 error=error,
-                final_output=safe_terminal_run_message(status, category),
-                failure_category=category,
-                failure_stage=RunFailureStage.AGENT_EXECUTION,
+                final_output=safe_terminal_run_message(
+                    status,
+                    classified_failure.category,
+                ),
+                classified_failure=classified_failure,
                 exception_type=getattr(result, "exception_type", None),
                 status=status,
                 post_completion_tasks=tuple(getattr(result, "post_completion_tasks", ()) or ()),

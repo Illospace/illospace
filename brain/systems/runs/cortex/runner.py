@@ -31,13 +31,15 @@ from brain.systems.runs.evidence_health import (
 )
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
-from brain.systems.runs.failure_diagnostic import RunFailureStage
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    failure_category_for_run_context,
+    run_tool_execution_started,
+)
 from brain.systems.runs.failures import (
     coerce_failure_category,
     failure_category_for_error,
-    failure_category_for_run_context,
     public_run_failure,
-    run_requires_durable_preservation,
     safe_terminal_run_message,
     terminal_run_notice_condition,
 )
@@ -1278,20 +1280,22 @@ async def _mark_run_failed_after_runner_error_async(
                 anchor_run_id=row.parent_run_id or row.id,
             )
         if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
+            from brain.systems.inbound.preservation import (
+                run_requires_durable_preservation,
+            )
+
             category = failure_category_for_error(error)
-            tool_execution_started = False
-            if run_requires_durable_preservation(row.metadata_):
-                for event_type in (
-                    "run.tool_started",
-                    "run.tool_completed",
-                    "run.tool_failed",
-                ):
-                    if await store.has_event_type(int(run_id), event_type):
-                        tool_execution_started = True
-                        break
+            requires_durable_preservation = run_requires_durable_preservation(
+                row.metadata_
+            )
+            tool_execution_started = (
+                await run_tool_execution_started(uow.session, run_id=int(run_id))
+                if requires_durable_preservation
+                else False
+            )
             category = failure_category_for_run_context(
                 category,
-                metadata=row.metadata_,
+                requires_durable_preservation=requires_durable_preservation,
                 tool_execution_started=tool_execution_started,
                 failure_stage=failure_stage,
             )

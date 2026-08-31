@@ -224,7 +224,7 @@ class WorkerRecipe(BaseRunRecipe):
             error = str(exc)
             status = RunStatus.FAILED
             failure_category = failure_category_for_error(exc)
-            failure = public_run_failure(status, failure_category)
+            failure = None
             exception_type = type(exc)
             output = ""
             post_completion_tasks = ()
@@ -260,11 +260,17 @@ class WorkerRecipe(BaseRunRecipe):
                     )
                 )
                 failure_category = failure_category_for_error(error)
-                failure = public_run_failure(status, failure_category)
                 exception_type = getattr(result, "exception_type", None)
                 output = ""
             post_completion_tasks = tuple(getattr(result, "post_completion_tasks", ()) or ())
         await _record_effective_routing(runtime, effective_routing)
+        classified_failure = None
+        if status == RunStatus.FAILED:
+            classified_failure = await runtime.classify_failure(
+                failure_category,
+                stage=RunFailureStage.AGENT_EXECUTION,
+            )
+            failure = public_run_failure(status, classified_failure.category)
         streamed_output = False
         if status == RunStatus.COMPLETED:
             for delta in pending_deltas:
@@ -290,12 +296,7 @@ class WorkerRecipe(BaseRunRecipe):
             status=status,
             error=error,
             final_output=public_output if status == RunStatus.FAILED else None,
-            failure_category=failure_category,
-            failure_stage=(
-                RunFailureStage.AGENT_EXECUTION
-                if status == RunStatus.FAILED
-                else None
-            ),
+            classified_failure=classified_failure,
             exception_type=exception_type,
             artifacts=(worker_result,),
             post_completion_tasks=post_completion_tasks,

@@ -2277,6 +2277,72 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     assert all(raw_error not in str(event.payload) for event in text_completed_events)
 
 
+async def test_worker_failure_receipt_matches_terminal_preservation_category(
+    monkeypatch,
+    session_factory,
+):
+    from brain.systems.runs.failures import PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    async def fake_invoke(_spec):
+        return SimpleNamespace(output="", success=False, error="worker failed")
+
+    async def no_usage(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.build_agent_tools",
+        lambda _role: [],
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.build_tool_handlers",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.invoke_direct_agent_async",
+        fake_invoke,
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.workers.async_summarize_run_usage_in_savepoint",
+        no_usage,
+    )
+
+    session = session_factory()
+    result = await AsyncAgentRunEngine(
+        session,
+        recipes={RunRecipe.WORKER.value: WorkerRecipe()},
+    ).run(
+        _run_request(
+            thread_id="thread-preservation-receipt",
+            message="Preserve this result.",
+            recipe=RunRecipe.WORKER,
+            model_policy={"model": "openai/gpt-5.6-sol", "thinking": "high"},
+            metadata={
+                "submission": {
+                    "preservation": {"requires_durable_evidence": True},
+                },
+            },
+        )
+    )
+
+    worker_receipt = (
+        await session.scalars(
+            select(AgentRunArtifactRow).where(
+                AgentRunArtifactRow.run_id == result.id,
+                AgentRunArtifactRow.artifact_type == "worker_result",
+            )
+        )
+    ).one()
+
+    terminal_category = result.metadata["failure"]["category"]
+    assert terminal_category == "preservation_setup"
+    assert worker_receipt.payload["failure"]["category"] == terminal_category
+    assert worker_receipt.payload["failure"]["message"] == (
+        PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+    )
+    assert worker_receipt.text == PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+
+
 async def test_failed_cycle_engine_events_do_not_surface_raw_provider_error(session_factory):
     raw_provider_error = (
         "An error occurred while processing your request. Contact help.openai.com with request ID "

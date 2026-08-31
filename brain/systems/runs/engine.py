@@ -16,13 +16,16 @@ from brain.systems.runs.context import RunContextLoader
 from brain.systems.runs.domain import AgentRun, AgentRunRequest
 from brain.systems.runs.events import activity_event, run_event, text_delta_event
 from brain.systems.runs.execution_failure import RunExecutionFailure
-from brain.systems.runs.failure_diagnostic import RunFailureStage
+from brain.systems.runs.failure_diagnostic import (
+    ClassifiedRunFailure,
+    RunFailureStage,
+    failure_category_for_run_context,
+    run_tool_execution_started,
+)
 from brain.systems.runs.failures import (
     RunFailureCategory,
     coerce_failure_category,
     failure_category_for_error,
-    failure_category_for_run_context,
-    run_requires_durable_preservation,
     safe_terminal_run_message,
 )
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -55,8 +58,8 @@ class RunRecipeResult:
     error: str | None = None
     # Optional user-safe text. Failed runs must never put raw errors here.
     final_output: str | None = None
-    failure_category: RunFailureCategory | str | None = None
-    failure_stage: RunFailureStage | None = None
+    # Recipes must resolve this before building any public failure output or artifact.
+    classified_failure: ClassifiedRunFailure | None = None
     exception_type: type[BaseException] | None = None
     artifacts: tuple = ()
     post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
@@ -160,6 +163,39 @@ class RunRuntime:
         if self.tools is None:
             self.tools = AsyncRunToolExecutor(self.store, stream=self.stream)
         return self.tools
+
+    async def classify_failure(
+        self,
+        category: RunFailureCategory | str | None,
+        *,
+        stage: RunFailureStage,
+    ) -> ClassifiedRunFailure:
+        """Resolve failure context before a recipe builds public failure records."""
+
+        from brain.systems.inbound.preservation import (
+            run_requires_durable_preservation,
+        )
+
+        requires_durable_preservation = run_requires_durable_preservation(
+            self.request.metadata
+        )
+        tool_execution_started = (
+            await run_tool_execution_started(
+                self.store.session,
+                run_id=self.run.id,
+            )
+            if requires_durable_preservation
+            else False
+        )
+        return ClassifiedRunFailure(
+            category=failure_category_for_run_context(
+                category,
+                requires_durable_preservation=requires_durable_preservation,
+                tool_execution_started=tool_execution_started,
+                failure_stage=stage,
+            ),
+            stage=stage,
+        )
 
 
 class AsyncAgentRunEngine:
@@ -306,8 +342,17 @@ class AsyncAgentRunEngine:
                 run.id,
                 error,
                 final_output=result.final_output,
-                failure_category=result.failure_category or failure_category_for_error(error),
-                failure_stage=result.failure_stage or RunFailureStage.RECIPE_EXECUTION,
+                failure_category=(
+                    None
+                    if result.classified_failure is not None
+                    else failure_category_for_error(error)
+                ),
+                failure_stage=(
+                    result.classified_failure.stage
+                    if result.classified_failure is not None
+                    else RunFailureStage.RECIPE_EXECUTION
+                ),
+                classified_failure=result.classified_failure,
                 exception_type=result.exception_type,
                 execution_claim=execution_claim,
             )
@@ -442,6 +487,7 @@ class AsyncAgentRunEngine:
         final_output: str | None = None,
         failure_category: RunFailureCategory | str | None = None,
         failure_stage: RunFailureStage = RunFailureStage.RECIPE_EXECUTION,
+        classified_failure: ClassifiedRunFailure | None = None,
         exception_type: type[BaseException] | None = None,
         execution_claim: ExecutionClaim | None = None,
     ) -> AgentRun:
@@ -449,23 +495,31 @@ class AsyncAgentRunEngine:
         async with self._atomic_terminal_write():
             if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
                 return to_domain(row)
-            category = coerce_failure_category(failure_category or failure_category_for_error(error))
-            tool_execution_started = False
-            if run_requires_durable_preservation(row.metadata_):
-                for event_type in (
-                    "run.tool_started",
-                    "run.tool_completed",
-                    "run.tool_failed",
-                ):
-                    if await self.store.has_event_type(run_id, event_type):
-                        tool_execution_started = True
-                        break
-            category = failure_category_for_run_context(
-                category,
-                metadata=row.metadata_,
-                tool_execution_started=tool_execution_started,
-                failure_stage=failure_stage,
-            )
+            if classified_failure is None:
+                from brain.systems.inbound.preservation import (
+                    run_requires_durable_preservation,
+                )
+
+                category = coerce_failure_category(
+                    failure_category or failure_category_for_error(error)
+                )
+                requires_durable_preservation = run_requires_durable_preservation(
+                    row.metadata_
+                )
+                tool_execution_started = (
+                    await run_tool_execution_started(self.store.session, run_id=run_id)
+                    if requires_durable_preservation
+                    else False
+                )
+                category = failure_category_for_run_context(
+                    category,
+                    requires_durable_preservation=requires_durable_preservation,
+                    tool_execution_started=tool_execution_started,
+                    failure_stage=failure_stage,
+                )
+            else:
+                category = classified_failure.category
+                failure_stage = classified_failure.stage
             if category == RunFailureCategory.PRESERVATION_SETUP and final_output:
                 final_output = safe_terminal_run_message(RunStatus.FAILED, category)
             safe_error = await self.store.safe_cycle_provider_error_text(run_id, str(error or ""))

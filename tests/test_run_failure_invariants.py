@@ -11,13 +11,13 @@ import pytest
 from brain.systems.runs.failure_diagnostic import (
     DiagnosticValueState,
     RunFailureStage,
+    failure_category_for_run_context,
     read_run_failure_diagnostic,
     run_failure_metadata,
 )
 from brain.systems.runs.failures import (
     DEFAULT_FAILED_RUN_MESSAGE,
     RunFailureCategory,
-    failure_category_for_run_context,
     safe_terminal_run_message,
 )
 from brain.systems.runs.status import RunStatus
@@ -117,11 +117,7 @@ def test_failure_envelope_builder_rejects_inconsistent_types() -> None:
 def test_pre_tool_preservation_failure_cannot_be_unknown_and_generic() -> None:
     category = failure_category_for_run_context(
         RunFailureCategory.INTERNAL,
-        metadata={
-            "submission": {
-                "preservation": {"requires_durable_evidence": True},
-            }
-        },
+        requires_durable_preservation=True,
         tool_execution_started=False,
         failure_stage=RunFailureStage.AGENT_EXECUTION,
     )

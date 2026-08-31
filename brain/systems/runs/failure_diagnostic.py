@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
-from brain.systems.runs.failures import RunFailureCategory
+from brain.systems.runs.failures import RunFailureCategory, coerce_failure_category
 
 
 _DIAGNOSTIC_SCHEMA = "typed_v1"
@@ -47,6 +47,24 @@ class RunFailureStage(str, Enum):
     COMPLETION_VERIFICATION = "completion_verification"
     RUNNER_SETTLEMENT = "runner_settlement"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ClassifiedRunFailure:
+    """A failure category resolved against its run context before presentation."""
+
+    category: RunFailureCategory
+    stage: RunFailureStage
+
+
+_PRE_TOOL_PRESERVATION_FAILURE_STAGES = frozenset(
+    {
+        RunFailureStage.RUNNER_EXECUTION,
+        RunFailureStage.PROJECT_CONTEXT_MATERIALIZATION,
+        RunFailureStage.RECIPE_EXECUTION,
+        RunFailureStage.AGENT_EXECUTION,
+    }
+)
 
 
 class DiagnosticValueState(str, Enum):
@@ -120,6 +138,47 @@ def failure_diagnostic_metadata(
     }
 
 
+def failure_category_for_run_context(
+    category: RunFailureCategory | str | None,
+    *,
+    requires_durable_preservation: bool,
+    tool_execution_started: bool,
+    failure_stage: RunFailureStage,
+) -> RunFailureCategory:
+    """Classify an internal pre-tool preservation failure as actionable setup work."""
+
+    resolved = coerce_failure_category(category)
+    if (
+        resolved is RunFailureCategory.INTERNAL
+        and requires_durable_preservation
+        and not tool_execution_started
+        and failure_stage in _PRE_TOOL_PRESERVATION_FAILURE_STAGES
+    ):
+        return RunFailureCategory.PRESERVATION_SETUP
+    return resolved
+
+
+async def run_tool_execution_started(
+    session: AsyncSession,
+    *,
+    run_id: int,
+) -> bool:
+    """Query the canonical event vocabulary for evidence of tool execution."""
+
+    event_types = (
+        await session.scalars(
+            select(AgentRunEventRow.event_type).where(
+                AgentRunEventRow.run_id == int(run_id),
+                AgentRunEventRow.event_type.in_(_TOOL_EXECUTION_EVENT_TYPES),
+            )
+        )
+    ).all()
+    return any(
+        str(event_type or "") in _TOOL_EXECUTION_EVENT_TYPES
+        for event_type in event_types
+    )
+
+
 def run_failure_metadata(
     *,
     category: RunFailureCategory,
@@ -189,14 +248,10 @@ async def read_run_failure_diagnostic(
     if str(run_status or "") != "failed":
         return None
 
-    event_types = (
-        await session.scalars(
-            select(AgentRunEventRow.event_type).where(
-                AgentRunEventRow.run_id == int(run.id),
-                AgentRunEventRow.event_type.in_(_TOOL_EXECUTION_EVENT_TYPES),
-            )
-        )
-    ).all()
+    tool_execution_started = await run_tool_execution_started(
+        session,
+        run_id=int(run.id),
+    )
     metadata = run.metadata_ if isinstance(run.metadata_, Mapping) else {}
     stored_failure = metadata.get("failure")
     failure_metadata = stored_failure if isinstance(stored_failure, Mapping) else {}
@@ -209,10 +264,7 @@ async def read_run_failure_diagnostic(
         stage_state=stage_state,
         exception_class=exception_class,
         exception_class_state=exception_class_state,
-        tool_execution_started=any(
-            str(event_type or "") in _TOOL_EXECUTION_EVENT_TYPES
-            for event_type in event_types
-        ),
+        tool_execution_started=tool_execution_started,
         # Replacement retries have their own current run. A still-failed run
         # is terminal and has no retry scheduled on this run identity.
         retry_scheduled=False,
@@ -220,10 +272,13 @@ async def read_run_failure_diagnostic(
 
 
 __all__ = [
+    "ClassifiedRunFailure",
     "DiagnosticValueState",
     "RunFailureDiagnostic",
     "RunFailureStage",
+    "failure_category_for_run_context",
     "failure_diagnostic_metadata",
     "read_run_failure_diagnostic",
+    "run_tool_execution_started",
     "run_failure_metadata",
 ]
