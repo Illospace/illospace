@@ -20,6 +20,7 @@ from brain.systems.cortex.project_context.identity import durable_project_id_fro
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
 from brain.systems.cortex.project_context.project_root import is_synthetic_project_root_resource, project_key_from_context
 from brain.systems.cortex.project_context.resource_imports import (
+    ResourcePathAccess,
     backend_readable_resource_path,
     path_is_relative_to,
     runtime_workspace_path,
@@ -698,10 +699,15 @@ def _materialize_backend_readable_resource(
     project_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str] | None, str | None, bool]:
     materialization = resource.get("materialization") if isinstance(resource.get("materialization"), dict) else {}
-    previous_source = should_use_existing_resource_path(_clean_text(materialization.get("source_path")), workspace_root)
+    previous_source = should_use_existing_resource_path(
+        _clean_text(materialization.get("source_path")),
+        workspace_root,
+        access=ResourcePathAccess.READ_ONLY,
+    )
     previous_draft = should_use_existing_resource_path(
         _clean_text(resource.get("path") or materialization.get("path")),
         workspace_root,
+        access=ResourcePathAccess.WRITE,
     )
     if previous_source and previous_draft and path_is_relative_to(previous_draft, workspace_root):
         existing_path = previous_draft
@@ -803,7 +809,11 @@ async def _materialize_resource(
             project_context=project_context,
         )
         return workspace, error
-    existing_path = should_use_existing_resource_path(_clean_text(resource.get("path")), workspace_root)
+    existing_path = should_use_existing_resource_path(
+        _clean_text(resource.get("path")),
+        workspace_root,
+        access=ResourcePathAccess.WRITE,
+    )
     if existing_path and path_is_relative_to(existing_path, workspace_root):
         return _workspace_entry_from_resource(resource, existing_path), None
 
