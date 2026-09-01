@@ -1100,7 +1100,7 @@ async def test_identical_body_replay_preserves_satisfied_evidence(session):
     assert replay["idempotent_replay"] is True
     assert replay["ilo_outcome"] == stored_outcome
     assert replay["ilo_outcome"]["evidence_status"] == "satisfied"
-    assert "replay_body_matches" not in replay
+    assert replay["replay_body_matches"] is True
 
 
 async def test_colliding_key_with_different_body_marks_replay_mismatch(session):
