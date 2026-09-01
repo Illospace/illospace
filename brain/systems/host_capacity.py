@@ -45,17 +45,32 @@ logger = logging.getLogger(__name__)
 HOST_CAPACITY_CHECK_TYPE = "host_capacity"
 HOST_CAPACITY_ALERT_KEY = "host_capacity_warn"
 HOST_CAPACITY_CRITICAL_ALERT_KEY = "host_capacity_critical"
+HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY = (
+    "host_capacity_reclamation_disabled"
+)
 
 
 @dataclass(frozen=True, slots=True)
 class _CapacitySeverity:
-    status: str
+    status: str | None
     alert_key: str
     trigger_kind: FailureGuardTriggerKind
     alert_title: str
-    error_severity: str
+    error_text: Callable[[StoragePolicyValues], str]
     priority: int
-    threshold_percent: Callable[[StoragePolicyValues], int]
+    minimum_capacity_priority: int
+    threshold_percent: Callable[[StoragePolicyValues], int] | None
+    requires_reclamation_disabled: bool = False
+
+    def is_active(
+        self,
+        current_capacity_priority: int,
+        policy: StoragePolicyValues,
+    ) -> bool:
+        return current_capacity_priority >= self.minimum_capacity_priority and (
+            not self.requires_reclamation_disabled
+            or not policy.automatic_reclamation_allowed
+        )
 
 
 _CAPACITY_SEVERITIES = (
@@ -64,8 +79,12 @@ _CAPACITY_SEVERITIES = (
         alert_key=HOST_CAPACITY_ALERT_KEY,
         trigger_kind=FailureGuardTriggerKind(HOST_CAPACITY_ALERT_KEY),
         alert_title="Host capacity warning",
-        error_severity="warning",
+        error_text=lambda policy: (
+            "Storage use crossed the active policy warning threshold of "
+            f"{policy.capacity_warn_percent}%."
+        ),
         priority=1,
+        minimum_capacity_priority=1,
         threshold_percent=lambda policy: policy.capacity_warn_percent,
     ),
     _CapacitySeverity(
@@ -73,9 +92,29 @@ _CAPACITY_SEVERITIES = (
         alert_key=HOST_CAPACITY_CRITICAL_ALERT_KEY,
         trigger_kind=FailureGuardTriggerKind(HOST_CAPACITY_CRITICAL_ALERT_KEY),
         alert_title="Host capacity critical",
-        error_severity="critical",
+        error_text=lambda policy: (
+            "Storage use crossed the active policy critical threshold of "
+            f"{policy.capacity_critical_percent}%."
+        ),
         priority=2,
+        minimum_capacity_priority=2,
         threshold_percent=lambda policy: policy.capacity_critical_percent,
+    ),
+    _CapacitySeverity(
+        status=None,
+        alert_key=HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY,
+        trigger_kind=FailureGuardTriggerKind(
+            HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY
+        ),
+        alert_title="Host capacity risk: automatic reclamation disabled",
+        error_text=lambda _policy: (
+            "Host capacity is unhealthy while automatic workspace reclamation "
+            "is disabled by policy."
+        ),
+        priority=3,
+        minimum_capacity_priority=1,
+        threshold_percent=None,
+        requires_reclamation_disabled=True,
     ),
 )
 
@@ -249,10 +288,14 @@ def _capacity_status(
 
 
 def _thresholds(policy: StoragePolicyValues) -> dict[str, int]:
-    return {
-        f"{severity.status}_percent": severity.threshold_percent(policy)
-        for severity in _CAPACITY_SEVERITIES
-    }
+    thresholds: dict[str, int] = {}
+    for severity in _CAPACITY_SEVERITIES:
+        if severity.status is None or severity.threshold_percent is None:
+            continue
+        thresholds[f"{severity.status}_percent"] = severity.threshold_percent(
+            policy
+        )
+    return thresholds
 
 
 def _default_alert_policy() -> SlackFailureAlertPolicy:
@@ -296,7 +339,7 @@ async def record_host_capacity(
     alert_keys_to_clear = tuple(
         severity.alert_key
         for severity in _CAPACITY_SEVERITIES
-        if severity.priority > current_priority
+        if not severity.is_active(current_priority, policy)
     )
     if alert_keys_to_clear:
         await session.execute(
@@ -312,7 +355,7 @@ async def record_host_capacity(
     triggers = tuple(
         FailureGuardTriggerResult(
             kind=severity.trigger_kind,
-            active=current_priority >= severity.priority,
+            active=severity.is_active(current_priority, policy),
             public_details={
                 "pct_used": measurement.pct_used,
                 **_thresholds(policy),
@@ -353,11 +396,7 @@ async def record_host_capacity(
                     title=highest_edge.alert_title,
                     summary=highest_edge.alert_summary,
                 ),
-                error_text=(
-                    "Storage use crossed the active policy "
-                    f"{severity.error_severity} threshold of "
-                    f"{severity.threshold_percent(policy)}%."
-                ),
+                error_text=severity.error_text(policy),
             )
         except Exception:  # noqa: BLE001 - retry the edge on the next tick
             logger.exception("Host-capacity Slack delivery failed")

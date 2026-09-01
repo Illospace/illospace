@@ -311,13 +311,6 @@ async def manage_headless_worker_workspaces(
         retention=active_retention,
         max_reclaims=normalized_max_reclaims,
     )
-    if action == "reclaim" and automatic and not policy.automatic_reclamation_allowed:
-        result["reclamation_skipped_reason"] = (
-            "automatic_reclamation_disabled_by_policy"
-        )
-        log.info("Workspace GC skipped because automatic reclamation is disabled")
-        return result
-
     observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     cutoff = observed_at - active_retention
     root_input = workspace_root.expanduser()
@@ -412,7 +405,12 @@ async def manage_headless_worker_workspaces(
             )
         )
 
-    if action == "reclaim":
+    if action == "reclaim" and automatic and not policy.automatic_reclamation_allowed:
+        result["reclamation_skipped_reason"] = (
+            "automatic_reclamation_disabled_by_policy"
+        )
+        log.info("Workspace GC skipped because automatic reclamation is disabled")
+    elif action == "reclaim":
         reclaimable = sorted(
             (item for item in measured if item.reclaimable),
             key=lambda item: (item.modified_at, str(item.path)),
@@ -527,4 +525,3 @@ async def reclaim_headless_worker_workspaces(
         max_reclaims=max_reclaims,
         report_limit=report_limit,
     )
-

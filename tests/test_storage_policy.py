@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.schema import CreateIndex
 
@@ -17,6 +21,97 @@ from brain.systems.storage_policy import (
     async_manage_storage_policy,
     storage_policy_field_schema,
 )
+
+
+def test_fresh_storage_policy_seed_enables_automatic_reclamation(monkeypatch):
+    migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0060_storage_policies"
+    )
+    engine = sa.create_engine("sqlite://")
+
+    with engine.begin() as connection:
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+
+        assert connection.execute(
+            sa.text(
+                "SELECT automatic_reclamation_allowed, rationale "
+                "FROM storage_policies WHERE is_active = TRUE"
+            )
+        ).one() == (
+            1,
+            "Automatic workspace reclamation is enabled by default.",
+        )
+
+
+def test_enable_automatic_reclamation_migration_only_updates_untouched_seed(
+    monkeypatch,
+):
+    migration = importlib.import_module(
+        "brain.platform.db.alembic.versions.0065_enable_automatic_reclamation"
+    )
+    assert migration.revision == "0065_enable_automatic_reclamation"
+    assert migration.down_revision == "0064_cycle_receipt_monitoring"
+    engine = sa.create_engine("sqlite://")
+    seed_rationale = "Initial policy migrated from deployed retention behavior."
+
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "CREATE TABLE storage_policies ("
+                "id INTEGER PRIMARY KEY, "
+                "automatic_reclamation_allowed BOOLEAN NOT NULL, "
+                "rationale TEXT NOT NULL, "
+                "is_active BOOLEAN NOT NULL)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO storage_policies VALUES "
+                "(1, FALSE, :seed_rationale, TRUE), "
+                "(2, FALSE, 'Operator deliberately disabled reclamation.', TRUE), "
+                "(3, FALSE, :seed_rationale, FALSE)"
+            ),
+            {"seed_rationale": seed_rationale},
+        )
+        monkeypatch.setattr(
+            migration,
+            "op",
+            Operations(MigrationContext.configure(connection)),
+        )
+
+        migration.upgrade()
+        migration.upgrade()
+
+        assert connection.execute(
+            sa.text(
+                "SELECT id, automatic_reclamation_allowed, rationale "
+                "FROM storage_policies ORDER BY id"
+            )
+        ).all() == [
+            (1, 1, "Illospace issue #876 enabled automatic reclamation."),
+            (2, 0, "Operator deliberately disabled reclamation."),
+            (3, 0, seed_rationale),
+        ]
+
+        migration.downgrade()
+        migration.downgrade()
+
+        assert connection.execute(
+            sa.text(
+                "SELECT id, automatic_reclamation_allowed, rationale "
+                "FROM storage_policies ORDER BY id"
+            )
+        ).all() == [
+            (1, 0, seed_rationale),
+            (2, 0, "Operator deliberately disabled reclamation."),
+            (3, 0, seed_rationale),
+        ]
 
 
 @pytest.fixture

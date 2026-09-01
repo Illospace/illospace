@@ -16,6 +16,7 @@ from brain.platform.db.models.storage_policy import StoragePolicy
 from brain.systems.host_capacity import (
     HOST_CAPACITY_ALERT_KEY,
     HOST_CAPACITY_CRITICAL_ALERT_KEY,
+    HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY,
     HOST_CAPACITY_CHECK_TYPE,
     HostCapacityMeasurement,
     HostDiskCapacity,
@@ -56,7 +57,13 @@ def _measurement(*, pct_used: float) -> HostCapacityMeasurement:
     )
 
 
-async def _add_policy(session, *, warn: int, critical: int) -> None:
+async def _add_policy(
+    session,
+    *,
+    warn: int,
+    critical: int,
+    automatic_reclamation_allowed: bool = True,
+) -> None:
     session.add(
         StoragePolicy(
             finished_workspace_retention_hours=24,
@@ -64,7 +71,7 @@ async def _add_policy(session, *, warn: int, critical: int) -> None:
             canvas_quiet_hours=12,
             capacity_warn_percent=warn,
             capacity_critical_percent=critical,
-            automatic_reclamation_allowed=False,
+            automatic_reclamation_allowed=automatic_reclamation_allowed,
             rationale="Capacity test policy",
             source_type="test",
             is_active=True,
@@ -225,6 +232,58 @@ async def test_host_capacity_warn_alert_latch_fires_exactly_once_across_two_over
     assert latch is not None
     assert latch.alerted_at == datetime(2026, 8, 9, 12, 0)
     assert row_count == 2
+
+
+@pytest.mark.parametrize("pct_used", [80.0, 95.0])
+async def test_unhealthy_capacity_with_reclamation_disabled_alerts_once_and_latches(
+    session,
+    monkeypatch,
+    pct_used,
+):
+    _patch_capacity_sequence(monkeypatch, 60.0, pct_used, pct_used)
+    await _add_policy(
+        session,
+        warn=70,
+        critical=90,
+        automatic_reclamation_allowed=False,
+    )
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    ok = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+    first_unhealthy = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 11, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+    second_unhealthy = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    latch = await session.get(
+        SchedulerAlertLatch,
+        HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY,
+    )
+    assert ok["alert_sent"] is False
+    assert first_unhealthy["alert_sent"] is True
+    assert second_unhealthy["alert_sent"] is False
+    assert len(deliveries) == 1
+    assert deliveries[0]["presentation"].title == (
+        "Host capacity risk: automatic reclamation disabled"
+    )
+    assert latch is not None
+    assert latch.alerted_at == datetime(2026, 9, 1, 11, 0)
 
 
 async def test_host_capacity_warn_to_critical_delivers_one_critical_alert(
