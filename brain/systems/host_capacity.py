@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
@@ -44,7 +44,15 @@ logger = logging.getLogger(__name__)
 
 HOST_CAPACITY_CHECK_TYPE = "host_capacity"
 HOST_CAPACITY_ALERT_KEY = "host_capacity_warn"
+HOST_CAPACITY_CRITICAL_ALERT_KEY = "host_capacity_critical"
 _CAPACITY_WARN_TRIGGER_KIND = FailureGuardTriggerKind(HOST_CAPACITY_ALERT_KEY)
+_CAPACITY_CRITICAL_TRIGGER_KIND = FailureGuardTriggerKind(
+    HOST_CAPACITY_CRITICAL_ALERT_KEY
+)
+_CAPACITY_ALERT_KEY_BY_TRIGGER_KIND = {
+    _CAPACITY_WARN_TRIGGER_KIND: HOST_CAPACITY_ALERT_KEY,
+    _CAPACITY_CRITICAL_TRIGGER_KIND: HOST_CAPACITY_CRITICAL_ALERT_KEY,
+}
 
 
 class HostCapacityDetails(TypedDict):
@@ -96,18 +104,28 @@ class _HostCapacityLatchStore:
     session: AsyncSession
 
     async def load_latches(self):
-        latch = await self.session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
-        return {_CAPACITY_WARN_TRIGGER_KIND: latch} if latch is not None else {}
+        latches = await self.session.scalars(
+            select(SchedulerAlertLatch).where(
+                SchedulerAlertLatch.alert_key.in_(
+                    _CAPACITY_ALERT_KEY_BY_TRIGGER_KIND.values()
+                )
+            )
+        )
+        return {
+            FailureGuardTriggerKind(latch.alert_key): latch
+            for latch in latches
+        }
 
     async def create_latch(
         self,
         trigger_kind: FailureGuardTriggerKind,
         alerted_at: datetime,
     ) -> SchedulerAlertLatch:
-        if trigger_kind != _CAPACITY_WARN_TRIGGER_KIND:
+        alert_key = _CAPACITY_ALERT_KEY_BY_TRIGGER_KIND.get(trigger_kind)
+        if alert_key is None:
             raise ValueError(f"Unsupported host-capacity trigger: {trigger_kind}")
         latch = SchedulerAlertLatch(
-            alert_key=HOST_CAPACITY_ALERT_KEY,
+            alert_key=alert_key,
             alerted_at=alerted_at,
         )
         self.session.add(latch)
@@ -225,29 +243,50 @@ async def record_host_capacity(
     if status == "ok":
         await session.execute(
             delete(SchedulerAlertLatch).where(
-                SchedulerAlertLatch.alert_key == HOST_CAPACITY_ALERT_KEY
+                SchedulerAlertLatch.alert_key.in_(
+                    _CAPACITY_ALERT_KEY_BY_TRIGGER_KIND.values()
+                )
+            )
+        )
+    elif status == "warn":
+        # Falling below critical rearms only that edge; the warning latch stays.
+        await session.execute(
+            delete(SchedulerAlertLatch).where(
+                SchedulerAlertLatch.alert_key
+                == HOST_CAPACITY_CRITICAL_ALERT_KEY
             )
         )
 
-    trigger = FailureGuardTriggerResult(
-        kind=_CAPACITY_WARN_TRIGGER_KIND,
-        active=status != "ok",
-        public_details={
-            "pct_used": measurement.pct_used,
-            **_thresholds(policy),
-        },
-        alert_title=(
-            "Host capacity critical"
-            if status == "critical"
-            else "Host capacity warning"
+    alert_summary = (
+        f"{measurement.pct_used}% used on {measurement.mount}; "
+        f"{measurement.bytes_free} bytes free."
+    )
+    triggers = (
+        FailureGuardTriggerResult(
+            kind=_CAPACITY_WARN_TRIGGER_KIND,
+            # Warning stays active at critical so the downward crossing to warn
+            # cannot create a second warning edge.
+            active=status != "ok",
+            public_details={
+                "pct_used": measurement.pct_used,
+                **_thresholds(policy),
+            },
+            alert_title="Host capacity warning",
+            alert_summary=alert_summary,
         ),
-        alert_summary=(
-            f"{measurement.pct_used}% used on {measurement.mount}; "
-            f"{measurement.bytes_free} bytes free."
+        FailureGuardTriggerResult(
+            kind=_CAPACITY_CRITICAL_TRIGGER_KIND,
+            active=status == "critical",
+            public_details={
+                "pct_used": measurement.pct_used,
+                **_thresholds(policy),
+            },
+            alert_title="Host capacity critical",
+            alert_summary=alert_summary,
         ),
     )
     guard = await async_evaluate_failure_edges(
-        results=(trigger,),
+        results=triggers,
         failure_signature=None,
         last_error=None,
         now=observed_at,
@@ -256,35 +295,44 @@ async def record_host_capacity(
     )
 
     alert_sent = False
-    if guard.crossed_edges and deliver_alert is not None:
-        try:
-            await deliver_alert(
-                policy=alert_policy or _default_alert_policy(),
-                subject=FailureAlertSubject(
-                    identity_label="Mount",
-                    identity=measurement.mount,
-                    url_label="Illo",
-                    url=f"{public_app_base_url()}/api/system",
-                    link_label="open system state",
-                ),
-                presentation=FailureAlertPresentation(
-                    title=trigger.alert_title,
-                    summary=trigger.alert_summary,
-                ),
-                error_text=(
-                    f"Storage use crossed the active policy warning threshold "
-                    f"of {policy.capacity_warn_percent}%."
-                ),
-            )
-        except Exception:  # noqa: BLE001 - leave the edge open for the next tick
-            logger.exception("Host-capacity Slack delivery failed")
-        else:
-            await async_latch_failure_edges(
-                guard,
-                alerted_at=observed_at,
-                store=store,
-            )
-            alert_sent = True
+    thresholds_by_kind = {
+        _CAPACITY_WARN_TRIGGER_KIND: ("warning", policy.capacity_warn_percent),
+        _CAPACITY_CRITICAL_TRIGGER_KIND: (
+            "critical",
+            policy.capacity_critical_percent,
+        ),
+    }
+    if deliver_alert is not None:
+        for edge in guard.crossed_edges:
+            severity, threshold_percent = thresholds_by_kind[edge.kind]
+            try:
+                await deliver_alert(
+                    policy=alert_policy or _default_alert_policy(),
+                    subject=FailureAlertSubject(
+                        identity_label="Mount",
+                        identity=measurement.mount,
+                        url_label="Illo",
+                        url=f"{public_app_base_url()}/api/system",
+                        link_label="open system state",
+                    ),
+                    presentation=FailureAlertPresentation(
+                        title=edge.alert_title,
+                        summary=edge.alert_summary,
+                    ),
+                    error_text=(
+                        f"Storage use crossed the active policy {severity} "
+                        f"threshold of {threshold_percent}%."
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - retry the edge on the next tick
+                logger.exception("Host-capacity Slack delivery failed")
+            else:
+                await async_latch_failure_edges(
+                    replace(guard, edges=(edge,)),
+                    alerted_at=observed_at,
+                    store=store,
+                )
+                alert_sent = True
 
     return {
         "id": entry.id,
@@ -361,6 +409,7 @@ async def async_read_host_capacity(
 
 __all__ = [
     "HOST_CAPACITY_ALERT_KEY",
+    "HOST_CAPACITY_CRITICAL_ALERT_KEY",
     "HOST_CAPACITY_CHECK_TYPE",
     "HostDiskCapacity",
     "HostCapacityMeasurement",

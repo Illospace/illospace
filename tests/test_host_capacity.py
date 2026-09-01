@@ -15,6 +15,7 @@ from brain.platform.db.models.scheduler import SchedulerAlertLatch
 from brain.platform.db.models.storage_policy import StoragePolicy
 from brain.systems.host_capacity import (
     HOST_CAPACITY_ALERT_KEY,
+    HOST_CAPACITY_CRITICAL_ALERT_KEY,
     HOST_CAPACITY_CHECK_TYPE,
     HostCapacityMeasurement,
     HostDiskCapacity,
@@ -70,6 +71,18 @@ async def _add_policy(session, *, warn: int, critical: int) -> None:
         )
     )
     await session.flush()
+
+
+def _patch_capacity_sequence(monkeypatch, *pct_used: float) -> None:
+    measurements = iter(pct_used)
+
+    async def fake_measure(_workspace_root):
+        return _measurement(pct_used=next(measurements))
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_capacity",
+        fake_measure,
+    )
 
 
 async def test_measure_host_capacity_inventories_largest_workspace_consumers(
@@ -212,6 +225,198 @@ async def test_host_capacity_warn_alert_latch_fires_exactly_once_across_two_over
     assert latch is not None
     assert latch.alerted_at == datetime(2026, 8, 9, 12, 0)
     assert row_count == 2
+
+
+async def test_host_capacity_warn_to_critical_delivers_one_critical_alert(
+    session,
+    monkeypatch,
+):
+    _patch_capacity_sequence(monkeypatch, 80.0, 95.0)
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+    deliveries.clear()
+
+    result = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 11, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    critical_latch = await session.get(
+        SchedulerAlertLatch,
+        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+    )
+    assert result["alert_sent"] is True
+    assert len(deliveries) == 1
+    assert deliveries[0]["presentation"].title == "Host capacity critical"
+    assert critical_latch is not None
+
+
+async def test_host_capacity_second_consecutive_critical_tick_does_not_alert(
+    session,
+    monkeypatch,
+):
+    _patch_capacity_sequence(monkeypatch, 95.0, 95.0)
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+    deliveries.clear()
+
+    result = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 11, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    assert result["alert_sent"] is False
+    assert deliveries == []
+
+
+async def test_host_capacity_ok_clears_both_latches_and_rearms_warning(
+    session,
+    monkeypatch,
+):
+    _patch_capacity_sequence(monkeypatch, 80.0, 95.0, 60.0, 80.0)
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    for hour in (10, 11):
+        await record_host_capacity(
+            session,
+            workspace_root="/srv/illo-workspace",
+            now=datetime(2026, 9, 1, hour, 0, tzinfo=timezone.utc),
+            deliver_alert=fake_deliver,
+        )
+
+    assert await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
+    assert await session.get(
+        SchedulerAlertLatch,
+        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+    )
+
+    ok_result = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    assert ok_result["alert_sent"] is False
+    assert await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY) is None
+    assert (
+        await session.get(
+            SchedulerAlertLatch,
+            HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        )
+        is None
+    )
+
+    warning_result = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    assert warning_result["alert_sent"] is True
+    assert [item["presentation"].title for item in deliveries] == [
+        "Host capacity warning",
+        "Host capacity critical",
+        "Host capacity warning",
+    ]
+
+
+async def test_host_capacity_critical_rearms_only_after_falling_to_warning(
+    session,
+    monkeypatch,
+):
+    _patch_capacity_sequence(monkeypatch, 80.0, 95.0, 95.0, 80.0, 95.0)
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    for hour in (10, 11):
+        await record_host_capacity(
+            session,
+            workspace_root="/srv/illo-workspace",
+            now=datetime(2026, 9, 1, hour, 0, tzinfo=timezone.utc),
+            deliver_alert=fake_deliver,
+        )
+    critical_latch = await session.get(
+        SchedulerAlertLatch,
+        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+    )
+    assert critical_latch is not None
+
+    consecutive_critical = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+    assert consecutive_critical["alert_sent"] is False
+    assert (
+        await session.get(
+            SchedulerAlertLatch,
+            HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        )
+    ).alerted_at == critical_latch.alerted_at
+
+    warning_result = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+    assert warning_result["alert_sent"] is False
+    assert await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
+    assert (
+        await session.get(
+            SchedulerAlertLatch,
+            HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        )
+        is None
+    )
+
+    critical_again = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    assert critical_again["alert_sent"] is True
+    assert [item["presentation"].title for item in deliveries] == [
+        "Host capacity warning",
+        "Host capacity critical",
+        "Host capacity critical",
+    ]
 
 
 async def test_read_host_capacity_returns_live_disk_and_persisted_inventory(
