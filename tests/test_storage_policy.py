@@ -6,8 +6,6 @@ import importlib
 from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import select
@@ -23,95 +21,126 @@ from brain.systems.storage_policy import (
 )
 
 
-def test_fresh_storage_policy_seed_enables_automatic_reclamation(monkeypatch):
+class _ScalarResult:
+    def scalar_one(self):
+        return 0
+
+
+class _MigrationOperationsRecorder:
+    def __init__(self):
+        self.statements = []
+
+    def get_bind(self):
+        return self
+
+    def execute(self, statement):
+        if str(statement).lstrip().startswith("SELECT count(*)"):
+            return _ScalarResult()
+        self.statements.append(statement)
+        return None
+
+
+@pytest.mark.asyncio
+async def test_fresh_storage_policy_seed_enables_automatic_reclamation(
+    monkeypatch,
+    async_sqlite_session_factory,
+):
     migration = importlib.import_module(
         "brain.platform.db.alembic.versions.0060_storage_policies"
     )
-    engine = sa.create_engine("sqlite://")
+    session = await async_sqlite_session_factory([StoragePolicy.__table__])
+    operations = _MigrationOperationsRecorder()
+    monkeypatch.setattr(migration, "_table_exists", lambda: True)
+    monkeypatch.setattr(migration, "_index_exists", lambda _name: True)
+    monkeypatch.setattr(migration, "op", operations)
 
-    with engine.begin() as connection:
-        monkeypatch.setattr(
-            migration,
-            "op",
-            Operations(MigrationContext.configure(connection)),
-        )
+    migration.upgrade()
+    assert len(operations.statements) == 1
+    await session.execute(operations.statements[0])
 
-        migration.upgrade()
-
-        assert connection.execute(
+    assert (
+        await session.execute(
             sa.text(
                 "SELECT automatic_reclamation_allowed, rationale "
                 "FROM storage_policies WHERE is_active = TRUE"
             )
-        ).one() == (
-            1,
-            "Automatic workspace reclamation is enabled by default.",
         )
+    ).one() == (
+        1,
+        "Automatic workspace reclamation is enabled by default.",
+    )
 
 
-def test_enable_automatic_reclamation_migration_only_updates_untouched_seed(
+@pytest.mark.asyncio
+async def test_enable_automatic_reclamation_migration_only_updates_untouched_seed(
     monkeypatch,
+    async_sqlite_session_factory,
 ):
     migration = importlib.import_module(
         "brain.platform.db.alembic.versions.0065_enable_automatic_reclamation"
     )
     assert migration.revision == "0065_enable_automatic_reclamation"
     assert migration.down_revision == "0064_cycle_receipt_monitoring"
-    engine = sa.create_engine("sqlite://")
+    session = await async_sqlite_session_factory([])
     seed_rationale = "Initial policy migrated from deployed retention behavior."
 
-    with engine.begin() as connection:
-        connection.execute(
-            sa.text(
-                "CREATE TABLE storage_policies ("
-                "id INTEGER PRIMARY KEY, "
-                "automatic_reclamation_allowed BOOLEAN NOT NULL, "
-                "rationale TEXT NOT NULL, "
-                "is_active BOOLEAN NOT NULL)"
-            )
+    await session.execute(
+        sa.text(
+            "CREATE TABLE storage_policies ("
+            "id INTEGER PRIMARY KEY, "
+            "automatic_reclamation_allowed BOOLEAN NOT NULL, "
+            "rationale TEXT NOT NULL, "
+            "is_active BOOLEAN NOT NULL)"
         )
-        connection.execute(
-            sa.text(
-                "INSERT INTO storage_policies VALUES "
-                "(1, FALSE, :seed_rationale, TRUE), "
-                "(2, FALSE, 'Operator deliberately disabled reclamation.', TRUE), "
-                "(3, FALSE, :seed_rationale, FALSE)"
-            ),
-            {"seed_rationale": seed_rationale},
-        )
-        monkeypatch.setattr(
-            migration,
-            "op",
-            Operations(MigrationContext.configure(connection)),
-        )
+    )
+    await session.execute(
+        sa.text(
+            "INSERT INTO storage_policies VALUES "
+            "(1, FALSE, :seed_rationale, TRUE), "
+            "(2, FALSE, 'Operator deliberately disabled reclamation.', TRUE), "
+            "(3, FALSE, :seed_rationale, FALSE)"
+        ),
+        {"seed_rationale": seed_rationale},
+    )
+    operations = _MigrationOperationsRecorder()
+    monkeypatch.setattr(migration, "op", operations)
 
-        migration.upgrade()
-        migration.upgrade()
+    migration.upgrade()
+    migration.upgrade()
+    for statement in operations.statements:
+        await session.execute(statement)
 
-        assert connection.execute(
+    assert (
+        await session.execute(
             sa.text(
                 "SELECT id, automatic_reclamation_allowed, rationale "
                 "FROM storage_policies ORDER BY id"
             )
-        ).all() == [
-            (1, 1, "Illospace issue #876 enabled automatic reclamation."),
-            (2, 0, "Operator deliberately disabled reclamation."),
-            (3, 0, seed_rationale),
-        ]
+        )
+    ).all() == [
+        (1, 1, "Illospace issue #876 enabled automatic reclamation."),
+        (2, 0, "Operator deliberately disabled reclamation."),
+        (3, 0, seed_rationale),
+    ]
 
-        migration.downgrade()
-        migration.downgrade()
+    operations.statements.clear()
+    migration.downgrade()
+    migration.downgrade()
+    for statement in operations.statements:
+        await session.execute(statement)
 
-        assert connection.execute(
+    assert (
+        await session.execute(
             sa.text(
                 "SELECT id, automatic_reclamation_allowed, rationale "
                 "FROM storage_policies ORDER BY id"
             )
-        ).all() == [
-            (1, 0, seed_rationale),
-            (2, 0, "Operator deliberately disabled reclamation."),
-            (3, 0, seed_rationale),
-        ]
+        )
+    ).all() == [
+        (1, 0, seed_rationale),
+        (2, 0, "Operator deliberately disabled reclamation."),
+        (3, 0, seed_rationale),
+    ]
 
 
 @pytest.fixture

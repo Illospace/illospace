@@ -1,4 +1,9 @@
-"""Enable automatic workspace reclamation for the untouched seed policy."""
+"""Enable automatic workspace reclamation for the untouched seed policy.
+
+Revision ID: 0065_enable_automatic_reclamation
+Revises: 0064_cycle_receipt_monitoring
+Create Date: 2026-09-01
+"""
 
 from __future__ import annotations
 
