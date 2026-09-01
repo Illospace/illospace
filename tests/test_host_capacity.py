@@ -263,6 +263,48 @@ async def test_host_capacity_warn_to_critical_delivers_one_critical_alert(
     assert critical_latch is not None
 
 
+async def test_host_capacity_cold_critical_delivers_only_highest_severity_and_latches_both_edges(
+    session,
+    monkeypatch,
+):
+    _patch_capacity_sequence(monkeypatch, 95.0)
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        now=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
+        deliver_alert=fake_deliver,
+    )
+
+    latch_keys = set(
+        await session.scalars(
+            select(SchedulerAlertLatch.alert_key).where(
+                SchedulerAlertLatch.alert_key.in_(
+                    (
+                        HOST_CAPACITY_ALERT_KEY,
+                        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+                    )
+                )
+            )
+        )
+    )
+    assert [item["presentation"].title for item in deliveries] == [
+        "Host capacity critical",
+    ]
+    assert deliveries[0]["error_text"] == (
+        "Storage use crossed the active policy critical threshold of 90%."
+    )
+    assert latch_keys == {
+        HOST_CAPACITY_ALERT_KEY,
+        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+    }
+
+
 async def test_host_capacity_second_consecutive_critical_tick_does_not_alert(
     session,
     monkeypatch,
@@ -280,7 +322,6 @@ async def test_host_capacity_second_consecutive_critical_tick_does_not_alert(
         now=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc),
         deliver_alert=fake_deliver,
     )
-    deliveries.clear()
 
     result = await record_host_capacity(
         session,
@@ -290,7 +331,9 @@ async def test_host_capacity_second_consecutive_critical_tick_does_not_alert(
     )
 
     assert result["alert_sent"] is False
-    assert deliveries == []
+    assert [item["presentation"].title for item in deliveries] == [
+        "Host capacity critical",
+    ]
 
 
 async def test_host_capacity_ok_clears_both_latches_and_rearms_warning(
