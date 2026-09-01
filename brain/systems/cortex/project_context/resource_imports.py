@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from enum import Enum
 from pathlib import Path
 from typing import Any
 import os
@@ -14,6 +15,11 @@ from brain.systems.cortex.project_context.project_root import (
 
 
 ProjectSeedPredicate = Callable[[dict[str, Any]], bool]
+
+
+class ResourcePathAccess(str, Enum):
+    READ_ONLY = "read_only"
+    WRITE = "write"
 
 
 def clean_text(value: Any) -> str | None:
@@ -34,7 +40,13 @@ def is_managed_project_context_path(path: Path) -> bool:
     return ".illo-project-context" in path.expanduser().parts
 
 
-def should_use_existing_resource_path(existing_path: str | None, workspace_root: Path) -> Path | None:
+def should_use_existing_resource_path(
+    existing_path: str | None,
+    workspace_root: Path,
+    *,
+    access: ResourcePathAccess,
+) -> Path | None:
+    """Return an existing path without granting cross-workspace write access."""
     if not existing_path:
         return None
     path = Path(existing_path).expanduser()
@@ -42,7 +54,7 @@ def should_use_existing_resource_path(existing_path: str | None, workspace_root:
         return None
     if path_is_relative_to(path, workspace_root):
         return path
-    if is_managed_project_context_path(path):
+    if is_managed_project_context_path(path) and access is not ResourcePathAccess.READ_ONLY:
         return None
     return path
 
@@ -100,14 +112,22 @@ def backend_readable_resource_path(
 ) -> tuple[Path | None, bool]:
     for key in ("path", "local_path", "storage_path"):
         value = clean_text(resource.get(key))
-        existing_path = should_use_existing_resource_path(value, workspace_root)
+        existing_path = should_use_existing_resource_path(
+            value,
+            workspace_root,
+            access=ResourcePathAccess.READ_ONLY,
+        )
         if existing_path:
             return existing_path, True
 
     scoped_paths: list[Path] = []
     path_texts = [*_path_texts_from_uploaded_files(resource), *_path_texts_from_resource_scope(resource)]
     for value in path_texts:
-        existing_path = should_use_existing_resource_path(value, workspace_root)
+        existing_path = should_use_existing_resource_path(
+            value,
+            workspace_root,
+            access=ResourcePathAccess.READ_ONLY,
+        )
         if existing_path:
             scoped_paths.append(existing_path)
 
@@ -134,6 +154,7 @@ def _uploaded_file_import_candidates(
         source = should_use_existing_resource_path(
             clean_text(item.get("storage_path") or item.get("path") or item.get("local_path")),
             workspace_root,
+            access=ResourcePathAccess.READ_ONLY,
         )
         if not source or not source.is_file():
             continue
@@ -180,6 +201,7 @@ def project_native_import_candidates(
 
 __all__ = [
     "ProjectSeedPredicate",
+    "ResourcePathAccess",
     "backend_readable_resource_path",
     "clean_text",
     "path_is_relative_to",

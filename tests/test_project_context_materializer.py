@@ -15,6 +15,60 @@ class _ScalarRows:
         return self._rows[0] if self._rows else None
 
 
+def test_read_only_resource_path_reuses_sibling_managed_path(tmp_path):
+    from brain.systems.cortex.project_context.resource_imports import backend_readable_resource_path
+
+    sibling_path = tmp_path / "parent-worker" / ".illo-project-context" / "local" / "project"
+    sibling_path.mkdir(parents=True)
+    workspace_root = tmp_path / "child-worker"
+    workspace_root.mkdir()
+
+    existing_path, checked = backend_readable_resource_path(
+        {"path": str(sibling_path)},
+        workspace_root=workspace_root,
+    )
+
+    assert checked is True
+    assert existing_path == sibling_path
+
+
+def test_write_resource_path_rejects_sibling_but_preserves_other_path_behaviour(tmp_path):
+    from brain.systems.cortex.project_context.resource_imports import (
+        ResourcePathAccess,
+        should_use_existing_resource_path,
+    )
+
+    workspace_root = tmp_path / "child-worker"
+    own_path = workspace_root / ".illo-project-context" / "local" / "project"
+    sibling_path = tmp_path / "parent-worker" / ".illo-project-context" / "local" / "project"
+    external_path = tmp_path / "external-project"
+    missing_path = tmp_path / "missing-project"
+    for path in (own_path, sibling_path, external_path):
+        path.mkdir(parents=True)
+
+    assert should_use_existing_resource_path(
+        str(sibling_path),
+        workspace_root,
+        access=ResourcePathAccess.WRITE,
+    ) is None
+    for access in ResourcePathAccess:
+        assert should_use_existing_resource_path(
+            str(own_path),
+            workspace_root,
+            access=access,
+        ) == own_path
+        assert should_use_existing_resource_path(
+            str(external_path),
+            workspace_root,
+            access=access,
+        ) == external_path
+        assert should_use_existing_resource_path(
+            str(missing_path),
+            workspace_root,
+            access=access,
+        ) is None
+
+
 def test_project_context_materialization_result_is_ready_when_evidence_is_degraded():
     from brain.systems.cortex.project_context.materializer import ProjectContextMaterializationResult
 
