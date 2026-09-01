@@ -1067,6 +1067,145 @@ async def test_idempotent_insert_integrity_error_returns_existing_replay(session
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
 
 
+async def test_identical_body_replay_preserves_satisfied_evidence(session):
+    principal = await _seed_connection(session)
+    envelope = {
+        "origin": "codex.memory",
+        "payload": {"message": "Preserve the completed work."},
+        "idempotency_key": "codex:memory:identical",
+    }
+    first = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=envelope,
+    )
+    event = await session.get(InboundEventRow, first["event_id"])
+    assert event is not None
+    stored_outcome = {
+        "event_id": first["event_id"],
+        "run_id": "prior-run",
+        "final_answer": "The work was preserved.",
+        "evidence_status": "satisfied",
+        "mutated_target_refs": [{"kind": "thread", "id": "thread-1"}],
+    }
+    event.action_result = stored_outcome
+    await session.flush()
+
+    replay = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope=envelope,
+    )
+
+    assert replay["idempotent_replay"] is True
+    assert replay["ilo_outcome"] == stored_outcome
+    assert replay["ilo_outcome"]["evidence_status"] == "satisfied"
+    assert "replay_body_matches" not in replay
+
+
+async def test_colliding_key_with_different_body_marks_replay_mismatch(session):
+    principal = await _seed_connection(session)
+    first = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "origin": "codex.memory",
+            "payload": {"message": "Preserve run one."},
+            "idempotency_key": "codex:memory:collision",
+        },
+    )
+    event = await session.get(InboundEventRow, first["event_id"])
+    assert event is not None
+    stored_outcome = {
+        "event_id": first["event_id"],
+        "run_id": "prior-run",
+        "final_answer": "Run one was preserved.",
+        "evidence_status": "satisfied",
+        "mutated_target_refs": [{"kind": "thread", "id": "thread-1"}],
+    }
+    event.action_result = stored_outcome
+    await session.flush()
+
+    replay = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "origin": "codex.memory",
+            "payload": {"message": "Preserve run two."},
+            "idempotency_key": "codex:memory:collision",
+        },
+    )
+
+    assert replay["idempotent_replay"] is True
+    assert replay["event_id"] == first["event_id"]
+    assert replay["replay_body_matches"] is False
+    assert replay["submitted_envelope_digest"] != replay["stored_envelope_digest"]
+    assert replay["ilo_outcome"] == {
+        "evidence_status": "replay_mismatch",
+        "mutated_target_refs": [],
+        "reason": "idempotency_key_reused_with_different_body",
+    }
+    assert replay["ilo_outcome"]["evidence_status"] != "satisfied"
+    assert replay["stored_ilo_outcome"] == stored_outcome
+    assert event.normalized_payload["payload"]["message"] == "Preserve run one."
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
+
+
+async def test_integrity_error_replay_with_different_body_marks_same_mismatch(
+    session,
+    monkeypatch,
+):
+    principal = await _seed_connection(session)
+    first = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "origin": "codex.memory",
+            "payload": {"message": "Preserve race winner."},
+            "idempotency_key": "codex:memory:race-collision",
+        },
+    )
+    event = await session.get(InboundEventRow, first["event_id"])
+    assert event is not None
+    stored_outcome = {
+        "evidence_status": "satisfied",
+        "mutated_target_refs": [{"kind": "thread", "id": "thread-1"}],
+    }
+    event.action_result = stored_outcome
+    await session.flush()
+
+    original_find = inbound._find_idempotent_event
+    calls = 0
+
+    async def miss_existing_event_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        return await original_find(*args, **kwargs)
+
+    monkeypatch.setattr(inbound, "_find_idempotent_event", miss_existing_event_once)
+
+    replay = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "origin": "codex.memory",
+            "payload": {"message": "Preserve race loser."},
+            "idempotency_key": "codex:memory:race-collision",
+        },
+    )
+
+    assert calls == 2
+    assert replay["idempotent_replay"] is True
+    assert replay["replay_body_matches"] is False
+    assert replay["ilo_outcome"]["evidence_status"] == "replay_mismatch"
+    assert replay["ilo_outcome"]["mutated_target_refs"] == []
+    assert replay["stored_ilo_outcome"] == stored_outcome
+    assert replay["submitted_envelope_digest"] != replay["stored_envelope_digest"]
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
+
+
 async def test_submission_envelope_queues_headless_illo_and_replays_idempotently(session):
     principal = await _seed_connection(session)
     envelope = {
