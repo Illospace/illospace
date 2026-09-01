@@ -124,8 +124,6 @@ def upgrade() -> None:
     active_count = op.get_bind().execute(
         sa.text("SELECT count(*) FROM storage_policies WHERE is_active = TRUE")
     ).scalar_one()
-    # This guarded seed only runs for fresh databases. Changing its defaults
-    # does not mutate deployments where this migration has already run.
     if active_count == 0:
         op.execute(
             sa.text(
@@ -146,8 +144,8 @@ def upgrade() -> None:
                     24,
                     80,
                     90,
-                    TRUE,
-                    'Automatic workspace reclamation is enabled by default.',
+                    FALSE,
+                    'Initial policy migrated from deployed retention behavior.',
                     'system',
                     TRUE
                 )

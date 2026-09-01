@@ -299,6 +299,11 @@ async def manage_headless_worker_workspaces(
         min(int(report_limit), MAX_WORKSPACE_REPORT_LIMIT),
     )
     policy = await async_get_storage_policy(session)
+    reclamation_withheld = (
+        action == "reclaim"
+        and automatic
+        and not policy.automatic_reclamation_allowed
+    )
     active_retention = (
         policy.finished_workspace_retention if retention is None else retention
     )
@@ -405,11 +410,15 @@ async def manage_headless_worker_workspaces(
             )
         )
 
-    if action == "reclaim" and automatic and not policy.automatic_reclamation_allowed:
+    if reclamation_withheld:
         result["reclamation_skipped_reason"] = (
             "automatic_reclamation_disabled_by_policy"
         )
-        log.info("Workspace GC skipped because automatic reclamation is disabled")
+        log.info(
+            "Workspace GC inventoried %d reclaimable workspaces; "
+            "reclamation withheld by policy (automatic reclamation disabled)",
+            sum(1 for item in measured if item.reclaimable),
+        )
     elif action == "reclaim":
         reclaimable = sorted(
             (item for item in measured if item.reclaimable),

@@ -16,6 +16,8 @@ down_revision = "0064_cycle_receipt_monitoring"
 branch_labels = None
 depends_on = None
 
+# Exact rationale literal written by the guarded seed in 0060_storage_policies;
+# it is the key that tells an untouched seed row from an operator edit.
 _SEED_RATIONALE = "Initial policy migrated from deployed retention behavior."
 _ENABLED_RATIONALE = "Illospace issue #876 enabled automatic reclamation."
 
