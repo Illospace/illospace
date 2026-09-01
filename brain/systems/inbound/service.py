@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.coercion import optional_text
+from brain.kernel.common.serialization import stable_digest
 from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.idea import Idea, IdeaThread
@@ -184,7 +185,10 @@ async def submit_inbound_envelope(
         )
     existing = await _find_idempotent_event(session, context, normalized.get("idempotency_key"))
     if existing is not None:
-        return _result_from_event(existing, idempotent_replay=True)
+        return _result_from_replay(
+            existing,
+            submitted_envelope=normalized,
+        )
 
     event = InboundEventRow(
         org_id=context.org_id,
@@ -203,7 +207,10 @@ async def submit_inbound_envelope(
     )
     event, idempotent_replay = await _store_inbound_event(session, context, event)
     if idempotent_replay:
-        return _result_from_event(event, idempotent_replay=True)
+        return _result_from_replay(
+            event,
+            submitted_envelope=normalized,
+        )
     if alert_signature is not None:
         original_event = await _find_recent_alert_signature_event(
             session,
@@ -1495,7 +1502,11 @@ def _finalize_event(
     event.processed_at = utcnow()
 
 
-def _result_from_event(event: InboundEventRow, *, idempotent_replay: bool = False) -> dict[str, Any]:
+def _result_from_event(
+    event: InboundEventRow,
+    *,
+    idempotent_replay: bool = False,
+) -> dict[str, Any]:
     outcome = _with_thread_links(event.action_result or {})
     return {
         "status": event.status,
@@ -1506,6 +1517,38 @@ def _result_from_event(event: InboundEventRow, *, idempotent_replay: bool = Fals
         "confidence": event.confidence,
         "idempotent_replay": idempotent_replay,
         "error": event.error,
+    }
+
+
+def _result_from_replay(
+    event: InboundEventRow,
+    *,
+    submitted_envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    # "Materially identical" means the complete normalized envelope matches.
+    # Ingress context is excluded because it is transport metadata stored outside
+    # the envelope; normalization does not inject timestamps or other volatile data.
+    stored_envelope = event.normalized_payload or event.envelope or {}
+    submitted_digest = stable_digest(submitted_envelope)
+    stored_digest = stable_digest(stored_envelope)
+    replay_body_matches = submitted_digest == stored_digest
+    result = _result_from_event(event, idempotent_replay=True)
+    if replay_body_matches:
+        return {
+            **result,
+            "replay_body_matches": True,
+        }
+    return {
+        **result,
+        "replay_body_matches": False,
+        "submitted_envelope_digest": submitted_digest,
+        "stored_envelope_digest": stored_digest,
+        "stored_ilo_outcome": result["ilo_outcome"],
+        "ilo_outcome": {
+            "evidence_status": "replay_mismatch",
+            "mutated_target_refs": [],
+            "reason": "idempotency_key_reused_with_different_body",
+        },
     }
 
 
