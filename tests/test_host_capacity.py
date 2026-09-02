@@ -21,6 +21,7 @@ from brain.systems.host_capacity import (
     HostCapacityMeasurement,
     HostDiskCapacity,
     async_read_host_capacity,
+    measure_host_capacities,
     measure_host_capacity,
     record_host_capacity,
 )
@@ -44,17 +45,30 @@ async def session(async_sqlite_session_factory):
     )
 
 
-def _measurement(*, pct_used: float) -> HostCapacityMeasurement:
+def _measurement(
+    *,
+    pct_used: float,
+    mount: str = "/srv/illo-workspace",
+    include_inventory: bool = True,
+) -> HostCapacityMeasurement:
     return HostCapacityMeasurement(
-        mount="/srv/illo-workspace",
+        mount=mount,
         pct_used=pct_used,
         bytes_free=49_000_000_000,
         bytes_total=1_800_000_000_000,
         top_consumers=(
-            {"path": "ideas", "bytes_used": 700_000_000_000},
-            {"path": "uploads", "bytes_used": 300_000_000_000},
+            (
+                {"path": "ideas", "bytes_used": 700_000_000_000},
+                {"path": "uploads", "bytes_used": 300_000_000_000},
+            )
+            if include_inventory
+            else ()
         ),
     )
+
+
+def _latch_key(base_key: str, mount: str = "/srv/illo-workspace") -> str:
+    return f"{base_key}:{mount}"
 
 
 async def _add_policy(
@@ -83,11 +97,11 @@ async def _add_policy(
 def _patch_capacity_sequence(monkeypatch, *pct_used: float) -> None:
     measurements = iter(pct_used)
 
-    async def fake_measure(_workspace_root):
-        return _measurement(pct_used=next(measurements))
+    async def fake_measure(_workspace_root, _monitored_paths):
+        return (_measurement(pct_used=next(measurements)),)
 
     monkeypatch.setattr(
-        "brain.systems.host_capacity.async_measure_host_capacity",
+        "brain.systems.host_capacity.async_measure_host_capacities",
         fake_measure,
     )
 
@@ -153,11 +167,11 @@ async def test_record_host_capacity_uses_policy_thresholds_and_persists_row_shap
     session,
     monkeypatch,
 ):
-    async def fake_measure(_workspace_root):
-        return _measurement(pct_used=74.2)
+    async def fake_measure(_workspace_root, _monitored_paths):
+        return (_measurement(pct_used=74.2),)
 
     monkeypatch.setattr(
-        "brain.systems.host_capacity.async_measure_host_capacity",
+        "brain.systems.host_capacity.async_measure_host_capacities",
         fake_measure,
     )
     await _add_policy(session, warn=73, critical=91)
@@ -189,12 +203,196 @@ async def test_record_host_capacity_uses_policy_thresholds_and_persists_row_shap
     }
 
 
+async def test_two_distinct_mounts_each_produce_a_capacity_row(
+    session,
+    monkeypatch,
+):
+    async def fake_measure(_workspace_root, _monitored_paths):
+        return (
+            _measurement(pct_used=61.0),
+            _measurement(pct_used=42.0, mount="/", include_inventory=False),
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_capacities",
+        fake_measure,
+    )
+    await _add_policy(session, warn=70, critical=90)
+
+    result = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        monitored_paths={"/", "/srv/illo-workspace"},
+        deliver_alert=None,
+    )
+    rows = list(await session.scalars(select(MemoryHealthLog)))
+
+    assert {row.details["mount"] for row in rows} == {
+        "/",
+        "/srv/illo-workspace",
+    }
+    assert len(rows) == 2
+    assert [mount["details"]["mount"] for mount in result["mounts"]] == [
+        "/srv/illo-workspace",
+        "/",
+    ]
+    root_row = next(row for row in rows if row.details["mount"] == "/")
+    assert root_row.details["top_consumers"] == []
+    assert root_row.details["inventory_scan_errors"] == []
+
+
+async def test_paths_on_same_mount_produce_one_row_and_one_alert(
+    session,
+    monkeypatch,
+):
+    shared = _measurement(pct_used=80.0, mount="/shared")
+
+    def fake_workspace_measurement(_workspace_root, *, top_consumer_limit=10):
+        assert top_consumer_limit == 10
+        return shared
+
+    def fake_disk_measurement(_path):
+        return HostDiskCapacity(
+            mount="/shared",
+            pct_used=80.0,
+            bytes_free=shared.bytes_free,
+            bytes_total=shared.bytes_total,
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.measure_host_capacity",
+        fake_workspace_measurement,
+    )
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.measure_host_disk_capacity",
+        fake_disk_measurement,
+    )
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    result = await record_host_capacity(
+        session,
+        workspace_root="/workspaces",
+        monitored_paths={"/", "/workspaces", "/another-path"},
+        deliver_alert=fake_deliver,
+    )
+    row_count = await session.scalar(
+        select(func.count()).select_from(MemoryHealthLog)
+    )
+
+    assert len(measure_host_capacities("/workspaces", {"/", "/another-path"})) == 1
+    assert row_count == 1
+    assert len(result["mounts"]) == 1
+    assert len(deliveries) == 1
+    assert deliveries[0]["subject"].identity == "/shared"
+
+
+async def test_critical_mount_alerts_while_other_mount_warn_is_latched(
+    session,
+    monkeypatch,
+):
+    ticks = iter(
+        (
+            (
+                _measurement(pct_used=80.0),
+                _measurement(pct_used=60.0, mount="/", include_inventory=False),
+            ),
+            (
+                _measurement(pct_used=80.0),
+                _measurement(pct_used=95.0, mount="/", include_inventory=False),
+            ),
+        )
+    )
+
+    async def fake_measure(_workspace_root, _monitored_paths):
+        return next(ticks)
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_capacities",
+        fake_measure,
+    )
+    await _add_policy(session, warn=70, critical=90)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        deliver_alert=fake_deliver,
+    )
+    second = await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        deliver_alert=fake_deliver,
+    )
+
+    assert [delivery["presentation"].title for delivery in deliveries] == [
+        "Host capacity warning",
+        "Host capacity critical",
+    ]
+    assert [delivery["subject"].identity for delivery in deliveries] == [
+        "/srv/illo-workspace",
+        "/",
+    ]
+    assert [mount["alert_sent"] for mount in second["mounts"]] == [False, True]
+    assert await session.get(
+        SchedulerAlertLatch,
+        _latch_key(HOST_CAPACITY_ALERT_KEY),
+    )
+    assert await session.get(
+        SchedulerAlertLatch,
+        _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY, "/"),
+    )
+
+
+async def test_root_exhaustion_alerts_when_workspace_is_at_95_9_percent(
+    session,
+    monkeypatch,
+):
+    async def fake_measure(_workspace_root, _monitored_paths):
+        return (
+            _measurement(pct_used=95.9),
+            _measurement(pct_used=100.0, mount="/", include_inventory=False),
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_capacities",
+        fake_measure,
+    )
+    await _add_policy(session, warn=90, critical=99)
+    deliveries = []
+
+    async def fake_deliver(**kwargs):
+        deliveries.append(kwargs)
+
+    await record_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        deliver_alert=fake_deliver,
+    )
+    rows = list(await session.scalars(select(MemoryHealthLog)))
+    root_row = next(row for row in rows if row.details["mount"] == "/")
+
+    assert root_row.status == "critical"
+    assert root_row.details["pct_used"] == 100.0
+    assert any(
+        delivery["subject"].identity == "/"
+        and delivery["presentation"].title == "Host capacity critical"
+        for delivery in deliveries
+    )
+
+
 async def test_host_capacity_warn_alert_latch_fires_exactly_once_across_two_over_threshold_ticks(
     session,
     monkeypatch,
 ):
-    async def fake_measure(_workspace_root):
-        return _measurement(pct_used=88.0)
+    async def fake_measure(_workspace_root, _monitored_paths):
+        return (_measurement(pct_used=88.0),)
 
     deliveries = []
 
@@ -202,7 +400,7 @@ async def test_host_capacity_warn_alert_latch_fires_exactly_once_across_two_over
         deliveries.append(kwargs)
 
     monkeypatch.setattr(
-        "brain.systems.host_capacity.async_measure_host_capacity",
+        "brain.systems.host_capacity.async_measure_host_capacities",
         fake_measure,
     )
     await _add_policy(session, warn=70, critical=90)
@@ -220,7 +418,10 @@ async def test_host_capacity_warn_alert_latch_fires_exactly_once_across_two_over
         deliver_alert=fake_deliver,
     )
 
-    latch = await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
+    latch = await session.get(
+        SchedulerAlertLatch,
+        _latch_key(HOST_CAPACITY_ALERT_KEY),
+    )
     row_count = await session.scalar(
         select(func.count()).select_from(MemoryHealthLog)
     )
@@ -273,7 +474,7 @@ async def test_unhealthy_capacity_with_reclamation_disabled_alerts_once_and_latc
 
     latch = await session.get(
         SchedulerAlertLatch,
-        HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY,
+        _latch_key(HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY),
     )
     assert ok["alert_sent"] is False
     assert first_unhealthy["alert_sent"] is True
@@ -314,7 +515,7 @@ async def test_host_capacity_warn_to_critical_delivers_one_critical_alert(
 
     critical_latch = await session.get(
         SchedulerAlertLatch,
-        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
     )
     assert result["alert_sent"] is True
     assert len(deliveries) == 1
@@ -345,8 +546,8 @@ async def test_host_capacity_cold_critical_delivers_only_highest_severity_and_la
             select(SchedulerAlertLatch.alert_key).where(
                 SchedulerAlertLatch.alert_key.in_(
                     (
-                        HOST_CAPACITY_ALERT_KEY,
-                        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+                        _latch_key(HOST_CAPACITY_ALERT_KEY),
+                        _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
                     )
                 )
             )
@@ -359,8 +560,8 @@ async def test_host_capacity_cold_critical_delivers_only_highest_severity_and_la
         "Storage use crossed the active policy critical threshold of 90%."
     )
     assert latch_keys == {
-        HOST_CAPACITY_ALERT_KEY,
-        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        _latch_key(HOST_CAPACITY_ALERT_KEY),
+        _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
     }
 
 
@@ -414,10 +615,13 @@ async def test_host_capacity_ok_clears_both_latches_and_rearms_warning(
             deliver_alert=fake_deliver,
         )
 
-    assert await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
     assert await session.get(
         SchedulerAlertLatch,
-        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        _latch_key(HOST_CAPACITY_ALERT_KEY),
+    )
+    assert await session.get(
+        SchedulerAlertLatch,
+        _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
     )
 
     ok_result = await record_host_capacity(
@@ -428,11 +632,17 @@ async def test_host_capacity_ok_clears_both_latches_and_rearms_warning(
     )
 
     assert ok_result["alert_sent"] is False
-    assert await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY) is None
     assert (
         await session.get(
             SchedulerAlertLatch,
-            HOST_CAPACITY_CRITICAL_ALERT_KEY,
+            _latch_key(HOST_CAPACITY_ALERT_KEY),
+        )
+        is None
+    )
+    assert (
+        await session.get(
+            SchedulerAlertLatch,
+            _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
         )
         is None
     )
@@ -472,7 +682,7 @@ async def test_host_capacity_critical_rearms_only_after_falling_to_warning(
         )
     critical_latch = await session.get(
         SchedulerAlertLatch,
-        HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
     )
     assert critical_latch is not None
 
@@ -486,7 +696,7 @@ async def test_host_capacity_critical_rearms_only_after_falling_to_warning(
     assert (
         await session.get(
             SchedulerAlertLatch,
-            HOST_CAPACITY_CRITICAL_ALERT_KEY,
+            _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
         )
     ).alerted_at == critical_latch.alerted_at
 
@@ -497,11 +707,14 @@ async def test_host_capacity_critical_rearms_only_after_falling_to_warning(
         deliver_alert=fake_deliver,
     )
     assert warning_result["alert_sent"] is False
-    assert await session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
+    assert await session.get(
+        SchedulerAlertLatch,
+        _latch_key(HOST_CAPACITY_ALERT_KEY),
+    )
     assert (
         await session.get(
             SchedulerAlertLatch,
-            HOST_CAPACITY_CRITICAL_ALERT_KEY,
+            _latch_key(HOST_CAPACITY_CRITICAL_ALERT_KEY),
         )
         is None
     )
@@ -588,6 +801,61 @@ async def test_read_host_capacity_returns_live_disk_and_persisted_inventory(
         "critical_percent": 91,
     }
     assert [point["pct_used"] for point in result["trend"]] == [74.0, 62.0]
+
+
+async def test_read_host_capacity_keeps_workspace_inventory_when_root_row_is_latest(
+    session,
+    monkeypatch,
+):
+    await _add_policy(session, warn=73, critical=91)
+    session.add_all(
+        [
+            MemoryHealthLog(
+                check_type=HOST_CAPACITY_CHECK_TYPE,
+                status="warn",
+                details=_measurement(pct_used=75.0).details(),
+                created_at=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+            ),
+            MemoryHealthLog(
+                check_type=HOST_CAPACITY_CHECK_TYPE,
+                status="critical",
+                details=_measurement(
+                    pct_used=100.0,
+                    mount="/",
+                    include_inventory=False,
+                ).details(),
+                created_at=datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    await session.flush()
+
+    async def fake_disk(_workspace_root):
+        return HostDiskCapacity(
+            mount="/srv/illo-workspace",
+            pct_used=75.5,
+            bytes_free=48_000_000_000,
+            bytes_total=1_800_000_000_000,
+        )
+
+    monkeypatch.setattr(
+        "brain.systems.host_capacity.async_measure_host_disk_capacity",
+        fake_disk,
+    )
+
+    result = await async_read_host_capacity(
+        session,
+        workspace_root="/srv/illo-workspace",
+        limit=1,
+    )
+
+    assert [point["mount"] for point in result["trend"]] == ["/"]
+    assert result["current"]["top_consumers"] == list(
+        _measurement(pct_used=75.0).top_consumers
+    )
+    assert result["current"]["inventory_observed_at"] == (
+        "2026-09-01T12:00:00+00:00"
+    )
 
 
 async def test_read_host_capacity_refreshes_inventory_only_when_requested(
