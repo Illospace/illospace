@@ -632,6 +632,7 @@ async def _handle_create_github_issue(
     body: str | None = None,
     labels: list[str] | str | None = None,
     assignees: list[str] | str | None = None,
+    assignee_rationale: str | None = None,
     token_secret_key: str | None = None,
     origin_ref: str | None = None,
 ) -> str:
@@ -656,6 +657,9 @@ async def _handle_create_github_issue(
         or _origin_ref_from_context()
     )
     issue_body = _body_with_origin_ref(body, resolved_origin_ref)
+    requested_assignees = _string_list(assignees)
+    clean_assignee_rationale = _clean(assignee_rationale)
+    effective_assignees = requested_assignees if clean_assignee_rationale else []
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
@@ -684,7 +688,7 @@ async def _handle_create_github_issue(
                 title=clean_title,
                 body=issue_body,
                 labels=_string_list(labels),
-                assignees=_string_list(assignees),
+                assignees=effective_assignees,
                 token=candidate["token"],
             )
         except GitHubConnectorError as exc:
@@ -703,6 +707,10 @@ async def _handle_create_github_issue(
             })
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
+        if requested_assignees:
+            payload["assignee_gate"] = "justified" if clean_assignee_rationale else "unjustified"
+            if not clean_assignee_rationale:
+                payload["assignees_dropped"] = requested_assignees
         # Surface the exact Vault key that authored the public issue so the audit
         # manifest and any human-facing note record the identity used.
         payload["token_key_name"] = candidate.get("key_name")

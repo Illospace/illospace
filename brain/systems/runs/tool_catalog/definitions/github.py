@@ -172,7 +172,15 @@ GITHUB_TOOLS = [
                 "assignees": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional GitHub login handles to assign.",
+                    "description": (
+                        "Optional GitHub login handles to assign. assignee_rationale is required. "
+                        "Unassigned is the correct fallback when ownership is unclear, evidence "
+                        "is missing, or playbooks conflict."
+                    ),
+                },
+                "assignee_rationale": {
+                    "type": "string",
+                    "description": "Required when assignees are supplied: concise routing evidence.",
                 },
                 "origin_ref": {
                     "type": "string",
