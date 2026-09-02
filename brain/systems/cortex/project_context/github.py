@@ -331,16 +331,6 @@ def _label_payloads(labels: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _github_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-
-
 def _assignment_provenance(issue: dict[str, Any], timeline: list[Any] | None) -> str:
     if not issue.get("assignees"):
         return "none"
@@ -349,7 +339,7 @@ def _assignment_provenance(issue: dict[str, Any], timeline: list[Any] | None) ->
 
     creator = issue.get("user")
     creator_login = creator.get("login") if isinstance(creator, dict) else None
-    issue_created_at = _github_timestamp(issue.get("created_at"))
+    issue_created_at = _github_datetime(issue.get("created_at"))
     assigned_events = [
         event
         for event in timeline
@@ -364,7 +354,7 @@ def _assignment_provenance(issue: dict[str, Any], timeline: list[Any] | None) ->
     for event in assigned_events:
         actor = event.get("actor")
         actor_login = actor.get("login") if isinstance(actor, dict) else None
-        event_created_at = _github_timestamp(event.get("created_at"))
+        event_created_at = _github_datetime(event.get("created_at"))
         if not creator_login or not actor_login or issue_created_at is None or event_created_at is None:
             return "human"
         elapsed_seconds = (event_created_at - issue_created_at).total_seconds()
@@ -451,7 +441,7 @@ async def _async_issue_timeline_or_none(
         return None
     try:
         return await _async_issue_timeline(client, slug, issue_number, token=token)
-    except Exception:
+    except GitHubConnectorError:
         logger.warning(
             "Could not read assignment timeline for %s#%s.",
             slug,
@@ -1317,7 +1307,6 @@ async def async_list_repo_issues(
     limit: int = 30,
     cursor: str | None = None,
     body_limit: int = 1000,
-    include_assignment_provenance: bool = False,
 ) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
@@ -1365,27 +1354,12 @@ async def async_list_repo_issues(
         next_position = {"page": page, "index": page_index + max_items}
     elif len(raw_items) == GITHUB_ITEM_LIMIT:
         next_position = {"page": page + 1, "index": 0}
-    assignment_timelines: list[list[Any] | None] = [None] * len(selected)
-    if include_assignment_provenance:
-        async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
-            for index, item in enumerate(selected):
-                if isinstance(item, dict) and item.get("assignees"):
-                    assignment_timelines[index] = await _async_issue_timeline_or_none(
-                        client,
-                        slug,
-                        item,
-                        token=token,
-                    )
     return {
         "repo": slug,
         "state": params["state"],
         "issues": [
-            _issue_payload(
-                item,
-                body_limit=body_limit,
-                assignment_timeline=assignment_timelines[index],
-            )
-            for index, item in enumerate(selected)
+            _issue_payload(item, body_limit=body_limit)
+            for item in selected
             if isinstance(item, dict)
         ],
         "included_pull_requests": include_pull_requests,

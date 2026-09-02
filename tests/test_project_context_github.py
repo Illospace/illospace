@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from brain.systems.cortex.project_context.github import _issue_payload, async_get_issue
+from brain.contracts.github import GitHubConnectorError
+from brain.systems.cortex.project_context.github import (
+    _async_issue_timeline_or_none,
+    _issue_payload,
+    async_get_issue,
+)
 from brain.systems.knowledge.connectors.github import _resource_repositories
 
 
@@ -143,7 +148,12 @@ async def test_get_issue_fetches_timeline_when_assignment_provenance_is_enabled(
 
 @pytest.mark.asyncio
 async def test_get_issue_timeline_failure_keeps_payload_and_reports_unknown():
-    request = AsyncMock(side_effect=[_assigned_issue(), RuntimeError("timeline unavailable")])
+    request = AsyncMock(
+        side_effect=[
+            _assigned_issue(),
+            GitHubConnectorError(status_code=502, message="timeline unavailable"),
+        ]
+    )
     with patch("brain.systems.cortex.project_context.github._async_request", new=request):
         result = await async_get_issue(
             "acme/widgets",
@@ -153,3 +163,33 @@ async def test_get_issue_timeline_failure_keeps_payload_and_reports_unknown():
 
     assert result["issue"]["number"] == 42
     assert result["issue"]["assignment_provenance"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_issue_timeline_or_none_only_swallows_github_connector_errors():
+    connector_error = GitHubConnectorError(status_code=502, message="timeline unavailable")
+    with patch(
+        "brain.systems.cortex.project_context.github._async_issue_timeline",
+        new=AsyncMock(side_effect=connector_error),
+    ):
+        result = await _async_issue_timeline_or_none(
+            AsyncMock(),
+            "acme/widgets",
+            _assigned_issue(),
+            token=None,
+        )
+
+    assert result is None
+
+    unexpected_error = RuntimeError("unexpected defect")
+    with patch(
+        "brain.systems.cortex.project_context.github._async_issue_timeline",
+        new=AsyncMock(side_effect=unexpected_error),
+    ):
+        with pytest.raises(RuntimeError, match="unexpected defect"):
+            await _async_issue_timeline_or_none(
+                AsyncMock(),
+                "acme/widgets",
+                _assigned_issue(),
+                token=None,
+            )
