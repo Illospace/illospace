@@ -18,7 +18,6 @@ async def run() -> dict[str, Any]:
         return await record_host_capacity(
             uow.session,  # type: ignore[arg-type]
             workspace_root=workspace_root,
-            monitored_paths={"/", workspace_root},
         )
 
 
