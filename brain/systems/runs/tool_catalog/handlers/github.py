@@ -21,6 +21,7 @@ from brain.systems.cortex.project_context.github import (
     async_add_repo_sub_issue,
     async_create_repo_issue,
     async_grep_repo,
+    async_get_issue,
     async_get_repo_issue_parent,
     async_get_issue_closure_info,
     async_get_pull_request_deploy_info,
@@ -345,6 +346,7 @@ async def _read_with_token(
     base: str | None,
     limit: int,
     token: str | None,
+    issue_number: int | None,
     pull_number: int | None,
     sha: str | None,
     cursor: str | None,
@@ -373,6 +375,13 @@ async def _read_with_token(
             include_pull_requests=bool(include_pull_requests),
             limit=_limit(limit),
             cursor=cursor,
+        )
+    if action in {"get_issue", "issue"}:
+        return await async_get_issue(
+            repo_slug,
+            int(issue_number or 0),
+            token=token,
+            include_assignment_provenance=True,
         )
     if action in {"list_pull_requests", "pull_requests", "prs"}:
         return await async_list_repo_pull_requests(
@@ -449,6 +458,7 @@ async def _handle_read_github_source(
     include_pull_requests: bool = False,
     head: str | None = None,
     base: str | None = None,
+    issue_number: int | None = None,
     pull_number: int | None = None,
     number: int | None = None,
     sha: str | None = None,
@@ -473,6 +483,8 @@ async def _handle_read_github_source(
         "get_repo",
         "list_issues",
         "issues",
+        "get_issue",
+        "issue",
         "list_pull_requests",
         "pull_requests",
         "prs",
@@ -492,10 +504,19 @@ async def _handle_read_github_source(
     if clean_action not in valid_actions:
         return json.dumps({
             "error": (
-                "read_github_source action must be get_repo, list_issues, list_pull_requests, "
+                "read_github_source action must be get_repo, get_issue, list_issues, list_pull_requests, "
                 "get_pull_request, pull_request_checks, get_counts, get_file, list_tree, or grep"
             )
         })
+    if clean_action in {"get_issue", "issue"}:
+        try:
+            clean_issue_number = int(issue_number or 0)
+        except (TypeError, ValueError):
+            clean_issue_number = 0
+        if clean_issue_number < 1:
+            return json.dumps({"error": "get_issue requires a positive issue_number"})
+    else:
+        clean_issue_number = None
     if clean_action in {"pull_request", "get_pull_request", "pr"}:
         try:
             clean_pull_number = int(number or pull_number or 0)
@@ -587,6 +608,7 @@ async def _handle_read_github_source(
                 base=base,
                 limit=limit,
                 token=candidate["token"],
+                issue_number=clean_issue_number,
                 pull_number=clean_pull_number,
                 sha=clean_sha,
                 cursor=_clean(cursor),
@@ -632,6 +654,7 @@ async def _handle_create_github_issue(
     body: str | None = None,
     labels: list[str] | str | None = None,
     assignees: list[str] | str | None = None,
+    assignee_rationale: str | None = None,
     token_secret_key: str | None = None,
     origin_ref: str | None = None,
 ) -> str:
@@ -656,6 +679,9 @@ async def _handle_create_github_issue(
         or _origin_ref_from_context()
     )
     issue_body = _body_with_origin_ref(body, resolved_origin_ref)
+    requested_assignees = _string_list(assignees)
+    clean_assignee_rationale = _clean(assignee_rationale)
+    effective_assignees = requested_assignees if clean_assignee_rationale else []
 
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
@@ -684,7 +710,7 @@ async def _handle_create_github_issue(
                 title=clean_title,
                 body=issue_body,
                 labels=_string_list(labels),
-                assignees=_string_list(assignees),
+                assignees=effective_assignees,
                 token=candidate["token"],
             )
         except GitHubConnectorError as exc:
@@ -703,6 +729,10 @@ async def _handle_create_github_issue(
             })
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
+        if requested_assignees:
+            payload["assignee_gate"] = "justified" if clean_assignee_rationale else "unjustified"
+            if not clean_assignee_rationale:
+                payload["assignees_dropped"] = requested_assignees
         # Surface the exact Vault key that authored the public issue so the audit
         # manifest and any human-facing note record the identity used.
         payload["token_key_name"] = candidate.get("key_name")

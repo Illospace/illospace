@@ -389,9 +389,13 @@ a human action. This never-merge rule is absolute for staging→main.
 Route by GitHub signal first, then by work class — area prose is the last
 resort, not the first.
 
-- **An explicit GitHub assignee always wins** — on issues AND PRs — over every
-  heuristic below. If you think the assignment is wrong, recommend a change —
-  never override it.
+- **An explicit human GitHub assignee always wins** — on issues AND PRs — over
+  every heuristic below. For issues, obtain `assignment_provenance` with the
+  `github` tool using `action="get_issue"`. A verdict of
+  `automation_at_filing` is Illo's earlier guess, not a human claim; re-derive
+  the assignee from the ownership rules exactly as if the issue were unassigned.
+  If you think a human assignment is wrong, recommend a change — never override
+  it.
 - **Unassigned PRs are owned by their GitHub author** when the author is a
   human. The team does not do peer review, so never assign a PR to a
   reviewer, a "review owner", or a "coordination owner", and never put
@@ -482,11 +486,14 @@ fix any that fail:
    closed — never listed as active work. Exception: an alert-linked ticket
    whose fix is only on staging or is not verified is NOT cleanup — keep it
    active per **Deploy State on Read**.
-2. **Owner gate:** every PR shows its GitHub assignee when set, else its human
+2. **Owner gate:** every PR shows its human GitHub assignee when set, else its human
    author, with an evidence-based next action (fix the named failing check /
    merge when green / close when obsolete) and no reviewer or coordination
-   owner attached. Every issue owner is the GitHub assignee, or the work-class
-   routing only if unassigned. No customer-generation issue is pre-assigned.
+   owner attached. Every issue owner is the human GitHub assignee, or the
+   work-class routing if unassigned. Read `assignment_provenance` with the
+   `github` tool using `action="get_issue"`; `automation_at_filing` is Illo's
+   earlier guess, not a human claim, so re-derive ownership exactly as if the
+   issue were unassigned. No customer-generation issue is pre-assigned.
 3. **Dedup gate:** no two items describe the same underlying problem under
    different issue numbers.
 4. **Deploy-state gate:** no expected-noise staging re-fire re-pings an owner
