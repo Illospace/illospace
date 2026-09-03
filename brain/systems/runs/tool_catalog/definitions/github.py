@@ -20,6 +20,7 @@ GITHUB_TOOLS = [
                     "type": "string",
                     "enum": [
                         "get_repo",
+                        "get_issue",
                         "list_issues",
                         "list_pull_requests",
                         "get_pull_request",
@@ -31,7 +32,11 @@ GITHUB_TOOLS = [
                     ],
                     "default": "list_issues",
                     "description": (
-                        "Which GitHub source data to read. get_pull_request includes mergeability, CI "
+                        "Which GitHub source data to read. get_issue reads one issue by exact number and "
+                        "returns assignment_provenance: none means no assignee, unknown means provenance could "
+                        "not be determined, human means a human assignment, and automation_at_filing means the "
+                        "filing actor assigned it within seconds of creation, so it is not a human assignment. "
+                        "get_pull_request includes mergeability, CI "
                         "check runs, and combined status; pull_request_checks reads CI for a head SHA; "
                         "get_counts returns exact issue and PR counts for the requested state. get_file, "
                         "list_tree, and grep require ref; grep is literal rather than regular-expression search."
@@ -67,6 +72,11 @@ GITHUB_TOOLS = [
                     "type": "integer",
                     "minimum": 1,
                     "description": "Pull request number required by get_pull_request.",
+                },
+                "issue_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Issue number required by get_issue.",
                 },
                 "number": {
                     "type": "integer",
