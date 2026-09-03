@@ -124,6 +124,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },
+    "tests/test_storage_policy_migration.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
     "tests/test_workspace_apps_service.py": {
         "sqlalchemy_create_engine",
         "sqlalchemy_sync_session",

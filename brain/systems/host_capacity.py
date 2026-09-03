@@ -1,12 +1,13 @@
-"""Measure host storage, persist its trend, and guard the warning edge."""
+"""Measure host storage, persist its trend, and alert once per capacity edge."""
 from __future__ import annotations
 
 import logging
 import os
 import shutil
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -44,7 +45,89 @@ logger = logging.getLogger(__name__)
 
 HOST_CAPACITY_CHECK_TYPE = "host_capacity"
 HOST_CAPACITY_ALERT_KEY = "host_capacity_warn"
-_CAPACITY_WARN_TRIGGER_KIND = FailureGuardTriggerKind(HOST_CAPACITY_ALERT_KEY)
+HOST_CAPACITY_CRITICAL_ALERT_KEY = "host_capacity_critical"
+HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY = (
+    "host_capacity_reclamation_disabled"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _CapacityAlert:
+    """One latched host-capacity alert and its Slack presentation."""
+
+    alert_key: str
+    alert_title: str
+    error_text: Callable[[StoragePolicyValues], str]
+
+    def trigger_kind(self, mount: str) -> FailureGuardTriggerKind:
+        """Return this alert's scheduler-latch identity for one mount."""
+        scoped_key = f"{self.alert_key}:{mount}"
+        if len(scoped_key) <= 80:
+            return FailureGuardTriggerKind(scoped_key)
+        mount_digest = sha256(mount.encode("utf-8")).hexdigest()[:16]
+        digest_suffix = f":{mount_digest}"
+        mount_length = 80 - len(self.alert_key) - 1 - len(digest_suffix)
+        return FailureGuardTriggerKind(
+            f"{self.alert_key}:{mount[:mount_length]}{digest_suffix}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _CapacityLevel(_CapacityAlert):
+    """One rung of the capacity ladder.
+
+    Rank is the position in ``_CAPACITY_LEVELS``; ``status`` is the durable
+    memory-health status written when this is the highest crossed rung.
+    """
+
+    status: str
+    threshold_percent: Callable[[StoragePolicyValues], int]
+
+
+# Ordered lowest to highest. Adding a rung is one row here: status, thresholds
+# and the alert ladder all derive from this tuple.
+_CAPACITY_LEVELS: tuple[_CapacityLevel, ...] = (
+    _CapacityLevel(
+        alert_key=HOST_CAPACITY_ALERT_KEY,
+        alert_title="Host capacity warning",
+        error_text=lambda policy: (
+            "Storage use crossed the active policy warning threshold of "
+            f"{policy.capacity_warn_percent}%."
+        ),
+        status="warn",
+        threshold_percent=lambda policy: policy.capacity_warn_percent,
+    ),
+    _CapacityLevel(
+        alert_key=HOST_CAPACITY_CRITICAL_ALERT_KEY,
+        alert_title="Host capacity critical",
+        error_text=lambda policy: (
+            "Storage use crossed the active policy critical threshold of "
+            f"{policy.capacity_critical_percent}%."
+        ),
+        status="critical",
+        threshold_percent=lambda policy: policy.capacity_critical_percent,
+    ),
+)
+
+# Not a rung: a policy-risk alert that fires when any rung is crossed while the
+# automatic reclamation safety net is switched off.
+_RECLAMATION_RISK_ALERT = _CapacityAlert(
+    alert_key=HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY,
+    alert_title="Host capacity risk: automatic reclamation disabled",
+    error_text=lambda _policy: (
+        "Host capacity is unhealthy while automatic workspace reclamation "
+        "is disabled by policy."
+    ),
+)
+
+_CAPACITY_ALERTS: tuple[_CapacityAlert, ...] = (
+    *_CAPACITY_LEVELS,
+    _RECLAMATION_RISK_ALERT,
+)
+
+
+def _reclamation_risk_active(status: str, policy: StoragePolicyValues) -> bool:
+    return status != "ok" and not policy.automatic_reclamation_allowed
 
 
 class HostCapacityDetails(TypedDict):
@@ -91,23 +174,41 @@ class HostCapacityMeasurement:
 
 @dataclass(slots=True)
 class _HostCapacityLatchStore:
-    """Expose the scheduler-global capacity latch to the neutral guard."""
+    """Expose one mount's capacity latches to the neutral guard."""
 
     session: AsyncSession
+    mount: str
+    trigger_kinds_by_alert: dict[_CapacityAlert, FailureGuardTriggerKind] = field(
+        init=False
+    )
+
+    def __post_init__(self) -> None:
+        self.trigger_kinds_by_alert = {
+            alert: alert.trigger_kind(self.mount) for alert in _CAPACITY_ALERTS
+        }
 
     async def load_latches(self):
-        latch = await self.session.get(SchedulerAlertLatch, HOST_CAPACITY_ALERT_KEY)
-        return {_CAPACITY_WARN_TRIGGER_KIND: latch} if latch is not None else {}
+        latches = await self.session.scalars(
+            select(SchedulerAlertLatch).where(
+                SchedulerAlertLatch.alert_key.in_(
+                    tuple(self.trigger_kinds_by_alert.values())
+                )
+            )
+        )
+        return {
+            FailureGuardTriggerKind(latch.alert_key): latch
+            for latch in latches
+        }
 
     async def create_latch(
         self,
         trigger_kind: FailureGuardTriggerKind,
         alerted_at: datetime,
     ) -> SchedulerAlertLatch:
-        if trigger_kind != _CAPACITY_WARN_TRIGGER_KIND:
+        if trigger_kind not in self.trigger_kinds_by_alert.values():
             raise ValueError(f"Unsupported host-capacity trigger: {trigger_kind}")
         latch = SchedulerAlertLatch(
-            alert_key=HOST_CAPACITY_ALERT_KEY,
+            alert_key=str(trigger_kind),
             alerted_at=alerted_at,
         )
         self.session.add(latch)
@@ -167,21 +268,68 @@ async def async_measure_host_disk_capacity(
     return await run_blocking(measure_host_disk_capacity, workspace_root)
 
 
+def _measure_host_capacities(
+    workspace_root: str | Path,
+    host_root: str | Path,
+) -> tuple[HostCapacityMeasurement, ...]:
+    """Measure the workspace and host-root mounts, de-duplicated by mount."""
+    workspace = measure_host_capacity(workspace_root)
+    measurements_by_mount = {workspace.mount: workspace}
+    disk = measure_host_disk_capacity(host_root)
+    measurements_by_mount.setdefault(
+        disk.mount,
+        HostCapacityMeasurement(
+            mount=disk.mount,
+            pct_used=disk.pct_used,
+            bytes_free=disk.bytes_free,
+            bytes_total=disk.bytes_total,
+            top_consumers=(),
+        ),
+    )
+    return tuple(measurements_by_mount.values())
+
+
+async def _async_measure_host_capacities(
+    workspace_root: str | Path,
+    host_root: str | Path,
+) -> tuple[HostCapacityMeasurement, ...]:
+    """Measure distinct host mounts without blocking the event loop."""
+    return await run_blocking(
+        _measure_host_capacities,
+        workspace_root,
+        host_root,
+    )
+
+
+def _crossed_levels(
+    pct_used: float,
+    policy: StoragePolicyValues,
+) -> tuple[_CapacityLevel, ...]:
+    """Return every ladder rung whose threshold ``pct_used`` has reached."""
+    return tuple(
+        level
+        for level in _CAPACITY_LEVELS
+        if pct_used >= level.threshold_percent(policy)
+    )
+
+
+def _status_for(crossed_levels: tuple[_CapacityLevel, ...]) -> str:
+    """The highest crossed rung names the status; no rung means ``"ok"``."""
+    return crossed_levels[-1].status if crossed_levels else "ok"
+
+
 def _capacity_status(
     pct_used: float,
     policy: StoragePolicyValues,
 ) -> str:
-    if pct_used >= policy.capacity_critical_percent:
-        return "critical"
-    if pct_used >= policy.capacity_warn_percent:
-        return "warn"
-    return "ok"
+    return _status_for(_crossed_levels(pct_used, policy))
 
 
 def _thresholds(policy: StoragePolicyValues) -> dict[str, int]:
+    """Return ``{"warn_percent": int, "critical_percent": int}`` from policy."""
     return {
-        "warn_percent": policy.capacity_warn_percent,
-        "critical_percent": policy.capacity_critical_percent,
+        f"{level.status}_percent": level.threshold_percent(policy)
+        for level in _CAPACITY_LEVELS
     }
 
 
@@ -189,31 +337,34 @@ def _default_alert_policy() -> SlackFailureAlertPolicy:
     return SlackFailureAlertPolicy(
         provide_client=slack_web_client_from_runtime,
         requested_by="host_capacity",
-        reason="Deliver a host-capacity warning to the team.",
+        reason=(
+            "Deliver a host-capacity alert (warning, critical, or "
+            "reclamation-disabled risk) to the team."
+        ),
         channel=(
             os.getenv("ILLO_SCHEDULER_FAILURE_ALERT_CHANNEL", "").strip()
             or "#alerts"
         ),
-        unknown_error_text="Host storage crossed its warning threshold",
+        unknown_error_text="Host storage capacity crossed an alert threshold",
     )
 
 
 AlertDelivery = Callable[..., Awaitable[None]]
 
 
-async def record_host_capacity(
+async def _record_mount_capacity(
     session: AsyncSession,
     *,
-    workspace_root: str | Path,
-    now: datetime | None = None,
-    deliver_alert: AlertDelivery | None = async_deliver_failure_alert,
-    alert_policy: SlackFailureAlertPolicy | None = None,
+    measurement: HostCapacityMeasurement,
+    policy: StoragePolicyValues,
+    observed_at: datetime,
+    deliver_alert: AlertDelivery | None,
+    alert_policy: SlackFailureAlertPolicy | None,
 ) -> dict[str, Any]:
-    """Persist one capacity row and alert once when policy becomes unhealthy."""
-    observed_at = ensure_utc(now)
-    measurement = await async_measure_host_capacity(workspace_root)
-    policy = await async_get_storage_policy(session)
-    status = _capacity_status(measurement.pct_used, policy)
+    """Persist and alert for one already de-duplicated mount measurement."""
+    thresholds = _thresholds(policy)
+    active_levels = _crossed_levels(measurement.pct_used, policy)
+    status = _status_for(active_levels)
     details = measurement.details()
     entry = await MemoryHealthRepository(session).a_log_check(
         HOST_CAPACITY_CHECK_TYPE,
@@ -221,33 +372,51 @@ async def record_host_capacity(
         details,
     )
 
-    store = _HostCapacityLatchStore(session)
-    if status == "ok":
+    store = _HostCapacityLatchStore(session, measurement.mount)
+    alert_activity: tuple[
+        tuple[FailureGuardTriggerKind, _CapacityAlert, bool], ...
+    ] = (
+        *(
+            (store.trigger_kinds_by_alert[level], level, level in active_levels)
+            for level in _CAPACITY_LEVELS
+        ),
+        (
+            store.trigger_kinds_by_alert[_RECLAMATION_RISK_ALERT],
+            _RECLAMATION_RISK_ALERT,
+            _reclamation_risk_active(status, policy),
+        ),
+    )
+    alert_keys_to_clear = tuple(
+        trigger_kind
+        for trigger_kind, _alert, active in alert_activity
+        if not active
+    )
+    if alert_keys_to_clear:
         await session.execute(
             delete(SchedulerAlertLatch).where(
-                SchedulerAlertLatch.alert_key == HOST_CAPACITY_ALERT_KEY
+                SchedulerAlertLatch.alert_key.in_(alert_keys_to_clear)
             )
         )
 
-    trigger = FailureGuardTriggerResult(
-        kind=_CAPACITY_WARN_TRIGGER_KIND,
-        active=status != "ok",
-        public_details={
-            "pct_used": measurement.pct_used,
-            **_thresholds(policy),
-        },
-        alert_title=(
-            "Host capacity critical"
-            if status == "critical"
-            else "Host capacity warning"
-        ),
-        alert_summary=(
-            f"{measurement.pct_used}% used on {measurement.mount}; "
-            f"{measurement.bytes_free} bytes free."
-        ),
+    alert_summary = (
+        f"{measurement.pct_used}% used on {measurement.mount}; "
+        f"{measurement.bytes_free} bytes free."
+    )
+    triggers = tuple(
+        FailureGuardTriggerResult(
+            kind=trigger_kind,
+            active=active,
+            public_details={
+                "pct_used": measurement.pct_used,
+                **thresholds,
+            },
+            alert_title=alert.alert_title,
+            alert_summary=alert_summary,
+        )
+        for trigger_kind, alert, active in alert_activity
     )
     guard = await async_evaluate_failure_edges(
-        results=(trigger,),
+        results=triggers,
         failure_signature=None,
         last_error=None,
         now=observed_at,
@@ -255,8 +424,25 @@ async def record_host_capacity(
         new_edge_mode="detect",
     )
 
+    # Delivery precedence: one Slack message per mount and tick. A freshly crossed
+    # reclamation-risk edge outranks every ladder rung because it names the
+    # missing safety net; otherwise deliver the highest crossed rung. Every
+    # crossed edge is latched once that one delivery succeeds.
+    delivery_order = (_RECLAMATION_RISK_ALERT, *reversed(_CAPACITY_LEVELS))
+    crossed_by_kind = {edge.kind: edge for edge in guard.crossed_edges}
+    delivered_alert = next(
+        (
+            alert
+            for alert in delivery_order
+            if store.trigger_kinds_by_alert[alert] in crossed_by_kind
+        ),
+        None,
+    )
+
     alert_sent = False
-    if guard.crossed_edges and deliver_alert is not None:
+    if deliver_alert is not None and delivered_alert is not None:
+        delivered_kind = store.trigger_kinds_by_alert[delivered_alert]
+        edge = crossed_by_kind[delivered_kind]
         try:
             await deliver_alert(
                 policy=alert_policy or _default_alert_policy(),
@@ -268,15 +454,12 @@ async def record_host_capacity(
                     link_label="open system state",
                 ),
                 presentation=FailureAlertPresentation(
-                    title=trigger.alert_title,
-                    summary=trigger.alert_summary,
+                    title=edge.alert_title,
+                    summary=edge.alert_summary,
                 ),
-                error_text=(
-                    f"Storage use crossed the active policy warning threshold "
-                    f"of {policy.capacity_warn_percent}%."
-                ),
+                error_text=delivered_alert.error_text(policy),
             )
-        except Exception:  # noqa: BLE001 - leave the edge open for the next tick
+        except Exception:  # noqa: BLE001 - retry the edge on the next tick
             logger.exception("Host-capacity Slack delivery failed")
         else:
             await async_latch_failure_edges(
@@ -291,9 +474,38 @@ async def record_host_capacity(
         "check_type": entry.check_type,
         "status": entry.status,
         "details": details,
-        "thresholds": _thresholds(policy),
+        "thresholds": thresholds,
         "alert_sent": alert_sent,
     }
+
+
+async def record_host_capacity(
+    session: AsyncSession,
+    *,
+    workspace_root: str | Path,
+    now: datetime | None = None,
+    deliver_alert: AlertDelivery | None = async_deliver_failure_alert,
+    alert_policy: SlackFailureAlertPolicy | None = None,
+) -> dict[str, Any]:
+    """Persist one row per mount and maintain independent alert latches."""
+    observed_at = ensure_utc(now)
+    measurements = await _async_measure_host_capacities(
+        workspace_root,
+        Path("/"),
+    )
+    policy = await async_get_storage_policy(session)
+    mount_results = [
+        await _record_mount_capacity(
+            session,
+            measurement=measurement,
+            policy=policy,
+            observed_at=observed_at,
+            deliver_alert=deliver_alert,
+            alert_policy=alert_policy,
+        )
+        for measurement in measurements
+    ]
+    return {"mounts": mount_results}
 
 
 async def async_read_host_capacity(
@@ -322,6 +534,7 @@ async def async_read_host_capacity(
         .where(
             MemoryHealthLog.check_type == HOST_CAPACITY_CHECK_TYPE,
             MemoryHealthLog.org_id.is_(None),
+            MemoryHealthLog.details["mount"].as_string() == disk.mount,
         )
         .order_by(MemoryHealthLog.created_at.desc(), MemoryHealthLog.id.desc())
         .limit(normalized_limit)
@@ -361,6 +574,8 @@ async def async_read_host_capacity(
 
 __all__ = [
     "HOST_CAPACITY_ALERT_KEY",
+    "HOST_CAPACITY_CRITICAL_ALERT_KEY",
+    "HOST_CAPACITY_RECLAMATION_DISABLED_ALERT_KEY",
     "HOST_CAPACITY_CHECK_TYPE",
     "HostDiskCapacity",
     "HostCapacityMeasurement",

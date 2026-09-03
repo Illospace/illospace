@@ -766,7 +766,12 @@ def test_read_github_source_schema_exposes_pinned_source_actions():
     definition = next(tool for tool in GITHUB_TOOLS if tool["name"] == "read_github_source")
     properties = definition["input_schema"]["properties"]
 
-    assert {"get_file", "list_tree", "grep"} <= set(properties["action"]["enum"])
+    assert {"get_issue", "get_file", "list_tree", "grep"} <= set(properties["action"]["enum"])
+    assert properties["issue_number"] == {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Issue number required by get_issue.",
+    }
     assert properties["ref"]["type"] == "string"
     assert properties["path"]["type"] == "string"
     assert properties["query"]["type"] == "string"
@@ -1725,3 +1730,45 @@ async def test_grep_pages_before_match_evidence_exceeds_the_tool_output_budget()
     assert 0 < payload["returned"] < 50
     assert payload["truncated"] is True
     assert payload["next_page"]
+
+
+@pytest.mark.asyncio
+async def test_get_issue_action_reads_one_issue_with_assignment_provenance_enabled():
+    payload = {
+        "repo": "uwear-ai/uwear-backend",
+        "issue": {"number": 1918, "assignment_provenance": "automation_at_filing"},
+    }
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_issue",
+        new=AsyncMock(return_value=payload),
+    ) as get_issue:
+        result = await _handle_read_github_source(
+            action="get_issue",
+            repo="https://github.com/uwear-ai/uwear-backend.git",
+            issue_number=1918,
+        )
+
+    body = json.loads(result)
+    assert body["issue"]["assignment_provenance"] == "automation_at_filing"
+    get_issue.assert_awaited_once()
+    assert get_issue.await_args.args == ("uwear-ai/uwear-backend", 1918)
+    # Provenance is the safety signal clause 3 of #881 depends on. A caller that
+    # has to know to ask for it will not ask, so get_issue always enables it.
+    assert get_issue.await_args.kwargs["include_assignment_provenance"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issue_number", [None, 0, -3])
+async def test_get_issue_action_requires_a_positive_issue_number(issue_number):
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_get_issue",
+        new=AsyncMock(),
+    ) as get_issue:
+        result = await _handle_read_github_source(
+            action="get_issue",
+            repo="uwear-ai/uwear-backend",
+            issue_number=issue_number,
+        )
+
+    assert json.loads(result) == {"error": "get_issue requires a positive issue_number"}
+    get_issue.assert_not_awaited()

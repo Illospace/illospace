@@ -321,7 +321,11 @@ async def test_automatic_reclamation_reads_permission_from_policy(tmp_path):
     )
 
     assert workspace.is_dir()
-    assert disabled["directories_scanned"] == 0
+    assert disabled["directories_scanned"] == 1
+    assert disabled["directories_reclaimable"] == 1
+    assert disabled["bytes_reclaimable"] == len(b"workspace data")
+    assert disabled["directories_reclaimed"] == 0
+    assert disabled["bytes_reclaimed"] == 0
     assert disabled["reclamation_skipped_reason"] == (
         "automatic_reclamation_disabled_by_policy"
     )

@@ -15,6 +15,60 @@ class _ScalarRows:
         return self._rows[0] if self._rows else None
 
 
+def test_read_only_resource_path_reuses_sibling_managed_path(tmp_path):
+    from brain.systems.cortex.project_context.resource_imports import backend_readable_resource_path
+
+    sibling_path = tmp_path / "parent-worker" / ".illo-project-context" / "local" / "project"
+    sibling_path.mkdir(parents=True)
+    workspace_root = tmp_path / "child-worker"
+    workspace_root.mkdir()
+
+    existing_path, checked = backend_readable_resource_path(
+        {"path": str(sibling_path)},
+        workspace_root=workspace_root,
+    )
+
+    assert checked is True
+    assert existing_path == sibling_path
+
+
+def test_write_resource_path_rejects_sibling_but_preserves_other_path_behaviour(tmp_path):
+    from brain.systems.cortex.project_context.resource_imports import (
+        ResourcePathAccess,
+        should_use_existing_resource_path,
+    )
+
+    workspace_root = tmp_path / "child-worker"
+    own_path = workspace_root / ".illo-project-context" / "local" / "project"
+    sibling_path = tmp_path / "parent-worker" / ".illo-project-context" / "local" / "project"
+    external_path = tmp_path / "external-project"
+    missing_path = tmp_path / "missing-project"
+    for path in (own_path, sibling_path, external_path):
+        path.mkdir(parents=True)
+
+    assert should_use_existing_resource_path(
+        str(sibling_path),
+        workspace_root,
+        access=ResourcePathAccess.WRITE,
+    ) is None
+    for access in ResourcePathAccess:
+        assert should_use_existing_resource_path(
+            str(own_path),
+            workspace_root,
+            access=access,
+        ) == own_path
+        assert should_use_existing_resource_path(
+            str(external_path),
+            workspace_root,
+            access=access,
+        ) == external_path
+        assert should_use_existing_resource_path(
+            str(missing_path),
+            workspace_root,
+            access=access,
+        ) is None
+
+
 def test_project_context_materialization_result_is_ready_when_evidence_is_degraded():
     from brain.systems.cortex.project_context.materializer import ProjectContextMaterializationResult
 
@@ -1289,6 +1343,90 @@ async def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_p
         "credential": "existing",
         "reused": True,
     }
+
+
+async def test_materialize_reclones_instead_of_reusing_sibling_worker_checkout(tmp_path, monkeypatch):
+    """#877 isolation: a sibling worker's managed checkout is never adopted as this worker's write path."""
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    sibling_checkout = (
+        tmp_path / "parent-worker" / ".illo-project-context" / "github" / "example-org" / "example-repo"
+    )
+    (sibling_checkout / ".git").mkdir(parents=True)
+    sibling_sentinel = sibling_checkout / "sibling-change.txt"
+    sibling_sentinel.write_text("belongs to the sibling")
+    workspace_root = tmp_path / "child-worker"
+    workspace_root.mkdir()
+    expected_checkout = workspace_root / ".illo-project-context" / "github" / "example-org" / "example-repo"
+
+    run = SimpleNamespace(
+        id=47,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "name": "example-org/example-repo",
+                        "repo": "example-org/example-repo",
+                        "path": str(sibling_checkout),
+                        "uri": "https://github.com/example-org/example-repo",
+                        "branch": "main",
+                    }
+                ],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    clone_calls = []
+
+    def fake_clone(slug, destination, *, token, branch):
+        clone_calls.append(destination)
+        destination.mkdir(parents=True)
+        return {"path": str(destination), "branch": branch or "main", "commit": "child123"}
+
+    def fail_on_sibling_probe(cwd, *args):
+        if Path(cwd).resolve() == sibling_checkout.resolve():
+            raise AssertionError("sibling checkout must not be probed for reuse")
+        return None
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(materializer, "_git_output", fail_on_sibling_probe)
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(47, workspace_root=str(workspace_root), user_id="user-1")
+
+    assert result.ok
+    assert clone_calls == [expected_checkout]
+    assert sibling_sentinel.read_text() == "belongs to the sibling"
+    root_draft = workspace_root / ".illo-project-context" / "local" / "run-47" / "project-root"
+    assert result.workspaces == [
+        {"name": "/", "path": str(root_draft)},
+        {"name": "example-org/example-repo", "path": str(expected_checkout)},
+    ]
+    resource = run.target_ref["project_context_snapshot"]["resources"][1]
+    assert resource["path"] == str(expected_checkout)
+    assert "reused" not in resource["materialization"]
 
 
 async def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(tmp_path, monkeypatch):

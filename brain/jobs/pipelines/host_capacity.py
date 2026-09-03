@@ -13,10 +13,11 @@ from brain.systems.host_capacity import record_host_capacity
 
 
 async def run() -> dict[str, Any]:
+    workspace_root = brain_config.resolve_workspace_root()
     async with UnitOfWork() as uow:
         return await record_host_capacity(
             uow.session,  # type: ignore[arg-type]
-            workspace_root=brain_config.resolve_workspace_root(),
+            workspace_root=workspace_root,
         )
 
 
