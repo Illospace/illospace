@@ -766,7 +766,12 @@ def test_read_github_source_schema_exposes_pinned_source_actions():
     definition = next(tool for tool in GITHUB_TOOLS if tool["name"] == "read_github_source")
     properties = definition["input_schema"]["properties"]
 
-    assert {"get_file", "list_tree", "grep"} <= set(properties["action"]["enum"])
+    assert {"get_issue", "get_file", "list_tree", "grep"} <= set(properties["action"]["enum"])
+    assert properties["issue_number"] == {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Issue number required by get_issue.",
+    }
     assert properties["ref"]["type"] == "string"
     assert properties["path"]["type"] == "string"
     assert properties["query"]["type"] == "string"
