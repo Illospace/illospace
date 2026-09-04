@@ -373,17 +373,28 @@ class TestPredictiveReading:
         ])
         py_file.write_text("\n".join(flattened))
 
-        with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)):
-                result = await handle_summarize_file_for_task(
-                    str(py_file),
-                    "Where is route_with_confidence defined and what does it return?",
-                )
+        with (
+            patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)),
+            patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5.6-luna"),
+            patch(
+                "brain.platform.integrations.completions.async_simple_text_completion",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "brain.systems.runs.direct_loop.telemetry.async_record_api_call",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await handle_summarize_file_for_task(
+                str(py_file),
+                "Where is route_with_confidence defined and what does it return?",
+            )
 
         assert result["path"] == str(py_file)
         assert result["model"] == "deterministic-multihop-fallback"
         assert "route_with_confidence" in result["key_symbols"]
-        assert isinstance(result["citations"], list)
+        assert result["citations"]
+        assert all(citation["path"] == str(py_file) for citation in result["citations"])
         assert result["confidence"] > 0
         assert len(result["relevant_ranges"]) >= 1
 
@@ -484,17 +495,29 @@ class TestPredictiveReading:
 '''
         )
 
-        with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)):
-                result = await handle_summarize_files_for_task(
-                    [str(a), str(b)],
-                    "Which file owns create_child_run and invocation setup?",
-                )
+        with (
+            patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)),
+            patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5.6-luna"),
+            patch(
+                "brain.platform.integrations.completions.async_simple_text_completion",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "brain.systems.runs.direct_loop.telemetry.async_record_api_call",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await handle_summarize_files_for_task(
+                [str(a), str(b)],
+                "Which file owns create_child_run and invocation setup?",
+            )
 
         assert result["model"] == "deterministic-implementation-map"
         assert result["file_count"] == 2
         assert len(result["files_ranked"]) == 2
         assert any(item["path"] == str(b) for item in result["files_ranked"])
+        assert result["citations"]
+        assert {citation["path"] for citation in result["citations"]} == {str(a), str(b)}
         assert "implementation_map" in result
 
     async def test_summarize_files_for_task_llm_path(self, tmp_path):
