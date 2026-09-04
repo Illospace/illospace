@@ -1001,7 +1001,7 @@ async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id:
             ),
         )
         result = _parse_reader_completion_response(response)
-        if result is not None:
+        if result:
             result["model"] = model
         return result
     except Exception as exc:

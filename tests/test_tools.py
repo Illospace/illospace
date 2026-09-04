@@ -52,11 +52,14 @@ class TestToolDefinitions:
 
 
     @pytest.mark.asyncio
-    async def test_reader_subcall_uses_async_completion_with_run_identity(self):
+    @pytest.mark.parametrize("response,expected", [
+        ('{"answer":"stored Codex auth works"}', {"answer": "stored Codex auth works", "model": "openai/gpt-5.6-sol"}),
+        ("{}", {}),
+    ])
+    async def test_reader_subcall_uses_async_completion_with_run_identity(self, response, expected):
         from brain.systems.runs.execution_context import bind_agent_context
         from brain.systems.tools.handlers import _reader_completion
 
-        response = '{"answer":"stored Codex auth works"}'
         async_completion = AsyncMock(return_value=response)
         record_api_call = AsyncMock()
 
@@ -91,7 +94,7 @@ class TestToolDefinitions:
                 org_id="org-1",
             )
 
-        assert result == {"answer": "stored Codex auth works", "model": "openai/gpt-5.6-sol"}
+        assert result == expected
         async_completion.assert_awaited_once()
         assert async_completion.await_args.kwargs["user_id"] == "user-1"
         assert async_completion.await_args.kwargs["org_id"] == "org-1"
