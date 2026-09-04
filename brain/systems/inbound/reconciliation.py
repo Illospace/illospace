@@ -489,7 +489,6 @@ async def reconcile_inbound_triage_run(
         stored_failure_category
         or (await _run_failure_category(session, run_id) if status == RunStatus.FAILED else None),
     )
-    public_final_answer = final_answer if failure is None else None
     attribution = await summarize_inbound_run_attribution(session, run_id=run_id, status=status)
     evidence_contract = preservation_evidence_result(
         preservation_contract_from_run_metadata(metadata),
@@ -497,6 +496,9 @@ async def reconcile_inbound_triage_run(
         attribution=attribution,
     )
     evidence_missing = evidence_contract.get("status") == "missing"
+    public_final_answer = final_answer if failure is None else None
+    if evidence_missing:
+        public_final_answer = evidence_contract.get("reason") or PRESERVATION_MISSING_REASON
     terminal_status = STATUS_REVIEW_REQUIRED if evidence_missing else _receipt_terminal_status(status)
     outcome_status = "needs_action" if evidence_missing else status.value
     triage_terminal = _triage_terminal_payload(
