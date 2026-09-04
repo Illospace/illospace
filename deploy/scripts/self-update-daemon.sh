@@ -16,6 +16,8 @@ WORKSPACE_TOOLS_HEARTBEAT_FILE="${ILLO_WORKSPACE_TOOLS_HEARTBEAT_FILE:-/data/pri
 WORKSPACE_TOOLS_LOG_PATH="${ILLO_WORKSPACE_TOOLS_LOG_PATH:-/data/private/logs/illo-workspace-tools.log}"
 WORKER_DRAIN_TIMEOUT_FILE="${ILLO_SELF_UPDATE_WORKER_DRAIN_TIMEOUT_FILE:-/data/private/self-update/worker-drain-timeout.json}"
 POLL_SECONDS="${ILLO_SELF_UPDATE_POLL_SECONDS:-2}"
+HEARTBEAT_INTERVAL_SECONDS="${ILLO_SELF_UPDATE_HEARTBEAT_INTERVAL_SECONDS:-2}"
+HEARTBEAT_KEEPER_PID=""
 AUTO_UPDATE_ENABLED="${ILLO_AUTO_UPDATE_ENABLED:-1}"
 AUTO_UPDATE_POLL_SECONDS="${ILLO_AUTO_UPDATE_POLL_SECONDS:-300}"
 APP_UID="${ILLO_APP_UID:-10001}"
@@ -139,6 +141,80 @@ write_workspace_tools_heartbeat() {
   json_write "$WORKSPACE_TOOLS_HEARTBEAT_FILE" \
     --arg updated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     '{status: "ready", updated_at: $updated_at}'
+}
+
+stop_heartbeat_keeper() {
+  trap '' USR1
+  if [ -n "$HEARTBEAT_KEEPER_PID" ]; then
+    kill "$HEARTBEAT_KEEPER_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_KEEPER_PID" 2>/dev/null || true
+    HEARTBEAT_KEEPER_PID=""
+  fi
+}
+
+refresh_controller_heartbeats() {
+  # Do not reenter json_write while its shared temporary file is in use.
+  trap '' USR1
+  write_heartbeat
+  write_runtime_services_heartbeat
+  write_workspace_tools_heartbeat
+  trap refresh_controller_heartbeats USR1
+}
+
+run_with_heartbeats() {
+  local controller_pid=$$ exit_code
+  trap stop_heartbeat_keeper EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  # Only the controller writes: a stopped/wedged controller cannot renew health.
+  trap refresh_controller_heartbeats USR1
+  (
+    operation_pid=""
+    sleeper_pid=""
+    cleanup_operation() {
+      if [ -n "$operation_pid" ]; then
+        kill -- "-$operation_pid" 2>/dev/null || true
+        wait "$operation_pid" 2>/dev/null || true
+      fi
+      if [ -n "$sleeper_pid" ]; then
+        kill "$sleeper_pid" 2>/dev/null || true
+        wait "$sleeper_pid" 2>/dev/null || true
+      fi
+    }
+    trap cleanup_operation EXIT
+    trap 'exit 0' TERM INT
+    # BASHPID is unavailable in macOS's Bash 3.2.
+    HEARTBEAT_KEEPER_PID="${BASHPID:-$(exec sh -c 'echo "$PPID"')}"
+    # Give the operation and its descendants a group that cleanup can stop.
+    set -m
+    (set +m; "$@") &
+    operation_pid=$!
+    set +m
+    while kill -0 "$operation_pid" 2>/dev/null; do
+      kill -0 "$controller_pid" 2>/dev/null || exit 1
+      # Linux may retain a dead controller as a zombie until its parent reaps it.
+      if [ -r "/proc/$controller_pid/stat" ]; then
+        read -r controller_state < "/proc/$controller_pid/stat" || exit 1
+        controller_state="${controller_state##*) }"
+        case "$controller_state" in Z*|X*) exit 1 ;; esac
+      fi
+      kill -USR1 "$controller_pid" 2>/dev/null || exit 1
+      sleep "$HEARTBEAT_INTERVAL_SECONDS" &
+      sleeper_pid=$!
+      wait "$sleeper_pid"
+      sleeper_pid=""
+    done
+    if wait "$operation_pid"; then exit 0; else exit $?; fi
+  ) &
+  HEARTBEAT_KEEPER_PID=$!
+  # Bash dispatches traps promptly during builtin wait, unlike a foreground build.
+  while kill -0 "$HEARTBEAT_KEEPER_PID" 2>/dev/null; do
+    wait "$HEARTBEAT_KEEPER_PID" 2>/dev/null || true
+  done
+  # A signal can interrupt wait; read the completed operation's actual status.
+  if wait "$HEARTBEAT_KEEPER_PID"; then exit_code=0; else exit_code=$?; fi
+  stop_heartbeat_keeper
+  return "$exit_code"
 }
 
 process_request() {
@@ -349,7 +425,7 @@ main() {
     write_workspace_tools_heartbeat
     if [ -f "$REQUEST_FILE" ]; then
       set +e
-      process_request
+      run_with_heartbeats process_request
       exit_code=$?
       set -e
       if [ "$exit_code" -ne 0 ]; then
@@ -359,7 +435,7 @@ main() {
     fi
     if [ -f "$RUNTIME_SERVICES_REQUEST_FILE" ]; then
       set +e
-      process_runtime_services_request
+      run_with_heartbeats process_runtime_services_request
       exit_code=$?
       set -e
       if [ "$exit_code" -ne 0 ]; then
@@ -369,7 +445,7 @@ main() {
     fi
     if [ -f "$WORKSPACE_TOOLS_REQUEST_FILE" ]; then
       set +e
-      process_workspace_tools_request
+      run_with_heartbeats process_workspace_tools_request
       exit_code=$?
       set -e
       if [ "$exit_code" -ne 0 ]; then
