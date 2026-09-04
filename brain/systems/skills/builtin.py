@@ -263,8 +263,11 @@ or resources as another active slice.
 - `spawn_worker` queues a child run and returns immediately with
   `status="queued"` and a `child_run_id`; queued is not completed.
 - Omitted `model` and `effort` inherit the parent's effective routing.
-- Two lanes. Reasoning/judgment/review/long-context/chatty tool loops:
-  `gpt-5.6-sol`, routed by effort (`xhigh` judgment, `high` standard).
+- Reasoning/judgment/review/long-context work: `openai/gpt-6-astra`, routed by
+  effort (`xhigh` judgment, `high` standard). `openai/gpt-5.6-sol` is the
+  availability fallback and an explicit option for standard reasoning or
+  chatty tool loops. Astra requires at least `low` effort; legacy `none`
+  settings run at `low` and the effective routing receipt records this.
   Bulk/mechanical/single-shot/small-context execution:
   `openai/gpt-5.6-luna` at `xhigh`. Luna caveats: quality collapses above ~200K
   context; `xhigh` pays a long first-token pause per turn — never use Luna

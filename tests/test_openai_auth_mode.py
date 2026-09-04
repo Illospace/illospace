@@ -6,6 +6,10 @@ from brain.platform.providers.model_policy import required_openai_auth_mode
 @pytest.mark.parametrize(
     "model",
     [
+        "gpt-6-astra",
+        "openai/gpt-6-astra",
+        "openai:gpt-6-astra",
+        "GPT-6-ASTRA",
         "gpt-5.5",
         "openai/gpt-5.5",
         "openai:gpt-5.5",

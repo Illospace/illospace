@@ -102,7 +102,7 @@
           const runtime = await api.runtimeSettings();
           const workspaceModel = String(runtime.models?.default || '').includes('/')
             ? String(runtime.models.default)
-            : `openai/${String(runtime.models?.default || 'gpt-5.6-sol')}`;
+            : `openai/${String(runtime.models?.default || 'gpt-6-astra')}`;
           cortex.applyWorkspaceRunDefaults(
             workspaceModel,
             runtime.models?.thinking || 'xhigh',

@@ -5,6 +5,24 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.mark.parametrize("tier, expected", [(None, "low"), ("none", "low"), ("high", "high"), ("xhigh", "xhigh")])
+def test_astra_transport_applies_minimum_effort_and_preserves_tools(tier, expected):
+    from brain.platform.integrations.transports.base import LLMRequest
+    from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
+
+    kwargs = OpenAIResponsesTransport().build_kwargs(LLMRequest(
+        model="openai/gpt-6-astra",
+        messages=[{"role": "user", "content": "Check readiness"}],
+        reasoning_effort=tier,
+        tools=[{"name": "check", "input_schema": {"type": "object", "properties": {}}}],
+    ))
+    assert kwargs["model"] == "gpt-6-astra"
+    assert kwargs["reasoning"]["effort"] == expected
+    assert kwargs["tools"][0]["name"] == "check"
+    assert kwargs["store"] is False
+    assert not {"temperature", "top_p", "top_logprobs", "prompt_cache_retention"} & kwargs.keys()
+
+
 def test_provider_facade_reexports_transport_types():
     from brain.platform.integrations import providers
     from brain.platform.integrations.transports.base import (

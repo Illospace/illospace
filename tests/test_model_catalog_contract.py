@@ -1,5 +1,30 @@
 from pathlib import Path
 
+import pytest
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "openai/gpt-6-astra", "openai:gpt-6-astra"])
+def test_astra_catalog_drives_subscription_routing_and_fallback(model):
+    from brain.platform.model_catalog import get_model_catalog_entry
+    from brain.platform.providers.model_policy import (
+        coerce_openai_api_key_model,
+        normalize_model_name,
+        required_openai_auth_mode,
+    )
+    from brain.platform.providers.model_fallback import fallback_model_for
+    from brain.systems.runs.direct_loop.request import get_extended_prompt_cache_retention
+
+    entry = get_model_catalog_entry(model)
+    assert entry.id == "openai/gpt-6-astra"
+    assert normalize_model_name(model) == entry.id
+    assert required_openai_auth_mode(model) == "chatgpt"
+    assert coerce_openai_api_key_model(model) is None
+    assert fallback_model_for(model) == "openai/gpt-5.6-sol"
+    assert get_extended_prompt_cache_retention(model) is None
+    assert entry.supported_effort_tiers == ("low", "medium", "high", "xhigh")
+    assert entry.input_price_per_million == 10.0
+    assert entry.output_price_per_million == 50.0
+
 
 def test_catalog_is_the_complete_owner_for_derived_provider_tables():
     from brain.platform.model_catalog import MODEL_CATALOG
@@ -9,7 +34,7 @@ def test_catalog_is_the_complete_owner_for_derived_provider_tables():
         PROVIDER_MODEL_OPTIONS,
     )
     from brain.systems.context.budget import resolve_model_context_budget
-    from brain.systems.runs.direct_loop.model_fallback import fallback_model_for
+    from brain.platform.providers.model_fallback import fallback_model_for
 
     ids = [entry.id for entry in MODEL_CATALOG]
     assert len(ids) == len(set(ids))

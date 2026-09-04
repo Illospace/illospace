@@ -254,7 +254,7 @@ async def async_resolve_default_provider(
 def required_openai_auth_mode(model: str | None) -> str | None:
     """Return the OpenAI auth mode a model requires, or None when either works.
 
-    GPT-5.5 and every GPT-5.6 variant are only reachable through the
+    Illo routes GPT-6 Astra, GPT-5.5, and every GPT-5.6 variant through the
     ChatGPT/Codex subscription backend, never an API key. Callers pass the
     result to credential resolution so a run validates and uses the credential
     it will actually need.
@@ -264,7 +264,7 @@ def required_openai_auth_mode(model: str | None) -> str | None:
         if value.startswith(prefix):
             value = value[len(prefix):]
             break
-    return "chatgpt" if value == "gpt-5.5" or value.startswith("gpt-5.6") else None
+    return "chatgpt" if value in {"gpt-6-astra", "gpt-5.5"} or value.startswith("gpt-5.6") else None
 
 
 def coerce_openai_api_key_model(model: str) -> str | None:

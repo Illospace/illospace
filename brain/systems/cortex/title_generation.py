@@ -173,33 +173,20 @@ async def _async_generate_with_provider_title_model(
     org_id: str | None,
 ) -> str | None:
     try:
-        from brain.platform.integrations.llm import async_resolve_llm_client
-        from brain.platform.integrations.providers import LLMRequest, get_provider
+        from brain.platform.integrations.completions import async_simple_text_completion
 
-        llm = await async_resolve_llm_client(
-            user_id=user_id,
-            org_id=org_id,
-            provider=provider,
-        )
-        provider_client = get_provider(llm.provider, llm.client)
-        response = await run_blocking(
-            provider_client.create,
-            LLMRequest(
-                model=_strip_provider_prefix(model),
-                max_output_tokens=TITLE_MAX_TOKENS,
-                messages=[{"role": "user", "content": _title_generation_user_prompt(raw_text)}],
-                system=TITLE_GENERATION_SYSTEM_PROMPT,
+        return normalize_generated_title(
+            await async_simple_text_completion(
+                _title_generation_user_prompt(raw_text),
+                model=_provider_model_spec(provider, model),
+                max_tokens=TITLE_MAX_TOKENS,
+                user_id=user_id,
+                org_id=org_id,
+                system_prompt=TITLE_GENERATION_SYSTEM_PROMPT,
                 reasoning_effort=TITLE_REASONING_EFFORT,
-                extra_headers=llm.build_request_headers() or None,
                 operation_type="title_generation",
-            ),
+            )
         )
-        text_parts = [
-            block.text
-            for block in getattr(response, "content", None) or []
-            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
-        ]
-        return normalize_generated_title("\n".join(text_parts))
     except Exception as exc:
         logger.warning("Provider title generation failed: %s", exc)
         return None

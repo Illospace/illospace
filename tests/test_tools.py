@@ -13,6 +13,31 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 class TestToolDefinitions:
     """Test extended tool definitions."""
 
+    @pytest.mark.asyncio
+    async def test_reader_uses_luna_without_requiring_astra_access(self):
+        from brain.systems.tools.handlers import _reader_completion
+
+        llm = MagicMock(provider="openai")
+        llm.build_request_headers.return_value = {}
+        provider = MagicMock()
+
+        def create(request):
+            assert request.model == "gpt-5.6-luna"
+            return MagicMock(content=[MagicMock(type="text", text='{"answer":"file evidence"}')])
+
+        provider.create.side_effect = create
+        with (
+            patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"),
+            patch("brain.platform.integrations.completions.async_resolve_llm_client", new=AsyncMock(return_value=llm)) as resolve,
+            patch("brain.platform.integrations.completions.get_provider", return_value=provider),
+            patch("brain.systems.runs.direct_loop.telemetry.async_record_api_call", new=AsyncMock()) as record,
+        ):
+            result = await _reader_completion("Read this file", user_id="user-1", org_id="org-1")
+
+        assert result == {"answer": "file evidence", "model": "openai/gpt-5.6-luna"}
+        assert resolve.await_args.kwargs["auth_mode"] == "chatgpt"
+        assert record.await_args.kwargs["model"] == "openai/gpt-5.6-luna"
+
     def test_extended_tools_defined(self):
         from brain.systems.tools.handlers import EXTENDED_TOOLS
         names = [t["name"] for t in EXTENDED_TOOLS]
@@ -27,11 +52,14 @@ class TestToolDefinitions:
 
 
     @pytest.mark.asyncio
-    async def test_reader_subcall_uses_async_completion_with_run_identity(self):
+    @pytest.mark.parametrize("response,expected", [
+        ('{"answer":"stored Codex auth works"}', {"answer": "stored Codex auth works", "model": "openai/gpt-5.6-sol"}),
+        ("{}", {}),
+    ])
+    async def test_reader_subcall_uses_async_completion_with_run_identity(self, response, expected):
         from brain.systems.runs.execution_context import bind_agent_context
         from brain.systems.tools.handlers import _reader_completion
 
-        response = '{"answer":"stored Codex auth works"}'
         async_completion = AsyncMock(return_value=response)
         record_api_call = AsyncMock()
 
@@ -66,7 +94,7 @@ class TestToolDefinitions:
                 org_id="org-1",
             )
 
-        assert result == {"answer": "stored Codex auth works"}
+        assert result == expected
         async_completion.assert_awaited_once()
         assert async_completion.await_args.kwargs["user_id"] == "user-1"
         assert async_completion.await_args.kwargs["org_id"] == "org-1"
@@ -345,17 +373,28 @@ class TestPredictiveReading:
         ])
         py_file.write_text("\n".join(flattened))
 
-        with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)):
-                result = await handle_summarize_file_for_task(
-                    str(py_file),
-                    "Where is route_with_confidence defined and what does it return?",
-                )
+        with (
+            patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)),
+            patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5.6-luna"),
+            patch(
+                "brain.platform.integrations.completions.async_simple_text_completion",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "brain.systems.runs.direct_loop.telemetry.async_record_api_call",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await handle_summarize_file_for_task(
+                str(py_file),
+                "Where is route_with_confidence defined and what does it return?",
+            )
 
         assert result["path"] == str(py_file)
         assert result["model"] == "deterministic-multihop-fallback"
         assert "route_with_confidence" in result["key_symbols"]
-        assert isinstance(result["citations"], list)
+        assert result["citations"]
+        assert all(citation["path"] == str(py_file) for citation in result["citations"])
         assert result["confidence"] > 0
         assert len(result["relevant_ranges"]) >= 1
 
@@ -456,17 +495,29 @@ class TestPredictiveReading:
 '''
         )
 
-        with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)):
-                result = await handle_summarize_files_for_task(
-                    [str(a), str(b)],
-                    "Which file owns create_child_run and invocation setup?",
-                )
+        with (
+            patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)),
+            patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5.6-luna"),
+            patch(
+                "brain.platform.integrations.completions.async_simple_text_completion",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "brain.systems.runs.direct_loop.telemetry.async_record_api_call",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await handle_summarize_files_for_task(
+                [str(a), str(b)],
+                "Which file owns create_child_run and invocation setup?",
+            )
 
         assert result["model"] == "deterministic-implementation-map"
         assert result["file_count"] == 2
         assert len(result["files_ranked"]) == 2
         assert any(item["path"] == str(b) for item in result["files_ranked"])
+        assert result["citations"]
+        assert {citation["path"] for citation in result["citations"]} == {str(a), str(b)}
         assert "implementation_map" in result
 
     async def test_summarize_files_for_task_llm_path(self, tmp_path):

@@ -65,8 +65,8 @@ class TestExtractHarvestItems:
         assert items[1].visibility_for("org-1") == "org"
         mock_ollama.assert_called_once()
 
-    @patch("brain.systems.sessions.harvest_extraction.get_provider")
-    @patch("brain.systems.sessions.harvest_extraction.resolve_llm_client")
+    @patch("brain.platform.integrations.completions.get_provider")
+    @patch("brain.platform.integrations.completions.resolve_llm_client")
     def test_openai_extraction_uses_provider_neutral_response_format(self, mock_resolve, mock_get_provider):
         llm = MagicMock()
         llm.provider = "openai"
@@ -89,6 +89,31 @@ class TestExtractHarvestItems:
 
     def test_empty_messages_returns_empty(self):
         assert extract_harvest_items([]) == []
+
+    def test_astra_unavailable_preserves_structured_memories_through_sol(self):
+        from brain.platform.integrations import completions
+        from brain.platform.integrations.openai_codex_client import OpenAICodexError
+
+        llm = MagicMock(provider="openai")
+        llm.build_request_headers.return_value = {}
+        provider = MagicMock()
+        provider.create.side_effect = [
+            OpenAICodexError("model is not available on this account", status_code=400),
+            MagicMock(content=[MagicMock(type="text", text=VALID_MODEL_RESPONSE)]),
+        ]
+        with (
+            patch.object(completions, "resolve_llm_client", return_value=llm),
+            patch.object(completions, "get_provider", return_value=provider),
+        ):
+            items = extract_harvest_items(SAMPLE_MESSAGES, model="openai/gpt-6-astra")
+
+        assert [item.harvest_type for item in items] == ["preference", "decision"]
+        assert all(not item.raw_episode for item in items)
+        assert "python" in items[0].topic_tags
+        requests = [call.args[0] for call in provider.create.call_args_list]
+        assert [request.model for request in requests] == ["gpt-6-astra", "gpt-5.6-sol"]
+        assert all(request.response_format == _response_format() for request in requests)
+        assert all(request.operation_type == "memory_extraction" for request in requests)
 
     @patch("brain.systems.sessions.harvest_extraction._call_ollama")
     def test_provider_unavailable_returns_low_confidence_raw_episode_only(self, mock_ollama):

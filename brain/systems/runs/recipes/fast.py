@@ -39,6 +39,7 @@ short feedback loops.
 Runtime rules:
 - Treat the provided Target, Workspace, Context, attachments, memory, and live steering as the current run state.
 - Use later live steering to adjust the current run without discarding useful progress.
+- A status question or correction does not cancel the task: answer it, incorporate it, and continue unless the user says to stop.
 - Triage first: decide whether this is a direct answer, a short interactive task, or work that needs durable/parallel delegation.
 - Prefer the smallest complete action that satisfies the request now, but do not disappear into long work before giving the user a timely model-authored update on the originating surface.
 - Fast should spawn scoped workers. If an independent investigation, implementation slice, verification pass, duplicate search, or bug/blocker report can safely progress in parallel while you continue the user-facing run, use spawn_worker.

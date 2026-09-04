@@ -45,6 +45,7 @@ from brain.platform.integrations.providers import ContentBlockType, LLMRequest, 
 from brain.platform.integrations.provider_error_sentinel import (
     safe_provider_error_sentinel,
 )
+from brain.platform.model_catalog import normalize_model_effort
 from brain.platform.providers.model_policy import (
     async_get_default_model,
     infer_provider_from_model,
@@ -91,7 +92,7 @@ from brain.systems.runs.direct_loop.retry import (
     async_api_call_with_retry as _runtime_async_api_call_with_retry,
     response_text_retry_decision,
 )
-from brain.systems.runs.direct_loop.model_fallback import (
+from brain.platform.providers.model_fallback import (
     fallback_model_for,
     is_missing_required_model_auth,
     is_model_unavailable_error,
@@ -1473,7 +1474,7 @@ async def run_agent_async(
             org_id=effective_org_id,
         )
         model = _normalize_model(model)
-        model_fallback_used = False
+        attempted_models = {model}
         fallback_activity: str | None = None
 
         # Resolve LLM client
@@ -1498,7 +1499,7 @@ async def run_agent_async(
                 org_id=effective_org_id,
                 resolved_llm=resolved_llm,
             )
-            model_fallback_used = True
+            attempted_models.add(model)
             fallback_activity = f"{preferred_model} requires a personal Codex connection; using {model}"
             logger.info(
                 "Agent %s: preferred model auth unavailable; falling back %s -> %s",
@@ -1507,6 +1508,7 @@ async def run_agent_async(
                 model,
             )
         state.provider_name = llm.provider
+        thinking = normalize_model_effort(model, thinking)
         effective_routing = effective_routing_snapshot(
             model,
             thinking,
@@ -1755,15 +1757,15 @@ async def run_agent_async(
                 except Exception as exc:
                     fallback = fallback_model_for(model)
                     if (
-                        not model_fallback_used
-                        and fallback
+                        fallback
+                        and _normalize_model(fallback) not in attempted_models
                         and is_model_unavailable_error(exc, model=model)
                     ):
                         preferred_model = model
                         preferred_provider = infer_provider_from_model(preferred_model)
                         fallback_provider = infer_provider_from_model(fallback)
                         model = _normalize_model(fallback)
-                        model_fallback_used = True
+                        attempted_models.add(model)
                         if preferred_provider != fallback_provider:
                             llm, state.provider, _runtime_extra_headers = await _init_llm_async(
                                 effective_user_id,
