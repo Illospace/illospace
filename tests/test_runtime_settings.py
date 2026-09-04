@@ -881,6 +881,41 @@ async def test_runtime_models_update_persists_workspace_model_and_effort(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_switching_runtime_to_astra_normalizes_inherited_none(monkeypatch):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.models as runtime_models
+    from brain.systems.runtime_settings.schemas import RuntimeModelsUpdate
+
+    org = SimpleNamespace(memory_model_config={"default_thinking": "none"})
+    session = SimpleNamespace(get=AsyncMock(return_value=org), flush=AsyncMock())
+    monkeypatch.setattr(runtime_models, "async_get_runtime_models", AsyncMock())
+
+    await runtime_models.async_update_runtime_models(
+        session, SimpleNamespace(id="user-1", org_id="org-1"),
+        RuntimeModelsUpdate(default="gpt-6-astra"),
+    )
+
+    assert org.memory_model_config["default_model"] == "openai/gpt-6-astra"
+    assert org.memory_model_config["default_thinking"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_runtime_astra_rejects_explicit_none_effort():
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+
+    from brain.systems.runtime_settings.models import async_update_runtime_models
+    from brain.systems.runtime_settings.schemas import RuntimeModelsUpdate
+
+    with pytest.raises(HTTPException, match="does not support none effort"):
+        await async_update_runtime_models(
+            MagicMock(), SimpleNamespace(id="user-1", org_id="org-1"),
+            RuntimeModelsUpdate(default="gpt-6-astra", thinking="none"),
+        )
+
+
+@pytest.mark.asyncio
 async def test_runtime_models_update_accepts_anthropic_catalog_model(monkeypatch):
     from types import SimpleNamespace
 

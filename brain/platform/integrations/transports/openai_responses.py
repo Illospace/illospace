@@ -25,7 +25,7 @@ from brain.platform.integrations.transports.base import (
     validate_system_blocks,
     validate_tool_definitions,
 )
-from brain.platform.model_catalog import model_accepts_effort
+from brain.platform.model_catalog import model_accepts_effort, normalize_model_effort
 
 logger = logging.getLogger("brain.platform.integrations.providers")
 
@@ -597,9 +597,10 @@ class OpenAIResponsesTransport:
         if tools:
             openai_kwargs["tools"] = tools
 
+        model_effort = normalize_model_effort(request.model, request.reasoning_effort)
         effort = (
-            render_reasoning_effort("openai", request.reasoning_effort)
-            if model_accepts_effort(request.model, request.reasoning_effort)
+            render_reasoning_effort("openai", model_effort)
+            if model_accepts_effort(request.model, model_effort)
             else None
         )
         if effort:

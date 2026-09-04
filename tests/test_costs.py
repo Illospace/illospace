@@ -302,7 +302,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
     assert rows[0]["tokens_output"] == 15
     assert rows[0]["tokens_total"] == 45
     assert rows[0]["api_calls"] == 3
-    assert rows[0]["estimated_cost"] == 0.000593
+    assert rows[0]["estimated_cost"] == 0.000414
     assert rows[0]["model_used"] == "openai/gpt-5.6-sol"
     assert rows[0]["by_effort"] == [
         {
@@ -313,7 +313,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
             "tokens_total": 30,
             "cache_read": 0,
             "cache_write": 0,
-            "estimated_cost": 0.0004,
+            "estimated_cost": 0.00028,
         },
         {
             "effort": "low",
@@ -323,7 +323,7 @@ async def test_async_summarize_recent_run_usage_uses_async_session():
             "tokens_total": 15,
             "cache_read": 3,
             "cache_write": 1,
-            "estimated_cost": 0.000193,
+            "estimated_cost": 0.000134,
         },
     ]
 

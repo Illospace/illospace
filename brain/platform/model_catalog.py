@@ -40,18 +40,30 @@ CREDENTIAL_FREE_PROVIDERS: frozenset[str] = frozenset({"ollama"})
 
 MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     ModelCatalogEntry(
+        id="openai/gpt-6-astra",
+        label="GPT-6 Astra",
+        provider="openai",
+        description="Reasoning default; falls back to GPT-5.6 Sol when unavailable.",
+        supported_effort_tiers=tuple(tier for tier in EFFORT_TIERS if tier != "none"),
+        availability_fallback="openai/gpt-5.6-sol",
+        # https://developers.openai.com/api/docs/models/gpt-6-astra
+        context_window_tokens=1_050_000,
+        input_price_per_million=10.0,
+        output_price_per_million=50.0,
+        provider_default=True,
+    ),
+    ModelCatalogEntry(
         id="openai/gpt-5.6-sol",
         label="GPT-5.6 Sol",
         provider="openai",
-        description="Organization default; falls back to GPT-5.5 when unavailable.",
+        description="Standard reasoning and Astra fallback; falls back to GPT-5.5.",
         supported_effort_tiers=_ALL_EFFORT_TIERS,
         availability_fallback="openai/gpt-5.5",
         # https://developers.openai.com/api/docs/models/gpt-5.6-sol
         # Provider contract: 1,050,000 total tokens (922,000 input + 128,000 output).
         context_window_tokens=1_050_000,
-        input_price_per_million=5.0,
-        output_price_per_million=30.0,
-        provider_default=True,
+        input_price_per_million=4.0,
+        output_price_per_million=20.0,
     ),
     ModelCatalogEntry(
         id="openai/gpt-5.6-luna",
@@ -185,6 +197,23 @@ def model_accepts_effort(model: str | None, tier: str | None) -> bool:
         return False
     entry = get_model_catalog_entry(model)
     return entry is None or normalized_tier in entry.supported_effort_tiers
+
+
+def normalize_model_effort(model: str | None, tier: str | None) -> str | None:
+    """Apply a model's minimum effort to omitted or legacy no-reasoning settings.
+
+    Keep the requested policy intact; execution and its effective routing receipt
+    use this value. Unknown models retain provider pass-through behavior.
+    """
+    normalized = str(tier or "").strip().lower() or None
+    entry = get_model_catalog_entry(model)
+    if (
+        entry is not None
+        and "none" not in entry.supported_effort_tiers
+        and normalized in {None, "none"}
+    ):
+        return entry.supported_effort_tiers[0]
+    return normalized
 
 
 def availability_fallback_for(model: str | None) -> str | None:

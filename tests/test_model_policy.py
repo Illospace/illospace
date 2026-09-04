@@ -33,7 +33,7 @@ class TestModelPolicy:
         from brain.platform.providers.model_policy import get_default_model
 
         with patch("brain.platform.providers.model_policy.get_active_provider", return_value="openai"):
-            assert get_default_model() == "openai/gpt-5.6-sol"
+            assert get_default_model() == "openai/gpt-6-astra"
 
     def test_openai_model_options_use_native_defaults(self):
         from brain.platform.providers.model_policy import get_provider_model_options
@@ -42,7 +42,7 @@ class TestModelPolicy:
         assert "gpt-5.6-sol" in options
         assert "gpt-5.6-luna" in options
         assert "gpt-5.5" in options
-        assert set(options) == {"gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"}
+        assert set(options) == {"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"}
 
     @pytest.mark.asyncio
     async def test_org_default_thinking_overrides_runtime_default(self):
@@ -130,7 +130,8 @@ class TestModelPolicy:
     def test_cost_uses_native_pricing_for_default_openai_models(self):
         from brain.platform.providers.model_policy import calculate_model_cost
 
-        assert abs(calculate_model_cost("gpt-5.6-sol", 1_000_000, 1_000_000) - 35.0) < 0.001
+        assert abs(calculate_model_cost("gpt-6-astra", 1_000_000, 1_000_000) - 60.0) < 0.001
+        assert abs(calculate_model_cost("gpt-5.6-sol", 1_000_000, 1_000_000) - 24.0) < 0.001
         assert abs(calculate_model_cost("gpt-5.6-luna", 1_000_000, 1_000_000) - 1.4) < 0.001
         assert abs(calculate_model_cost("gpt-5.5", 1_000_000, 1_000_000) - 35.0) < 0.001
 
@@ -217,7 +218,7 @@ class TestModelPolicy:
             user_id="user-1",
         )
 
-        assert catalogs["openai"]["default"] == "gpt-5.6-sol"
+        assert catalogs["openai"]["default"] == "gpt-6-astra"
         assert "gpt-5.5" in catalogs["openai"]["options"]
         assert catalogs["anthropic"]["default"] == "claude-sonnet-5"
         assert catalogs["ollama"] == {
@@ -237,12 +238,12 @@ class TestModelPolicy:
             "id": "openai/gpt-5.6-sol",
             "label": "GPT-5.6 Sol",
             "provider": "openai",
-            "description": "Organization default; falls back to GPT-5.5 when unavailable.",
+            "description": "Standard reasoning and Astra fallback; falls back to GPT-5.5.",
             "supported_effort_tiers": ["none", "low", "medium", "high", "xhigh"],
             "auth_requirement": "chatgpt",
             "availability_fallback": "openai/gpt-5.5",
             "default_provenance": {
-                "provider_default": True,
+                "provider_default": False,
                 "workspace_default": True,
             },
         }

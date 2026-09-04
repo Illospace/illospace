@@ -85,7 +85,7 @@ class TestProviderInference:
         assert required_openai_auth_mode("openai/gpt-4.1") is None
 
     def test_preview_model_falls_back_only_for_model_availability_errors(self):
-        from brain.systems.runs.direct_loop.model_fallback import (
+        from brain.platform.providers.model_fallback import (
             fallback_model_for,
             is_model_unavailable_error,
         )
@@ -111,7 +111,7 @@ class TestProviderInference:
     def test_ollama_connection_error_is_model_unavailable(self):
         import httpx
 
-        from brain.systems.runs.direct_loop.model_fallback import (
+        from brain.platform.providers.model_fallback import (
             is_model_unavailable_error,
         )
 
@@ -125,7 +125,7 @@ class TestProviderInference:
     def test_openai_connection_error_is_not_model_unavailable(self):
         import httpx
 
-        from brain.systems.runs.direct_loop.model_fallback import (
+        from brain.platform.providers.model_fallback import (
             is_model_unavailable_error,
         )
 
@@ -137,7 +137,7 @@ class TestProviderInference:
         ) is False
 
     def test_ollama_model_not_found_is_model_unavailable(self):
-        from brain.systems.runs.direct_loop.model_fallback import (
+        from brain.platform.providers.model_fallback import (
             is_model_unavailable_error,
         )
 
@@ -228,7 +228,15 @@ class TestProviderInference:
 
 
 @pytest.mark.asyncio
-async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(monkeypatch):
+@pytest.mark.parametrize("route, thinking, effective_effort", [
+    (["gpt-5.6-sol", "gpt-5.5"], "xhigh", "xhigh"),
+    (["gpt-6-astra", "gpt-5.6-sol"], "high", "high"),
+    (["gpt-6-astra", "gpt-5.6-sol"], "none", "low"),
+    (["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5"], "high", "high"),
+])
+async def test_agent_retries_subscription_model_when_account_lacks_entitlement(
+    monkeypatch, route, thinking, effective_effort,
+):
     from brain.platform.integrations.openai_codex_client import OpenAICodexError
     from brain.platform.integrations.providers import LLMResponse, TextContentBlock, Usage
     from brain.systems.runs.direct_agent import run_agent_async
@@ -237,19 +245,20 @@ async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(m
     llm.auth_mode = "chatgpt"
     llm.is_oauth = True
     requests = []
+    preferred, fallback = route[0], route[-1]
 
     async def fake_api_call(_provider, request, *_args, **_kwargs):
         requests.append(request)
-        if len(requests) == 1:
+        if len(requests) < len(route):
             raise OpenAICodexError(
-                "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                f"The '{preferred}' model is not supported when using Codex with a ChatGPT account.",
                 status_code=400,
             )
         return LLMResponse(
             content=[TextContentBlock("Fallback succeeded")],
             stop_reason="end_turn",
             usage=Usage(input_tokens=3, output_tokens=2),
-            model="gpt-5.5",
+            model=fallback,
         )
 
     monkeypatch.setattr("brain.systems.runs.direct_agent.get_provider", lambda *_args: MagicMock())
@@ -263,8 +272,8 @@ async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(m
     activity = []
     result = await run_agent_async(
         "Test fallback",
-        model="openai/gpt-5.6-sol",
-        thinking="xhigh",
+        model=f"openai/{preferred}",
+        thinking=thinking,
         tools=[],
         tool_handlers={},
         persist_session=False,
@@ -275,11 +284,12 @@ async def test_agent_retries_gpt_5_6_on_gpt_5_5_when_account_lacks_entitlement(m
 
     assert result.success is True
     assert result.output == "Fallback succeeded"
-    assert [request.model for request in requests] == ["gpt-5.6-sol", "gpt-5.5"]
-    assert any("unavailable" in item and "gpt-5.5" in item for item in activity)
+    assert [request.model for request in requests] == route
+    assert requests[0].reasoning_effort == effective_effort
+    assert any("unavailable" in item and fallback in item for item in activity)
     assert result.effective_routing == {
-        "model": "openai/gpt-5.5",
-        "effort": "xhigh",
+        "model": f"openai/{fallback}",
+        "effort": effective_effort,
         "provider": "openai",
         "auth_mode": "chatgpt",
     }

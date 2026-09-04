@@ -696,13 +696,18 @@ def handle_project_context(path: str | None = None, workspace_root: str | None =
 
 
 def _reader_model(user_id: str | None = None, org_id: str | None = None) -> str:
-    """Pick the configured default reader model from the active provider policy."""
+    """Keep bounded code-reading subcalls on the inexpensive OpenAI lane."""
     from brain.platform.providers.model_policy import (
+        DEFAULT_BULK_MODEL,
         get_default_model,
         resolve_default_provider,
     )
 
     provider = resolve_default_provider(user_id=user_id, org_id=org_id)
+    if provider == "openai":
+        # A reasoning-default rollout must not raise utility cost or require
+        # access to a newly released model for these small file summaries.
+        return DEFAULT_BULK_MODEL
     model = get_default_model(
         provider=provider,
         include_provider_prefix=True,
@@ -976,6 +981,11 @@ async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id:
     start_time = time.time()
     response = None
     error = None
+
+    def record_selected_model(selected: str) -> None:
+        nonlocal model
+        model = selected
+
     try:
         response = await async_simple_text_completion(
             prompt,
@@ -983,13 +993,17 @@ async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id:
             max_tokens=700,
             user_id=user_id,
             org_id=org_id,
+            on_model_selected=record_selected_model,
             system_prompt=(
                 "You are a low-cost code reading helper. "
                 "Return strict JSON only. Be compact, cite files and line ranges, "
                 "and never invent code details that are not present in the provided excerpts."
             ),
         )
-        return _parse_reader_completion_response(response)
+        result = _parse_reader_completion_response(response)
+        if result is not None:
+            result["model"] = model
+        return result
     except Exception as exc:
         error = str(exc)
         raise
@@ -1097,7 +1111,7 @@ async def handle_summarize_file_for_task(
         llm_result.setdefault("confidence", 0.5)
         llm_result["path"] = path
         llm_result["line_count"] = total_lines
-        llm_result["model"] = _reader_model(user_id=user_id, org_id=org_id)
+        llm_result.setdefault("model", _reader_model(user_id=user_id, org_id=org_id))
         llm_result["question"] = question
         _record_reader_artifact("summarize_file_for_task", llm_result)
         return llm_result
@@ -1182,7 +1196,7 @@ async def handle_summarize_files_for_task(
         llm_result.setdefault("citations", [])
         llm_result.setdefault("confidence", 0.5)
         llm_result["file_count"] = len(selected)
-        llm_result["model"] = _reader_model(user_id=user_id, org_id=org_id)
+        llm_result.setdefault("model", _reader_model(user_id=user_id, org_id=org_id))
         llm_result["question"] = question
         _record_reader_artifact("summarize_files_for_task", llm_result)
         return llm_result

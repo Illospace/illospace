@@ -1928,8 +1928,8 @@ async def test_spawn_worker_coerces_inherited_api_key_model(monkeypatch):
         },
     )
 
-    assert captured["model_policy"]["model"] == "openai/gpt-5.6-sol"
-    assert payload["model"] == "openai/gpt-5.6-sol"
+    assert captured["model_policy"]["model"] == "openai/gpt-6-astra"
+    assert payload["model"] == "openai/gpt-6-astra"
     assert payload["routing"]["auth_mode"] == "chatgpt"
 
 
@@ -2318,7 +2318,7 @@ async def test_cycle_auth_policy_blocks_anthropic_without_credentials(monkeypatc
         (
             {"model": "openai/gpt-4.1"},
             "requires an OpenAI API key; use the allowed subscription route "
-            "'openai/gpt-5.6-sol'",
+            "'openai/gpt-6-astra'",
         ),
     ],
 )

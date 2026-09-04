@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.org import Org, User
-from brain.platform.model_catalog import get_model_catalog_entry
+from brain.platform.model_catalog import get_model_catalog_entry, normalize_model_effort
 from brain.platform.providers.model_policy import (
     EFFORT_TIERS,
     async_get_default_model,
@@ -19,7 +19,7 @@ _THINKING_OPTION_DETAILS = {
     "low": ("Low", "Faster responses with light reasoning."),
     "medium": ("Medium", "Balanced reasoning effort."),
     "high": ("High", "More reasoning for difficult work."),
-    "xhigh": ("Extra High", "Maximum supported reasoning effort."),
+    "xhigh": ("Extra High", "Highest reasoning effort offered by Illo."),
 }
 THINKING_OPTIONS = [
     RuntimeOption(
@@ -55,7 +55,7 @@ async def async_get_runtime_models(session: AsyncSession, user: User) -> Runtime
     )
     return RuntimeModelsRead(
         default=_normalize_model(default),
-        thinking=thinking,
+        thinking=normalize_model_effort(default, thinking),
         catalog=get_model_catalog_contract(workspace_default=default),
         thinking_options=THINKING_OPTIONS,
     )
@@ -81,6 +81,11 @@ async def async_update_runtime_models(
         config["default_model"] = entry.id
         if update.thinking is not None:
             config["default_thinking"] = update.thinking
+        else:
+            # Switching models must not retain an unsupported legacy none tier.
+            config["default_thinking"] = normalize_model_effort(
+                model, config.get("default_thinking") or "high"
+            )
         for stale_key in (
             "session_harvest",
             "depth_0",

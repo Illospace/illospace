@@ -21,9 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from brain.platform.async_io import http_post
-from brain.platform.integrations.llm import resolve_llm_client
-from brain.platform.integrations.providers import LLMRequest, get_provider
-from brain.platform.providers.model_policy import infer_provider_from_model, resolve_default_provider
+from brain.platform.integrations.completions import simple_text_completion
 
 logger = logging.getLogger(__name__)
 
@@ -338,27 +336,16 @@ def _call_extraction_provider(
     if model.startswith("ollama:"):
         return _call_ollama(prompt, model.removeprefix("ollama:"))
 
-    requested_model = _normalize_model_name(model)
-    requested_provider = infer_provider_from_model(
-        requested_model,
-        default=resolve_default_provider(user_id=user_id, org_id=org_id),
+    return simple_text_completion(
+        prompt,
+        model=_normalize_model_name(model),
+        max_tokens=1200,
+        user_id=user_id,
+        org_id=org_id,
+        system_prompt=HARVEST_SYSTEM_PROMPT,
+        response_format=_response_format(),
+        operation_type="memory_extraction",
     )
-    llm = resolve_llm_client(user_id=user_id, org_id=org_id, provider=requested_provider)
-    provider = get_provider(llm.provider, llm.client)
-    response_format = _response_format() if llm.provider == "openai" else None
-
-    response = provider.create(
-        LLMRequest(
-            model=requested_model,
-            max_output_tokens=1200,
-            messages=[{"role": "user", "content": prompt}],
-            system=HARVEST_SYSTEM_PROMPT,
-            extra_headers=llm.build_request_headers() or None,
-            response_format=response_format,
-            operation_type="memory_extraction",
-        )
-    )
-    return _response_text(response)
 
 
 def _normalize_model_name(model: str) -> str:
@@ -391,15 +378,6 @@ def _call_ollama(prompt: str, model: str) -> str | None:
     except Exception as e:
         logger.warning("Ollama harvest call failed: %s", e)
         return None
-
-
-def _response_text(response: Any) -> str | None:
-    text_parts: list[str] = []
-    for block in getattr(response, "content", []) or []:
-        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
-            text_parts.append(str(block.text))
-    text = "\n".join(part.strip() for part in text_parts if part and part.strip()).strip()
-    return text or None
 
 
 def _parse_response(raw: str) -> list[HarvestItem]:
