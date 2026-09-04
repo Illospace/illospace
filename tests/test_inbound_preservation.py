@@ -17,7 +17,10 @@ from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundE
 from brain.platform.db.models.org import Org, User
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
-from brain.systems.inbound.preservation import PRESERVATION_MISSING_REASON
+from brain.systems.inbound.preservation import (
+    PRESERVATION_MISSING_REASON,
+    PRESERVATION_NON_DURABLE_REASON,
+)
 from brain.systems.runs.events import run_event
 from brain.systems.runs.failure_diagnostic import (
     RunFailureStage,
@@ -317,6 +320,11 @@ async def test_preservation_submission_without_durable_evidence_stays_actionable
     assert evidence["status"] == "missing"
     assert evidence["reason"] == PRESERVATION_MISSING_REASON
     assert "non_durable_target_refs" not in evidence
+    assert event.action_result["handling"]["final_answer"] == PRESERVATION_MISSING_REASON
+    assert (
+        event.action_result["handling"]["result"]["final_answer"]
+        == PRESERVATION_MISSING_REASON
+    )
     assert "did not produce durable storage evidence" in event.error
     assert receipt.status == "review_required"
     assert receipt.tool_use["status"] == "needs_action"
@@ -393,9 +401,14 @@ async def test_preservation_submission_with_github_comment_names_non_durable_evi
     assert evidence["status"] == "missing"
     assert evidence["mutated_target_refs"] == []
     assert evidence["non_durable_target_refs"] == [expected_ref]
-    assert evidence["reason"] != PRESERVATION_MISSING_REASON
+    assert evidence["reason"] == PRESERVATION_NON_DURABLE_REASON
     assert "non-durable surface" in evidence["reason"]
     assert "Illo-owned" in evidence["reason"]
+    assert event.action_result["handling"]["final_answer"] == PRESERVATION_NON_DURABLE_REASON
+    assert (
+        event.action_result["handling"]["result"]["final_answer"]
+        == PRESERVATION_NON_DURABLE_REASON
+    )
     assert receipt.status == "review_required"
     assert receipt.tool_use["evidence_contract"]["non_durable_target_refs"] == [expected_ref]
     assert receipt.tool_use["attribution"]["mutated_target_refs"] == [expected_ref]
@@ -454,6 +467,12 @@ async def test_preservation_submission_with_explicit_memory_evidence_reconciles_
     evidence = event.action_result["handling"]["evidence_contract"]
     assert evidence["status"] == "satisfied"
     assert "non_durable_target_refs" not in evidence
+    assert event.action_result["handling"]["final_answer"] == (
+        "Stored the playbook in reconstructive memory."
+    )
+    assert event.action_result["handling"]["result"]["final_answer"] == (
+        "Stored the playbook in reconstructive memory."
+    )
     assert {"kind": "memory_source", "id": "91", "source": "memory_ingest_source"} in evidence["mutated_target_refs"]
     assert receipt.status == "processed"
     assert "memory_source" in {ref["kind"] for ref in receipt.tool_use["attribution"]["mutated_target_refs"]}
@@ -598,11 +617,12 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
         ingress_context={"surface": "test"},
     )
     handling = await _assert_queued_submission(session, result["ilo_outcome"])
-    run = await session.get(AgentRunRow, handling["run_id"])
-    assert run is not None
-    run.status = RunStatus.COMPLETED.value
-    run.completed_at = datetime.now(timezone.utc)
-    await session.flush()
+    await _finish_triage_run(
+        session,
+        handling,
+        status=RunStatus.COMPLETED,
+        final_answer="Reviewed the context; no preservation was requested.",
+    )
 
     from brain.app.api.routers.agent_mcp import _tool_get_result
 
@@ -613,6 +633,13 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
     assert payload["handling_status"] == "completed"
     assert payload["run_status"] == "completed"
     assert payload["evidence_status"] == "not_required"
+    handling_result = payload["event"]["action_result"]["handling"]
+    assert handling_result["final_answer"] == (
+        "Reviewed the context; no preservation was requested."
+    )
+    assert handling_result["result"]["final_answer"] == (
+        "Reviewed the context; no preservation was requested."
+    )
 
 
 async def test_get_result_failed_preservation_reports_exception_class_states(session):
