@@ -357,7 +357,9 @@ a human action. This never-merge rule is absolute for staging→main.
   external testing, or manual design/release decision before agent execution.
 - `Backlog`: valid but not selected for near-term execution.
 - `Todo`: selected/near-term and ready, but no active PR yet.
-- `In Progress`: active branch, draft PR, or implementation underway.
+- `In Progress`: active branch, draft PR, or implementation underway. A comment,
+  human or automated, is never grounds for `In Progress`. Occupancy comes from an
+  explicit human action, never from parsing comment prose.
 - `In Review`: non-draft PR is open and awaiting review, CI, or merge.
 - `Blocked`: failing CI, requested changes, unclear owner, missing info, or
   external dependency.
@@ -375,6 +377,12 @@ a human action. This never-merge rule is absolute for staging→main.
   true), or work that is obsolete, duplicate, invalid, intentionally closed,
   or not worth doing. Record a closed-unmerged PR with the progress note "PR
   closed on GitHub without merge; no further review action."
+
+Never infer human authorship from a comment's author login. `redawear` is a
+shared credential. Read `authorship` on the comment payload; `automation` is
+automation regardless of who posted it. Never write "human-set", "Reda's human
+comment", or similar attribution in a `progress_note` unless a human action was
+observed rather than inferred.
 
 ## Identities
 
