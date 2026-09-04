@@ -368,12 +368,7 @@ def _assignment_provenance(issue: dict[str, Any], timeline: list[Any] | None) ->
     return "automation_at_filing"
 
 
-def _comment_authorship(comment: dict[str, Any]) -> str:
-    if not isinstance(comment, dict):
-        return "unknown"
-    body = comment.get("body")
-    if not isinstance(body, str):
-        return "unknown"
+def _comment_authorship(body: str) -> str:
     first_line = next((line.strip() for line in body.splitlines() if line.strip()), None)
     if first_line is None or not first_line.startswith(">"):
         return "unknown"
@@ -485,7 +480,7 @@ def _issue_comment_payload(comment: dict[str, Any]) -> dict[str, Any]:
         "body": bounded_body,
         "body_total_chars": len(raw_body),
         "body_truncated": body_truncated,
-        "authorship": _comment_authorship(comment),
+        "authorship": _comment_authorship(raw_body),
         "user": _user_payload(comment.get("user")),
         "created_at": comment.get("created_at"),
         "updated_at": comment.get("updated_at"),
