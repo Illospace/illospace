@@ -18,6 +18,7 @@ WORKER_DRAIN_TIMEOUT_FILE="${ILLO_SELF_UPDATE_WORKER_DRAIN_TIMEOUT_FILE:-/data/p
 POLL_SECONDS="${ILLO_SELF_UPDATE_POLL_SECONDS:-2}"
 HEARTBEAT_INTERVAL_SECONDS="${ILLO_SELF_UPDATE_HEARTBEAT_INTERVAL_SECONDS:-2}"
 HEARTBEAT_KEEPER_PID=""
+HEARTBEAT_PREVIOUS_USR1_TRAP=""
 AUTO_UPDATE_ENABLED="${ILLO_AUTO_UPDATE_ENABLED:-1}"
 AUTO_UPDATE_POLL_SECONDS="${ILLO_AUTO_UPDATE_POLL_SECONDS:-300}"
 APP_UID="${ILLO_APP_UID:-10001}"
@@ -143,29 +144,45 @@ write_workspace_tools_heartbeat() {
     '{status: "ready", updated_at: $updated_at}'
 }
 
+write_controller_heartbeats() {
+  write_heartbeat
+  write_runtime_services_heartbeat
+  write_workspace_tools_heartbeat
+}
+
+install_controller_signal_handlers() {
+  trap stop_heartbeat_keeper EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+}
+
 stop_heartbeat_keeper() {
-  trap '' USR1
+  if [ -n "$HEARTBEAT_PREVIOUS_USR1_TRAP" ]; then
+    trap '' USR1
+  fi
   if [ -n "$HEARTBEAT_KEEPER_PID" ]; then
     kill "$HEARTBEAT_KEEPER_PID" 2>/dev/null || true
     wait "$HEARTBEAT_KEEPER_PID" 2>/dev/null || true
     HEARTBEAT_KEEPER_PID=""
+  fi
+  if [ -n "$HEARTBEAT_PREVIOUS_USR1_TRAP" ]; then
+    eval "$HEARTBEAT_PREVIOUS_USR1_TRAP"
+    HEARTBEAT_PREVIOUS_USR1_TRAP=""
   fi
 }
 
 refresh_controller_heartbeats() {
   # Do not reenter json_write while its shared temporary file is in use.
   trap '' USR1
-  write_heartbeat
-  write_runtime_services_heartbeat
-  write_workspace_tools_heartbeat
+  write_controller_heartbeats
   trap refresh_controller_heartbeats USR1
 }
 
 run_with_heartbeats() {
   local controller_pid=$$ exit_code
-  trap stop_heartbeat_keeper EXIT
-  trap 'exit 143' TERM
-  trap 'exit 130' INT
+  HEARTBEAT_PREVIOUS_USR1_TRAP="$(trap -p USR1)"
+  # An empty trap listing means the default disposition, not an ignored signal.
+  HEARTBEAT_PREVIOUS_USR1_TRAP="${HEARTBEAT_PREVIOUS_USR1_TRAP:-trap - USR1}"
   # Only the controller writes: a stopped/wedged controller cannot renew health.
   trap refresh_controller_heartbeats USR1
   (
@@ -414,15 +431,14 @@ main() {
   local exit_code now_epoch
 
   prepare_shared_paths
+  install_controller_signal_handlers
   write_status "idle" "Compose updater sidecar is ready." "" ""
   write_runtime_services_status "idle" "Runtime service host controller is ready." "" "" "" "[]"
   write_workspace_tools_status "idle" "Workspace tool host controller is ready." "" "" "" "" ""
   initialize_auto_update_poll "$(date +%s)"
 
   while true; do
-    write_heartbeat
-    write_runtime_services_heartbeat
-    write_workspace_tools_heartbeat
+    write_controller_heartbeats
     if [ -f "$REQUEST_FILE" ]; then
       set +e
       run_with_heartbeats process_request

@@ -90,7 +90,7 @@ def _daemon_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
 
 def _run_daemon_function(env: dict[str, str], body: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", f'source "{DAEMON}"\n{body}'],
+        ["bash", "-c", f'source "{DAEMON}"\ninstall_controller_signal_handlers\n{body}'],
         cwd=ROOT,
         env=env,
         text=True,
@@ -179,6 +179,38 @@ def test_keeper_preserves_failed_operation_status_across_repeated_calls(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_operation_restores_signal_dispositions(tmp_path):
+    env, _paths = _heartbeat_env(tmp_path)
+    result = _run_daemon_function(
+        env,
+        '''
+        controller_traps=$(trap -p EXIT TERM INT)
+        operation() { sleep 0.15; return "$1"; }
+        for disposition in default ignored custom; do
+          case "$disposition" in
+            default) trap - USR1 ;;
+            ignored) trap '' USR1 ;;
+            custom) trap 'echo restored' USR1 ;;
+          esac
+          usr1_trap=$(trap -p USR1)
+          for expected_status in 0 7; do
+            set +e
+            run_with_heartbeats operation "$expected_status"
+            operation_status=$?
+            set -e
+            [ "$operation_status" -eq "$expected_status" ]
+            [ "$(trap -p USR1)" = "$usr1_trap" ]
+            [ "$(trap -p EXIT TERM INT)" = "$controller_traps" ]
+            stop_heartbeat_keeper
+            [ "$(trap -p USR1)" = "$usr1_trap" ]
+            [ "$(trap -p EXIT TERM INT)" = "$controller_traps" ]
+          done
+        done
+        ''',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGINT, signal.SIGKILL, signal.SIGSTOP])
 def test_keeper_stops_when_controller_stops(tmp_path, stop_signal):
     env, paths = _heartbeat_env(tmp_path)
@@ -194,7 +226,7 @@ def test_keeper_stops_when_controller_stops(tmp_path, stop_signal):
     run_with_heartbeats blocking_build
     '''
     daemon = subprocess.Popen(
-        ["bash", "-c", f'source "{DAEMON}"\n{body}'],
+        ["bash", "-c", f'source "{DAEMON}"\ninstall_controller_signal_handlers\n{body}'],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
