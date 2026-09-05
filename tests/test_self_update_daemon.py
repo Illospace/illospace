@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import textwrap
+import time
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DAEMON = ROOT / "deploy" / "scripts" / "self-update-daemon.sh"
+HEALTHCHECK = ROOT / "deploy" / "scripts" / "self-update-healthcheck.sh"
 
 
 def _fake_git_tools(tmp_path: Path) -> Path:
@@ -87,12 +90,184 @@ def _daemon_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
 
 def _run_daemon_function(env: dict[str, str], body: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", f'source "{DAEMON}"\n{body}'],
+        ["bash", "-c", f'source "{DAEMON}"\ninstall_controller_signal_handlers\n{body}'],
         cwd=ROOT,
         env=env,
         text=True,
         capture_output=True,
+        timeout=15,
     )
+
+
+def _heartbeat_env(tmp_path: Path) -> tuple[dict[str, str], list[Path]]:
+    env, *_ = _daemon_env(tmp_path)
+    paths = []
+    for controller in ("SELF_UPDATE", "RUNTIME_SERVICES", "WORKSPACE_TOOLS"):
+        path = tmp_path / f"{controller.lower()}-heartbeat.json"
+        env[f"ILLO_{controller}_HEARTBEAT_FILE"] = str(path)
+        paths.append(path)
+    env["ILLO_SELF_UPDATE_HEARTBEAT_MAX_AGE_SECONDS"] = "1"
+    env["ILLO_SELF_UPDATE_HEARTBEAT_INTERVAL_SECONDS"] = "0.05"
+    return env, paths
+
+
+def test_blocking_build_keeps_all_heartbeats_healthy_and_reaps_keeper(tmp_path):
+    env, paths = _heartbeat_env(tmp_path)
+    result = _run_daemon_function(
+        env,
+        f'''
+        blocking_build() {{
+          echo "$HEARTBEAT_KEEPER_PID" > "$HEARTBEAT_FILE.keeper"
+          for path in "$HEARTBEAT_FILE" "$RUNTIME_SERVICES_HEARTBEAT_FILE" "$WORKSPACE_TOOLS_HEARTBEAT_FILE"; do
+            for attempt in {{1..100}}; do
+              [ ! -f "$path" ] || break
+              sleep 0.01
+            done
+            cp "$path" "$path.before"
+          done
+          sleep 2.2
+          for path in "$HEARTBEAT_FILE" "$RUNTIME_SERVICES_HEARTBEAT_FILE" "$WORKSPACE_TOOLS_HEARTBEAT_FILE"; do
+            ILLO_SELF_UPDATE_HEARTBEAT_FILE="$path" bash "{HEALTHCHECK}" || return 1
+          done
+        }}
+        run_with_heartbeats blocking_build
+        [ -z "$HEARTBEAT_KEEPER_PID" ]
+        ! kill -0 "$(cat "$HEARTBEAT_FILE.keeper")" 2>/dev/null
+        ''',
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for path in paths:
+        before = json.loads(Path(f"{path}.before").read_text())["updated_at"]
+        assert json.loads(path.read_text())["updated_at"] > before
+
+
+def test_heartbeats_expire_after_keeper_cleanup(tmp_path):
+    env, paths = _heartbeat_env(tmp_path)
+    result = _run_daemon_function(env, "run_with_heartbeats sleep 0.2")
+    assert result.returncode == 0, result.stdout + result.stderr
+    snapshots = [path.read_bytes() for path in paths]
+    time.sleep(2.1)
+
+    for path, snapshot in zip(paths, snapshots):
+        assert path.read_bytes() == snapshot
+        check = subprocess.run(
+            ["bash", str(HEALTHCHECK)],
+            env={**env, "ILLO_SELF_UPDATE_HEARTBEAT_FILE": str(path)},
+            capture_output=True,
+            timeout=5,
+        )
+        assert check.returncode != 0
+
+
+def test_keeper_preserves_failed_operation_status_across_repeated_calls(tmp_path):
+    env, _paths = _heartbeat_env(tmp_path)
+    result = _run_daemon_function(
+        env,
+        '''
+        fail_build() { sleep 0.15; return 7; }
+        for attempt in 1 2 3; do
+          set +e
+          run_with_heartbeats fail_build
+          result=$?
+          set -e
+          [ "$result" -eq 7 ]
+          [ -z "$HEARTBEAT_KEEPER_PID" ]
+        done
+        ''',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_operation_restores_signal_dispositions(tmp_path):
+    env, _paths = _heartbeat_env(tmp_path)
+    result = _run_daemon_function(
+        env,
+        '''
+        controller_traps=$(trap -p EXIT TERM INT)
+        operation() { sleep 0.15; return "$1"; }
+        for disposition in default ignored custom; do
+          case "$disposition" in
+            default) trap - USR1 ;;
+            ignored) trap '' USR1 ;;
+            custom) trap 'echo restored' USR1 ;;
+          esac
+          usr1_trap=$(trap -p USR1)
+          for expected_status in 0 7; do
+            set +e
+            run_with_heartbeats operation "$expected_status"
+            operation_status=$?
+            set -e
+            [ "$operation_status" -eq "$expected_status" ]
+            [ "$(trap -p USR1)" = "$usr1_trap" ]
+            [ "$(trap -p EXIT TERM INT)" = "$controller_traps" ]
+            stop_heartbeat_keeper
+            [ "$(trap -p USR1)" = "$usr1_trap" ]
+            [ "$(trap -p EXIT TERM INT)" = "$controller_traps" ]
+          done
+        done
+        ''',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGINT, signal.SIGKILL, signal.SIGSTOP])
+def test_keeper_stops_when_controller_stops(tmp_path, stop_signal):
+    env, paths = _heartbeat_env(tmp_path)
+    pid_path = tmp_path / "keeper.pid"
+    build_pid_path = tmp_path / "build.pid"
+    body = f'''
+    blocking_build() {{
+      echo "$HEARTBEAT_KEEPER_PID" > "{pid_path}"
+      sleep 10 &
+      echo $! > "{build_pid_path}"
+      wait $!
+    }}
+    run_with_heartbeats blocking_build
+    '''
+    daemon = subprocess.Popen(
+        ["bash", "-c", f'source "{DAEMON}"\ninstall_controller_signal_handlers\n{body}'],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not (pid_path.exists() and all(path.exists() for path in paths)):
+            assert time.monotonic() < deadline, "keeper did not start"
+            time.sleep(0.01)
+        keeper_pid = int(pid_path.read_text())
+        build_pid = int(build_pid_path.read_text())
+        daemon.send_signal(stop_signal)
+        if stop_signal == signal.SIGSTOP:
+            # The timer may still signal, but only the stopped controller writes.
+            time.sleep(0.1)
+            snapshots = [path.read_bytes() for path in paths]
+            time.sleep(0.2)
+            assert [path.read_bytes() for path in paths] == snapshots
+            daemon.kill()
+        daemon.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(keeper_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "keeper survived its controller"
+            time.sleep(0.02)
+        snapshots = [path.read_bytes() for path in paths]
+        time.sleep(0.1)
+        assert [path.read_bytes() for path in paths] == snapshots
+        with pytest.raises(ProcessLookupError):
+            os.kill(build_pid, 0)
+    finally:
+        # Also remove the simulated build after SIGKILL/SIGSTOP.
+        try:
+            os.killpg(daemon.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        daemon.wait(timeout=5)
 
 
 def test_auto_update_queues_once_when_origin_main_is_ahead(tmp_path):
