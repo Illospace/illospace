@@ -202,6 +202,20 @@ GITHUB_TOOLS = [
                         "to deliver the created artifact back to a matching open request."
                     ),
                 },
+                "provider_alert": {
+                    "type": "object",
+                    "description": (
+                        "Optional deterministic provider-alert identity. Atomically reserves the initial "
+                        "filing or returns the canonical issue and appends occurrence evidence from body. "
+                        "If filing_pending is returned, retry with the same identity."
+                    ),
+                    "properties": {
+                        "service": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "subsystem": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "tracked_signature": {"type": "string", "minLength": 1, "maxLength": 64},
+                    },
+                    "required": ["service", "subsystem", "tracked_signature"],
+                },
                 "token_secret_key": {
                     "type": "string",
                     "description": "Optional Vault secret key holding a write-capable GitHub token for private repos.",

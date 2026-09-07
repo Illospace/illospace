@@ -14,10 +14,39 @@ from brain.platform.db.base import Base, TimestampMixin
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
 
 __all__ = [
+    "ProviderAlertFilingClaim",
     "ProviderAlertLedger",
     "ProviderAlertOccurrence",
     "ProviderAlertSurge",
 ]
+
+
+class ProviderAlertFilingClaim(Base, TimestampMixin):
+    """Canonical GitHub filing and expiring owner for a tracked signature."""
+
+    __tablename__ = "provider_alert_filing_claims"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id", "service", "subsystem", "tracked_signature",
+            name="uq_provider_alert_filing_signature",
+        ),
+        Index("ix_provider_alert_filing_pending", "state", "claimed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str] = mapped_column(
+        UUIDString, ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False,
+    )
+    service: Mapped[str] = mapped_column(String(120), nullable=False)
+    subsystem: Mapped[str] = mapped_column(String(120), nullable=False)
+    tracked_signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    repo: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default=text("'pending'"),
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    issue_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ProviderAlertLedger(Base, TimestampMixin):

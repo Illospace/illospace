@@ -56,6 +56,11 @@ from brain.systems.deploy_state_github import (
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
+from brain.systems.slack.provider_alert_filing import (
+    FilingIdentity,
+    FilingPendingError,
+    create_provider_alert_issue,
+)
 from brain.systems.vault import (
     VAULT_AGENT_ACCESS_AVAILABLE,
     async_get_secret,
@@ -657,6 +662,7 @@ async def _handle_create_github_issue(
     assignee_rationale: str | None = None,
     token_secret_key: str | None = None,
     origin_ref: str | None = None,
+    provider_alert: dict[str, Any] | None = None,
 ) -> str:
     """Open a REAL GitHub issue in the target repository.
 
@@ -683,6 +689,17 @@ async def _handle_create_github_issue(
     clean_assignee_rationale = _clean(assignee_rationale)
     effective_assignees = requested_assignees if clean_assignee_rationale else []
 
+    filing_identity = None
+    if provider_alert is not None:
+        if not isinstance(provider_alert, Mapping):
+            return json.dumps({"error": "provider_alert must be an object"})
+        try:
+            filing_identity = FilingIdentity.parse(
+                _clean(getattr(_agent_context, "org_id", None)), provider_alert,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
         token_secret_key=token_secret_key,
@@ -705,14 +722,15 @@ async def _handle_create_github_issue(
     auth_statuses = {401, 403, 404}
     for index, candidate in enumerate(write_candidates):
         try:
-            payload = await async_create_repo_issue(
-                repo_slug,
-                title=clean_title,
-                body=issue_body,
-                labels=_string_list(labels),
-                assignees=effective_assignees,
-                token=candidate["token"],
-            )
+            create_args = dict(title=clean_title, body=issue_body, labels=_string_list(labels),
+                               assignees=effective_assignees, token=candidate["token"])
+            if filing_identity is not None:
+                payload = await create_provider_alert_issue(
+                    filing_identity, repo_slug, create_issue=async_create_repo_issue, **create_args,
+                )
+                repo_slug = payload["repo"]
+            else:
+                payload = await async_create_repo_issue(repo_slug, **create_args)
         except GitHubConnectorError as exc:
             last_error = exc
             # Retry the next token only on auth/visibility failures. A 422 is a
@@ -726,6 +744,16 @@ async def _handle_create_github_issue(
                 "no_write_token": exc.status_code in auth_statuses,
                 "repo": repo_slug,
                 "token_key_name": candidate.get("key_name"),
+                **({"filing_pending": True, "retryable": True} if filing_identity else {}),
+            })
+        except FilingPendingError as exc:
+            return json.dumps({"error": str(exc), "filing_pending": True, "retryable": True})
+        except Exception as exc:
+            if filing_identity is None:
+                raise
+            return json.dumps({
+                "error": str(exc), "filing_pending": True, "retryable": True,
+                "instruction": "Retry the same provider_alert claim; do not create another issue or tracker record.",
             })
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
