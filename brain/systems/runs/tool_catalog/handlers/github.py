@@ -1047,6 +1047,8 @@ async def _handle_update_github_issue(
     title: str | None = None,
     body: str | None = None,
     token_secret_key: str | None = None,
+    clear_body: bool = False,
+    clear_labels: bool = False,
 ) -> str:
     """Update a real GitHub issue using the issue-create App write lane."""
 
@@ -1062,6 +1064,43 @@ async def _handle_update_github_issue(
     clean_labels_add = _string_list(labels_add)
     clean_labels_remove = _string_list(labels_remove)
     clean_labels_set = _string_list(labels_set) if labels_set is not None else None
+    for field_name, value in (("clear_body", clear_body), ("clear_labels", clear_labels)):
+        if not isinstance(value, bool):
+            return json.dumps({
+                "error": f"update_github_issue {field_name} must be a boolean",
+                "status_code": 422,
+            })
+    if clear_body and body is not None:
+        return json.dumps({
+            "error": "update_github_issue clear_body cannot be combined with body; omit body",
+            "status_code": 422,
+        })
+    if clear_labels and any(value is not None for value in (labels_set, labels_add, labels_remove)):
+        return json.dumps({
+            "error": (
+                "update_github_issue clear_labels cannot be combined with labels_set, "
+                "labels_add or labels_remove; omit those fields"
+            ),
+            "status_code": 422,
+        })
+    if body is not None and not str(body).strip():
+        return json.dumps({
+            "error": (
+                "update_github_issue body must be non-empty; omit body to leave it unchanged, "
+                "or omit body and use clear_body: true to clear it"
+            ),
+            "status_code": 422,
+        })
+    if clean_labels_set == []:
+        return json.dumps({
+            "error": (
+                "update_github_issue labels_set must be non-empty; omit labels_set to leave it "
+                "unchanged, or omit labels_set and use clear_labels: true to clear all labels"
+            ),
+            "status_code": 422,
+        })
+    if clear_labels:
+        clean_labels_set = []
     clean_state = _clean(state)
     if clean_state is not None:
         clean_state = clean_state.lower()
@@ -1085,7 +1124,7 @@ async def _handle_update_github_issue(
             "error": "update_github_issue title must be non-empty when provided",
             "status_code": 422,
         })
-    clean_body = str(body) if body is not None else None
+    clean_body = "" if clear_body else (str(body) if body is not None else None)
     if clean_labels_set is not None and (clean_labels_add or clean_labels_remove):
         return json.dumps({
             "error": "update_github_issue labels_set cannot be combined with labels_add or labels_remove",

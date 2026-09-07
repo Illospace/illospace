@@ -269,7 +269,8 @@ GITHUB_TOOLS = [
             "as total success. This uses the same project-bound GitHub App write identity as issue "
             "creation; the resulting GitHub issues webhook keeps configured mirrored ticket records "
             "in sync. labels_set replaces every label and is mutually exclusive with labels_add and "
-            "labels_remove."
+            "labels_remove. Empty body or labels_set values are rejected; omit them to preserve "
+            "existing content. Use clear_body or clear_labels only for an intentional clear."
         ),
         "input_schema": {
             "type": "object",
@@ -307,8 +308,16 @@ GITHUB_TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Replace all issue labels with this exact list; [] clears every label. "
+                        "Replace all issue labels with this non-empty list. To clear all labels, "
+                        "omit labels_set and use clear_labels: true. "
                         "Do not combine with labels_add or labels_remove."
+                    ),
+                },
+                "clear_labels": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicitly remove every issue label. Omit labels_set, labels_add and "
+                        "labels_remove when true. Omit this flag to preserve labels."
                     ),
                 },
                 "state": {
@@ -322,7 +331,14 @@ GITHUB_TOOLS = [
                 },
                 "body": {
                     "type": "string",
-                    "description": "Replacement Markdown body; an empty string clears the body.",
+                    "description": (
+                        "Non-empty replacement Markdown body. To clear the body, omit body and "
+                        "use clear_body: true."
+                    ),
+                },
+                "clear_body": {
+                    "type": "boolean",
+                    "description": "Explicitly clear the issue body. Omit body when true.",
                 },
                 "token_secret_key": {
                     "type": "string",
