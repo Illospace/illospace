@@ -726,7 +726,8 @@ async def _handle_create_github_issue(
                                assignees=effective_assignees, token=candidate["token"])
             if filing_identity is not None:
                 payload = await create_provider_alert_issue(
-                    filing_identity, repo_slug, create_issue=async_create_repo_issue, **create_args,
+                    filing_identity, repo_slug, title=create_args["title"], body=create_args["body"],
+                    labels=create_args["labels"], assignees=create_args["assignees"], token=create_args["token"],
                 )
                 repo_slug = payload["repo"]
             else:

@@ -116,7 +116,7 @@ async def test_four_messages_force_claim_conflict_and_share_one_ticket(filing_st
     monkeypatch.setattr(filing, "acquire_filing_claim", observe_claim)
     monkeypatch.setattr(filing, "_wait_for_filing", owner_done.wait)
     create_mock = AsyncMock(side_effect=create)
-    monkeypatch.setattr(github, "async_create_repo_issue", create_mock)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create_mock)
 
     async def run(index):
         result = await _file(identity, body=f"Message 1788716940.{index}, Rollbar #{2278 + index}")
@@ -156,14 +156,17 @@ async def test_dead_owner_before_create_is_replaced_after_expiry(filing_store, m
     assert not (await filing.acquire_filing_claim(IDENTITY, REPO)).acquired
     control["now"] += timedelta(seconds=filing.CLAIM_TTL_SECONDS)
     create = AsyncMock(return_value={"repo": REPO, "issue": dict(ISSUE)})
-    monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     result = await _file()
     assert result["issue"]["number"] == 2021
     assert result["filing_claim_id"] == dead.id
     create.assert_awaited_once()
     filing.async_list_repo_issues.assert_not_awaited()
     with pytest.raises(filing.FilingPendingError):
-        await filing._create_or_reconcile(dead, IDENTITY, create, token="test-token")
+        await filing._create_or_reconcile(
+            dead, IDENTITY, title="Generation failed", body="Occurrence evidence",
+            labels=[], assignees=[], token="test-token",
+        )
     create.assert_awaited_once()
 
 
@@ -181,7 +184,7 @@ async def test_create_survives_failed_finalization_and_reconciles(filing_store, 
         return {"repo": REPO, "issue": dict(ISSUE)}
 
     create_mock = AsyncMock(side_effect=create)
-    monkeypatch.setattr(github, "async_create_repo_issue", create_mock)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create_mock)
     if failure == "process_death":
         with pytest.raises(asyncio.CancelledError):
             await _file()
@@ -244,6 +247,7 @@ async def test_pending_claim_does_not_fall_through_to_unclaimed_create(filing_st
     monkeypatch.setattr(filing, "_wait_for_filing", AsyncMock())
     create = AsyncMock()
     monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     result = await _file()
     assert result["filing_pending"] and result["retryable"]
     create.assert_not_awaited()
@@ -256,7 +260,7 @@ async def test_failed_reconciliation_never_creates_blindly(filing_store, monkeyp
     await filing._release_claim(claim)
     filing.async_list_repo_issues.side_effect = GitHubConnectorError(status_code=502, message="unavailable")
     create = AsyncMock()
-    monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     result = await _file()
     assert result["status_code"] == 502
     create.assert_not_awaited()
@@ -266,7 +270,7 @@ async def test_failed_reconciliation_never_creates_blindly(filing_store, monkeyp
 async def test_timed_out_post_keeps_lease_and_reconciles_after_expiry(filing_store, monkeypatch):
     _, control = filing_store
     create = AsyncMock(side_effect=GitHubConnectorError(status_code=502, message="timed out"))
-    monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     monkeypatch.setattr(filing, "WAIT_ATTEMPTS", 1)
     monkeypatch.setattr(filing, "_wait_for_filing", AsyncMock())
     assert (await _file())["filing_pending"]
@@ -285,7 +289,7 @@ async def test_canonical_repo_cannot_be_changed_by_another_run(filing_store, mon
         await filing.acquire_filing_claim(IDENTITY, "uwear-ai/other")
     await filing._release_claim(claim)
     create = AsyncMock(return_value={"repo": REPO, "issue": dict(ISSUE)})
-    monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     await _file()
     canonical = await filing.acquire_filing_claim(IDENTITY, "uwear-ai/other")
     assert canonical.repo == REPO
@@ -301,7 +305,7 @@ async def test_missing_reconciliation_match_allows_retry_before_remote_create(fi
     await filing._prepare_create(claim)  # Crash immediately before the POST.
     control["now"] += timedelta(seconds=filing.CLAIM_TTL_SECONDS)
     create = AsyncMock(return_value={"repo": REPO, "issue": dict(ISSUE)})
-    monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     assert (await _file())["issue"]["number"] == 2021
     filing.async_list_repo_issues.assert_awaited_once()
     create.assert_awaited_once()
@@ -310,7 +314,7 @@ async def test_missing_reconciliation_match_allows_retry_before_remote_create(fi
 @pytest.mark.asyncio
 async def test_evidence_failure_preserves_canonical_filing(filing_store, monkeypatch):
     create = AsyncMock(return_value={"repo": REPO, "issue": dict(ISSUE)})
-    monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     await _file()
     filing.async_add_repo_issue_comment.side_effect = GitHubConnectorError(status_code=403, message="denied")
     result = await _file()
@@ -333,6 +337,7 @@ def test_provider_alert_argument_is_optional_and_validates_only_when_supplied():
 async def test_malformed_identity_cannot_create_an_unclaimed_issue(filing_store, monkeypatch):
     create = AsyncMock()
     monkeypatch.setattr(github, "async_create_repo_issue", create)
+    monkeypatch.setattr(filing, "async_create_repo_issue", create)
     with bind_agent_context({"org_id": ORG}):
         result = json.loads(await github._handle_create_github_issue(
             repo=REPO, title="Failure", provider_alert={"service": "api"},

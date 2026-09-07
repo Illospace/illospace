@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Mapping
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -27,6 +27,7 @@ from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
     async_add_repo_issue_comment,
+    async_create_repo_issue,
     async_list_repo_issues,
 )
 
@@ -174,8 +175,8 @@ async def _find_filed_issue(repo: str, marker: str, token: str) -> dict[str, Any
 
 
 async def _create_or_reconcile(
-    claim: FilingClaim, identity: FilingIdentity, create_issue: Callable[..., Awaitable[dict[str, Any]]],
-    **kwargs: Any,
+    claim: FilingClaim, identity: FilingIdentity, *,
+    title: str, body: str | None, labels: list[str], assignees: list[str], token: str,
 ) -> dict[str, Any]:
     await _prepare_create(claim)
     async with UnitOfWork() as uow:
@@ -184,11 +185,12 @@ async def _create_or_reconcile(
         )
         if row is None or not _owns(row, claim):
             raise FilingPendingError("Provider-alert filing ownership changed; retry the same claim")
-        payload = await _find_filed_issue(claim.repo, identity.marker, kwargs["token"]) if claim.reconcile else None
+        payload = await _find_filed_issue(claim.repo, identity.marker, token) if claim.reconcile else None
         reused = payload is not None
         if payload is None:
-            payload = await create_issue(
-                claim.repo, **{**kwargs, "body": f"{identity.marker}\n\n{kwargs.get('body') or ''}"},
+            payload = await async_create_repo_issue(
+                claim.repo, title=title, body=f"{identity.marker}\n\n{body or ''}",
+                labels=labels, assignees=assignees, token=token,
             )
         issue = payload.get("issue") or {}
         number = issue.get("number")
@@ -205,7 +207,7 @@ async def _create_or_reconcile(
 
 async def create_provider_alert_issue(
     identity: FilingIdentity, repo: str, *,
-    create_issue: Callable[..., Awaitable[dict[str, Any]]], **kwargs: Any,
+    title: str, body: str | None, labels: list[str], assignees: list[str], token: str,
 ) -> dict[str, Any]:
     for _ in range(WAIT_ATTEMPTS):
         claim = await acquire_filing_claim(identity, repo)
@@ -214,7 +216,9 @@ async def create_provider_alert_issue(
             break
         if claim.acquired:
             try:
-                payload = await _create_or_reconcile(claim, identity, create_issue, **kwargs)
+                payload = await _create_or_reconcile(
+                    claim, identity, title=title, body=body, labels=labels, assignees=assignees, token=token,
+                )
             except Exception as exc:
                 # A timed-out POST may still be running remotely. Keep the lease
                 # until expiry before attempting reconciliation in that case.
@@ -233,11 +237,11 @@ async def create_provider_alert_issue(
         raise FilingPendingError("Provider-alert filing is in progress; retry the same claim")
 
     if payload["reused"]:
-        evidence = kwargs.get("body") or kwargs["title"]
+        evidence = body or title
         try:
             await async_add_repo_issue_comment(
                 payload["repo"], payload["issue"]["number"],
-                body=f"Additional provider-alert occurrence:\n\n{evidence}", token=kwargs["token"],
+                body=f"Additional provider-alert occurrence:\n\n{evidence}", token=token,
             )
             payload["occurrence_evidence_appended"] = True
         except Exception as exc:
