@@ -141,6 +141,13 @@ def slack_channel_monitor_message(
                 f"- External id: {provider_alert.get('external_id')}",
                 f"- Tracked signature: {provider_alert.get('tracked_signature')}",
                 f"- Signature title: {provider_alert.get('signature_title')}",
+                "- For create_github_issue, pass provider_alert with the service, subsystem, and "
+                "tracked_signature above. This reserves the initial filing atomically. Include this "
+                "occurrence's evidence in body. Search is only for historical deduplication.",
+                "- If filing_pending is returned, retry the same identity; do not create a second "
+                "issue or tracker record. If reused is true, use the returned canonical issue and "
+                "its existing tracker record; occurrence evidence is already appended unless the "
+                "tool reports occurrence_evidence_appended=false.",
             ]
         )
         if provider_alert.get("is_new_error"):
