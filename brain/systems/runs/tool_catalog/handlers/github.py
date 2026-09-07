@@ -59,8 +59,8 @@ from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 from brain.systems.runs.tool_catalog.handlers.github_issue_create import (
     CREATE_ISSUE_AUTH_STATUSES,
-    PlainIssueCreate,
-    ProviderAlertIssueCreate,
+    plain_issue_failure,
+    provider_alert_issue_failure,
 )
 from brain.systems.slack.provider_alert_filing import (
     FilingIdentity,
@@ -723,24 +723,24 @@ async def _handle_create_github_issue(
             "repo": repo_slug,
         })
 
-    creation = (
-        ProviderAlertIssueCreate(partial(create_provider_alert_issue, filing_identity))
-        if filing_identity is not None else PlainIssueCreate(async_create_repo_issue)
+    create_issue, handle_failure = (
+        (partial(create_provider_alert_issue, filing_identity), provider_alert_issue_failure)
+        if filing_identity is not None else (async_create_repo_issue, plain_issue_failure)
     )
     last_error: GitHubConnectorError | None = None
-    auth_statuses = CREATE_ISSUE_AUTH_STATUSES
     for index, candidate in enumerate(write_candidates):
         try:
             create_args = dict(title=clean_title, body=issue_body, labels=_string_list(labels),
                                assignees=effective_assignees, token=candidate["token"])
-            payload, repo_slug = await creation.attempt(repo_slug, **create_args)
+            payload = await create_issue(repo_slug, **create_args)
+            repo_slug = payload["repo"]
+        except GitHubConnectorError as exc:
+            last_error = exc
+            if exc.status_code in CREATE_ISSUE_AUTH_STATUSES and index < len(write_candidates) - 1:
+                continue
+            return handle_failure(exc, repo_slug, candidate.get("key_name"))
         except Exception as exc:
-            if isinstance(exc, GitHubConnectorError):
-                last_error = exc
-                # Only auth/visibility failures can advance to another token.
-                if exc.status_code in auth_statuses and index < len(write_candidates) - 1:
-                    continue
-            return creation.failure(exc, repo_slug, candidate.get("key_name"))
+            return handle_failure(exc, repo_slug, candidate.get("key_name"))
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
         if requested_assignees:
@@ -801,7 +801,7 @@ async def _handle_create_github_issue(
         return json.dumps({
             "error": last_error.message,
             "status_code": last_error.status_code,
-            "no_write_token": last_error.status_code in auth_statuses,
+            "no_write_token": last_error.status_code in CREATE_ISSUE_AUTH_STATUSES,
             "repo": repo_slug,
         })
     return json.dumps({"error": "No GitHub token candidates were available", "no_write_token": True})
