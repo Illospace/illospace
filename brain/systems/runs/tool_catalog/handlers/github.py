@@ -56,6 +56,11 @@ from brain.systems.deploy_state_github import (
 )
 from brain.systems.runs.execution_context import get_or_create_agent_run_state
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
+from brain.systems.slack.provider_alert_filing import (
+    FilingIdentity,
+    FilingPendingError,
+    create_provider_alert_issue,
+)
 from brain.systems.vault import (
     VAULT_AGENT_ACCESS_AVAILABLE,
     async_get_secret,
@@ -657,6 +662,7 @@ async def _handle_create_github_issue(
     assignee_rationale: str | None = None,
     token_secret_key: str | None = None,
     origin_ref: str | None = None,
+    provider_alert: dict[str, Any] | None = None,
 ) -> str:
     """Open a REAL GitHub issue in the target repository.
 
@@ -683,6 +689,17 @@ async def _handle_create_github_issue(
     clean_assignee_rationale = _clean(assignee_rationale)
     effective_assignees = requested_assignees if clean_assignee_rationale else []
 
+    filing_identity = None
+    if provider_alert is not None:
+        if not isinstance(provider_alert, Mapping):
+            return json.dumps({"error": "provider_alert must be an object"})
+        try:
+            filing_identity = FilingIdentity.parse(
+                _clean(getattr(_agent_context, "org_id", None)), provider_alert,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
     candidates = await _github_token_candidates(
         repo_slug=repo_slug,
         token_secret_key=token_secret_key,
@@ -705,14 +722,16 @@ async def _handle_create_github_issue(
     auth_statuses = {401, 403, 404}
     for index, candidate in enumerate(write_candidates):
         try:
-            payload = await async_create_repo_issue(
-                repo_slug,
-                title=clean_title,
-                body=issue_body,
-                labels=_string_list(labels),
-                assignees=effective_assignees,
-                token=candidate["token"],
-            )
+            create_args = dict(title=clean_title, body=issue_body, labels=_string_list(labels),
+                               assignees=effective_assignees, token=candidate["token"])
+            if filing_identity is not None:
+                payload = await create_provider_alert_issue(
+                    filing_identity, repo_slug, title=create_args["title"], body=create_args["body"],
+                    labels=create_args["labels"], assignees=create_args["assignees"], token=create_args["token"],
+                )
+                repo_slug = payload["repo"]
+            else:
+                payload = await async_create_repo_issue(repo_slug, **create_args)
         except GitHubConnectorError as exc:
             last_error = exc
             # Retry the next token only on auth/visibility failures. A 422 is a
@@ -726,6 +745,16 @@ async def _handle_create_github_issue(
                 "no_write_token": exc.status_code in auth_statuses,
                 "repo": repo_slug,
                 "token_key_name": candidate.get("key_name"),
+                **({"filing_pending": True, "retryable": True} if filing_identity else {}),
+            })
+        except FilingPendingError as exc:
+            return json.dumps({"error": str(exc), "filing_pending": True, "retryable": True})
+        except Exception as exc:
+            if filing_identity is None:
+                raise
+            return json.dumps({
+                "error": str(exc), "filing_pending": True, "retryable": True,
+                "instruction": "Retry the same provider_alert claim; do not create another issue or tracker record.",
             })
         payload["token_secret_key_used"] = bool(candidate.get("key_name"))
         payload["token_source"] = candidate["source"]
@@ -1047,6 +1076,8 @@ async def _handle_update_github_issue(
     title: str | None = None,
     body: str | None = None,
     token_secret_key: str | None = None,
+    clear_body: bool = False,
+    clear_labels: bool = False,
 ) -> str:
     """Update a real GitHub issue using the issue-create App write lane."""
 
@@ -1062,6 +1093,43 @@ async def _handle_update_github_issue(
     clean_labels_add = _string_list(labels_add)
     clean_labels_remove = _string_list(labels_remove)
     clean_labels_set = _string_list(labels_set) if labels_set is not None else None
+    for field_name, value in (("clear_body", clear_body), ("clear_labels", clear_labels)):
+        if not isinstance(value, bool):
+            return json.dumps({
+                "error": f"update_github_issue {field_name} must be a boolean",
+                "status_code": 422,
+            })
+    if clear_body and body is not None:
+        return json.dumps({
+            "error": "update_github_issue clear_body cannot be combined with body; omit body",
+            "status_code": 422,
+        })
+    if clear_labels and any(value is not None for value in (labels_set, labels_add, labels_remove)):
+        return json.dumps({
+            "error": (
+                "update_github_issue clear_labels cannot be combined with labels_set, "
+                "labels_add or labels_remove; omit those fields"
+            ),
+            "status_code": 422,
+        })
+    if body is not None and not str(body).strip():
+        return json.dumps({
+            "error": (
+                "update_github_issue body must be non-empty; omit body to leave it unchanged, "
+                "or omit body and use clear_body: true to clear it"
+            ),
+            "status_code": 422,
+        })
+    if clean_labels_set == []:
+        return json.dumps({
+            "error": (
+                "update_github_issue labels_set must be non-empty; omit labels_set to leave it "
+                "unchanged, or omit labels_set and use clear_labels: true to clear all labels"
+            ),
+            "status_code": 422,
+        })
+    if clear_labels:
+        clean_labels_set = []
     clean_state = _clean(state)
     if clean_state is not None:
         clean_state = clean_state.lower()
@@ -1085,7 +1153,7 @@ async def _handle_update_github_issue(
             "error": "update_github_issue title must be non-empty when provided",
             "status_code": 422,
         })
-    clean_body = str(body) if body is not None else None
+    clean_body = "" if clear_body else (str(body) if body is not None else None)
     if clean_labels_set is not None and (clean_labels_add or clean_labels_remove):
         return json.dumps({
             "error": "update_github_issue labels_set cannot be combined with labels_add or labels_remove",

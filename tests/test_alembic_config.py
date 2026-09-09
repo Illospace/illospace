@@ -23,6 +23,8 @@ BROAD_DESTRUCTIVE_SQL_PATTERNS = (
     r"\bREASSIGN\s+OWNED\b",
 )
 REVIEWED_DESTRUCTIVE_MIGRATIONS = {
+    # Downgrade removes only the provider-alert filing claims introduced here.
+    "0066_provider_alert_filing_claims.py",
     "0003_schema_simplification.py",
     # Downgrade removes only the access table introduced by the same migration.
     "0005_project_profile_privacy.py",

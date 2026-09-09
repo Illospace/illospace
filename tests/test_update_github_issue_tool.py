@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,7 +12,10 @@ from brain.systems.cortex.project_context.github import (
 )
 from brain.systems.runs.execution_context import bind_agent_context
 from brain.systems.runs.tool_catalog.definitions.github import GITHUB_TOOLS
-from brain.systems.runs.tool_catalog.handlers.github import _handle_update_github_issue
+from brain.systems.runs.tool_catalog.handlers.github import (
+    _handle_add_github_issue_comment,
+    _handle_update_github_issue,
+)
 
 
 _C = "brain.systems.cortex.project_context.github"
@@ -60,6 +64,8 @@ def test_update_github_issue_is_registered_with_all_supported_fields():
         "state",
         "title",
         "body",
+        "clear_body",
+        "clear_labels",
     } <= properties.keys()
     assert properties["state"]["enum"] == ["open", "closed"]
     assert "Only repo and issue_number are required" in definition["description"]
@@ -318,6 +324,152 @@ async def test_handler_rejects_placeholder_text_without_writing(field_name, valu
     assert f"omit {field_name} to leave it unchanged" in payload["error"]
     candidates.assert_not_awaited()
     update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fields", [
+    {"body": ""},
+    {"body": " \n\t"},
+    {"labels_set": []},
+    {"labels_set": [" "]},
+    {"labels_set": ""},
+    {"body": "", "labels_set": []},
+    {"clear_body": "true"},
+    {"clear_labels": 1},
+    {"clear_body": True, "body": "replacement"},
+    {"clear_body": True, "body": ""},
+    {"clear_labels": True, "labels_set": []},
+    {"clear_labels": True, "labels_add": ["bug"]},
+    {"clear_labels": True, "labels_remove": ["bug"]},
+])
+async def test_handler_rejects_ambiguous_clears_before_any_write(fields):
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock()) as candidates, patch(
+        f"{_H}.async_update_repo_issue", new=AsyncMock(),
+    ) as update:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace", issue_number=369,
+            assignees_add=["new-owner"], **fields,
+        ))
+
+    assert payload["status_code"] == 422
+    assert "omit" in payload["error"] or "must be a boolean" in payload["error"]
+    candidates.assert_not_awaited()
+    update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("fields", "changed", "delta"), [
+    ({"assignees_add": ["new-owner"]}, "assignees", [{"login": "new-owner", "id": 99}]),
+    ({"labels_add": ["triaged"]}, "labels", [{"name": "triaged", "color": "654321"}]),
+    ({"state": "open"}, "state", "open"),
+    ({"body": "New occurrence\n\nEvidence: alert 4"}, "comments", None),
+])
+async def test_enrichment_preserves_all_unrequested_issue_fields(fields, changed, delta):
+    # Model GitHub's mutations, so accidental PATCH defaults actually destroy the
+    # fixture and fail the assertion instead of being hidden by a static GET mock.
+    issue = _updated_issue(assignees=["existing-owner"], labels=["bug", "production"])
+    issue["body"] = "## Failure\n\n  Exact spacing.\n```\nstack trace\n```\n" * 50
+    before = deepcopy(issue)
+    comments = []
+
+    async def request(_client, method, path, **kwargs):
+        data = kwargs.get("json") or {}
+        if method == "GET":
+            return deepcopy(issue)
+        if path.endswith("/comments") and method == "POST":
+            comments.append(data["body"])
+            return {"id": 1234, "body": data["body"]}
+        if path.endswith("/assignees") and method == "POST":
+            issue["assignees"].extend({"login": login, "id": 99} for login in data["assignees"])
+        elif path.endswith("/labels") and method in {"POST", "PUT"}:
+            labels = [{"name": label, "color": "654321"} for label in data["labels"]]
+            if method == "PUT":
+                issue["labels"] = labels
+            else:
+                issue["labels"].extend(labels)
+        elif method == "PATCH":
+            issue.update(data)
+        else:
+            pytest.fail(f"Unexpected GitHub operation: {method} {path}")
+        return deepcopy(issue)
+
+    handler = _handle_add_github_issue_comment if changed == "comments" else _handle_update_github_issue
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock(return_value=[{
+        "token": "installation-token", "source": "project_binding:GITHUB_TOKEN",
+    }])), patch(f"{_C}._async_request", new=AsyncMock(side_effect=request)):
+        payload = json.loads(await handler(repo="Illospace/illospace", issue_number=369, **fields))
+
+    expected = deepcopy(before)
+    if changed in {"assignees", "labels"}:
+        expected[changed].extend(delta)
+    elif changed == "state":
+        expected[changed] = delta
+    if changed == "comments":
+        assert comments == [fields["body"]]
+        assert payload["comment"]["id"] == 1234
+    else:
+        assert comments == []
+        assert payload["status"] == "applied"
+    assert issue == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("flag", "field", "value", "method", "suffix"), [
+    ("clear_body", "body", "", "PATCH", ""),
+    ("clear_labels", "labels_set", [], "PUT", "/labels"),
+])
+async def test_handler_explicit_clear_is_applied_and_verified(flag, field, value, method, suffix):
+    read_back = _updated_issue()
+    read_back["body" if field == "body" else "labels"] = value
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock(return_value=[{
+        "token": "installation-token", "source": "project_binding:GITHUB_TOKEN",
+    }])), patch(f"{_C}._async_request", new=AsyncMock(side_effect=[{}, read_back])) as request:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace", issue_number=369, **{flag: True},
+        ))
+
+    assert payload["ok"] is True
+    assert payload["applied"] == {field: value}
+    assert payload["fields"][field]["verified"] is True
+    assert request.await_args_list[0].args[1:] == (
+        method, f"/repos/Illospace/illospace/issues/369{suffix}",
+    )
+    assert request.await_args_list[0].kwargs["json"] == {
+        "body" if field == "body" else "labels": value,
+    }
+    assert request.await_args_list[1].args[1] == "GET"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("fields", "verified_field", "returned"), [
+    ({"title": "Requested title"}, "title", {"title": "Stale title"}),
+    ({"body": "Requested body\n"}, "body", {"body": "Requested body"}),
+    ({"body": "Full incident report"}, "body", {"body": "Filed by Illo"}),
+    ({"labels_set": ["triaged"]}, "labels_set", {"labels": [{"name": "triaged"}, {"name": "stale"}]}),
+    ({"labels_set": ["triaged"]}, "labels_set", {"labels": []}),
+    ({"clear_body": True}, "body", {"body": "Still present"}),
+    ({"clear_labels": True}, "labels_set", {"labels": [{"name": "stale"}]}),
+])
+async def test_handler_reports_partial_failure_when_replacement_is_not_confirmed(fields, verified_field, returned):
+    read_back = {**_updated_issue(assignees=["new-owner"]), **returned}
+
+    async def request(_client, method, _path, **_kwargs):
+        return read_back if method == "GET" else {}
+
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock(return_value=[{
+        "token": "installation-token", "source": "project_binding:GITHUB_TOKEN",
+    }])), patch(f"{_C}._async_request", new=AsyncMock(side_effect=request)):
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace", issue_number=369,
+            assignees_add=["new-owner"], **fields,
+        ))
+
+    assert payload["ok"] is False
+    assert payload["partial"] is True
+    assert payload["status"] == "partial"
+    assert payload["applied"] == {"assignees_add": ["new-owner"]}
+    assert payload["failed"][verified_field]["verified"] is False
+    assert payload["failed"][verified_field]["status_code"] == 502
 
 
 @pytest.mark.asyncio

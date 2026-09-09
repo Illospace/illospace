@@ -80,6 +80,7 @@ EXPECTED_TABLES = {
     "project_narratives",
     "project_profile_access",
     "project_profiles",
+    "provider_alert_filing_claims",
     "provider_alert_ledger",
     "provider_alert_occurrences",
     "provider_alert_surges",
