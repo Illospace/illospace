@@ -480,13 +480,6 @@ async def reconcile_inbound_triage_run(
 
         return None
 
-    # A same-key preservation retry keeps its event but has a new receipt/run.
-    # Late settlement of the old run must not replace the current handling.
-    outcome_key = "handling" if _json_dict(receipt.tool_use).get("type") == "illo_submit" else "triage"
-    current_handling = _json_dict(_json_dict(event.action_result).get(outcome_key))
-    if current_handling.get("run_id") != run_id:
-        return None
-
     now = datetime.now(timezone.utc)
     terminal_at = _run_datetime(row, status)
     final_answer = await _latest_final_answer(session, run_id)
@@ -557,6 +550,14 @@ async def reconcile_inbound_triage_run(
         **tool_terminal,
         "attribution": attribution,
     }
+
+    # A same-key preservation retry keeps its event but has a new receipt/run.
+    # Settle the old receipt without replacing another run's current handling.
+    current_handling = _json_dict(_json_dict(event.action_result).get(outcome_key))
+    current_run_id = current_handling.get("run_id")
+    if current_run_id is not None and current_run_id != run_id:
+        await session.flush()
+        return receipt
 
     event.status = terminal_status
     event.action_result = {
