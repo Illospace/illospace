@@ -130,9 +130,15 @@ async def read_inbound_submission_result(
         ),
         None,
     )
-    if failure is not None and current_run is not None:
+    if current_run is not None:
         diagnostic = await read_run_failure_diagnostic(session, run=current_run)
-        if diagnostic is not None:
+        if diagnostic is not None and failure is None and diagnostic.retry_scheduled:
+            failure = {
+                "status": "queued",
+                "category": "upstream",
+                "message": "The agent could not connect. A retry is queued.",
+            }
+        if diagnostic is not None and failure is not None:
             failure["diagnostic"] = diagnostic.as_payload()
     return InboundSubmissionResult(
         state=InboundSubmissionResultState.FOUND,
