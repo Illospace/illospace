@@ -33,7 +33,7 @@ VERIFICATION_FAILED_RUN_MESSAGE = (
 )
 PRESERVATION_SETUP_FAILED_RUN_MESSAGE = (
     "Illo could not start the preservation workflow before a durable-storage tool ran. "
-    "Retry this submission with the same idempotency key. If it fails again, check the "
+    "Resubmit this with a new idempotency key. If it fails again, check the "
     "run provider and preservation-tool configuration."
 )
 CANCELED_RUN_MESSAGE = (
