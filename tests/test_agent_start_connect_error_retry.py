@@ -99,7 +99,10 @@ async def test_agent_start_connect_error_requeues_and_really_runs_again(
         assert "run.failed" not in events
         assert "run.text_completed" not in events
         assert not list(await retry_session.scalars(
-            select(AgentRunArtifactRow).where(AgentRunArtifactRow.run_id == queued.id)
+            select(AgentRunArtifactRow).where(
+                AgentRunArtifactRow.run_id == queued.id,
+                AgentRunArtifactRow.artifact_type.in_(("worker_result", "final_answer")),
+            )
         ))
         claimed = await store.claim_next()
         assert claimed.id == queued.id

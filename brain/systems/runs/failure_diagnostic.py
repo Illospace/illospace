@@ -1,4 +1,4 @@
-"""Typed persistence and read projection for terminal run diagnostics."""
+"""Typed diagnostics for failed runs and pending or exhausted agent-start retries."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ class DiagnosticValueState(str, Enum):
 
 @dataclass(frozen=True)
 class RunFailureDiagnostic:
-    """Safe typed projection of one failed run's diagnostic metadata."""
+    """Safe diagnostics for failed runs, pending retries, or exhausted interruptions."""
 
     stage: RunFailureStage
     stage_state: DiagnosticValueState

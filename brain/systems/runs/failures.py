@@ -126,6 +126,16 @@ def public_run_failure(
     }
 
 
+def public_agent_start_retry_failure() -> PublicRunFailure:
+    """Return the public failure for a persisted pending agent-start retry."""
+
+    return {
+        "status": RunStatus.QUEUED.value,
+        "category": RunFailureCategory.UPSTREAM.value,
+        "message": "The agent could not connect. A retry is queued.",
+    }
+
+
 __all__ = [
     "CANCELED_RUN_MESSAGE",
     "DEFAULT_FAILED_RUN_MESSAGE",
@@ -137,6 +147,7 @@ __all__ = [
     "VERIFICATION_FAILED_RUN_MESSAGE",
     "coerce_failure_category",
     "failure_category_for_error",
+    "public_agent_start_retry_failure",
     "public_run_failure",
     "safe_terminal_run_message",
     "terminal_run_notice_condition",
