@@ -1,4 +1,4 @@
-"""Typed persistence and read projection for terminal run diagnostics."""
+"""Typed diagnostics for failed runs and pending or exhausted agent-start retries."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ class DiagnosticValueState(str, Enum):
 
 @dataclass(frozen=True)
 class RunFailureDiagnostic:
-    """Safe typed projection of one failed run's diagnostic metadata."""
+    """Safe diagnostics for failed runs, pending retries, or exhausted interruptions."""
 
     stage: RunFailureStage
     stage_state: DiagnosticValueState
@@ -237,23 +237,61 @@ def _exception_class_projection(
     return exception_class, DiagnosticValueState.KNOWN
 
 
+def agent_start_retry_diagnostic_metadata(
+    *,
+    stage: RunFailureStage,
+    exception_type: type[BaseException] | None,
+) -> dict[str, Any] | None:
+    """Identify a typed connection failure; withheld or unknown types fail closed."""
+
+    if stage is not RunFailureStage.AGENT_EXECUTION:
+        return None
+    metadata = failure_diagnostic_metadata(stage=stage, exception_type=exception_type)
+    exception_class, state = _exception_class_projection(metadata)
+    if state is not DiagnosticValueState.KNOWN or exception_class != "ConnectError":
+        return None
+    return metadata
+
+
 async def read_run_failure_diagnostic(
     session: AsyncSession,
     *,
     run: AgentRunRow,
 ) -> RunFailureDiagnostic | None:
-    """Read the canonical diagnostic projection for a failed run."""
+    """Read a failed run or a persisted agent-start interruption."""
 
     run_status = getattr(run.status, "value", run.status)
-    if str(run_status or "") != "failed":
+    metadata = run.metadata_ if isinstance(run.metadata_, Mapping) else {}
+    interruption = metadata.get("interruption")
+    interruption = interruption if isinstance(interruption, Mapping) else {}
+    agent_start_interrupted = (
+        interruption.get("reason") == "agent_start_connect_error"
+        and isinstance(interruption.get("failure"), Mapping)
+    )
+    # The queue status and interruption record are written atomically by the
+    # store. Eligibility alone is never evidence that a retry was scheduled.
+    retry_scheduled = (
+        run_status == "queued"
+        and agent_start_interrupted
+        and interruption.get("requeued") is True
+    )
+    exhausted = (
+        run_status == "expired"
+        and agent_start_interrupted
+        and interruption.get("requeued") is False
+    )
+    if run_status != "failed" and not retry_scheduled and not exhausted:
         return None
 
     tool_execution_started = await run_tool_execution_started(
         session,
         run_id=int(run.id),
     )
-    metadata = run.metadata_ if isinstance(run.metadata_, Mapping) else {}
-    stored_failure = metadata.get("failure")
+    stored_failure = (
+        interruption.get("failure")
+        if retry_scheduled or exhausted
+        else metadata.get("failure")
+    )
     failure_metadata = stored_failure if isinstance(stored_failure, Mapping) else {}
     stage, stage_state = _stage_projection(failure_metadata)
     exception_class, exception_class_state = _exception_class_projection(
@@ -266,8 +304,9 @@ async def read_run_failure_diagnostic(
         exception_class_state=exception_class_state,
         tool_execution_started=tool_execution_started,
         # Replacement retries have their own current run. A still-failed run
-        # is terminal and has no retry scheduled on this run identity.
-        retry_scheduled=False,
+        # remains terminal; only an actual requeue on this identity is pending.
+        terminal=not retry_scheduled,
+        retry_scheduled=retry_scheduled,
     )
 
 

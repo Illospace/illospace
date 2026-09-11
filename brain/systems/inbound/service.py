@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.coercion import optional_text
 from brain.kernel.common.serialization import stable_digest
+from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.idea import Idea, IdeaThread
@@ -44,6 +45,9 @@ from brain.systems.inbound.preservation import (
     submission_preservation_contract,
     submission_preservation_prompt_lines,
 )
+from brain.systems.runs.failure_diagnostic import run_tool_execution_started
+from brain.systems.runs.failures import RunFailureCategory
+from brain.systems.runs.status import RunStatus
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.slack.monitored_intakes import SLACK_CHANNEL_MESSAGE_ORIGIN
 from brain.systems.task_domain import classify_task_domain
@@ -185,8 +189,10 @@ async def submit_inbound_envelope(
         )
     existing = await _find_idempotent_event(session, context, normalized.get("idempotency_key"))
     if existing is not None:
-        return _result_from_replay(
-            existing,
+        return await _replay_or_retry_submission(
+            session,
+            context=context,
+            event=existing,
             submitted_envelope=normalized,
         )
 
@@ -207,8 +213,10 @@ async def submit_inbound_envelope(
     )
     event, idempotent_replay = await _store_inbound_event(session, context, event)
     if idempotent_replay:
-        return _result_from_replay(
-            event,
+        return await _replay_or_retry_submission(
+            session,
+            context=context,
+            event=event,
             submitted_envelope=normalized,
         )
     if alert_signature is not None:
@@ -1287,6 +1295,7 @@ async def _process_submission_envelope(
     context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
+    retry_of_run_id: int | None = None,
 ) -> dict[str, Any]:
     """Queue headless Illo handling for an external coordination submission."""
 
@@ -1295,6 +1304,7 @@ async def _process_submission_envelope(
         context=context,
         event=event,
         normalized=normalized,
+        retry_of_run_id=retry_of_run_id,
     )
     return await _complete_event(
         session,
@@ -1327,6 +1337,7 @@ async def _queue_illo_submission(
     context: InboundHandlerContext,
     event: InboundEventRow,
     normalized: Mapping[str, Any],
+    retry_of_run_id: int | None = None,
 ) -> dict[str, Any]:
     if not context.owner_user_id:
         return {"status": "skipped", "reason": "missing_authority_user", "event_id": str(event.id)}
@@ -1378,7 +1389,11 @@ async def _queue_illo_submission(
             },
             policy={
                 "producer": "inbound",
-                "idempotency_key": f"inbound:submission:{event.id}",
+                "idempotency_key": (
+                    f"inbound:submission:{event.id}:retry:{retry_of_run_id}"
+                    if retry_of_run_id is not None
+                    else f"inbound:submission:{event.id}"
+                ),
                 "run_event": "inbound_submission_received",
             },
         ),
@@ -1518,6 +1533,74 @@ def _result_from_event(
         "idempotent_replay": idempotent_replay,
         "error": event.error,
     }
+
+
+async def _replay_or_retry_submission(
+    session: AsyncSession,
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    submitted_envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    replay = _result_from_replay(event, submitted_envelope=submitted_envelope)
+    if (
+        replay["replay_body_matches"] is not True
+        or event.kind != SUBMISSION_ENVELOPE_KIND
+        or event.status != STATUS_FAILED
+    ):
+        return replay
+
+    # Serialize retries and refresh any row loaded before another caller retried.
+    event = (
+        await session.scalars(
+            select(InboundEventRow)
+            .where(InboundEventRow.id == event.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+    replay = _result_from_replay(event, submitted_envelope=submitted_envelope)
+    outcome = event.action_result if isinstance(event.action_result, Mapping) else {}
+    handling = outcome.get("handling")
+    if (
+        replay["replay_body_matches"] is not True
+        or event.status != STATUS_FAILED
+        or not isinstance(handling, Mapping)
+        or handling.get("run_status") != RunStatus.FAILED.value
+    ):
+        return replay
+    failure = handling.get("failure")
+    attribution = handling.get("attribution")
+    run_id = handling.get("run_id")
+    if (
+        not isinstance(failure, Mapping)
+        or failure.get("category") != RunFailureCategory.PRESERVATION_SETUP.value
+        or not isinstance(attribution, Mapping)
+        # Missing or malformed evidence is not proof that no mutation occurred.
+        or attribution.get("mutated_target_refs") != []
+        or type(run_id) is not int
+    ):
+        return replay
+    run = await session.get(AgentRunRow, run_id, populate_existing=True)
+    if run is None or run.status != RunStatus.FAILED.value or run.org_id != event.org_id:
+        return replay
+    metadata = run.metadata_ if isinstance(run.metadata_, Mapping) else {}
+    stored_failure = metadata.get("failure")
+    if (
+        not isinstance(stored_failure, Mapping)
+        or stored_failure.get("category") != RunFailureCategory.PRESERVATION_SETUP.value
+        or await run_tool_execution_started(session, run_id=run_id)
+    ):
+        return replay
+
+    result = await _process_submission_envelope(
+        session,
+        context=context,
+        event=event,
+        normalized=submitted_envelope,
+        retry_of_run_id=run_id,
+    )
+    return {**result, "replay_body_matches": True}
 
 
 def _result_from_replay(

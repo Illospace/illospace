@@ -12,6 +12,7 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.runs.failure_diagnostic import read_run_failure_diagnostic
+from brain.systems.runs.failures import public_agent_start_retry_failure
 
 
 class InboundSubmissionResultState(str, Enum):
@@ -130,9 +131,11 @@ async def read_inbound_submission_result(
         ),
         None,
     )
-    if failure is not None and current_run is not None:
+    if current_run is not None:
         diagnostic = await read_run_failure_diagnostic(session, run=current_run)
-        if diagnostic is not None:
+        if diagnostic is not None and failure is None and diagnostic.retry_scheduled:
+            failure = public_agent_start_retry_failure()
+        if diagnostic is not None and failure is not None:
             failure["diagnostic"] = diagnostic.as_payload()
     return InboundSubmissionResult(
         state=InboundSubmissionResultState.FOUND,

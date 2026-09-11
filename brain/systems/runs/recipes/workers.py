@@ -14,7 +14,11 @@ from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
-from brain.systems.runs.failure_diagnostic import RunFailureStage
+from brain.systems.runs.failure_diagnostic import (
+    RunFailureStage,
+    agent_start_retry_diagnostic_metadata,
+    run_tool_execution_started,
+)
 from brain.systems.runs.failures import failure_category_for_error, public_run_failure
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import (
@@ -270,6 +274,23 @@ class WorkerRecipe(BaseRunRecipe):
                 failure_category,
                 stage=RunFailureStage.AGENT_EXECUTION,
             )
+            if (
+                agent_start_retry_diagnostic_metadata(
+                    stage=classified_failure.stage,
+                    exception_type=exception_type,
+                ) is not None
+                and not await run_tool_execution_started(
+                    runtime.store.session, run_id=runtime.run.id
+                )
+            ):
+                # Let the engine settle the retry before emitting a terminal
+                # worker receipt or a failure message on the parent surface.
+                return RunRecipeResult(
+                    error=error,
+                    status=status,
+                    classified_failure=classified_failure,
+                    exception_type=exception_type,
+                )
             failure = public_run_failure(status, classified_failure.category)
         streamed_output = False
         if status == RunStatus.COMPLETED:
