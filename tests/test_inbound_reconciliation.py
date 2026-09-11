@@ -364,3 +364,101 @@ async def test_failed_run_takes_the_receipt_terminal_with_the_failure(session):
     event = await session.get(InboundEventRow, str(event.id))
     assert event.status == "failed"
     assert event.error == receipt.outcome["triage"]["failure"]["message"]
+
+
+async def _seed_replacement_triage_run(session, event, *, receipt_type, outcome_key):
+    run = AgentRunRow(
+        org_id=_ORG,
+        user_id=_RUN_USER,
+        thread_id="idea:t",
+        profile="fast",
+        recipe="illo",
+        status="queued",
+        input_message="retry triage",
+        metadata_={"inbound_event": {"event_id": str(event.id)}},
+    )
+    session.add(run)
+    await session.flush()
+    event.action_result = {outcome_key: {"run_id": run.id, "status": "queued"}}
+    event.error = "Current run is awaiting handling."
+    receipt = InboundDecisionReceiptRow(
+        event_id=str(event.id),
+        org_id=_ORG,
+        connection_id=_CONN,
+        status="review_required",
+        tool_use={"type": receipt_type, "run_id": run.id},
+        target={"kind": "cortex_idea"},
+        outcome=dict(event.action_result),
+    )
+    session.add(receipt)
+    await session.flush()
+    return run, receipt
+
+
+@pytest.mark.parametrize(
+    ("receipt_type", "outcome_key"),
+    [("illo_triage", "triage"), ("illo_submit", "handling")],
+)
+@pytest.mark.parametrize(
+    ("run_status", "receipt_status"),
+    [("completed", "processed"), ("failed", "failed")],
+)
+async def test_superseded_run_settles_own_receipt_without_rewriting_current_event(
+    session, receipt_type, outcome_key, run_status, receipt_status,
+):
+    event, original_run = await _seed_triage_lane(
+        session, receipt_type=receipt_type, run_status=run_status,
+    )
+    current_run, current_receipt = await _seed_replacement_triage_run(
+        session, event, receipt_type=receipt_type, outcome_key=outcome_key,
+    )
+    current_outcome = dict(event.action_result)
+    current_status, current_error = event.status, event.error
+
+    receipt = await reconcile_inbound_triage_run(session, original_run.id)
+
+    assert receipt is not None
+    assert receipt.id != current_receipt.id
+    assert receipt.status == receipt_status
+    assert receipt.tool_use["run_id"] == original_run.id
+    assert receipt.outcome[outcome_key]["run_id"] == original_run.id
+    assert receipt.outcome[outcome_key]["status"] == run_status
+    await session.refresh(receipt)
+    assert receipt.status == receipt_status
+    await session.refresh(event)
+    assert event.action_result[outcome_key]["run_id"] == current_run.id
+    assert event.action_result == current_outcome
+    assert event.status == current_status
+    assert event.error == current_error
+    await session.refresh(current_receipt)
+    assert current_receipt.status == "review_required"
+    assert current_receipt.outcome == current_outcome
+
+
+@pytest.mark.parametrize(
+    ("run_status", "receipt_status"),
+    [("completed", "processed"), ("failed", "failed")],
+)
+async def test_current_handling_run_settles_receipt_and_event(
+    session, run_status, receipt_status,
+):
+    event, run = await _seed_triage_lane(
+        session, receipt_type="illo_submit", run_status=run_status,
+    )
+    event.action_result = {"handling": {"run_id": run.id, "status": "queued"}}
+    event.error = "Previous handling error"
+    await session.flush()
+
+    receipt = await reconcile_inbound_triage_run(session, run.id)
+
+    assert receipt is not None
+    assert receipt.status == receipt_status
+    await session.refresh(event)
+    assert event.status == receipt_status
+    assert event.action_result["handling"] == receipt.outcome["handling"]
+    assert event.action_result["handling"]["run_id"] == run.id
+    assert event.action_result["handling"]["status"] == run_status
+    if run_status == "completed":
+        assert event.error is None
+    else:
+        assert event.error == receipt.outcome["handling"]["failure"]["message"]
