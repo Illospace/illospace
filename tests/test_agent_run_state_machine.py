@@ -2277,6 +2277,12 @@ async def test_interactive_slack_transport_failure_never_persists_raw_error_as_f
     assert all(raw_error not in str(event.payload) for event in text_completed_events)
 
 
+def test_preservation_setup_failure_message_requests_a_new_idempotency_key():
+    from brain.systems.runs.failures import PRESERVATION_SETUP_FAILED_RUN_MESSAGE
+
+    assert "new idempotency key" in PRESERVATION_SETUP_FAILED_RUN_MESSAGE.lower()
+
+
 async def test_worker_failure_receipt_matches_terminal_preservation_category(
     monkeypatch,
     session_factory,

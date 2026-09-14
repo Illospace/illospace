@@ -19,6 +19,7 @@ from brain.systems.runs.execution_failure import RunExecutionFailure
 from brain.systems.runs.failure_diagnostic import (
     ClassifiedRunFailure,
     RunFailureStage,
+    agent_start_retry_diagnostic_metadata,
     failure_category_for_run_context,
     run_tool_execution_started,
 )
@@ -321,6 +322,19 @@ class AsyncAgentRunEngine:
                 result = await result
         except Exception as exc:
             raise RunExecutionFailure.capture(run.id, exc) from exc
+        if (
+            RunStatus(result.status) == RunStatus.FAILED
+            and result.classified_failure is not None
+            and not await cancel_event_is_set(cancel_event)
+        ):
+            retried = await self._retry_agent_start_failure(
+                run.id,
+                stage=result.classified_failure.stage,
+                exception_type=result.exception_type,
+                execution_claim=execution_claim,
+            )
+            if retried is not None:
+                return retried
         for artifact in result.artifacts:
             await self.store.append_artifact(artifact)
         if await cancel_event_is_set(cancel_event):
@@ -478,6 +492,42 @@ class AsyncAgentRunEngine:
             )
             await self._queue_chantier_continuation(run_id)
             return completed
+
+    async def _retry_agent_start_failure(
+        self,
+        run_id: int,
+        *,
+        stage: RunFailureStage,
+        exception_type: type[BaseException] | None,
+        execution_claim: ExecutionClaim | None,
+    ) -> AgentRun | None:
+        from brain.systems.runs.interruption import interrupt_and_requeue_run
+
+        diagnostic = agent_start_retry_diagnostic_metadata(
+            stage=stage,
+            exception_type=exception_type,
+        )
+        if diagnostic is None:
+            return None
+        row = await self._prepare_terminal_write(run_id)
+        async with self._atomic_terminal_write():
+            if coerce_run_status(row.status, default=RunStatus.FAILED) in TERMINAL_RUN_STATUSES:
+                return to_domain(row)
+            if execution_claim is not None:
+                await self.store.assert_execution_claim(execution_claim)
+            # Check the entire run history under the ownership lock. A tool in
+            # any attempt may have mutated state, even if it never completed.
+            if await run_tool_execution_started(self.store.session, run_id=run_id):
+                return None
+            interruption = await interrupt_and_requeue_run(
+                self.store,
+                run_id,
+                reason="agent_start_connect_error",
+                details={"failure": diagnostic},
+            )
+            if interruption is not None:
+                return to_domain(await self.store.require_run(run_id))
+        return None
 
     async def fail(
         self,

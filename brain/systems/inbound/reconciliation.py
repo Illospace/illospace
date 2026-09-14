@@ -551,6 +551,14 @@ async def reconcile_inbound_triage_run(
         "attribution": attribution,
     }
 
+    # A same-key preservation retry keeps its event but has a new receipt/run.
+    # Settle the old receipt without replacing another run's current handling.
+    current_handling = _json_dict(_json_dict(event.action_result).get(outcome_key))
+    current_run_id = current_handling.get("run_id")
+    if current_run_id is not None and current_run_id != run_id:
+        await session.flush()
+        return receipt
+
     event.status = terminal_status
     event.action_result = {
         **_json_dict(event.action_result),
