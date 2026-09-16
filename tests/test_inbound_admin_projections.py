@@ -11,11 +11,14 @@ from brain.platform.db.models.inbound import InboundDomainProjectionRow, Inbound
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound import service as inbound_service
+from brain.systems.inbound.github_webhook import github_event_to_envelope
 from brain.systems.runs.execution_context import AgentExecutionContext, bind_agent_context
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
+from brain.systems.user_domains.service import AsyncDomainService
 from tests.inbound_admin_support import (
     ORG_ID,
     USER_ID,
+    _bridge_connection,
     _create_issue_domain,
     _decode,
     _submit_issue_signal,
@@ -26,6 +29,122 @@ from tests.inbound_admin_support import (
 
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+async def github_projection(seeded_session):
+    domain = await _create_issue_domain(seeded_session)
+    connection = await inbound_admin.create_connection(
+        seeded_session, org_id=ORG_ID, owner_user_id=USER_ID,
+        display_name="GitHub webhook", agent_kind="github", transport="webhook",
+    )
+    policy = await inbound_admin.create_policy(
+        seeded_session, org_id=ORG_ID, connection_id=str(connection.id),
+        name="GitHub issues", origin_patterns=["github:uwear-ai/uwear-website"],
+        envelope_kinds=["github_event"], allowed_actions=["domain_projection.upsert"],
+    )
+    projection = await inbound_admin.create_projection(
+        seeded_session, org_id=ORG_ID, connection_id=str(connection.id),
+        policy_id=str(policy.id), domain_id=domain.id, object_key="issue",
+        external_id_path="github:{hints.repo}:issue:{hints.number}",
+        external_id_field="external_id",
+        field_mapping={"summary": "payload.issue.title", "status": "hints.issue_outcome"},
+        validation_failure_status="quarantined",
+    )
+    envelope = github_event_to_envelope("issues", {
+        "action": "closed",
+        "repository": {"full_name": "uwear-ai/uwear-website"},
+        "issue": {
+            "number": 253, "node_id": "I_kwDO_test253", "title": "Fix issue state sync",
+            "html_url": "https://github.com/uwear-ai/uwear-website/issues/253",
+            "state": "closed", "state_reason": "completed",
+            "closed_at": "2026-09-16T12:00:00Z", "updated_at": "2026-09-16T12:00:00Z",
+            "user": {"login": "reporter"},
+        },
+    }, delivery_id="issue-253-closed")
+    return connection, projection, envelope
+
+
+@pytest.mark.parametrize("existing_record", [False, True])
+async def test_github_composed_identity_matches_live_projection_and_preview(
+    seeded_session, github_projection, existing_record,
+):
+    connection, projection, envelope = github_projection
+    expected_id = "github:uwear-ai/uwear-website:issue:253"
+    if existing_record:
+        original = await AsyncDomainService(seeded_session).create_record(
+            ORG_ID, projection.domain_id, "issue", title=expected_id,
+            data={"external_id": expected_id, "summary": "Fix issue state sync", "status": "open"},
+            actor_id=USER_ID,
+        )
+    preview = await inbound_admin._preview_envelope(
+        seeded_session, org_id=ORG_ID, connection_id=str(connection.id), **envelope,
+    )
+    result = await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection=_bridge_connection(inbound_admin.serialize_connection(connection)),
+        envelope=envelope,
+    )
+    record = (await seeded_session.scalars(select(DomainRecord))).one()
+    assert preview["projection_error"] is None
+    assert preview["would_project_domain_record"] is True
+    assert preview["external_id"] == result["ilo_outcome"]["external_id"] == expected_id
+    assert result["status"] == inbound_service.STATUS_PROCESSED
+    assert result["ilo_outcome"]["operation"] == ("updated" if existing_record else "created")
+    assert record.data == {
+        "external_id": expected_id, "summary": "Fix issue state sync", "status": "closed",
+    }
+    if existing_record:
+        assert record.id == original.id
+
+
+@pytest.mark.parametrize("missing_part", ["missing", "null", "empty"])
+async def test_github_projection_missing_part_matches_preview_without_writing(
+    seeded_session, github_projection, missing_part,
+):
+    connection, projection, envelope = github_projection
+    if missing_part == "missing":
+        del envelope["hints"]["number"]
+    else:
+        envelope["hints"]["number"] = None if missing_part == "null" else ""
+    preview = await inbound_admin._preview_envelope(
+        seeded_session, org_id=ORG_ID, connection_id=str(connection.id), **envelope,
+    )
+    result = await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection=_bridge_connection(inbound_admin.serialize_connection(connection)),
+        envelope=envelope,
+    )
+    expected_error = f"Missing projection external id at '{projection.external_id_path}'"
+    assert preview["projection_error"] == expected_error
+    assert preview["external_id"] is None
+    assert preview["would_project_domain_record"] is False
+    assert result["status"] == inbound_service.STATUS_QUARANTINED
+    assert result["error"] == expected_error
+    assert list(await seeded_session.scalars(select(DomainRecord))) == []
+
+
+@pytest.mark.parametrize("template", ["github:{hints.repo", "github:{}"])
+async def test_github_projection_malformed_template_matches_preview_without_writing(
+    seeded_session, github_projection, template,
+):
+    connection, projection, envelope = github_projection
+    projection.external_id_path = template
+    await seeded_session.flush()
+    preview = await inbound_admin._preview_envelope(
+        seeded_session, org_id=ORG_ID, connection_id=str(connection.id), **envelope,
+    )
+    result = await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection=_bridge_connection(inbound_admin.serialize_connection(connection)),
+        envelope=envelope,
+    )
+    assert preview["projection_error"].startswith("path template")
+    assert preview["external_id"] is None
+    assert preview["would_project_domain_record"] is False
+    assert result["status"] == inbound_service.STATUS_QUARANTINED
+    assert result["error"] == preview["projection_error"]
+    assert list(await seeded_session.scalars(select(DomainRecord))) == []
 
 
 async def test_illo_can_configure_connection_policy_projection_and_token(
@@ -479,4 +598,3 @@ async def test_dry_run_schema_errors_match_runtime_quarantine(
     assert dry_run["would_project_domain_record"] is False
     assert dry_run["would_require_ilo"] is False
     assert dry_run["schema_error"] == "Missing required inbound field(s): payload.issue.key"
-

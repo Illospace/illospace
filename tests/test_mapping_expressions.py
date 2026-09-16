@@ -1,10 +1,11 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
 from brain.platform.mapping_expressions import (
     MappingExpressionError,
     evaluate_mapping_expression,
+    render_path_template,
     validate_mapping_expression,
 )
 
@@ -82,3 +83,75 @@ def test_evaluation_errors_are_neutral(expression, message):
             expression, {}, resolve_path=lambda source, path: None, clock=Mock(),
         )
     assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("value", [object(), None, "", 253, False, {"key": "value"}])
+def test_path_template_plain_path_preserves_resolution(value):
+    source = {"payload": {"issues": [{"key": value}]}}
+    resolve_path = Mock(return_value=value)
+    path = "payload.issues.0.key"
+    assert render_path_template(
+        path, source, resolve_path=resolve_path, missing=object(),
+    ) is value
+    resolve_path.assert_called_once_with(source, path)
+
+
+def test_path_template_composes_github_identity():
+    source = {"hints": {"repo": "uwear-ai/uwear-website", "number": 253}}
+    resolve_path = Mock(side_effect=[source["hints"]["repo"], source["hints"]["number"]])
+    assert render_path_template(
+        "github:{hints.repo}:issue:{hints.number}", source,
+        resolve_path=resolve_path, missing=object(),
+    ) == "github:uwear-ai/uwear-website:issue:253"
+    assert resolve_path.call_args_list == [call(source, "hints.repo"), call(source, "hints.number")]
+
+
+@pytest.mark.parametrize("part", ["missing", "null", "empty"])
+@pytest.mark.parametrize("position", [0, 1])
+def test_path_template_missing_part_makes_entire_identity_missing(part, position):
+    missing = object()
+    values = ["uwear-ai/uwear-website", 253]
+    values[position] = {"missing": missing, "null": None, "empty": ""}[part]
+    assert render_path_template(
+        "github:{hints.repo}:issue:{hints.number}", {},
+        resolve_path=Mock(side_effect=values), missing=missing,
+    ) is missing
+
+
+@pytest.mark.parametrize("value, expected", [(0, "id:0"), (False, "id:False")])
+def test_path_template_keeps_present_falsy_values(value, expected):
+    assert render_path_template(
+        "id:{value}", {}, resolve_path=Mock(return_value=value), missing=object(),
+    ) == expected
+
+
+@pytest.mark.parametrize("template, expected", [
+    ("{{literal}}:{hints.number}", "{literal}:253"),
+    ("{{{hints.number}}}", "{253}"),
+    ("{{}}", "{}"),
+])
+def test_path_template_escapes_braces(template, expected):
+    assert render_path_template(
+        template, {}, resolve_path=Mock(return_value=253), missing=object(),
+    ) == expected
+
+
+def test_path_template_without_opening_brace_is_always_a_path():
+    source = {"key}}": "value"}
+    resolve_path = Mock(return_value="value")
+    assert render_path_template(
+        "key}}", source, resolve_path=resolve_path, missing=object(),
+    ) == "value"
+    resolve_path.assert_called_once_with(source, "key}}")
+
+
+@pytest.mark.parametrize("template", [
+    "github:{hints.repo", "github:{}", "github:{ }", "{outer{inner}}",
+    "{hints.repo}:{", "{hints.repo}:{}", "{hints.repo}}",
+])
+def test_path_template_rejects_malformed_syntax_even_after_missing_part(template):
+    missing = object()
+    with pytest.raises(MappingExpressionError, match="path template"):
+        render_path_template(
+            template, {}, resolve_path=Mock(return_value=missing), missing=missing,
+        )

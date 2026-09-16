@@ -29,6 +29,7 @@ from brain.platform.db.models.inbound import (
 from brain.platform.mapping_expressions import (
     MappingExpressionError,
     evaluate_mapping_expression,
+    render_path_template,
     validate_mapping_expression,
 )
 from brain.platform.provider_alerts import parse_rollbar_alert
@@ -771,7 +772,13 @@ async def _apply_domain_projection(
         raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
 
     root = _path_root(envelope)
-    external_id = _string_value(_extract_path(root, projection.external_id_path))
+    try:
+        value = render_path_template(
+            projection.external_id_path, root, resolve_path=_extract_path, missing=_MISSING,
+        )
+    except MappingExpressionError as exc:
+        raise InboundValidationError(str(exc)) from exc
+    external_id = _string_value(value)
     if not external_id:
         raise InboundValidationError(f"Missing projection external id at '{projection.external_id_path}'")
 

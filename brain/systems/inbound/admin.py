@@ -19,6 +19,7 @@ from brain.platform.db.models.inbound import (
     InboundEventRow,
     InboundSourcePolicyRow,
 )
+from brain.platform.mapping_expressions import MappingExpressionError, render_path_template
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound_service
 from brain.systems.runs.failures import public_run_failure
@@ -733,6 +734,7 @@ async def _preview_envelope(
             "would_project_domain_record": False,
             "would_status": inbound_service.STATUS_REVIEW_REQUIRED,
             "reason": "no_matching_source_policy",
+            "external_id": None,
         }
     envelope = {
         "kind": kind,
@@ -749,7 +751,7 @@ async def _preview_envelope(
     except Exception as exc:
         schema_error = str(exc)
     projection = await inbound_service._projection_for_policy(session, policy)
-    projection_error = _dry_run_projection_error(policy, projection, envelope)
+    external_id, projection_error = _dry_run_projection_identity(policy, projection, envelope)
     would_assign_projection = (
         projection is not None
         and schema_error is None
@@ -774,6 +776,7 @@ async def _preview_envelope(
         ),
         "schema_error": schema_error,
         "projection_error": projection_error,
+        "external_id": external_id if would_project else None,
     }
 
 
@@ -1141,21 +1144,27 @@ def _source_card_event_summary(row: InboundEventRow) -> dict[str, Any]:
     return summary
 
 
-def _dry_run_projection_error(
+def _dry_run_projection_identity(
     policy: InboundSourcePolicyRow,
     projection: InboundDomainProjectionRow | None,
     envelope: Mapping[str, Any],
-) -> str | None:
+) -> tuple[str | None, str | None]:
     if projection is None:
-        return None
+        return None, None
     if not inbound_service._policy_allows_domain_projection(policy):
-        return "domain_projection_not_allowed"
+        return None, "domain_projection_not_allowed"
     root = inbound_service._path_root(envelope)
-    value = inbound_service._extract_path(root, projection.external_id_path)
+    try:
+        value = render_path_template(
+            projection.external_id_path, root,
+            resolve_path=inbound_service._extract_path, missing=inbound_service._MISSING,
+        )
+    except MappingExpressionError as exc:
+        return None, str(exc)
     external_id = inbound_service._string_value(value)
     if not external_id:
-        return f"Missing projection external id at '{projection.external_id_path}'"
-    return None
+        return None, f"Missing projection external id at '{projection.external_id_path}'"
+    return external_id, None
 
 
 def _dry_run_would_require_ilo(

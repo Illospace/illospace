@@ -9,6 +9,7 @@ from typing import Any
 MAPPING_KEYS = ("const", "path", "template", "if", "now")
 MAPPING_DESCRIPTION = "const, path, template, now, or if/then/else"
 _TEMPLATE_RE = re.compile(r"\{([a-zA-Z_][\w.-]*)\}")
+_PATH_TEMPLATE_RE = re.compile(r"\{\{|\}\}|\{([^{}]*)\}|[{}]")
 
 
 class MappingExpressionError(ValueError):
@@ -107,6 +108,43 @@ def render_mapping_template(
         return "" if value is None else str(value)
 
     return _TEMPLATE_RE.sub(replace, template)
+
+
+def render_path_template(
+    template: str,
+    source: Mapping[str, Any],
+    *,
+    resolve_path: Callable[[Any, str], Any],
+    missing: Any,
+) -> Any:
+    """Resolve a plain path or interpolate paths, preserving the caller's sentinel.
+
+    Doubled braces are literals. Any missing, null, or empty placeholder makes
+    the entire result missing; malformed templates still raise an error.
+    """
+    if "{" not in template:
+        return resolve_path(source, template)
+
+    has_missing = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal has_missing
+        token = match.group(0)
+        if token in ("{{", "}}"):
+            return token[0]
+        if token in ("{", "}"):
+            raise MappingExpressionError("path template contains an unmatched brace")
+        path = match.group(1)
+        if not path.strip():
+            raise MappingExpressionError("path template placeholder requires a non-empty path")
+        value = resolve_path(source, path)
+        if value is missing or value is None or value == "":
+            has_missing = True
+            return ""
+        return str(value)
+
+    rendered = _PATH_TEMPLATE_RE.sub(replace, template)
+    return missing if has_missing else rendered
 
 
 def _collect_expression_errors(

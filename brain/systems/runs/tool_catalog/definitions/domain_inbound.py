@@ -331,7 +331,11 @@ INBOUND_TOOLS = [
                 "object_key": {"type": "string", "description": "Target Domain object key."},
                 "external_id_path": {
                     "type": "string",
-                    "description": "Path to source external id, e.g. payload.issue.key.",
+                    "description": (
+                        "Path to source external id (payload.issue.key), or a path template "
+                        "(github:{hints.repo}:issue:{hints.number}). Double braces escape literal braces; "
+                        "all template parts must be present and non-empty."
+                    ),
                 },
                 "external_id_field": {
                     "type": "string",
