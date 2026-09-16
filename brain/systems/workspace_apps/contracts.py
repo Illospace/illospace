@@ -6,6 +6,7 @@ import json
 from html.parser import HTMLParser
 from typing import Any, Mapping
 
+from brain.platform.mapping_expressions import MappingExpressionError, validate_mapping_expression
 from brain.systems.workspace_apps.capabilities import (
     CAPABILITY_BINDING_KINDS,
     DOMAIN_BROKER_OPERATIONS,
@@ -37,8 +38,6 @@ GENERATED_UI_CHART_TYPES = {"bar", "line", "pie", "scatter"}
 GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
 GENERIC_HTTP_KINDS = {"http_request", "http_sync"}
 GENERIC_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-GENERIC_HTTP_MAPPING_KEYS = ("const", "path", "template", "if", "now")
-GENERIC_HTTP_MAPPING_DESCRIPTION = "const, path, template, now, or if/then/else"
 RECORD_LIKE_STATE_KEYS = {
     "records",
     "items",
@@ -466,61 +465,10 @@ def _validate_generic_http_mapping_expr(
     *,
     branch_literal: bool = False,
 ) -> None:
-    if isinstance(expr, Mapping):
-        present = [key for key in GENERIC_HTTP_MAPPING_KEYS if key in expr]
-        if not present:
-            errors.append(f"{field_path} mapping expressions must use {GENERIC_HTTP_MAPPING_DESCRIPTION}")
-            return
-        if len(present) > 1:
-            errors.append(f"{field_path} mapping expression must use only one of const, path, template, now, or if")
-            return
-        key = present[0]
-        if key == "path" and not isinstance(expr.get("path"), str):
-            errors.append(f"{field_path}.path must be a string")
-        elif key == "template" and not isinstance(expr.get("template"), str):
-            errors.append(f"{field_path}.template must be a string")
-        elif key == "now" and expr.get("now") is not True:
-            errors.append(f"{field_path}.now must be true")
-        elif key == "if":
-            _validate_generic_http_condition(f"{field_path}.if", expr.get("if"), errors)
-            if "then" not in expr:
-                errors.append(f"{field_path}.then is required for conditional mapping expressions")
-            else:
-                _validate_generic_http_mapping_expr(
-                    f"{field_path}.then",
-                    expr.get("then"),
-                    errors,
-                    branch_literal=True,
-                )
-            if "else" in expr:
-                _validate_generic_http_mapping_expr(
-                    f"{field_path}.else",
-                    expr.get("else"),
-                    errors,
-                    branch_literal=True,
-                )
-        return
-    if expr is None:
-        return
-    if isinstance(expr, str):
-        if not branch_literal and not expr.strip():
-            errors.append(f"{field_path} mapping path must not be empty")
-        return
-    if not branch_literal:
-        errors.append(f"{field_path} mapping expression must be a string path or object")
-
-
-def _validate_generic_http_condition(field_path: str, condition: Any, errors: list[str]) -> None:
-    if not isinstance(condition, Mapping):
-        errors.append(f"{field_path} must be an object")
-        return
-    path = condition.get("path") if "path" in condition else condition.get("field")
-    if not isinstance(path, str) or not path.strip():
-        errors.append(f"{field_path} requires field or path")
-    if "in" in condition and not isinstance(condition.get("in"), list):
-        errors.append(f"{field_path}.in must be a list")
-    if "exists" in condition and not isinstance(condition.get("exists"), bool):
-        errors.append(f"{field_path}.exists must be a boolean")
+    try:
+        validate_mapping_expression(field_path, expr, branch_literal=branch_literal)
+    except MappingExpressionError as exc:
+        errors.extend(exc.errors)
 
 
 def _validate_design_contract(value: Any, errors: list[str]) -> None:

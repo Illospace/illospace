@@ -1360,7 +1360,7 @@ async def test_payload_cannot_spoof_another_connections_source_policy(session):
     )
 
 
-async def test_domain_projection_mapping_expressions_stamp_each_write(session, monkeypatch):
+async def test_domain_projection_mapping_expressions_stamp_each_write(session):
     principal = await _seed_connection(session)
     domain_service = AsyncDomainService(session)
     domain = await domain_service.create_domain(
@@ -1396,15 +1396,9 @@ async def test_domain_projection_mapping_expressions_stamp_each_write(session, m
     for index, operation in enumerate(("created", "updated")):
         timestamp = datetime(2026, 9, 16, 12, index, tzinfo=timezone.utc)
 
-        class Clock:
-            @staticmethod
-            def now(tz):
-                assert tz is timezone.utc
-                return timestamp
-
-        monkeypatch.setattr("brain.systems.workspace_apps.generic_http.datetime", Clock)
         result = await inbound.submit_inbound_envelope(
             session, connection=principal,
+            projection_clock=lambda: timestamp.isoformat().replace("+00:00", "Z"),
             envelope={
                 "origin": f"jira.ticket_{operation}",
                 "payload": {"issue": {

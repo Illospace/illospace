@@ -26,6 +26,11 @@ from brain.platform.db.models.inbound import (
     InboundEventRow,
     InboundSourcePolicyRow,
 )
+from brain.platform.mapping_expressions import (
+    MappingExpressionError,
+    evaluate_mapping_expression,
+    validate_mapping_expression,
+)
 from brain.platform.provider_alerts import parse_rollbar_alert
 from brain.systems.external_agents import service as external_agents
 from brain.systems.cortex.thread_links import thread_link_payload
@@ -52,8 +57,6 @@ from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.slack.monitored_intakes import SLACK_CHANNEL_MESSAGE_ORIGIN
 from brain.systems.task_domain import classify_task_domain
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
-from brain.systems.workspace_apps.contracts import _validate_generic_http_mapping_expr
-from brain.systems.workspace_apps.generic_http import _mapped_value
 
 
 ACTION_STORE_ONLY = "store_only"
@@ -85,6 +88,10 @@ class InboundValidationError(ValueError):
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _projection_timestamp() -> str:
+    return utcnow().replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 async def create_source_policy(
@@ -175,6 +182,7 @@ async def submit_inbound_envelope(
     connection: external_agents.AgentBridgePrincipal | ExternalAgentConnectionRow | Mapping[str, Any],
     envelope: Mapping[str, Any],
     ingress_context: Mapping[str, Any] | None = None,
+    projection_clock: Callable[[], str] = _projection_timestamp,
 ) -> dict[str, Any]:
     """Store and process a shared inbound envelope from any ingress lane."""
 
@@ -345,6 +353,7 @@ async def submit_inbound_envelope(
             event=event,
             envelope=normalized,
             projection=projection,
+            clock=projection_clock,
         )
         return await _complete_event(
             session,
@@ -756,6 +765,7 @@ async def _apply_domain_projection(
     event: InboundEventRow,
     envelope: Mapping[str, Any],
     projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
 ) -> dict[str, Any]:
     if projection.upsert_mode not in VALID_PROJECTION_UPSERT_MODES:
         raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
@@ -768,10 +778,12 @@ async def _apply_domain_projection(
     data = {projection.external_id_field: external_id}
     for field_key, source_path in dict(projection.field_mapping or {}).items():
         if isinstance(source_path, Mapping):
-            if "path" in source_path:
-                value = _extract_path(root, source_path["path"])
-            else:
-                value = _mapped_value(source_path, root)
+            try:
+                value = evaluate_mapping_expression(
+                    source_path, root, resolve_path=_extract_path, clock=clock,
+                )
+            except MappingExpressionError as exc:
+                raise InboundValidationError(str(exc)) from exc
         else:
             value = _extract_path(root, str(source_path))
         if value is _MISSING:
@@ -1690,7 +1702,7 @@ def _path_root(envelope: Mapping[str, Any]) -> dict[str, Any]:
 def validate_projection_field_mapping(
     field_mapping: Mapping[str, str | Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Preserve legacy paths and validate the supported workspace-app expressions."""
+    """Preserve legacy paths and validate the restricted projection expressions."""
     result = {}
     for field_key, expr in field_mapping.items():
         field_path = f"field_mapping.{field_key}"
@@ -1699,10 +1711,10 @@ def validate_projection_field_mapping(
                 raise InboundValidationError(
                     f"{field_path} mapping expression must use exactly one of const, path, or now"
                 )
-            errors: list[str] = []
-            _validate_generic_http_mapping_expr(field_path, expr, errors)
-            if errors:
-                raise InboundValidationError("; ".join(errors))
+            try:
+                validate_mapping_expression(field_path, expr)
+            except MappingExpressionError as exc:
+                raise InboundValidationError(str(exc)) from exc
             result[str(field_key)] = dict(expr)
         elif isinstance(expr, str):
             result[str(field_key)] = expr
