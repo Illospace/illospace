@@ -94,6 +94,13 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
         author = (comment.get("user") or {}).get("login") or author
         source_updated_at = comment.get("updated_at") or source_updated_at
 
+    issue_hints = {}
+    if event == "issues":
+        issue_hints = {
+            "issue_outcome": "closed" if state == "closed" else "open",
+            "closed_at": subject.get("closed_at"),
+        }
+
     merge_hints = {}
     summary_action = action
     if event == "pull_request":
@@ -140,6 +147,7 @@ def github_event_to_envelope(event: str, payload: dict, *, delivery_id=None) -> 
             "author": author,
             # Freshness: GitHub's own last-modified for the subject object.
             "source_updated_at": source_updated_at,
+            **issue_hints,
             **merge_hints,
         },
         "idempotency_key": (f"github:{delivery_id}"[:160] if delivery_id else None),
