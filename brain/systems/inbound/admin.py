@@ -408,7 +408,7 @@ async def create_projection(
     object_key: str,
     external_id_path: str,
     external_id_field: str,
-    field_mapping: Mapping[str, str],
+    field_mapping: Mapping[str, str | Mapping[str, Any]],
     policy_id: str | None = None,
     title_path: str | None = None,
     upsert_mode: str = "upsert",
@@ -461,13 +461,18 @@ async def update_projection(
     enabled: bool | None = None,
     external_id_path: str | None = None,
     external_id_field: str | None = None,
-    field_mapping: Mapping[str, str] | None = None,
+    field_mapping: Mapping[str, str | Mapping[str, Any]] | None = None,
     title_path: str | None = None,
     upsert_mode: str | None = None,
     validation_failure_status: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> InboundDomainProjectionRow:
     row = await require_projection_for_org(session, org_id=org_id, projection_id=projection_id)
+    validated_mapping = (
+        inbound_service.validate_projection_field_mapping(field_mapping)
+        if field_mapping is not None
+        else None
+    )
     if policy_id is not None:
         policy = await require_policy_for_org(session, org_id=org_id, policy_id=policy_id)
         if str(policy.connection_id) != str(row.connection_id):
@@ -481,8 +486,8 @@ async def update_projection(
     _set_if_not_none(row, "title_path", title_path)
     _set_if_not_none(row, "upsert_mode", upsert_mode)
     _set_if_not_none(row, "validation_failure_status", validation_failure_status)
-    if field_mapping is not None:
-        row.field_mapping = {str(key): str(value) for key, value in dict(field_mapping).items()}
+    if validated_mapping is not None:
+        row.field_mapping = validated_mapping
     if metadata is not None:
         row.metadata_ = dict(metadata)
     await session.flush()

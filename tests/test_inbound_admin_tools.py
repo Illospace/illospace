@@ -261,6 +261,81 @@ async def test_illo_can_configure_connection_policy_projection_and_token(
     assert dry_run["would_project_domain_record"] is True
 
 
+async def test_projection_expressions_round_trip_through_admin(seeded_session, patch_unit_of_work):
+    domain = await _create_issue_domain(seeded_session)
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(await _handle_manage_inbound(
+            action="create_connection", display_name="Expression source", transport="webhook",
+        ))["connection"]
+        mapping = {
+            "summary": "payload.issue.summary",
+            "status": {"const": "open"},
+            "synced_at": {"now": True},
+        }
+        created = _decode(await _handle_manage_inbound(
+            action="create_projection", connection_id=connection["id"],
+            domain_id=domain.id, object_key="issue", external_id_path="payload.issue.key",
+            external_id_field="external_id", field_mapping=mapping,
+        ))["projection"]
+        assert created["field_mapping"] == mapping
+        row = await seeded_session.get(InboundDomainProjectionRow, created["id"])
+        await seeded_session.refresh(row)
+        assert row.field_mapping == mapping
+
+        mapping = {**mapping, "status": {"path": "payload.issue.status"}}
+        updated = _decode(await _handle_manage_inbound(
+            action="update_projection", projection_id=created["id"], field_mapping=mapping,
+        ))["projection"]
+        assert updated["field_mapping"] == mapping
+        await seeded_session.refresh(row)
+        assert row.field_mapping == mapping
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("expression, message", [
+    ({"now": False}, "field_mapping.status.now must be true"),
+    ({"now": "yes"}, "field_mapping.status.now must be true"),
+    ({"now": 1}, "field_mapping.status.now must be true"),
+    ({"unknown": True}, "must use exactly one of const, path, or now"),
+    ({}, "must use exactly one of const, path, or now"),
+    ({"now": True, "const": "x"}, "must use exactly one of const, path, or now"),
+    ({"now": True, "unknown": True}, "must use exactly one of const, path, or now"),
+    ({"path": 42}, "field_mapping.status.path must be a string"),
+    ([], "must be a string path or mapping expression"),
+])
+async def test_admin_rejects_invalid_projection_expressions(seeded_session, action, expression, message):
+    domain = await _create_issue_domain(seeded_session)
+    connection = await inbound_admin.create_connection(
+        seeded_session, org_id=ORG_ID, owner_user_id=USER_ID,
+        display_name="Expression source", transport="webhook",
+    )
+    kwargs = dict(
+        org_id=ORG_ID, connection_id=str(connection.id), domain_id=domain.id,
+        object_key="issue", external_id_path="payload.issue.key", external_id_field="external_id",
+    )
+    original_mapping = {"summary": "payload.issue.summary"}
+    if action == "update":
+        row = await inbound_admin.create_projection(
+            seeded_session, **kwargs, field_mapping=original_mapping,
+        )
+    with pytest.raises(inbound_service.InboundValidationError, match=re.escape(message)):
+        if action == "create":
+            await inbound_admin.create_projection(
+                seeded_session, **kwargs, field_mapping={"status": expression},
+            )
+        else:
+            await inbound_admin.update_projection(
+                seeded_session, org_id=ORG_ID, projection_id=str(row.id),
+                field_mapping={"status": expression}, enabled=False,
+            )
+    if action == "update":
+        await seeded_session.refresh(row)
+        assert row.field_mapping == original_mapping
+        assert row.enabled is True
+    else:
+        assert list(await seeded_session.scalars(select(InboundDomainProjectionRow))) == []
+
+
 async def test_configured_projection_processes_signal_and_illo_can_inspect_logs(
     seeded_session,
     patch_unit_of_work,

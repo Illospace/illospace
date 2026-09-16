@@ -52,6 +52,8 @@ from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.slack.monitored_intakes import SLACK_CHANNEL_MESSAGE_ORIGIN
 from brain.systems.task_domain import classify_task_domain
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
+from brain.systems.workspace_apps.contracts import _validate_generic_http_mapping_expr
+from brain.systems.workspace_apps.generic_http import _mapped_value
 
 
 ACTION_STORE_ONLY = "store_only"
@@ -137,7 +139,7 @@ async def create_domain_projection(
     object_key: str,
     external_id_path: str,
     external_id_field: str,
-    field_mapping: Mapping[str, str],
+    field_mapping: Mapping[str, str | Mapping[str, Any]],
     policy_id: str | None = None,
     title_path: str | None = None,
     upsert_mode: str = "upsert",
@@ -156,7 +158,7 @@ async def create_domain_projection(
         enabled=bool(enabled),
         external_id_path=_nonempty(external_id_path, "external_id_path"),
         external_id_field=_nonempty(external_id_field, "external_id_field"),
-        field_mapping={str(key): str(value) for key, value in dict(field_mapping).items()},
+        field_mapping=validate_projection_field_mapping(field_mapping),
         title_path=optional_text(title_path),
         upsert_mode=str(upsert_mode or "upsert"),
         validation_failure_status=str(validation_failure_status or STATUS_REVIEW_REQUIRED),
@@ -765,7 +767,13 @@ async def _apply_domain_projection(
 
     data = {projection.external_id_field: external_id}
     for field_key, source_path in dict(projection.field_mapping or {}).items():
-        value = _extract_path(root, str(source_path))
+        if isinstance(source_path, Mapping):
+            if "path" in source_path:
+                value = _extract_path(root, source_path["path"])
+            else:
+                value = _mapped_value(source_path, root)
+        else:
+            value = _extract_path(root, str(source_path))
         if value is _MISSING:
             continue
         data[str(field_key)] = value
@@ -1677,6 +1685,30 @@ def _path_root(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "desired_outcome": envelope.get("desired_outcome"),
         "origin": envelope.get("origin"),
     }
+
+
+def validate_projection_field_mapping(
+    field_mapping: Mapping[str, str | Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Preserve legacy paths and validate the supported workspace-app expressions."""
+    result = {}
+    for field_key, expr in field_mapping.items():
+        field_path = f"field_mapping.{field_key}"
+        if isinstance(expr, Mapping):
+            if len(expr) != 1 or not set(expr).issubset({"const", "path", "now"}):
+                raise InboundValidationError(
+                    f"{field_path} mapping expression must use exactly one of const, path, or now"
+                )
+            errors: list[str] = []
+            _validate_generic_http_mapping_expr(field_path, expr, errors)
+            if errors:
+                raise InboundValidationError("; ".join(errors))
+            result[str(field_key)] = dict(expr)
+        elif isinstance(expr, str):
+            result[str(field_key)] = expr
+        else:
+            raise InboundValidationError(f"{field_path} must be a string path or mapping expression")
+    return result
 
 
 def _extract_path(root: Mapping[str, Any], path: str) -> Any:
