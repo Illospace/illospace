@@ -70,10 +70,70 @@ class TestEventToEnvelope:
         assert env["idempotency_key"] == "github:d-1"
         assert env["hints"]["number"] == 42
         assert env["hints"]["action"] == "opened"
+        assert env["hints"]["state"] == "open"
+        assert env["hints"]["issue_outcome"] == "open"
+        assert env["hints"]["closed_at"] is None
         assert env["hints"]["source_updated_at"] == "2026-07-08T10:00:00Z"
         assert env["hints"]["author"] == "alice"
         assert "Login is broken" in env["summary"]
         assert env["payload"] is payload  # full payload carried for the projection
+
+    def test_issue_closed(self):
+        payload = {
+            "action": "closed",
+            "repository": {"full_name": "o/r"},
+            "issue": {
+                "number": 42, "title": "Login is broken", "html_url": "issue-url",
+                "state": "closed", "node_id": "I_abc",
+                "updated_at": "2026-09-16T00:11:56Z",
+                "closed_at": "2026-09-16T00:11:56Z",
+            },
+        }
+        env = github_event_to_envelope("issues", payload, delivery_id="d-closed")
+        assert env["hints"]["event"] == "issues"
+        assert env["hints"]["action"] == "closed"
+        assert env["hints"]["state"] == "closed"
+        assert env["hints"]["issue_outcome"] == "closed"
+        assert env["hints"]["closed_at"] == "2026-09-16T00:11:56Z"
+        assert env["hints"]["source_updated_at"] == "2026-09-16T00:11:56Z"
+        assert env["hints"]["node_id"] == "I_abc"
+        assert env["hints"]["url"] == "issue-url"
+        assert "pr_outcome" not in env["hints"]
+        assert env["summary"] == "GitHub issue #42 closed: Login is broken"
+        assert env["idempotency_key"] == "github:d-closed"
+        assert env["payload"] is payload
+
+    def test_closed_issue_edit_preserves_close_hints(self):
+        env = github_event_to_envelope("issues", {
+            "action": "edited",
+            "issue": {
+                "state": "closed",
+                "closed_at": "2026-09-16T00:11:56Z",
+                "updated_at": "2026-09-16T01:00:00Z",
+            },
+        })
+        assert env["hints"]["action"] == "edited"
+        assert env["hints"]["issue_outcome"] == "closed"
+        assert env["hints"]["closed_at"] == "2026-09-16T00:11:56Z"
+        assert env["hints"]["source_updated_at"] == "2026-09-16T01:00:00Z"
+
+    def test_issue_reopened_clears_close_hints(self):
+        env = github_event_to_envelope("issues", {
+            "action": "reopened",
+            "issue": {"state": "open", "closed_at": None},
+        })
+        assert env["hints"]["state"] == "open"
+        assert env["hints"]["issue_outcome"] == "open"
+        assert env["hints"]["closed_at"] is None
+
+    def test_closed_issue_without_timestamp_does_not_invent_one(self):
+        env = github_event_to_envelope("issues", {
+            "action": "closed",
+            "issue": {"state": "closed", "updated_at": "2026-09-16T01:00:00Z"},
+        })
+        assert env["hints"]["state"] == "closed"
+        assert env["hints"]["issue_outcome"] == "closed"
+        assert env["hints"]["closed_at"] is None
 
     def test_pull_request_merged(self):
         payload = {
