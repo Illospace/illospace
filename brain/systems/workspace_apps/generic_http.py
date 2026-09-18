@@ -8,7 +8,6 @@ items into Domain records.
 from __future__ import annotations
 
 import ipaddress
-import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +16,11 @@ from urllib.parse import urlparse
 import httpx
 
 from brain.platform.async_io import async_http_client
+from brain.platform.mapping_expressions import (
+    MappingExpressionError,
+    evaluate_mapping_expression,
+    render_mapping_template,
+)
 from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContext,
     WorkspaceAppActionContractError,
@@ -27,7 +31,6 @@ from brain.systems.user_domains.service import AsyncDomainService, DomainError
 
 GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
 _ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-_TEMPLATE_RE = re.compile(r"\{([a-zA-Z_][\w.-]*)\}")
 _MAX_ITEMS = 200
 
 
@@ -331,50 +334,12 @@ def _compact_response(value: Any, *, depth: int = 0) -> Any:
 
 
 def _mapped_value(expr: Any, item: Mapping[str, Any]) -> Any:
-    if isinstance(expr, Mapping):
-        if "const" in expr:
-            return expr.get("const")
-        if "path" in expr:
-            return _extract_path(item, str(expr.get("path") or ""))
-        if "template" in expr:
-            return _render_template(str(expr.get("template") or ""), item)
-        if "now" in expr:
-            if expr.get("now") is True:
-                return _utc_now_iso()
-            raise WorkspaceAppActionContractError("mapping expression.now must be true")
-        if "if" in expr:
-            condition = _mapping(expr.get("if"), "mapping expression.if")
-            branch = expr.get("then") if _condition_matches(condition, item) else expr.get("else")
-            return _literal_or_mapped_value(branch, item)
-        raise WorkspaceAppActionContractError("mapping expressions must use const, path, template, now, or if/then/else")
-    if expr is None:
-        return None
-    return _extract_path(item, str(expr))
-
-
-def _literal_or_mapped_value(expr: Any, item: Mapping[str, Any]) -> Any:
-    if isinstance(expr, Mapping):
-        return _mapped_value(expr, item)
-    return expr
-
-
-def _condition_matches(condition: Mapping[str, Any], item: Mapping[str, Any]) -> bool:
-    path = condition.get("path") if "path" in condition else condition.get("field")
-    if path is None:
-        raise WorkspaceAppActionContractError("mapping condition requires field or path")
-    value = _extract_path(item, str(path))
-    if "exists" in condition:
-        return (value is not None) is bool(condition.get("exists"))
-    if "equals" in condition:
-        return value == condition.get("equals")
-    if "not_equals" in condition:
-        return value != condition.get("not_equals")
-    if "in" in condition:
-        options = condition.get("in")
-        if not isinstance(options, list):
-            raise WorkspaceAppActionContractError("mapping condition.in must be a list")
-        return value in options
-    return bool(value)
+    try:
+        return evaluate_mapping_expression(
+            expr, item, resolve_path=_extract_path, clock=_utc_now_iso,
+        )
+    except MappingExpressionError as exc:
+        raise WorkspaceAppActionContractError(str(exc)) from exc
 
 
 def _extract_path(source: Any, path: str) -> Any:
@@ -418,11 +383,7 @@ def _render_json_value(value: Any, payload: Mapping[str, Any]) -> Any:
 
 
 def _render_template(template: str, payload: Mapping[str, Any]) -> str:
-    def replace(match: re.Match[str]) -> str:
-        value = _extract_path(payload, match.group(1))
-        return "" if value is None else str(value)
-
-    return _TEMPLATE_RE.sub(replace, template)
+    return render_mapping_template(template, payload, resolve_path=_extract_path)
 
 
 def _utc_now_iso() -> str:

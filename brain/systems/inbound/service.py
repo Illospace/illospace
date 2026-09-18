@@ -26,6 +26,12 @@ from brain.platform.db.models.inbound import (
     InboundEventRow,
     InboundSourcePolicyRow,
 )
+from brain.platform.mapping_expressions import (
+    MappingExpressionError,
+    evaluate_mapping_expression,
+    render_path_template,
+    validate_mapping_expression,
+)
 from brain.platform.provider_alerts import parse_rollbar_alert
 from brain.systems.external_agents import service as external_agents
 from brain.systems.cortex.thread_links import thread_link_payload
@@ -85,6 +91,10 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _projection_timestamp() -> str:
+    return utcnow().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 async def create_source_policy(
     session: AsyncSession,
     *,
@@ -137,7 +147,7 @@ async def create_domain_projection(
     object_key: str,
     external_id_path: str,
     external_id_field: str,
-    field_mapping: Mapping[str, str],
+    field_mapping: Mapping[str, str | Mapping[str, Any]],
     policy_id: str | None = None,
     title_path: str | None = None,
     upsert_mode: str = "upsert",
@@ -156,7 +166,7 @@ async def create_domain_projection(
         enabled=bool(enabled),
         external_id_path=_nonempty(external_id_path, "external_id_path"),
         external_id_field=_nonempty(external_id_field, "external_id_field"),
-        field_mapping={str(key): str(value) for key, value in dict(field_mapping).items()},
+        field_mapping=validate_projection_field_mapping(field_mapping),
         title_path=optional_text(title_path),
         upsert_mode=str(upsert_mode or "upsert"),
         validation_failure_status=str(validation_failure_status or STATUS_REVIEW_REQUIRED),
@@ -173,6 +183,7 @@ async def submit_inbound_envelope(
     connection: external_agents.AgentBridgePrincipal | ExternalAgentConnectionRow | Mapping[str, Any],
     envelope: Mapping[str, Any],
     ingress_context: Mapping[str, Any] | None = None,
+    projection_clock: Callable[[], str] = _projection_timestamp,
 ) -> dict[str, Any]:
     """Store and process a shared inbound envelope from any ingress lane."""
 
@@ -343,6 +354,7 @@ async def submit_inbound_envelope(
             event=event,
             envelope=normalized,
             projection=projection,
+            clock=projection_clock,
         )
         return await _complete_event(
             session,
@@ -754,18 +766,33 @@ async def _apply_domain_projection(
     event: InboundEventRow,
     envelope: Mapping[str, Any],
     projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
 ) -> dict[str, Any]:
     if projection.upsert_mode not in VALID_PROJECTION_UPSERT_MODES:
         raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
 
     root = _path_root(envelope)
-    external_id = _string_value(_extract_path(root, projection.external_id_path))
+    try:
+        value = render_path_template(
+            projection.external_id_path, root, resolve_path=_extract_path, missing=_MISSING,
+        )
+    except MappingExpressionError as exc:
+        raise InboundValidationError(str(exc)) from exc
+    external_id = _string_value(value)
     if not external_id:
         raise InboundValidationError(f"Missing projection external id at '{projection.external_id_path}'")
 
     data = {projection.external_id_field: external_id}
     for field_key, source_path in dict(projection.field_mapping or {}).items():
-        value = _extract_path(root, str(source_path))
+        if isinstance(source_path, Mapping):
+            try:
+                value = evaluate_mapping_expression(
+                    source_path, root, resolve_path=_extract_path, clock=clock,
+                )
+            except MappingExpressionError as exc:
+                raise InboundValidationError(str(exc)) from exc
+        else:
+            value = _extract_path(root, str(source_path))
         if value is _MISSING:
             continue
         data[str(field_key)] = value
@@ -1677,6 +1704,30 @@ def _path_root(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "desired_outcome": envelope.get("desired_outcome"),
         "origin": envelope.get("origin"),
     }
+
+
+def validate_projection_field_mapping(
+    field_mapping: Mapping[str, str | Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Preserve legacy paths and validate the restricted projection expressions."""
+    result = {}
+    for field_key, expr in field_mapping.items():
+        field_path = f"field_mapping.{field_key}"
+        if isinstance(expr, Mapping):
+            if len(expr) != 1 or not set(expr).issubset({"const", "path", "now"}):
+                raise InboundValidationError(
+                    f"{field_path} mapping expression must use exactly one of const, path, or now"
+                )
+            try:
+                validate_mapping_expression(field_path, expr)
+            except MappingExpressionError as exc:
+                raise InboundValidationError(str(exc)) from exc
+            result[str(field_key)] = dict(expr)
+        elif isinstance(expr, str):
+            result[str(field_key)] = expr
+        else:
+            raise InboundValidationError(f"{field_path} must be a string path or mapping expression")
+    return result
 
 
 def _extract_path(root: Mapping[str, Any], path: str) -> Any:

@@ -1360,6 +1360,65 @@ async def test_payload_cannot_spoof_another_connections_source_policy(session):
     )
 
 
+async def test_domain_projection_mapping_expressions_stamp_each_write(session):
+    principal = await _seed_connection(session)
+    domain_service = AsyncDomainService(session)
+    domain = await domain_service.create_domain(
+        ORG_ID,
+        name="Projection expressions",
+        objects=[{
+            "key": "ticket",
+            "fields": [
+                {"key": key, "field_type": "text"}
+                for key in ("external_id", "summary", "copied", "constant", "synced_at", "missing", "nullable")
+            ],
+        }],
+        actor_id=USER_ID,
+    )
+    policy = await inbound.create_source_policy(
+        session, org_id=ORG_ID, connection_id=CONNECTION_ID,
+        name="Projection expressions", origin_patterns=["jira.ticket_*"],
+        allowed_actions=["domain_projection.upsert"],
+    )
+    await inbound.create_domain_projection(
+        session, org_id=ORG_ID, connection_id=CONNECTION_ID,
+        policy_id=str(policy.id), domain_id=domain.id, object_key="ticket",
+        external_id_path="payload.issue.key", external_id_field="external_id",
+        field_mapping={
+            "summary": "payload.issue.summary",
+            "copied": {"path": "payload.issue.summary"},
+            "constant": {"const": "fixed"},
+            "nullable": {"const": None},
+            "synced_at": {"now": True},
+            "missing": {"path": "payload.issue.missing"},
+        },
+    )
+    for index, operation in enumerate(("created", "updated")):
+        timestamp = datetime(2026, 9, 16, 12, index, tzinfo=timezone.utc)
+
+        result = await inbound.submit_inbound_envelope(
+            session, connection=principal,
+            projection_clock=lambda: timestamp.isoformat().replace("+00:00", "Z"),
+            envelope={
+                "origin": f"jira.ticket_{operation}",
+                "payload": {"issue": {
+                    "key": "PROJ-7", "summary": "Summary",
+                    **({"missing": "retained"} if index == 0 else {}),
+                }},
+                "idempotency_key": f"projection-expressions:{index}",
+            },
+        )
+        assert result["status"] == "processed"
+        assert result["ilo_outcome"]["operation"] == operation
+        record = (await domain_service.list_records(ORG_ID, domain.id, object_key="ticket"))[0]
+        assert record.data == {
+            "external_id": "PROJ-7", "summary": "Summary",
+            "copied": "Summary", "constant": "fixed", "nullable": None, "missing": "retained",
+            "synced_at": timestamp.isoformat().replace("+00:00", "Z"),
+        }
+        assert record.version == index + 1
+
+
 async def test_domain_projection_creates_updates_and_dedupes_domain_records(session):
     principal = await _seed_connection(session)
     domain_service = AsyncDomainService(session)
