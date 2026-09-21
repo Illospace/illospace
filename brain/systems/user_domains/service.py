@@ -9,7 +9,7 @@ import re
 from typing import Any, Iterable, Sequence
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import (
@@ -726,40 +726,8 @@ class AsyncDomainService:
             )
             .order_by(DomainRecord.id)
         )
-        if natural_key.external_id is not None:
-            external_id = DomainRecord.data["external_id"].as_string()
-            whitespace = " \t\n\r\v\f"
-            if self.session.get_bind().dialect.name == "sqlite":
-                external_id = func.trim(
-                    func.json_extract(DomainRecord.data, "$.external_id"), whitespace
-                )
-            else:
-                external_id = func.btrim(external_id, whitespace)
-            normalized_id = (
-                func.lower(external_id)
-                if natural_key.external_id.startswith("github:")
-                else external_id
-            )
-            predicate = normalized_id == natural_key.external_id
-            if natural_key.repo_number is not None:
-                # Older observations may have only repo/number or a URL.
-                predicate = or_(predicate, external_id.is_(None), external_id == "")
-            stmt = stmt.where(predicate)
-
         records = (await self.session.scalars(stmt)).all()
-        matches = []
-        external_id = natural_key.external_id
-        for record in records:
-            stored_key = _record_natural_key(fields, record.data or {})
-            if stored_key is None or not natural_key.matches(stored_key):
-                continue
-            # A repo/number-only observation must not bridge conflicting IDs.
-            # Keep the earliest matching identity when the observation is ambiguous.
-            if external_id and stored_key.external_id not in (None, external_id):
-                continue
-            external_id = external_id or stored_key.external_id
-            matches.append(record)
-        return matches
+        return _select_same_entity_records(natural_key, records, fields)
 
     async def _merge_duplicate_records(
         self,
@@ -1586,10 +1554,45 @@ class _RecordNaturalKey:
     external_id: str | None
     repo_number: tuple[str, str] | None
 
-    def matches(self, other: _RecordNaturalKey) -> bool:
-        if self.external_id is not None and other.external_id is not None:
-            return self.external_id == other.external_id
-        return self.repo_number is not None and self.repo_number == other.repo_number
+
+def _select_same_entity_records(
+    natural_key: _RecordNaturalKey,
+    candidates: Sequence[DomainRecord],
+    fields: Sequence[DomainFieldDefinition],
+) -> list[DomainRecord]:
+    """Select one identity in record-id order without bridging conflicting IDs."""
+    keyed_records = [
+        (record, key)
+        for record in sorted(candidates, key=lambda record: record.id)
+        if (key := _record_natural_key(fields, record.data or {})) is not None
+    ]
+    if natural_key.external_id is not None:
+        return [
+            record
+            for record, key in keyed_records
+            if key.external_id == natural_key.external_id
+            or (
+                key.external_id is None
+                and natural_key.repo_number is not None
+                and key.repo_number == natural_key.repo_number
+            )
+        ]
+
+    repo_matches = [
+        (record, key)
+        for record, key in keyed_records
+        if natural_key.repo_number is not None and key.repo_number == natural_key.repo_number
+    ]
+    # An ID-less observation selects the earliest matching external identity.
+    external_id = next(
+        (key.external_id for _, key in repo_matches if key.external_id is not None),
+        None,
+    )
+    return [
+        record
+        for record, key in repo_matches
+        if key.external_id is None or key.external_id == external_id
+    ]
 
 
 def _record_natural_key(

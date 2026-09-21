@@ -16,7 +16,12 @@ from brain.platform.db.models.domain import (
     DomainRelation,
     DomainRelationType,
 )
-from brain.systems.user_domains.service import AsyncDomainService, DomainError
+from brain.systems.user_domains.service import (
+    AsyncDomainService,
+    DomainError,
+    _RecordNaturalKey,
+    _select_same_entity_records,
+)
 
 ORG_ID = "11111111-1111-4111-8111-111111111111"
 USER_ID = "22222222-2222-4222-8222-222222222222"
@@ -1079,6 +1084,31 @@ async def test_tracker_different_external_ids_do_not_merge(session, object_key):
     assert {record.id for record in active} == {record.id for record in records}
 
 
+def test_select_same_entity_records_keeps_earliest_external_identity():
+    fields = [
+        DomainFieldDefinition(key="external_id", field_type="text"),
+        DomainFieldDefinition(key="repo", field_type="text"),
+        DomainFieldDefinition(key="number", field_type="number"),
+    ]
+    repo_data = {"repo": "https://github.com/Illospace/illospace.git", "number": "084"}
+    external_id = "github:illospace/illospace:issue:84"
+    candidates = [
+        DomainRecord(id=4, data={**repo_data, "external_id": "provider:conflicting"}),
+        DomainRecord(id=5, data={**repo_data, "external_id": external_id}),
+        DomainRecord(id=1, data={**repo_data, "number": 85, "external_id": "provider:other"}),
+        DomainRecord(id=6, data={**repo_data, "external_id": "\t \n"}),
+        DomainRecord(id=3, data={**repo_data, "external_id": f"\t {external_id.upper()}\n"}),
+        DomainRecord(id=2, data=repo_data),
+        DomainRecord(id=7, data={**repo_data, "number": 85, "external_id": external_id}),
+        DomainRecord(id=8, data=None),
+    ]
+    natural_key = _RecordNaturalKey(None, ("illospace/illospace", "84"))
+
+    selected = _select_same_entity_records(natural_key, candidates, fields)
+    assert [record.id for record in selected] == [2, 3, 5, 6]
+    assert _select_same_entity_records(natural_key, list(reversed(candidates)), fields) == selected
+
+
 async def test_tracker_upsert_ignores_archived_records_and_other_object_types(session):
     service = AsyncDomainService(session)
     domain = await _create_tracker(service, legacy=False)
@@ -1103,6 +1133,67 @@ async def test_tracker_upsert_ignores_archived_records_and_other_object_types(se
     )
     assert observed.id == created.id
     assert ticket.archived_at is None
+
+
+async def test_plain_object_type_upserts_external_id(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Plain objects",
+        objects=[{
+            "key": "note",
+            "name": "Note",
+            "title_field": "title",
+            "fields": [
+                {"key": "title", "field_type": "text"},
+                {"key": "external_id", "field_type": "text"},
+            ],
+        }],
+    )
+    first = await service.create_record(
+        ORG_ID, domain.id, "note", data={"title": "Original", "external_id": "catalog:note:84"},
+    )
+    observed = await service.create_record(
+        ORG_ID, domain.id, "note", data={"title": "Updated", "external_id": " catalog:note:84 "},
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="note")
+    assert [record.id for record in records] == [first.id]
+    assert observed.id == first.id
+    assert observed.title == "Updated"
+    assert observed.version == 2
+
+
+async def test_plain_object_type_upserts_repo_and_number(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Plain objects",
+        objects=[{
+            "key": "note",
+            "name": "Note",
+            "title_field": "title",
+            "fields": [
+                {"key": "title", "field_type": "text"},
+                {"key": "repo", "field_type": "text"},
+                {"key": "number", "field_type": "number"},
+            ],
+        }],
+    )
+    first = await service.create_record(
+        ORG_ID, domain.id, "note",
+        data={"title": "Original", "repo": "Illospace/illospace", "number": "084"},
+    )
+    observed = await service.create_record(
+        ORG_ID, domain.id, "note",
+        data={"title": "Updated", "repo": "illospace/illospace", "number": 84.0},
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key="note")
+    assert [record.id for record in records] == [first.id]
+    assert observed.id == first.id
+    assert observed.title == "Updated"
+    assert observed.version == 2
 
 
 @pytest.mark.parametrize("extra_field", [None, "repo", "number", "url"])
