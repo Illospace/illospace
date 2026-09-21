@@ -167,20 +167,30 @@ async def test_list_records_filters_by_data_fields_and_record_metadata(session):
     assert [record.id for record in records] == [reda.id]
 
 
-async def _create_pr_tracker(service: AsyncDomainService) -> Domain:
+async def _create_tracker(
+    service: AsyncDomainService,
+    object_key: str = "pull_request",
+    *,
+    legacy: bool = True,
+) -> Domain:
     return await service.create_domain(
         ORG_ID,
-        name="GitHub Pull Request Tracker",
+        name="GitHub Ticket Tracker",
         objects=[
             {
-                "key": "pull_request",
-                "name": "Pull Request",
+                "key": object_key,
+                "name": object_key.replace("_", " ").title(),
                 "title_field": "title",
                 "fields": [
                     {"key": "title", "field_type": "text", "required": True},
-                    {"key": "repo", "field_type": "text", "required": True},
-                    {"key": "pr_number", "field_type": "number", "required": True},
-                    {"key": "pr_url", "field_type": "url"},
+                    {"key": "repo", "field_type": "text", "required": legacy},
+                    {
+                        "key": "pr_number" if legacy else "number",
+                        "field_type": "number",
+                        "required": legacy,
+                    },
+                    {"key": "pr_url" if legacy else "url", "field_type": "url"},
+                    *([] if legacy else [{"key": "external_id", "field_type": "text"}]),
                     {
                         "key": "status",
                         "field_type": "enum",
@@ -692,21 +702,20 @@ async def test_slack_chantier_declare_run_contract_requires_threaded_echo_and_mi
     assert "Ask the teammate for `next_step`" in run_message
 
 
-async def _insert_legacy_pr_record(
+async def _insert_tracker_record(
     session,
     service: AsyncDomainService,
     domain: Domain,
     *,
     title: str,
-    repo: str,
-    pr_number: int,
+    object_key: str = "pull_request",
     **data,
 ) -> DomainRecord:
-    obj = await service.get_object_type(domain.id, "pull_request")
+    obj = await service.get_object_type(domain.id, object_key)
     fields = await service.list_fields(obj.id)
     normalized = service.validate_record_data(
         fields,
-        {"title": title, "repo": repo, "pr_number": pr_number, **data},
+        {"title": title, **data},
     )
     record = DomainRecord(
         org_id=ORG_ID,
@@ -724,7 +733,7 @@ async def _insert_legacy_pr_record(
 
 async def test_pr_tracker_create_record_upserts_repo_and_pr_number(session):
     service = AsyncDomainService(session)
-    domain = await _create_pr_tracker(service)
+    domain = await _create_tracker(service)
 
     created = await service.create_record(
         ORG_ID,
@@ -764,7 +773,7 @@ async def test_pr_tracker_create_record_upserts_repo_and_pr_number(session):
 
 async def test_pr_tracker_upsert_normalizes_two_evidence_sources(session):
     service = AsyncDomainService(session)
-    domain = await _create_pr_tracker(service)
+    domain = await _create_tracker(service)
 
     from_sync = await service.create_record(
         ORG_ID,
@@ -805,8 +814,8 @@ async def test_pr_tracker_upsert_normalizes_two_evidence_sources(session):
 
 async def test_pr_tracker_write_merges_legacy_duplicates_into_lowest_id(session):
     service = AsyncDomainService(session)
-    domain = await _create_pr_tracker(service)
-    canonical = await _insert_legacy_pr_record(
+    domain = await _create_tracker(service)
+    canonical = await _insert_tracker_record(
         session,
         service,
         domain,
@@ -816,7 +825,7 @@ async def test_pr_tracker_write_merges_legacy_duplicates_into_lowest_id(session)
         status="open",
         sync_source="mission-control",
     )
-    duplicate = await _insert_legacy_pr_record(
+    duplicate = await _insert_tracker_record(
         session,
         service,
         domain,
@@ -855,8 +864,8 @@ async def test_pr_tracker_write_merges_legacy_duplicates_into_lowest_id(session)
 
 async def test_legacy_pr_duplicates_can_still_be_archived_explicitly(session):
     service = AsyncDomainService(session)
-    domain = await _create_pr_tracker(service)
-    canonical = await _insert_legacy_pr_record(
+    domain = await _create_tracker(service)
+    canonical = await _insert_tracker_record(
         session,
         service,
         domain,
@@ -864,7 +873,7 @@ async def test_legacy_pr_duplicates_can_still_be_archived_explicitly(session):
         repo="Illospace/illospace",
         pr_number=84,
     )
-    duplicate = await _insert_legacy_pr_record(
+    duplicate = await _insert_tracker_record(
         session,
         service,
         domain,
@@ -892,7 +901,7 @@ async def test_legacy_pr_duplicates_can_still_be_archived_explicitly(session):
 
 async def test_pr_tracker_distinct_pr_numbers_create_distinct_records(session):
     service = AsyncDomainService(session)
-    domain = await _create_pr_tracker(service)
+    domain = await _create_tracker(service)
 
     first = await service.create_record(
         ORG_ID,
@@ -920,6 +929,197 @@ async def test_pr_tracker_distinct_pr_numbers_create_distinct_records(session):
         domain.id,
         object_key="pull_request",
     )
+    assert {record.id for record in records} == {first.id, second.id}
+
+
+@pytest.mark.parametrize("object_key,kind", [("pull_request", "pr"), ("ticket", "issue")])
+@pytest.mark.parametrize("include_repo_number", [False, True])
+async def test_tracker_upserts_external_id(session, object_key, kind, include_repo_number):
+    service = AsyncDomainService(session)
+    domain = await _create_tracker(service, object_key, legacy=False)
+    external_id = f"github:illospace/illospace:{kind}:84"
+    first = await service.create_record(
+        ORG_ID, domain.id, object_key,
+        data={"title": "Original", "external_id": external_id.upper(), "status": "open"},
+    )
+    # Exercise normalization on stored data too, including historical whitespace.
+    first.data = {**first.data, "external_id": f"\t {external_id.upper()}\n"}
+    await session.flush()
+    observed = await service.create_record(
+        ORG_ID, domain.id, object_key,
+        data={
+            "title": "Updated", "external_id": f" {external_id} ", "status": "in_review",
+            **({"repo": "Illospace/illospace", "number": 84} if include_repo_number else {}),
+        },
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key=object_key)
+    assert [record.id for record in records] == [first.id]
+    assert observed.id == first.id
+    assert observed.version == 2
+    assert observed.title == "Updated"
+    assert observed.data["status"] == "in_review"
+
+
+@pytest.mark.parametrize("object_key,kind", [("pull_request", "pr"), ("ticket", "issue")])
+@pytest.mark.parametrize("external_id_on", [None, "stored", "incoming"])
+async def test_tracker_upserts_repo_and_number(session, object_key, kind, external_id_on):
+    service = AsyncDomainService(session)
+    domain = await _create_tracker(service, object_key, legacy=False)
+    identity = {"external_id": f"github:illospace/illospace:{kind}:84"}
+    first = await service.create_record(
+        ORG_ID, domain.id, object_key,
+        data={
+            "title": "Original", "repo": "https://github.com/Illospace/illospace.git",
+            "number": "084", "status": "open",
+            **(identity if external_id_on == "stored" else {}),
+        },
+    )
+    observed = await service.create_record(
+        ORG_ID, domain.id, object_key,
+        data={
+            "title": "Updated", "repo": "illospace/illospace", "number": 84.0,
+            "status": "in_review",
+            **(identity if external_id_on == "incoming" else {}),
+        },
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key=object_key)
+    assert [record.id for record in records] == [first.id]
+    assert observed.id == first.id
+    assert observed.data["status"] == "in_review"
+    if external_id_on:
+        assert observed.data["external_id"] == identity["external_id"]
+
+
+@pytest.mark.parametrize("object_key,path,legacy,url_first", [
+    ("pull_request", "pull", False, False),
+    ("pull_request", "pull", False, True),
+    ("ticket", "issues", False, False),
+    ("ticket", "issues", False, True),
+    ("pull_request", "pull", True, False),
+])
+async def test_tracker_upsert_uses_github_url_fallback(session, object_key, path, legacy, url_first):
+    service = AsyncDomainService(session)
+    domain = await _create_tracker(service, object_key, legacy=legacy)
+    repo_data = {"repo": "illospace/illospace", "pr_number" if legacy else "number": 84}
+    url_data = {"pr_url" if legacy else "url": f"https://github.com/Illospace/illospace/{path}/84?tab=files#top"}
+    first_data, second_data = (url_data, repo_data) if url_first else (repo_data, url_data)
+    first = await service.create_record(
+        ORG_ID, domain.id, object_key, data={"title": "Original", **first_data},
+    )
+    observed = await service.create_record(
+        ORG_ID, domain.id, object_key, data={"title": "Updated", **second_data},
+    )
+
+    records = await service.list_records(ORG_ID, domain.id, object_key=object_key)
+    assert [record.id for record in records] == [first.id]
+    assert observed.id == first.id
+    assert observed.title == "Updated"
+
+
+@pytest.mark.parametrize("object_key,kind", [("pull_request", "pr"), ("ticket", "issue")])
+async def test_tracker_merges_existing_duplicates_without_changing_status(session, object_key, kind):
+    service = AsyncDomainService(session)
+    domain = await _create_tracker(service, object_key, legacy=False)
+    external_id = f"github:illospace/illospace:{kind}:84"
+    canonical = await _insert_tracker_record(
+        session, service, domain, object_key=object_key, title="Canonical",
+        external_id=external_id, status="in_review", sync_source="original",
+    )
+    duplicate = await _insert_tracker_record(
+        session, service, domain, object_key=object_key, title="Duplicate",
+        external_id=external_id, repo="Illospace/illospace", number=84,
+        status="open", reviewer="Reda", sync_source="duplicate",
+    )
+    repo_only_duplicate = await _insert_tracker_record(
+        session, service, domain, object_key=object_key, title="Older observation",
+        repo="illospace/illospace", number=84, status="merged",
+    )
+    merged = await service.create_record(
+        ORG_ID, domain.id, object_key,
+        data={
+            "title": "Current observation", "external_id": external_id,
+            "repo": "illospace/illospace", "number": 84, "sync_source": "current",
+        },
+        reason="Tracker sync",
+    )
+
+    active = await service.list_records(ORG_ID, domain.id, object_key=object_key)
+    assert [record.id for record in active] == [canonical.id]
+    assert merged.id == canonical.id < duplicate.id < repo_only_duplicate.id
+    assert merged.data["status"] == "in_review"
+    assert merged.data["reviewer"] == "Reda"
+    assert merged.data["sync_source"] == "current"
+    for record in (duplicate, repo_only_duplicate):
+        assert (await session.get(DomainRecord, record.id)).archived_at is not None
+        events = await service.list_events(ORG_ID, domain.id, record_id=record.id)
+        assert events[0].reason == f"Tracker sync | Merged duplicate record into record {canonical.id}"
+
+
+@pytest.mark.parametrize("object_key", ["pull_request", "ticket"])
+async def test_tracker_different_external_ids_do_not_merge(session, object_key):
+    service = AsyncDomainService(session)
+    domain = await _create_tracker(service, object_key, legacy=False)
+    common_data = {"title": "Observation", "repo": "illospace/illospace", "number": 84}
+    records = []
+    for external_id in ("provider:first", "provider:second"):
+        records.append(await service.create_record(
+            ORG_ID, domain.id, object_key, data={**common_data, "external_id": external_id},
+        ))
+    assert records[0].id != records[1].id
+    observed = await service.create_record(
+        ORG_ID, domain.id, object_key,
+        data={**common_data, "external_id": "provider:second", "status": "in_review"},
+    )
+    assert observed.id == records[1].id
+    # An observation without an external ID cannot merge conflicting identities.
+    await service.create_record(ORG_ID, domain.id, object_key, data=common_data)
+    active = await service.list_records(ORG_ID, domain.id, object_key=object_key)
+    assert {record.id for record in active} == {record.id for record in records}
+
+
+async def test_tracker_upsert_ignores_archived_records_and_other_object_types(session):
+    service = AsyncDomainService(session)
+    domain = await _create_tracker(service, legacy=False)
+    await service.add_object_type(
+        domain,
+        {"key": "ticket", "name": "Ticket", "fields": [{"key": "external_id", "field_type": "text"}]},
+    )
+    external_id = "github:illospace/illospace:pr:84"
+    archived = await service.create_record(
+        ORG_ID, domain.id, "pull_request", data={"title": "Archived", "external_id": external_id},
+    )
+    await service.remove_record(ORG_ID, domain.id, archived.id, mode="archive")
+    ticket = await service.create_record(
+        ORG_ID, domain.id, "ticket", data={"external_id": external_id},
+    )
+    created = await service.create_record(
+        ORG_ID, domain.id, "pull_request", data={"title": "Active", "external_id": external_id},
+    )
+    assert len({archived.id, ticket.id, created.id}) == 3
+    observed = await service.create_record(
+        ORG_ID, domain.id, "pull_request", data={"title": "Updated", "external_id": external_id},
+    )
+    assert observed.id == created.id
+    assert ticket.archived_at is None
+
+
+@pytest.mark.parametrize("extra_field", [None, "repo", "number", "url"])
+async def test_plain_object_type_still_creates_identical_records(session, extra_field):
+    service = AsyncDomainService(session)
+    fields = [{"key": "title", "field_type": "text"}]
+    data = {"title": "Same data"}
+    if extra_field:
+        fields.append({"key": extra_field, "field_type": "text"})
+        data[extra_field] = {"repo": "illospace/illospace", "number": "84", "url": "https://github.com/illospace/illospace/pull/84"}[extra_field]
+    domain = await service.create_domain(
+        ORG_ID, name="Plain objects", objects=[{"key": "note", "name": "Note", "fields": fields}],
+    )
+    first = await service.create_record(ORG_ID, domain.id, "note", data=data)
+    second = await service.create_record(ORG_ID, domain.id, "note", data=data)
+    records = await service.list_records(ORG_ID, domain.id, object_key="note")
+    assert first.id != second.id
     assert {record.id for record in records} == {first.id, second.id}
 
 

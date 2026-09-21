@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
 import re
 from typing import Any, Iterable, Sequence
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import (
@@ -630,7 +631,7 @@ class AsyncDomainService:
         domain = await self.get_domain(org_id, domain_id)
         # Serialize create/upsert decisions for this object type. Without this
         # lock, two concurrent observations can both pass the application-level
-        # uniqueness check before either inserts its PR record.
+        # uniqueness check before either inserts its record.
         obj = await self.get_object_type(domain.id, object_key, for_update=True)
         fields = await self.list_fields(obj.id)
         prepared_data, warnings = await self.prepare_record_write(
@@ -640,9 +641,9 @@ class AsyncDomainService:
         )
         if partial_warnings is not None:
             partial_warnings.extend(warnings)
-        natural_key = _tracker_pr_natural_key(fields, prepared_data)
+        natural_key = _record_natural_key(fields, prepared_data)
         if natural_key is not None:
-            existing = await self._find_active_tracker_pr_records(
+            existing = await self._find_active_records_by_natural_key(
                 org_id,
                 domain.id,
                 obj.id,
@@ -650,7 +651,7 @@ class AsyncDomainService:
                 natural_key,
             )
             if existing:
-                return await self._merge_tracker_pr_records(
+                return await self._merge_duplicate_records(
                     org_id,
                     domain.id,
                     existing,
@@ -707,13 +708,13 @@ class AsyncDomainService:
         await self.session.refresh(record)
         return record
 
-    async def _find_active_tracker_pr_records(
+    async def _find_active_records_by_natural_key(
         self,
         org_id: str,
         domain_id: int,
         object_type_id: int,
         fields: Sequence[DomainFieldDefinition],
-        natural_key: tuple[str, str],
+        natural_key: _RecordNaturalKey,
     ) -> list[DomainRecord]:
         stmt = (
             select(DomainRecord)
@@ -725,14 +726,42 @@ class AsyncDomainService:
             )
             .order_by(DomainRecord.id)
         )
-        records = (await self.session.scalars(stmt)).all()
-        return [
-            record
-            for record in records
-            if _tracker_pr_natural_key(fields, record.data or {}) == natural_key
-        ]
+        if natural_key.external_id is not None:
+            external_id = DomainRecord.data["external_id"].as_string()
+            whitespace = " \t\n\r\v\f"
+            if self.session.get_bind().dialect.name == "sqlite":
+                external_id = func.trim(
+                    func.json_extract(DomainRecord.data, "$.external_id"), whitespace
+                )
+            else:
+                external_id = func.btrim(external_id, whitespace)
+            normalized_id = (
+                func.lower(external_id)
+                if natural_key.external_id.startswith("github:")
+                else external_id
+            )
+            predicate = normalized_id == natural_key.external_id
+            if natural_key.repo_number is not None:
+                # Older observations may have only repo/number or a URL.
+                predicate = or_(predicate, external_id.is_(None), external_id == "")
+            stmt = stmt.where(predicate)
 
-    async def _merge_tracker_pr_records(
+        records = (await self.session.scalars(stmt)).all()
+        matches = []
+        external_id = natural_key.external_id
+        for record in records:
+            stored_key = _record_natural_key(fields, record.data or {})
+            if stored_key is None or not natural_key.matches(stored_key):
+                continue
+            # A repo/number-only observation must not bridge conflicting IDs.
+            # Keep the earliest matching identity when the observation is ambiguous.
+            if external_id and stored_key.external_id not in (None, external_id):
+                continue
+            external_id = external_id or stored_key.external_id
+            matches.append(record)
+        return matches
+
+    async def _merge_duplicate_records(
         self,
         org_id: str,
         domain_id: int,
@@ -770,7 +799,7 @@ class AsyncDomainService:
             reason=reason,
         )
         for duplicate in duplicates:
-            merge_reason = f"Merged duplicate PR record into record {canonical.id}"
+            merge_reason = f"Merged duplicate record into record {canonical.id}"
             if reason:
                 merge_reason = f"{reason} | {merge_reason}"
             await self.remove_record(
@@ -1552,22 +1581,48 @@ def _is_empty(value: Any) -> bool:
     return value is None or value == ""
 
 
-def _tracker_pr_natural_key(
+@dataclass(frozen=True)
+class _RecordNaturalKey:
+    external_id: str | None
+    repo_number: tuple[str, str] | None
+
+    def matches(self, other: _RecordNaturalKey) -> bool:
+        if self.external_id is not None and other.external_id is not None:
+            return self.external_id == other.external_id
+        return self.repo_number is not None and self.repo_number == other.repo_number
+
+
+def _record_natural_key(
     fields: Iterable[DomainFieldDefinition],
     data: Mapping[str, Any],
-) -> tuple[str, str] | None:
+) -> _RecordNaturalKey | None:
     field_keys = {field.key for field in fields}
-    if not {"repo", "pr_number"}.issubset(field_keys):
+    # Apply to any schema declaring external_id or repo plus number/pr_number,
+    # including tracker tickets and PRs. Other object types keep create semantics.
+    external_id = None
+    if "external_id" in field_keys:
+        external_id = str(data.get("external_id") or "").strip() or None
+        if external_id and external_id.lower().startswith("github:"):
+            external_id = external_id.lower()
+
+    repo_number = None
+    number_fields = [key for key in ("number", "pr_number") if key in field_keys]
+    if "repo" in field_keys and number_fields:
+        repo = _normalize_repo_identity(data.get("repo"))
+        for key in number_fields:
+            number = _normalize_record_number(data.get(key))
+            if repo and number:
+                repo_number = repo, number
+                break
+        if repo_number is None:
+            for key in ("url", "pr_url"):
+                if key in field_keys:
+                    repo_number = _github_record_key_from_url(data.get(key))
+                    if repo_number is not None:
+                        break
+    if external_id is None and repo_number is None:
         return None
-
-    repo = _normalize_repo_identity(data.get("repo"))
-    pr_number = _normalize_pr_number(data.get("pr_number"))
-    if repo and pr_number:
-        return repo, pr_number
-
-    if "pr_url" in field_keys:
-        return _github_pr_key_from_url(data.get("pr_url"))
-    return None
+    return _RecordNaturalKey(external_id, repo_number)
 
 
 def _normalize_repo_identity(value: Any) -> str | None:
@@ -1582,35 +1637,35 @@ def _normalize_repo_identity(value: Any) -> str | None:
     return repo.casefold() or None
 
 
-def _normalize_pr_number(value: Any) -> str | None:
+def _normalize_record_number(value: Any) -> str | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
-    pr_number = str(value).strip().removeprefix("#").strip()
-    if not pr_number:
+    number = str(value).strip().removeprefix("#").strip()
+    if not number:
         return None
-    if pr_number.isdigit():
-        return str(int(pr_number))
-    return pr_number.casefold()
+    if number.isdigit():
+        return str(int(number))
+    return number.casefold()
 
 
-def _github_pr_key_from_url(value: Any) -> tuple[str, str] | None:
-    pr_url = str(value or "").strip()
+def _github_record_key_from_url(value: Any) -> tuple[str, str] | None:
+    url = str(value or "").strip()
     match = re.match(
-        r"^https?://github\.com/([^/]+)/([^/]+)/pull/([^/?#]+)",
-        pr_url,
+        r"^https?://github\.com/([^/]+)/([^/]+)/(?:pull|issues)/([^/?#]+)",
+        url,
         flags=re.IGNORECASE,
     )
     if match is None:
         return None
     repo = _normalize_repo_identity(f"{match.group(1)}/{match.group(2)}")
-    pr_number = _normalize_pr_number(match.group(3))
-    if not repo or not pr_number:
+    number = _normalize_record_number(match.group(3))
+    if not repo or not number:
         return None
-    return repo, pr_number
+    return repo, number
 
 
 def _is_open_vocabulary_field(field: DomainFieldDefinition) -> bool:
