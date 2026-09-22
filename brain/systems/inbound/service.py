@@ -320,7 +320,8 @@ async def submit_inbound_envelope(
 
         event.policy_id = str(policy.id)
         _validate_schema_config(policy.schema_config or {}, normalized)
-        projection = await _projection_for_policy(session, policy)
+        projections = await _projections_for_policy(session, policy)
+        projection = projections[0] if projections else None
         if projection is None:
             return await _complete_event_with_illo_triage(
                 session,
@@ -348,7 +349,18 @@ async def submit_inbound_envelope(
                 reasoning_summary="Source policy matched a projection, but the policy does not allow projection writes.",
             )
 
+        # Keep the legacy primary reference and single-projection result unchanged.
         event.domain_projection_id = str(projection.id)
+        if len(projections) > 1:
+            return await _apply_domain_projections(
+                session,
+                context=context,
+                event=event,
+                envelope=normalized,
+                policy=policy,
+                projections=projections,
+                clock=projection_clock,
+            )
         action_result = await _apply_domain_projection(
             session,
             context=context,
@@ -758,6 +770,112 @@ async def _projection_for_policy(
         .limit(1)
     )
     return (await session.scalars(stmt)).first()
+
+
+async def _projections_for_policy(
+    session: AsyncSession,
+    policy: InboundSourcePolicyRow,
+) -> list[InboundDomainProjectionRow]:
+    stmt = (
+        select(InboundDomainProjectionRow)
+        .where(
+            InboundDomainProjectionRow.policy_id == str(policy.id),
+            InboundDomainProjectionRow.enabled.is_(True),
+        )
+        .order_by(InboundDomainProjectionRow.created_at.asc(), InboundDomainProjectionRow.id.asc())
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def _apply_domain_projections(
+    session: AsyncSession,
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    envelope: Mapping[str, Any],
+    policy: InboundSourcePolicyRow,
+    projections: Sequence[InboundDomainProjectionRow],
+    clock: Callable[[], str],
+) -> dict[str, Any]:
+    outcomes = []
+    targets = []
+    errors = []
+    for projection in projections:
+        outcome = {
+            "projection_id": str(projection.id),
+            "domain_id": projection.domain_id,
+            "object_key": projection.object_key,
+        }
+        try:
+            # A failed flush must roll back only this projection's writes and keys.
+            async with session.begin_nested():
+                result = await _apply_domain_projection(
+                    session,
+                    context=context,
+                    event=event,
+                    envelope=envelope,
+                    projection=projection,
+                    clock=clock,
+                )
+        except Exception as exc:
+            validation_error = isinstance(exc, (DomainError, DomainNotFound, InboundValidationError))
+            status = projection.validation_failure_status if validation_error else STATUS_FAILED
+            if status not in VALID_PROJECTION_FAILURE_STATUSES:
+                status = STATUS_REVIEW_REQUIRED
+            error = f"Projection {outcome['projection_id']} (domain {outcome['domain_id']}): {exc}"
+            outcome.update(
+                status=status,
+                reason="validation_error" if validation_error else "processing_failed",
+                error=error,
+            )
+            errors.append(error)
+        else:
+            targets.append({**outcome, "record_id": result.get("record_id")})
+            outcome.update(status=STATUS_PROCESSED, result=result)
+        outcomes.append(outcome)
+
+    # A request for review takes priority so any configured triage still runs.
+    status = next(
+        (
+            candidate
+            for candidate in (STATUS_REVIEW_REQUIRED, STATUS_FAILED, STATUS_QUARANTINED)
+            if any(outcome["status"] == candidate for outcome in outcomes)
+        ),
+        STATUS_PROCESSED,
+    )
+    action_result = {"projections": outcomes}
+    error = "; ".join(errors) or None
+    reasoning_summary = error or "Configured Domain Projections handled this signal deterministically."
+    if errors:
+        action_result["reason"] = "projection_failed"
+    if status == STATUS_REVIEW_REQUIRED:
+        return await _complete_event_with_illo_triage(
+            session,
+            event,
+            context=context,
+            normalized=envelope,
+            policy=policy,
+            status=status,
+            action_type=ACTION_ILO_REQUIRED,
+            action_result=action_result,
+            confidence=None,
+            error=error,
+            reasoning_summary=reasoning_summary,
+        )
+    return await _complete_event(
+        session,
+        event,
+        policy=policy,
+        status=status,
+        action_type=ACTION_DOMAIN_PROJECTION_UPSERT,
+        action_result=action_result,
+        confidence=None if errors else 1.0,
+        error=error,
+        target={"projections": targets},
+        tool_use={"type": ACTION_DOMAIN_PROJECTION_UPSERT},
+        reasoning_summary=reasoning_summary,
+        reusable_pattern_candidate={"origin": envelope["origin"], "policy_id": str(policy.id)},
+    )
 
 
 async def _apply_domain_projection(
