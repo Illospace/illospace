@@ -29,6 +29,8 @@ class DeadlineSweepResult:
     closeout_requested: int = 0
     expired: int = 0
     expired_run_ids: tuple[int, ...] = ()
+    skipped: int = 0
+    skipped_run_ids: tuple[int, ...] = ()
 
 
 def deadline_closeout_grace_seconds() -> int:
@@ -125,6 +127,8 @@ async def _expire_after_closeout(
     run_id: int,
     now: datetime,
 ) -> bool:
+    """Expire under the event-stream lock already held by the sweep."""
+
     row = await session.get(AgentRunRow, int(run_id), populate_existing=True)
     if row is None or str(row.status or "") not in _OPEN_STATUS_VALUES:
         return False
@@ -133,7 +137,6 @@ async def _expire_after_closeout(
         return False
     store = AsyncAgentRunStore(session)
     anchor_run_id = int(row.parent_run_id or row.id)
-    await store.commit_event_boundary(int(run_id))
     row = await store.lock_terminal_boundary(
         int(run_id),
         anchor_run_id=anchor_run_id,
@@ -226,7 +229,16 @@ async def sweep_agent_run_deadlines(
     requested = 0
     expired = 0
     expired_run_ids: list[int] = []
+    skipped_run_ids: list[int] = []
+    store = AsyncAgentRunStore(session)
     for run_id in candidate_ids:
+        # Commit before taking the transaction-scoped advisory lock, then keep
+        # it through all deadline writes. One busy stream must not stall the
+        # whole sweep, including runs that still need a closeout request.
+        await store.commit_event_boundary(int(run_id))
+        if not await store.try_lock_event_stream(int(run_id)):
+            skipped_run_ids.append(int(run_id))
+            continue
         row = await session.get(AgentRunRow, int(run_id), populate_existing=True)
         if row is None:
             continue
@@ -241,10 +253,10 @@ async def sweep_agent_run_deadlines(
             )
             continue
         did_expire = await _expire_after_closeout(
-                session,
-                run_id=int(run_id),
-                now=resolved_now,
-            )
+            session,
+            run_id=int(run_id),
+            now=resolved_now,
+        )
         expired += int(did_expire)
         if did_expire:
             expired_run_ids.append(int(run_id))
@@ -252,6 +264,8 @@ async def sweep_agent_run_deadlines(
         closeout_requested=requested,
         expired=expired,
         expired_run_ids=tuple(expired_run_ids),
+        skipped=len(skipped_run_ids),
+        skipped_run_ids=tuple(skipped_run_ids),
     )
 
 
