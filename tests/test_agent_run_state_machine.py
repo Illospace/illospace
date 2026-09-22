@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, AsyncIterator
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import event, func, select
@@ -415,10 +415,12 @@ async def test_deadline_sweep_expires_after_grace_and_preserves_partial_state(
 
 
 @pytest.mark.parametrize("locked_needs_closeout", [False, True])
-async def test_deadline_sweep_skips_busy_stream_and_processes_remaining_candidates(
+@pytest.mark.parametrize("busy_lock", ["row", "advisory"])
+async def test_deadline_sweep_skips_busy_lock_and_processes_remaining_candidates(
     session_factory,
     monkeypatch,
     locked_needs_closeout,
+    busy_lock,
 ):
     from brain.systems.runs.deadlines import sweep_agent_run_deadlines
 
@@ -427,7 +429,7 @@ async def test_deadline_sweep_skips_busy_stream_and_processes_remaining_candidat
         now = datetime(2026, 9, 22, 20, 35, tzinfo=timezone.utc)
         run_ids = []
         for index, needs_closeout in enumerate(
-            [locked_needs_closeout, False, False, True]
+            [locked_needs_closeout, False, True, False]
         ):
             run = await store.create_run(
                 _run_request(
@@ -445,12 +447,36 @@ async def test_deadline_sweep_skips_busy_stream_and_processes_remaining_candidat
         await session.commit()
         locked_id, *remaining_ids = run_ids
         locked_events_before = await _event_types(session, locked_id)
+        candidate_transactions = []
+        row_transactions = {}
         acquired_transactions = {}
         attempted_ids = []
+        advisory_attempted_ids = []
+
+        async def acquire_agent_run_locks(
+            self, lock_ids, *, key_share, no_key_update=False, skip_locked=False
+        ):
+            transaction = self.session.sync_session.get_transaction()
+            assert transaction is not None
+            if skip_locked:
+                assert not key_share and no_key_update
+                assert all(not prior.is_active for prior in candidate_transactions)
+                candidate_transactions.append(transaction)
+                attempted_ids.extend(sorted(lock_ids))
+                if busy_lock == "row" and locked_id in lock_ids:
+                    return set()
+                for lock_id in lock_ids:
+                    row_transactions[lock_id] = transaction
+            else:
+                # Normal status/event writes can only re-enter locks already
+                # held by the maintenance boundary in this transaction.
+                for lock_id in lock_ids:
+                    assert row_transactions[lock_id] is transaction
+            return set(lock_ids)
 
         async def try_lock_event_stream(self, run_id):
-            await self.session.connection()
-            attempted_ids.append(run_id)
+            advisory_attempted_ids.append(run_id)
+            assert row_transactions[run_id] is self.session.sync_session.get_transaction()
             if run_id == locked_id:
                 return False
             # Model a transaction-scoped lock: a commit after this point must
@@ -464,15 +490,15 @@ async def test_deadline_sweep_skips_busy_stream_and_processes_remaining_candidat
             assert acquired_transactions[run_id] is not None
             assert acquired_transactions[run_id] is self.session.sync_session.get_transaction()
 
-        original_terminal_boundary = AsyncAgentRunStore.lock_terminal_boundary
-
-        async def lock_terminal_boundary(self, run_id, **kwargs):
-            await lock_event_stream(self, run_id)
-            return await original_terminal_boundary(self, run_id, **kwargs)
-
+        monkeypatch.setattr(AsyncAgentRunStore, "_dialect_name", lambda self: "postgresql")
+        monkeypatch.setattr(AsyncAgentRunStore, "_acquire_agent_run_locks", acquire_agent_run_locks)
         monkeypatch.setattr(AsyncAgentRunStore, "try_lock_event_stream", try_lock_event_stream)
         monkeypatch.setattr(AsyncAgentRunStore, "lock_event_stream", lock_event_stream)
-        monkeypatch.setattr(AsyncAgentRunStore, "lock_terminal_boundary", lock_terminal_boundary)
+        monkeypatch.setattr(
+            AsyncAgentRunStore,
+            "lock_terminal_boundary",
+            AsyncMock(side_effect=AssertionError("sweep repeated the terminal lock boundary")),
+        )
         with patch(
             "brain.systems.runs.chantier_continuation.queue_chantier_continuation_for_terminal_run",
             return_value=None,
@@ -480,16 +506,21 @@ async def test_deadline_sweep_skips_busy_stream_and_processes_remaining_candidat
             result = await sweep_agent_run_deadlines(session, now=now)
 
         assert attempted_ids == run_ids
+        assert advisory_attempted_ids == (remaining_ids if busy_lock == "row" else run_ids)
+        assert candidate_transactions[-1].is_active
+        await session.commit()
+        assert all(not transaction.is_active for transaction in candidate_transactions)
         assert result.skipped == 1
         assert result.skipped_run_ids == (locked_id,)
         assert result.expired == 2
-        assert result.expired_run_ids == tuple(remaining_ids[:2])
+        expired_ids = (remaining_ids[0], remaining_ids[2])
+        assert result.expired_run_ids == expired_ids
         assert result.closeout_requested == 1
         locked_row = await session.get(AgentRunRow, locked_id, populate_existing=True)
         assert locked_row.status == RunStatus.RUNNING.value
         assert (locked_row.closeout_expires_at is None) == locked_needs_closeout
         assert await _event_types(session, locked_id) == locked_events_before
-        for run_id in remaining_ids[:2]:
+        for run_id in expired_ids:
             row = await session.get(AgentRunRow, run_id, populate_existing=True)
             assert row.status == RunStatus.EXPIRED.value
             answers = (
@@ -503,7 +534,7 @@ async def test_deadline_sweep_skips_busy_stream_and_processes_remaining_candidat
             assert len(answers) == 1
             assert "timed out" in answers[0].text
             assert (await _event_types(session, run_id)).count("run.expired") == 1
-        assert "run.deadline_closeout_requested" in await _event_types(session, remaining_ids[2])
+        assert "run.deadline_closeout_requested" in await _event_types(session, remaining_ids[1])
 
 
 @pytest.mark.requires_db

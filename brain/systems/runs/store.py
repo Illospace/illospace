@@ -401,6 +401,33 @@ class AsyncAgentRunStore:
             raise LookupError(f"Run {run_id} not found")
         return await self.refresh_run(run_id)
 
+    async def try_lock_maintenance_boundary(self, run_id: int) -> bool:
+        """Try the terminal row pair, then the event stream, without waiting.
+
+        Take mutable anchor/current row locks in ascending id order with
+        SKIP LOCKED before trying the advisory lock. Return False if the run
+        is missing or any required lock is unavailable.
+
+        Both lock kinds are transaction-scoped. A failed attempt can retain
+        partial row locks; the sweep's commit before the next candidate
+        releases them. The caller must commit the final candidate, including
+        a skipped one. Do not commit between success and the candidate's writes.
+        """
+        run_id = int(run_id)
+        row = await self._refresh_run_or_none(run_id)
+        if row is None:
+            return False
+        lock_ids = {int(row.parent_run_id or row.id), run_id}
+        locked_ids = await self._acquire_agent_run_locks(
+            lock_ids,
+            key_share=False,
+            no_key_update=True,
+            skip_locked=True,
+        )
+        if self._dialect_name() == "postgresql" and locked_ids != lock_ids:
+            return False
+        return await self.try_lock_event_stream(run_id)
+
     async def _run_for_source_idempotency(
         self,
         *,
