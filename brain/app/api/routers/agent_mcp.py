@@ -59,7 +59,7 @@ from brain.systems.inbound.results import (
     read_inbound_submission_result,
 )
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
-from brain.systems.knowledge.search import search_knowledge
+from brain.systems.knowledge.search import get_knowledge_items, search_knowledge
 from brain.systems.runs.cortex.read_models import (
     public_failed_run_artifact,
     public_failure_for_run,
@@ -181,7 +181,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "capability": {
                     "type": "string",
                     "description": (
-                        "Read capability name, such as workspace.search, project_contexts.search, "
+                        "Use knowledge.search for source-backed preserved knowledge and memory, "
+                        "or knowledge.get for an exact source_ref such as memory_node:<id> from a preservation receipt. "
+                        "workspace.search covers Project Contexts, ideas, and threads. "
+                        "Other read capabilities include project_contexts.search, "
                         "thread.get, skills.get, skills.list, handoff.get, team.members.list, "
                         "domain.inspect, or capabilities."
                     ),
@@ -517,6 +520,10 @@ async def _tool_submit(
 
 
 READ_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "knowledge.get": {
+        "description": "Read preserved knowledge or memory by exact source_ref from a preservation receipt, such as memory_node:4881.",
+        "arguments": {"source_ref": "string"},
+    },
     "knowledge.search": {
         "description": "Search the source-backed Illo Knowledge index with hybrid recall and canonical provenance.",
         "arguments": {
@@ -527,7 +534,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         },
     },
     "workspace.search": {
-        "description": "Search the Illo workspace for related Project Contexts, ideas, threads, and shared work.",
+        "description": "Search Project Contexts, ideas, and threads. Does not search preserved knowledge or memory; use knowledge.search.",
         "arguments": {"query": "string", "limit": "integer"},
     },
     "project_contexts.search": {
@@ -934,6 +941,12 @@ async def _tool_read(
             principal,
             query=_required_capability_string(capability_arguments, "query", capability=capability),
             limit=int(capability_arguments.get("limit") or 10),
+        )
+    if capability == "knowledge.get":
+        return await get_knowledge_items(
+            db,
+            [_required_capability_string(capability_arguments, "source_ref", capability=capability)],
+            org_id=principal.org_id,
         )
     if capability == "knowledge.search":
         return await search_knowledge(
