@@ -437,7 +437,13 @@ TOOLS: dict[str, dict[str, Any]] = {
             "properties": {
                 "capability": {
                     "type": "string",
-                    "description": "Read capability name, such as workspace.search, project_contexts.search, thread.get, handoff.get, team.members.list, domain.inspect, or capabilities.",
+                    "description": (
+                        "Use knowledge.search for source-backed preserved knowledge and memory, "
+                        "or knowledge.get for an exact source_ref such as memory_node:<id> from a preservation receipt. "
+                        "workspace.search covers Project Contexts, ideas, and threads. "
+                        "Other read capabilities include project_contexts.search, thread.get, handoff.get, "
+                        "team.members.list, domain.inspect, or capabilities."
+                    ),
                 },
                 "arguments": {"type": "object", "description": "Capability-specific arguments.", "default": {}},
             },
