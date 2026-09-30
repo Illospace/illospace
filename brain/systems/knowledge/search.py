@@ -361,6 +361,37 @@ def _serialize_result(
     }
 
 
+async def get_knowledge_items(
+    session: AsyncSession,
+    source_refs: Sequence[str],
+    *,
+    org_id: str,
+) -> dict[str, Any]:
+    """Read exact source references with the same visibility as knowledge search."""
+
+    refs = list(dict.fromkeys(source_refs))
+    filters = knowledge_item_filters(org_id=org_id, sources=None, kinds=None)
+    items = list((await session.scalars(
+        select(KnowledgeItem)
+        .where(*filters, KnowledgeItem.source_ref.in_(refs))
+        .order_by(KnowledgeItem.id.asc())
+    )).all())
+    found_refs = {item.source_ref for item in items}
+    return {
+        "source_refs": refs,
+        "results": [
+            _serialize_result(
+                item,
+                debug={"rrf": 0.0, "channels": {}},
+                lexical_scores={},
+                semantic_scores={},
+            )
+            for item in items
+        ],
+        "missing": [ref for ref in refs if ref not in found_refs],
+    }
+
+
 async def search_knowledge(
     session: AsyncSession,
     query: str,
@@ -443,6 +474,7 @@ __all__ = [
     "RECENCY_WEIGHT",
     "RRF_K",
     "SEMANTIC_WEIGHT",
+    "get_knowledge_items",
     "knowledge_item_filters",
     "reciprocal_rank_fusion",
     "search_knowledge",

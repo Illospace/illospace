@@ -55,7 +55,11 @@ from brain.systems.knowledge.connectors.github import (
     _github_authority,
 )
 from brain.systems.knowledge.connectors.memory import MemoryConnector
-from brain.systems.knowledge.search import reciprocal_rank_fusion, search_knowledge
+from brain.systems.knowledge.search import (
+    get_knowledge_items,
+    reciprocal_rank_fusion,
+    search_knowledge,
+)
 from brain.systems.knowledge.service import (
     RAW_TEXT_MAX_CHARS,
     sync_connector,
@@ -1252,6 +1256,121 @@ async def test_embedding_failures_degrade_to_lexical_ingest_and_search(
     assert [result["source_ref"] for result in search_result["results"]] == [
         "degraded:1"
     ]
+
+
+async def test_knowledge_get_uses_exact_refs_and_search_visibility_and_shape(
+    session,
+    embedding_runtime,
+):
+    del embedding_runtime
+    at = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    rows = [
+        ("memory_node:4881", {"org_id": _ORG_ID}, None),
+        ("memory_node:4882", {"org_id": "other-org"}, None),
+        ("memory_node:4883", {"org_id": _ORG_ID}, at),
+        ("memory_node:4884", {}, None),
+        ("memory_node:4885", {KNOWLEDGE_SCOPE_EXTRA_KEY: KnowledgeScope.GLOBAL.value}, None),
+    ]
+    for ref, extra, archived_at in rows:
+        session.add(KnowledgeItem(
+            source="memory",
+            kind="decision",
+            source_ref=ref,
+            title="Week-two localization audit",
+            summary="Verified localization audit findings.",
+            resolution="Audit complete.",
+            entities=["localization"],
+            raw_text="localization audit",
+            search_text="localization audit",
+            content_digest=ref,
+            extra=extra,
+            source_created_at=at,
+            source_updated_at=at,
+            archived_at=archived_at,
+        ))
+    await session.flush()
+
+    refs = [ref for ref, _, _ in rows] + ["memory_node:488", "memory_node:9999"]
+    result = await get_knowledge_items(session, refs, org_id=_ORG_ID)
+    search = await search_knowledge(session, "localization audit", org_id=_ORG_ID)
+    search_rows = {row["source_ref"]: row for row in search["results"]}
+
+    assert result["source_refs"] == refs
+    assert [row["source_ref"] for row in result["results"]] == [
+        "memory_node:4881", "memory_node:4885",
+    ]
+    assert result["missing"] == [
+        "memory_node:4882", "memory_node:4883", "memory_node:4884",
+        "memory_node:488", "memory_node:9999",
+    ]
+    assert set(search_rows) == {"memory_node:4881", "memory_node:4885"}
+    for row in result["results"]:
+        search_row = search_rows[row["source_ref"]]
+        assert row.keys() == search_row.keys()
+        assert {key: value for key, value in row.items() if key != "scores"} == {
+            key: value for key, value in search_row.items() if key != "scores"
+        }
+        assert row["scores"] == {
+            "rrf": 0.0,
+            "channels": {"lexical": None, "semantic": None, "recency": None},
+        }
+
+
+async def test_agent_mcp_exposes_and_dispatches_knowledge_get():
+    from brain.app.api.routers import agent_mcp
+
+    description = agent_mcp.MCP_TOOLS["illo_read"]["inputSchema"]["properties"]["capability"]["description"]
+    assert description.index("knowledge.search") < description.index("workspace.search")
+    assert description.index("knowledge.get") < description.index("workspace.search")
+    assert "memory_node:<id>" in description
+    assert "workspace.search covers Project Contexts, ideas, and threads" in description
+
+    session = _McpAsyncSession()
+    expected = {
+        "source_refs": ["memory_node:4881"],
+        "results": [{"source_ref": "memory_node:4881"}],
+        "missing": [],
+    }
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_mcp_principal(),
+    ), patch.object(agent_mcp, "get_knowledge_items", new=AsyncMock(return_value=expected)) as lookup:
+        catalog_response = await _mcp_request(
+            session=session,
+            request_id=15,
+            arguments={"capability": "capabilities"},
+        )
+        get_response = await _mcp_request(
+            session=session,
+            request_id=16,
+            arguments={
+                "capability": "knowledge.get",
+                "arguments": {"source_ref": " memory_node:4881 "},
+            },
+        )
+
+    assert catalog_response.status_code == 200
+    catalog = json.loads(catalog_response.json()["result"]["content"][0]["text"])
+    capabilities = {entry["name"]: entry for entry in catalog["capabilities"]}
+    assert capabilities["knowledge.get"]["arguments"] == {"source_ref": "string"}
+    assert "knowledge.search" in capabilities["workspace.search"]["description"]
+    assert get_response.status_code == 200
+    assert json.loads(get_response.json()["result"]["content"][0]["text"]) == expected
+    lookup.assert_awaited_once_with(session, ["memory_node:4881"], org_id="org-1")
+
+
+@pytest.mark.parametrize("arguments", [{}, {"source_ref": None}, {"source_ref": ""}, {"source_ref": "  "}])
+async def test_agent_mcp_knowledge_get_requires_source_ref(arguments):
+    from brain.app.api.routers import agent_mcp
+
+    with patch.object(agent_mcp, "get_knowledge_items", new=AsyncMock()) as lookup:
+        with pytest.raises(ValueError, match="knowledge.get requires a non-empty source_ref"):
+            await agent_mcp._tool_read(
+                _McpAsyncSession(),
+                _mcp_principal(),
+                {"capability": "knowledge.get", "arguments": arguments},
+            )
+    lookup.assert_not_awaited()
 
 
 async def test_agent_mcp_exposes_and_dispatches_knowledge_search():

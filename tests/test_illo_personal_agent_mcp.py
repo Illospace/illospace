@@ -33,14 +33,26 @@ def test_tool_catalog_contains_behavior_guidance():
     assert tools["illo_submit"]["inputSchema"]["required"] == ["message"]
     assert "named capability" in tools["illo_read"]["description"]
     assert tools["illo_read"]["inputSchema"]["required"] == ["capability"]
-    assert "project_contexts.search" in tools["illo_read"]["inputSchema"]["properties"]["capability"]["description"]
+    read_description = tools["illo_read"]["inputSchema"]["properties"]["capability"]["description"]
+    assert "project_contexts.search" in read_description
+    assert read_description.index("knowledge.search") < read_description.index("workspace.search")
+    assert read_description.index("knowledge.get") < read_description.index("workspace.search")
+    assert "memory_node:<id>" in read_description
+    assert "workspace.search covers Project Contexts, ideas, and threads" in read_description
     assert "user's delegate" in tools["illo_act"]["description"]
     assert tools["illo_act"]["inputSchema"]["required"] == ["capability"]
     assert "result_id" in tools["illo_get_result"]["description"]
     assert tools["illo_get_result"]["inputSchema"]["required"] == []
 
 
-def test_client_routes_and_auth_header_are_stable(monkeypatch):
+@pytest.mark.parametrize(
+    ("read_capability", "read_arguments"),
+    [
+        ("workspace.search", {"query": "roadmap", "limit": 5}),
+        ("knowledge.get", {"source_ref": "memory_node:4881"}),
+    ],
+)
+def test_client_routes_and_auth_header_are_stable(monkeypatch, read_capability, read_arguments):
     module = _load_mcp_module()
     calls: list[dict] = []
 
@@ -72,8 +84,8 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
         metadata={"source": "test"},
     )
     read_result = client.read(
-        "workspace.search",
-        arguments={"query": "roadmap", "limit": 5},
+        read_capability,
+        arguments=read_arguments,
     )
     act_result = client.act(
         "thread.create",
@@ -114,10 +126,9 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
     assert submit_result["thread_url"] == "https://illo.test/cortex?idea=idea-1"
     assert submit_result["url"] == submit_result["thread_url"]
     assert submit_result["thread_route"] == "/cortex?idea=idea-1"
-    read_arguments = calls[1]["payload"]["params"]["arguments"]
-    assert read_arguments == {
-        "capability": "workspace.search",
-        "arguments": {"query": "roadmap", "limit": 5},
+    assert calls[1]["payload"]["params"]["arguments"] == {
+        "capability": read_capability,
+        "arguments": read_arguments,
     }
     assert read_result["tool"] == "illo_read"
     act_arguments = calls[2]["payload"]["params"]["arguments"]
