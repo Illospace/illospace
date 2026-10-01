@@ -56,6 +56,7 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.results import (
     InboundSubmissionResultState,
+    project_inbound_submission_result,
     read_inbound_submission_result,
 )
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
@@ -235,6 +236,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             (
                 "Read the current status and receipts for an async Illo submission. "
                 "For preservation requests, returns whether durable evidence is pending, satisfied, or missing. "
+                "The current answer is published at final_answer; evidence_contract and attribution are top-level. "
+                "latest_receipt is the newest receipt; receipts preserves distinct receipt history. "
+                "Poll with compact: true for status, terminal, and any final_answer and public failure (category and message) when terminal. "
+                "compact defaults to false and overrides include_payload when true. "
                 "Prefer webhook callbacks when configured; this tool is the polling fallback."
             ),
             {
@@ -245,6 +250,11 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "type": "boolean",
                     "description": "Whether to include stored raw and normalized event payloads.",
                     "default": True,
+                },
+                "compact": {
+                    "type": "boolean",
+                    "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, terminal, and any terminal answer and public failure (category and message); overrides include_payload.",
+                    "default": False,
                 },
                 "limit": {
                     "type": "integer",
@@ -1396,7 +1406,9 @@ async def _tool_get_result(
             "owned_by_another_connection": True,
         }
     assert result.payload is not None
-    return result.payload
+    return project_inbound_submission_result(
+        result.payload, compact=bool(arguments.get("compact", False))
+    )
 
 
 async def _add_thread_trigger_result_if_needed(
