@@ -94,6 +94,14 @@ async def _load_superseded_by(
     return dict(rows)
 
 
+async def memory_node_index_exclusion_reason(
+    session: AsyncSession, node: MemoryNode,
+) -> MemoryIndexExclusionReason | None:
+    """Check a stored node's eligibility without assuming its mirror exists yet."""
+    superseded_by = await _load_superseded_by(session, [node.id])
+    return memory_index_exclusion_reason(node, superseded_by=superseded_by.get(node.id))
+
+
 async def get_memory_index_exclusion_reasons(
     session: AsyncSession,
     node_ids: Mapping[str, int],
@@ -330,4 +338,5 @@ __all__ = [
     "MemoryIndexExclusionReason",
     "get_memory_index_exclusion_reasons",
     "memory_index_exclusion_reason",
+    "memory_node_index_exclusion_reason",
 ]

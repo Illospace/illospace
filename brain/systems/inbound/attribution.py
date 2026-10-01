@@ -15,6 +15,7 @@ from brain.contracts.github import (
     github_pull_request_ref,
 )
 from brain.platform.db.models.agent_run import AgentRunEventRow
+from brain.systems.knowledge.connectors.memory import MemoryIndexExclusionReason
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get_tool_registration
 
@@ -170,9 +171,15 @@ def _tool_is_read_only(tool_name: str, args: Mapping[str, Any]) -> bool:
     return _enum_value(getattr(registration, "side_effect_class", "")) == "read_only"
 
 
-def _add_ref(refs: list[dict[str, str]], seen: set[tuple[str, str]], *, kind: str, value: Any, source: str) -> None:
-    if len(refs) >= _MAX_TARGET_REFS:
-        return
+def _add_ref(
+    refs: list[dict[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    kind: str,
+    value: Any,
+    source: str,
+    annotations: Mapping[str, Any] | None = None,
+) -> None:
     text = str(value or "").strip()
     kind_text = str(kind or "").strip()
     if not text or not kind_text:
@@ -180,10 +187,20 @@ def _add_ref(refs: list[dict[str, str]], seen: set[tuple[str, str]], *, kind: st
     if len(text) > _MAX_REF_ID_CHARS or len(kind_text) > _MAX_REF_KIND_CHARS:
         return
     key = (kind_text, text)
-    if key in seen:
-        return
-    seen.add(key)
-    refs.append({"kind": kind_text, "id": text, "source": str(source or "")[:_MAX_REF_SOURCE_CHARS]})
+    if key not in seen:
+        if len(refs) >= _MAX_TARGET_REFS:
+            return
+        seen.add(key)
+        refs.append({"kind": kind_text, "id": text, "source": str(source or "")[:_MAX_REF_SOURCE_CHARS]})
+    if kind_text == "memory_node" and annotations and annotations.get("role") == "content":
+        # Identity stays (kind, id). Enrich duplicates too, including result_refs
+        # beside a preview that already contributed the same unannotated ref.
+        ref = next(ref for ref in refs if (ref["kind"], ref["id"]) == key)
+        ref["role"] = "content"
+        if annotations.get("visibility") in ("private", "team", "org"):
+            ref["visibility"] = annotations["visibility"]
+        if annotations.get("knowledge_get") in ("served", *MemoryIndexExclusionReason):
+            ref["knowledge_get"] = str(annotations["knowledge_get"])
 
 
 def _add_ref_values(
@@ -193,12 +210,13 @@ def _add_ref_values(
     kind: str,
     value: Any,
     source: str,
+    annotations: Mapping[str, Any] | None = None,
 ) -> None:
     if isinstance(value, list | tuple | set):
         for item in value:
-            _add_ref(refs, seen, kind=kind, value=item, source=source)
+            _add_ref(refs, seen, kind=kind, value=item, source=source, annotations=annotations)
         return
-    _add_ref(refs, seen, kind=kind, value=value, source=source)
+    _add_ref(refs, seen, kind=kind, value=value, source=source, annotations=annotations)
 
 
 def _add_explicit_ref(
@@ -222,6 +240,7 @@ def _add_explicit_ref(
         kind=kind,
         value=ref_id,
         source=str(value.get("source") or source),
+        annotations=value,
     )
 
 
@@ -249,7 +268,19 @@ def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, s
                 _add_explicit_ref_values(refs, seen, value=child, source=source)
                 continue
             if key_text in _DIRECT_REF_KINDS:
-                _add_ref_values(refs, seen, kind=_DIRECT_REF_KINDS[key_text], value=child, source=source)
+                annotations = None
+                if key_text == "content_node_id":
+                    index = value.get("knowledge_index")
+                    index = index if isinstance(index, Mapping) else {}
+                    annotations = {
+                        "role": "content",
+                        "visibility": value.get("visibility"),
+                        "knowledge_get": "served" if index.get("served") is True else index.get("reason"),
+                    }
+                _add_ref_values(
+                    refs, seen, kind=_DIRECT_REF_KINDS[key_text], value=child, source=source,
+                    annotations=annotations,
+                )
             if key_text in _OBJECT_REF_KINDS and isinstance(child, Mapping):
                 _add_ref(refs, seen, kind=_OBJECT_REF_KINDS[key_text], value=child.get("id"), source=source)
             if isinstance(child, Mapping | list):

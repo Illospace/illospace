@@ -15,8 +15,10 @@ import pytest
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.systems.inbound.attribution import (
     WORK_ITEM_REF_KINDS,
+    collect_result_refs,
     summarize_inbound_run_attribution,
 )
+from brain.systems.inbound.preservation import preservation_evidence_result
 from brain.systems.runs.status import RunStatus
 
 
@@ -196,3 +198,87 @@ def test_oversized_ref_ids_are_dropped_never_truncated():
         source="s" * 500,
     )
     assert refs == [{"kind": "idea", "id": "idea-ok", "source": "s" * 80}]
+
+
+def test_memory_annotations_preserve_ref_identities_and_evidence_status():
+    # Same refs as the existing explicit-memory preservation fixture.
+    legacy = {"mutated_target_refs": [
+        {"kind": "memory_source", "id": 91},
+        {"kind": "memory_node", "id": 93},
+    ]}
+    annotated = {
+        **legacy,
+        "content_node_id": 93,
+        "visibility": "private",
+        "knowledge_index": {"served": False, "reason": "private_visibility"},
+    }
+    old_refs = collect_result_refs(legacy, source="memory_ingest_source")
+    new_refs = collect_result_refs(annotated, source="memory_ingest_source")
+    expected = {("memory_source", "91"), ("memory_node", "93")}
+    assert {(ref["kind"], ref["id"]) for ref in old_refs} == expected
+    assert {(ref["kind"], ref["id"]) for ref in new_refs} == expected
+    assert len(new_refs) == len(expected)
+    assert new_refs[1] == {
+        **old_refs[1], "role": "content", "visibility": "private", "knowledge_get": "private_visibility",
+    }
+
+    for required, status, kinds, expected_status in [
+        (True, "completed", ["memory_node"], "satisfied"),
+        (True, "completed", ["project_context"], "missing"),
+        (True, "running", ["memory_node"], "running"),
+        (True, "failed", ["memory_node"], "failed"),
+        (False, "completed", ["memory_node"], "not_required"),
+    ]:
+        contract = {"requires_durable_evidence": required, "acceptable_target_kinds": kinds}
+        for refs in (old_refs, new_refs):
+            evidence = preservation_evidence_result(
+                contract, run_status=status,
+                attribution={"mutated_target_refs": refs, "tool_names": ["memory_ingest_source"]},
+            )
+            assert evidence["status"] == expected_status
+            if expected_status == "satisfied":
+                assert evidence["mutated_target_refs"] == [refs[1]]
+            elif expected_status == "missing":
+                assert evidence["mutated_target_refs"] == []
+
+
+@pytest.mark.parametrize("truncate", [False, True])
+async def test_memory_content_annotations_survive_event_ref_dedup(session, truncate):
+    from brain.systems.runs.tools import _event_payload
+
+    run_id = await _seed_run(session)
+    result = {
+        "content_node_id": 93,
+        "visibility": "team",
+        "knowledge_index": {"served": True, "reason": None},
+        "cue_node_ids": [94],
+        "tag_node_ids": [95],
+        "padding": "x" * (2000 if truncate else 0),
+    }
+    payload = _event_payload("memory_ingest_source", {}, result=json.dumps(result))
+    if not truncate:
+        # A legacy preview may contain the ID without the new annotations.
+        payload["result"] = json.dumps({"content_node_id": 93})
+    session.add(AgentRunEventRow(
+        run_id=run_id, sequence_no=1, event_type="run.tool_completed", payload=payload,
+    ))
+    await session.flush()
+    attribution = await summarize_inbound_run_attribution(
+        session, run_id=run_id, status=RunStatus.COMPLETED,
+    )
+    assert attribution["mutated_target_refs"] == [
+        {"kind": "memory_node", "id": "93", "source": "memory_ingest_source",
+         "role": "content", "visibility": "team", "knowledge_get": "served"},
+        {"kind": "memory_node", "id": "94", "source": "memory_ingest_source"},
+        {"kind": "memory_node", "id": "95", "source": "memory_ingest_source"},
+    ]
+
+
+def test_memory_ref_annotations_remain_bounded():
+    refs = collect_result_refs({"mutated_target_refs": [
+        {"kind": "memory_node", "id": "93", "role": "content", "visibility": "x" * 1000,
+         "knowledge_get": "y" * 1000, "extra": "z" * 1000},
+    ]}, source="memory_ingest_source")
+    assert refs == [{
+        "kind": "memory_node", "id": "93", "source": "memory_ingest_source", "role": "content",
+    }]
