@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 
 from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.failures import failure_category_for_error, public_run_failure
-from brain.systems.runs.project_execution_env import redact_sensitive_output
 from brain.systems.runs.tool_event_read_model import (
     parse_persisted_tool_side_effect,
 )
@@ -53,11 +52,12 @@ _SQL_COLUMN = (
 )
 TOOL_ERROR_TEXT_PATTERNS = [
     re.compile(r"\bBearer\s+[^\s,;\"']+", re.IGNORECASE),
-    re.compile(r"\b(?:api[_-]?key|token|password|secret|credential|authorization)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.IGNORECASE),
+    # Compound keys such as client_secret or access-token count too.
+    re.compile(r"\b[\w-]*(?:api[_-]?key|token|password|secret|credential|authorization)[\w-]*[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.IGNORECASE),
     # Database exceptions can append statements and parameter dumps. Suppress
     # the entire tail, including multiline SQL and values following it.
     re.compile(
-        rf"(?:\[SQL:|\[parameters:|\bSELECT\s+(?:[*'\"\d]|{_SQL_IDENTIFIER}\s*\("
+        rf"(?:\[SQL:|\[parameters:|\bSELECT\s+(?:(?:DISTINCT|ALL)\s+)?(?:\(*\s*[*'\"\d]|{_SQL_IDENTIFIER}\s*\("
         rf"|{_SQL_COLUMN}(?:\s*,\s*{_SQL_COLUMN})*\s+FROM\s+{_SQL_IDENTIFIER})"
         rf"|\bINSERT\s+INTO\s+{_SQL_IDENTIFIER}|\bUPDATE\s+{_SQL_IDENTIFIER}\s+SET\b"
         rf"|\bDELETE\s+FROM\s+{_SQL_IDENTIFIER}|\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE\b).*",
@@ -114,13 +114,18 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
         status = "failed"
     display = public_tool_display(tool_name, args, status=status)
 
+    hidden_keys = {"args", "result", "result_preview", "result_refs"}
+    is_failed = failure is not None or event_type == "run.tool_failed"
+    if is_failed:
+        # The diagnostic fields are republished below, after redaction.
+        hidden_keys |= {"error_class", "error_message"}
     public = {
         key: value
         for key, value in raw.items()
         # result_refs is the backend attribution channel (full-fidelity refs
         # extracted pre-truncation); it never goes to the browser — ref ids
         # are raw result content and receive no _redact_text pass.
-        if key not in {"args", "result", "result_preview", "result_refs", "error_class", "error_message"}
+        if key not in hidden_keys
         and not _is_sensitive_key(str(key).lower())
     }
     public["tool_name"] = tool_name
@@ -132,7 +137,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     public["display"] = display
     public["display_label"] = display["label"]
 
-    if failure is not None or event_type == "run.tool_failed":
+    if is_failed:
         public.update(public_tool_error_diagnostic(
             raw.get("error_class"), raw.get("error_message"),
         ))
@@ -173,8 +178,7 @@ def _tool_argument_values(args: dict[str, Any]) -> list[str]:
                 collect(item, sensitive)
         elif sensitive and value is not None:
             text = str(value)
-            # Short values would shred ordinary diagnostic prose.
-            if len(text) >= 4:
+            if text:
                 argument_values.extend((text, json.dumps(text)[1:-1]))
 
     collect(args, False)
@@ -199,7 +203,7 @@ def _redact_tool_arguments(error: str, args: dict[str, Any]) -> str:
     cursor = 0
     for start, end in merged:
         parts.append(error[cursor:start])
-        parts.append(redact_sensitive_output(error[start:end], [error[start:end]]))
+        parts.append("[secret redacted]")
         cursor = end
     parts.append(error[cursor:])
     return "".join(parts)

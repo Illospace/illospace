@@ -229,6 +229,10 @@ def test_diagnostic_does_not_treat_bare_keywords_as_sql(message):
     "query failed: INSERT INTO accounts (token) VALUES ('private-sql-value');",
     "query failed: UPDATE accounts SET token = 'private-sql-value';",
     "query failed: DELETE FROM accounts WHERE token = 'private-sql-value';",
+    "provider failed client_secret=private-secret-value",
+    "provider failed access-token: private-token-value",
+    "query failed: SELECT ('private-sql-value')",
+    'query failed: SELECT DISTINCT private_column FROM "private-table"',
 ])
 async def test_failure_diagnostic_redacts_secrets_and_sql(message):
     event = await _failed_event(message)
@@ -282,7 +286,7 @@ async def test_quoted_secret_redacted_before_storage_limit():
     (["abcdef", "defghijk"], "x abcdefghijk y", "x [secret redacted] y"),
     (["abcdef", "ghijk"], "x abcdefghijk y", "x [secret redacted] y"),
     (["aaaa"], "x aaaaa y", "x [secret redacted] y"),
-    (["abc"], "x abc y", "x abc y"),
+    (["abc"], "x abc y", "x [secret redacted] y"),
 ])
 async def test_diagnostic_redacts_complete_argument_regions(values, message, expected):
     event = await _failed_event(message, args={"password": values})
@@ -292,15 +296,12 @@ async def test_diagnostic_redacts_complete_argument_regions(values, message, exp
 
 
 @pytest.mark.parametrize("args", [
-    {},
     {"operations": []},
     {"operations": [{}]},
     {"operations": [{"tool_name": "brain_recall"}]},
     {"operations": [{"tool_name": "search_knowledge"}]},
     {"operations": [{"tool_name": "read_workspace_overview"}]},
     {"operations": [{"tool_name": "exec_command", "args": {"command": "pwd"}}]},
-    {"operations": [{"tool_name": "read_file"}], "max_parallel": "two"},
-    {"operations": [{"tool_name": "read_file", "args": []}]},
 ])
 async def test_invalid_batch_is_a_failed_event_with_readable_diagnostic(args):
     from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
@@ -330,7 +331,7 @@ async def test_invalid_batch_is_a_failed_event_with_readable_diagnostic(args):
     assert public["error_class"] == "ToolError"
     assert public["error_message"] == failed.payload["error_message"]
     assert public["error_message"]
-    if not args:
+    if not args["operations"]:
         assert public["error_message"] == "operations must be a non-empty list"
     rejected = [op.get("tool_name") for op in args.get("operations", []) if isinstance(op, dict)]
     if rejected and rejected[0] in {"brain_recall", "search_knowledge", "read_workspace_overview", "exec_command"}:

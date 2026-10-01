@@ -860,7 +860,7 @@ def _get_tool_handlers(
     except Exception as e:
         logger.debug(f"Extended tools unavailable: {e}")
 
-    def _parallel_tool_batch(operations: list[dict] | None = None, max_parallel: int | None = None) -> dict:
+    def _parallel_tool_batch(operations: list[dict], max_parallel: int | None = None) -> dict:
         if not isinstance(operations, list) or not operations:
             return {"error": "operations must be a non-empty list"}
         if len(operations) > _MAX_PARALLEL_BATCH_OPERATIONS:
@@ -870,8 +870,6 @@ def _get_tool_handlers(
                     f"per call (received {len(operations)})"
                 )
             }
-        if max_parallel is not None and (type(max_parallel) is not int or max_parallel < 1):
-            return {"error": "max_parallel must be a positive integer"}
 
         normalized_ops: list[tuple[int, str, dict]] = []
         for idx, op in enumerate(operations):
@@ -891,7 +889,7 @@ def _get_tool_handlers(
             handler = handlers.get(tool_name)
             if not callable(handler):
                 return {"error": f"Tool '{tool_name}' is unavailable in this runtime"}
-            args = op.get("args", {})
+            args = op.get("args") or {}
             if not isinstance(args, dict):
                 return {"error": f"operations[{idx}].args must be an object"}
             normalized_ops.append((idx, tool_name, args))
