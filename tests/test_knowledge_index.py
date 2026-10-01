@@ -54,7 +54,11 @@ from brain.systems.knowledge.connectors.github import (
     _draft_for_issue,
     _github_authority,
 )
-from brain.systems.knowledge.connectors.memory import MemoryConnector
+from brain.systems.knowledge.connectors.memory import (
+    MemoryConnector,
+    MemoryIndexExclusionReason,
+    memory_index_exclusion_reason,
+)
 from brain.systems.knowledge.search import (
     get_knowledge_items,
     reciprocal_rank_fusion,
@@ -1071,6 +1075,58 @@ async def test_memory_connector_propagates_archived_and_superseded_state(
     assert mirrored["memory_node:32"].extra["truth_status"] == "superseded"
 
 
+@pytest.mark.parametrize(
+    ("visibility", "node_kind", "archived", "truth_status", "has_superseding_edge"),
+    [
+        ("team", "content", False, "active", False),
+        ("org", "content", False, "active", False),
+        ("private", "content", False, "active", False),
+        ("team", "tag", False, "active", False),
+        ("org", "summary", False, "active", False),
+        ("team", "content", True, "active", False),
+        ("team", "content", False, "superseded", False),
+        ("team", "content", False, "active", True),
+        ("private", "tag", True, "superseded", True),
+    ],
+)
+async def test_memory_connector_and_classifier_share_live_eligibility(
+    session, visibility, node_kind, archived, truth_status, has_superseding_edge
+):
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    node = _memory_node(31, at, visibility=visibility, node_kind=node_kind)
+    node.archived_at = at if archived else None
+    node.truth_status = truth_status
+    session.add_all([node, _memory_node(32, at)])
+    await session.flush()
+    if has_superseding_edge:
+        session.add(MemoryEdgeNode(
+            source_node_id=31, target_node_id=32, edge_kind="superseded_by",
+            org_id=_ORG_ID, visibility="org", created_by="test",
+        ))
+        await session.flush()
+
+    connector = MemoryConnector()
+    immediate = await connector.draft_for_node(session, node_id=node.id)
+    sweep = await connector.enumerate_changed(session, {})
+    sweep_draft = next(
+        (draft for draft in sweep.drafts if draft.source_ref == "memory_node:31"),
+        None,
+    )
+    node_reason = memory_index_exclusion_reason(
+        node, superseded_by=32 if has_superseding_edge else None,
+    )
+    missing_mirror_reason = memory_index_exclusion_reason(
+        node, superseded_by=32 if has_superseding_edge else None, has_mirror=False,
+    )
+
+    for draft in (immediate, sweep_draft):
+        mirrored_live = draft is not None and draft.archived_at is None
+        assert mirrored_live == (node_reason is None)
+        assert mirrored_live == (
+            missing_mirror_reason == MemoryIndexExclusionReason.NOT_YET_INDEXED
+        )
+
+
 async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
     session,
     embedding_runtime,
@@ -1369,6 +1425,32 @@ async def test_knowledge_get_classifies_readable_memory_without_content(
     assert set(entry) == {"source_ref", "reason", "detail"}
     assert isinstance(entry["detail"], str) and entry["detail"].endswith(".")
     assert "Secret" not in json.dumps(entry)
+
+
+async def test_knowledge_get_classifies_active_node_with_superseding_edge(session):
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    node = _memory_node(5549, at, visibility="team")
+    node.truth_status = "active"
+    session.add_all([node, _memory_node(5550, at)])
+    await session.flush()
+    session.add(MemoryEdgeNode(
+        source_node_id=5549, target_node_id=5550, edge_kind="superseded_by",
+        org_id=_ORG_ID, visibility="org", created_by="test",
+    ))
+    await session.flush()
+
+    result = await get_knowledge_items(session, ["memory_node:5549"], org_id=_ORG_ID)
+
+    assert result == {
+        "source_refs": ["memory_node:5549"],
+        "results": [],
+        "missing": [],
+        "not_indexed": [{
+            "source_ref": "memory_node:5549",
+            "reason": "archived_or_superseded",
+            "detail": "The memory node or its shared index entry is archived or superseded.",
+        }],
+    }
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from enum import StrEnum
 import logging
 import re
 from typing import Any
@@ -15,11 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
-from brain.platform.db.models.reconstructive_memory import MemoryNode
-from brain.platform.db.repositories.reconstructive_memory import memory_node_visibility_predicate
 from brain.systems.knowledge.connectors.memory import (
-    _KNOWLEDGE_NODE_KINDS,
-    _SHARED_VISIBILITIES,
+    MemoryIndexExclusionReason,
+    get_memory_index_exclusion_reasons,
 )
 from brain.systems.knowledge.scope import (
     KNOWLEDGE_SCOPE_EXTRA_KEY,
@@ -368,18 +365,11 @@ def _serialize_result(
     }
 
 
-class _NotIndexedReason(StrEnum):
-    PRIVATE_VISIBILITY = "private_visibility"
-    NOT_A_CONTENT_NODE = "not_a_content_node"
-    ARCHIVED_OR_SUPERSEDED = "archived_or_superseded"
-    NOT_YET_INDEXED = "not_yet_indexed"
-
-
 _NOT_INDEXED_DETAILS = {
-    _NotIndexedReason.PRIVATE_VISIBILITY: "The memory node is private and is not available in the shared index.",
-    _NotIndexedReason.NOT_A_CONTENT_NODE: "The memory node has a kind that the shared index does not include.",
-    _NotIndexedReason.ARCHIVED_OR_SUPERSEDED: "The memory node or its shared index entry is archived or superseded.",
-    _NotIndexedReason.NOT_YET_INDEXED: "The memory node is eligible for the shared index but has no index entry yet.",
+    MemoryIndexExclusionReason.PRIVATE_VISIBILITY: "The memory node is private and is not available in the shared index.",
+    MemoryIndexExclusionReason.NOT_A_CONTENT_NODE: "The memory node has a kind that the shared index does not include.",
+    MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED: "The memory node or its shared index entry is archived or superseded.",
+    MemoryIndexExclusionReason.NOT_YET_INDEXED: "The memory node is eligible for the shared index but has no index entry yet.",
 }
 
 
@@ -402,56 +392,17 @@ async def _get_not_indexed_memory_refs(
     if not node_ids:
         return []
 
-    nodes = (await session.execute(
-        select(
-            MemoryNode.id,
-            MemoryNode.node_kind,
-            MemoryNode.visibility,
-            MemoryNode.archived_at,
-            MemoryNode.truth_status,
-        ).where(
-            MemoryNode.id.in_(node_ids.values()),
-            MemoryNode.org_id == org_id,
-            memory_node_visibility_predicate(org_id=org_id, user_id=user_id),
-            # A caller with no user never learns that a private node exists,
-            # including an owner-less one the recall predicate would match.
-            *(() if user_id else (MemoryNode.visibility.in_(_SHARED_VISIBILITIES),)),
-        )
-    )).all()
-    by_id = {node.id: node for node in nodes}
-    readable_refs = [ref for ref, node_id in node_ids.items() if node_id in by_id]
-    if not readable_refs:
-        return []
-    mirrors = dict((await session.execute(
-        select(KnowledgeItem.source_ref, KnowledgeItem.archived_at).where(
-            KnowledgeItem.source == "memory",
-            KnowledgeItem.source_ref.in_(readable_refs),
-        )
-    )).all())
-
-    not_indexed = []
-    for ref in readable_refs:
-        node = by_id[node_ids[ref]]
-        # Node-level causes first: a node that went private has an archived
-        # (withdrawn) mirror row, and the useful answer there is "private".
-        if node.archived_at is not None or node.truth_status == "superseded":
-            reason = _NotIndexedReason.ARCHIVED_OR_SUPERSEDED
-        elif node.node_kind not in _KNOWLEDGE_NODE_KINDS:
-            reason = _NotIndexedReason.NOT_A_CONTENT_NODE
-        elif node.visibility not in _SHARED_VISIBILITIES:
-            reason = _NotIndexedReason.PRIVATE_VISIBILITY
-        elif mirrors.get(ref) is not None:
-            reason = _NotIndexedReason.ARCHIVED_OR_SUPERSEDED
-        elif ref not in mirrors:
-            reason = _NotIndexedReason.NOT_YET_INDEXED
-        else:
-            continue
-        not_indexed.append({
+    reasons = await get_memory_index_exclusion_reasons(
+        session, node_ids, org_id=org_id, user_id=user_id
+    )
+    return [
+        {
             "source_ref": ref,
             "reason": reason.value,
             "detail": _NOT_INDEXED_DETAILS[reason],
-        })
-    return not_indexed
+        }
+        for ref, reason in reasons.items()
+    ]
 
 
 async def get_knowledge_items(
