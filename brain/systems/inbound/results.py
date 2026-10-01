@@ -51,6 +51,82 @@ def _run_id(value: Any) -> int | None:
         return None
 
 
+def project_inbound_submission_result(
+    payload: dict[str, Any], *, compact: bool = False
+) -> dict[str, Any]:
+    """Project the full internal result for external MCP callers without mutating it.
+
+    final_answer, evidence_contract and attribution have one top-level home.
+    Evidence remains readable at evidence_status and evidence_contract.status;
+    evidence_contract.mutated_target_refs remains available as well. Top-level
+    mutated_target_refs, attribution.tags, completed_at and reconciled_at expose
+    the current handling result without traversing receipt history.
+    latest_receipt holds the newest receipt; receipts holds only older receipts.
+    Existing status fields and nested completion timestamps remain readable.
+    """
+    event = payload.get("event") or {}
+    action_result = event.get("action_result") or {}
+    latest_receipt = payload.get("latest_receipt") or {}
+    outcome = latest_receipt.get("outcome") or {}
+    handling = (
+        _result_handling(action_result)
+        or action_result.get("triage")
+        or outcome.get("handling")
+        or outcome.get("triage")
+        or {}
+    )
+    result = handling.get("result") or {}
+    tool_use = latest_receipt.get("tool_use") or {}
+    attribution = handling.get("attribution") or tool_use.get("attribution") or {}
+    evidence_contract = payload.get("evidence_contract")
+    final_answer = handling.get("final_answer", result.get("final_answer"))
+    summary = {
+        "event_id": payload.get("event_id"),
+        "run_id": payload.get("run_id"),
+        "run_status": payload.get("run_status"),
+        "handling_status": payload.get("handling_status"),
+        "evidence_status": payload.get("evidence_status"),
+        "completed_at": handling.get("completed_at"),
+        "reconciled_at": handling.get("reconciled_at"),
+        "mutated_target_refs": (evidence_contract or {}).get(
+            "mutated_target_refs", attribution.get("mutated_target_refs", [])
+        ),
+        "attribution": attribution,
+    }
+    if compact:
+        summary["attribution"] = {"tags": attribution.get("tags", [])}
+        if str(payload.get("run_status") or "").upper() == "COMPLETED":
+            summary["final_answer"] = final_answer
+        return summary
+
+    def without_duplicates(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_duplicates(item)
+                for key, item in value.items()
+                if key not in {"final_answer", "evidence_contract", "attribution"}
+            }
+        if isinstance(value, list):
+            return [without_duplicates(item) for item in value]
+        return value
+
+    def receipt_view(receipt: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: without_duplicates(value) if key in {"outcome", "tool_use"} else value
+            for key, value in receipt.items()
+        }
+
+    return {
+        **payload,
+        **summary,
+        "final_answer": final_answer,
+        "evidence_contract": evidence_contract,
+        "event": {**event, "action_result": without_duplicates(action_result)},
+        "latest_receipt": receipt_view(latest_receipt) if latest_receipt else None,
+        "receipts": [receipt_view(receipt) for receipt in (payload.get("receipts") or [])[1:]],
+    }
+
+
 async def read_inbound_submission_result(
     session: AsyncSession,
     *,
@@ -166,5 +242,6 @@ async def read_inbound_submission_result(
 __all__ = [
     "InboundSubmissionResult",
     "InboundSubmissionResultState",
+    "project_inbound_submission_result",
     "read_inbound_submission_result",
 ]
