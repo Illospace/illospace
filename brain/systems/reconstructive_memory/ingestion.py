@@ -26,7 +26,7 @@ from brain.platform.db.repositories.reconstructive_memory import (
     NodeDraft,
     SourceSpanDraft,
 )
-from brain.systems.knowledge.connectors.memory import (
+from brain.systems.knowledge.memory_eligibility import (
     MemoryIndexExclusionReason,
     memory_node_index_exclusion_reason,
 )
@@ -104,9 +104,18 @@ class IngestedMemorySource:
             "visibility": self.visibility,
             "knowledge_source_ref": f"memory_node:{self.content_node_id}",
             "knowledge_index": {
-                "served": self.knowledge_index_reason is None,
+                "eligible": self.knowledge_index_reason is None,
                 "reason": self.knowledge_index_reason.value if self.knowledge_index_reason is not None else None,
             },
+            "mutated_target_refs": [{
+                "kind": "memory_node",
+                "id": self.content_node_id,
+                "role": "content",
+                "visibility": self.visibility,
+                "knowledge_get": (
+                    self.knowledge_index_reason.value if self.knowledge_index_reason is not None else "eligible"
+                ),
+            }],
         }
 
 

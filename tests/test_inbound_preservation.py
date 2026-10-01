@@ -517,7 +517,11 @@ async def test_private_memory_content_ref_is_identified_in_satisfied_receipt(ses
             "edge_ids": [97],
             "visibility": "private",
             "knowledge_source_ref": "memory_node:93",
-            "knowledge_index": {"served": False, "reason": "private_visibility"},
+            "knowledge_index": {"eligible": False, "reason": "private_visibility"},
+            "mutated_target_refs": [{
+                "kind": "memory_node", "id": 93, "role": "content",
+                "visibility": "private", "knowledge_get": "private_visibility",
+            }],
         })),
         root_run_id=run_id,
     ))

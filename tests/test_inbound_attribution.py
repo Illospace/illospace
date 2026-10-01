@@ -210,7 +210,11 @@ def test_memory_annotations_preserve_ref_identities_and_evidence_status():
         **legacy,
         "content_node_id": 93,
         "visibility": "private",
-        "knowledge_index": {"served": False, "reason": "private_visibility"},
+        "knowledge_index": {"eligible": False, "reason": "private_visibility"},
+        "mutated_target_refs": [legacy["mutated_target_refs"][0], {
+            "kind": "memory_node", "id": 93, "role": "content",
+            "visibility": "private", "knowledge_get": "private_visibility",
+        }],
     }
     old_refs = collect_result_refs(legacy, source="memory_ingest_source")
     new_refs = collect_result_refs(annotated, source="memory_ingest_source")
@@ -250,7 +254,11 @@ async def test_memory_content_annotations_survive_event_ref_dedup(session, trunc
     result = {
         "content_node_id": 93,
         "visibility": "team",
-        "knowledge_index": {"served": True, "reason": None},
+        "knowledge_index": {"eligible": True, "reason": None},
+        "mutated_target_refs": [{
+            "kind": "memory_node", "id": 93, "role": "content",
+            "visibility": "team", "knowledge_get": "eligible",
+        }],
         "cue_node_ids": [94],
         "tag_node_ids": [95],
         "padding": "x" * (2000 if truncate else 0),
@@ -268,7 +276,7 @@ async def test_memory_content_annotations_survive_event_ref_dedup(session, trunc
     )
     assert attribution["mutated_target_refs"] == [
         {"kind": "memory_node", "id": "93", "source": "memory_ingest_source",
-         "role": "content", "visibility": "team", "knowledge_get": "served"},
+         "role": "content", "visibility": "team", "knowledge_get": "eligible"},
         {"kind": "memory_node", "id": "94", "source": "memory_ingest_source"},
         {"kind": "memory_node", "id": "95", "source": "memory_ingest_source"},
     ]
@@ -282,3 +290,50 @@ def test_memory_ref_annotations_remain_bounded():
     assert refs == [{
         "kind": "memory_node", "id": "93", "source": "memory_ingest_source", "role": "content",
     }]
+
+
+def test_ref_cap_precedes_value_conversion():
+    refs = collect_result_refs({"cue_node_ids": [*range(1, 21), 10**5000]}, source="x")
+    assert refs == [
+        {"kind": "memory_node", "id": str(node_id), "source": "x"}
+        for node_id in range(1, 21)
+    ]
+
+
+def test_memory_result_without_explicit_annotation_matches_base_bytes():
+    result = {
+        "source_id": 91,
+        "span_ids": [92],
+        "content_node_id": 93,
+        "cue_node_ids": [94, 93],
+        "visibility": "team",
+        "knowledge_index": {"eligible": True, "reason": None},
+        "mutated_target_refs": [{"kind": "memory_node", "id": 93}],
+    }
+    # Frozen base output: sibling fields and duplicate refs do not annotate.
+    base_bytes = (
+        b'[{"kind": "memory_source", "id": "91", "source": "x"}, '
+        b'{"kind": "memory_span", "id": "92", "source": "x"}, '
+        b'{"kind": "memory_node", "id": "93", "source": "x"}, '
+        b'{"kind": "memory_node", "id": "94", "source": "x"}]'
+    )
+    assert json.dumps(collect_result_refs(result, source="x")).encode() == base_bytes
+
+
+def test_content_annotation_never_adds_or_reorders_refs_at_cap():
+    from brain.systems.inbound.attribution import _annotate_content_memory_refs
+
+    refs = collect_result_refs({"cue_node_ids": list(range(1, 21))}, source="x")
+    original_order = [id(ref) for ref in refs]
+    original_identities = [(ref["kind"], ref["id"], ref["source"]) for ref in refs]
+    _annotate_content_memory_refs(refs, {"mutated_target_refs": [
+        {"kind": "memory_node", "id": node_id, "role": "content",
+         "visibility": "team", "knowledge_get": "eligible"}
+        for node_id in (21, 20, 1)
+    ]})
+
+    assert [id(ref) for ref in refs] == original_order
+    assert [(ref["kind"], ref["id"], ref["source"]) for ref in refs] == original_identities
+    assert len(refs) == 20
+    assert refs[0]["knowledge_get"] == refs[-1]["knowledge_get"] == "eligible"
+    assert all("role" not in ref for ref in refs[1:-1])

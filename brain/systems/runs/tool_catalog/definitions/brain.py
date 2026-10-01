@@ -345,7 +345,8 @@ BRAIN_TOOLS = [
                     "default": "private",
                     "description": (
                         "A private node is readable only by its owner through memory recall and is not returned by "
-                        "knowledge.get or knowledge.search. Use team or org when the submitter expects to read the handle back."
+                        "knowledge.get or knowledge.search. Use team or org when the submitter expects to read the handle back. "
+                        "The content ref states its visibility and whether the shared index can serve it; knowledge.get checks that it does."
                     ),
                 },
                 "confidence": {"type": "number", "description": "Extraction confidence", "default": 0.5},
