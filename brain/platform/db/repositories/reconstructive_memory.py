@@ -58,6 +58,24 @@ _QUERY_STOP_WORDS = {
 _MIN_SEMANTIC_CANDIDATE_SCORE = 0.35
 
 
+def memory_node_visibility_predicate(
+    *, org_id: str | None, user_id: str | None
+) -> Any:
+    """Return memory read access without filtering node kind or lifecycle.
+
+    The three clauses are the ones every caller carried inline. With no user_id,
+    the private clause matches owner-less private nodes, as it always has.
+    """
+
+    if not user_id and not org_id:
+        return false()
+    return or_(
+        and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
+        and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
+        and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
+    )
+
+
 def memory_content_node_filters(
     *,
     org_id: str | None = None,
@@ -71,11 +89,7 @@ def memory_content_node_filters(
     elif not user_id and not org_id:
         return (false(),)
     else:
-        visibility_predicate = or_(
-            and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
-            and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
-            and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
-        )
+        visibility_predicate = memory_node_visibility_predicate(org_id=org_id, user_id=user_id)
 
     filters: list[Any] = [
         MemoryNode.archived_at.is_(None),
@@ -370,11 +384,7 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
         unique_ids = list(dict.fromkeys(int(node_id) for node_id in node_ids))
         if not unique_ids or (not org_id and not user_id):
             return []
-        visibility_predicate = or_(
-            and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
-            and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
-            and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
-        )
+        visibility_predicate = memory_node_visibility_predicate(org_id=org_id, user_id=user_id)
         stmt = (
             select(MemoryNode)
             .where(MemoryNode.id.in_(unique_ids))
@@ -791,11 +801,7 @@ def _visible_node_predicate(context: Any):
     org_id = _context_org_id(context)
     if not user_id and not org_id:
         return false_predicate()
-    return or_(
-        and_(MemoryNode.visibility == "org", MemoryNode.org_id == org_id),
-        and_(MemoryNode.visibility == "team", MemoryNode.org_id == org_id),
-        and_(MemoryNode.visibility == "private", MemoryNode.user_id == user_id),
-    )
+    return memory_node_visibility_predicate(org_id=org_id, user_id=user_id)
 
 
 def false_predicate():
