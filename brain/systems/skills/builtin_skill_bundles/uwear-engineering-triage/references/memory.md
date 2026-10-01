@@ -69,8 +69,6 @@ same key:
 5. When the same outcome is reaffirmed, reuse its first sentence verbatim.
    When it is superseded, name the old outcome and the replacement explicitly.
 
-A match is reused only when the caller may read the old memory and it is at least as widely visible as the request; otherwise a separate memory is created.
-
 Curate memory whenever live verification exposes a contradiction, standing
 guidance has gone stale, or recall reveals duplicate saves: use
 `memory_supersede` when a corrected memory replaces an older one,

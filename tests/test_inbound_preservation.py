@@ -699,13 +699,13 @@ async def test_get_result_lazily_reconciles_completed_submission_run(session):
     assert payload["handling_status"] == "completed"
     assert payload["run_status"] == "completed"
     assert payload["evidence_status"] == "not_required"
+    # illo_get_result publishes the answer once, at the top level (#918).
+    assert payload["final_answer"] == (
+        "Reviewed the context; no preservation was requested."
+    )
     handling_result = payload["event"]["action_result"]["handling"]
-    assert handling_result["final_answer"] == (
-        "Reviewed the context; no preservation was requested."
-    )
-    assert handling_result["result"]["final_answer"] == (
-        "Reviewed the context; no preservation was requested."
-    )
+    assert "final_answer" not in handling_result
+    assert "final_answer" not in handling_result["result"]
 
 
 async def test_get_result_failed_preservation_reports_exception_class_states(session):
