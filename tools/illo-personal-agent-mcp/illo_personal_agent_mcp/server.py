@@ -448,7 +448,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                         "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists. "
                         "workspace.search covers Project Contexts, ideas, and threads. "
                         "Other read capabilities include project_contexts.search, thread.get, handoff.get, "
-                        "team.members.list, domain.inspect, or capabilities."
+                        "team.members.list, domain.inspect, or capabilities. "
+                        "thread.get also accepts the inbound:<connection_id>:<event_id> id returned by run.get."
                     ),
                 },
                 "arguments": {"type": "object", "description": "Capability-specific arguments.", "default": {}},

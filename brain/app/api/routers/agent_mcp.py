@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
@@ -70,6 +72,7 @@ from brain.systems.runs.cortex.read_models import (
 from brain.systems.runs.tool_event_read_model import tool_call_summary
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
 
 SUBMIT_TOOL_NAME = "illo_submit"
@@ -561,7 +564,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         },
     },
     "thread.get": {
-        "description": "Read messages from an existing Illo idea/thread.",
+        "description": "Read messages from an existing Illo idea/thread, including the inbound:<connection_id>:<event_id> id returned by run.get.",
         "arguments": {"idea_id": "string", "limit": "integer"},
     },
     "run.get": {
@@ -1575,8 +1578,18 @@ async def _handle_mcp_request(
             await _broadcast_thread_result(tool_payload, org_id=principal.org_id)
         return _result(req_id, _tool_result(tool_payload))
     except Exception as exc:
-        await db.rollback()
+        try:
+            await db.rollback()
+        except SQLAlchemyError:
+            logger.exception("MCP database rollback failed")
+        if isinstance(exc, SQLAlchemyError):
+            logger.exception("MCP database operation failed")
+            return _result(req_id, _tool_error(_database_error_text(exc)))
         return _result(req_id, _tool_error(str(exc)))
+
+
+def _database_error_text(exc: SQLAlchemyError) -> str:
+    return f"Illo could not complete this request: internal database error ({type(exc).__name__})"
 
 
 async def _mcp_endpoint(
@@ -1596,6 +1609,19 @@ async def _mcp_endpoint(
         return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
     except external_agents.ExternalAgentPermissionError as exc:
         return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
+    except SQLAlchemyError as exc:
+        logger.exception("MCP authentication database operation failed")
+        try:
+            await db.rollback()
+        except SQLAlchemyError:
+            logger.exception("MCP database rollback failed")
+        messages = payload if isinstance(payload, list) else [payload]
+        errors = [
+            _error_response(_request_id(item), code=-32603, message=_database_error_text(exc))
+            for item in messages
+            if not isinstance(item, dict) or "id" in item
+        ]
+        return JSONResponse(errors if isinstance(payload, list) else errors[0] if errors else None)
 
     if isinstance(payload, list):
         responses: list[dict[str, Any]] = []
