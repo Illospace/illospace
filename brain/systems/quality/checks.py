@@ -106,7 +106,10 @@ async def check_duplicate(
             SELECT id, COALESCE(text, canonical_label) AS content, 1.0 AS similarity
             FROM memory_nodes
             WHERE archived_at IS NULL
-            AND normalized_key = :normalized
+            AND (
+                normalized_key = :normalized
+                OR lower(COALESCE(text, canonical_label)) = :normalized
+            )
             AND created_at > :cutoff
             {visibility_clause}
             ORDER BY confidence DESC

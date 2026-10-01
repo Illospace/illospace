@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.repositories.reconstructive_memory import (
     AssertionDraft,
@@ -25,6 +27,9 @@ from brain.platform.db.repositories.reconstructive_memory import (
     MemorySourceRepository,
     NodeDraft,
     SourceSpanDraft,
+    memory_node_visibility_predicate,
+    normalize_key,
+    stable_digest,
 )
 from brain.systems.knowledge.memory_eligibility import (
     MemoryIndexExclusionReason,
@@ -266,11 +271,14 @@ async def ingest_memory_source(
     )
     span_ids = tuple(span.id for span in spans)
 
-    content_node = await node_repo.upsert_node(
+    canonical_label = _canonical_label(cleaned)
+    content_node = await _upsert_content_node(
+        session,
         draft=NodeDraft(
             node_kind="content",
             content_kind=_normalize_content_kind(content_kind),
-            canonical_label=_canonical_label(cleaned),
+            canonical_label=canonical_label,
+            normalized_key=f"{normalize_key(canonical_label)}:{stable_digest(cleaned)[:16]}",
             text=cleaned,
             scope_key=scope_key,
             confidence=confidence,
@@ -407,6 +415,65 @@ async def ingest_memory_source(
         node_id=result.content_node_id,
     )
     return result
+
+
+async def _upsert_content_node(
+    session: AsyncSession,
+    *,
+    draft: NodeDraft,
+    org_id: str | None,
+    user_id: str | None,
+    visibility: str,
+) -> MemoryNode:
+    """Reuse exact readable content without reducing the requested audience.
+
+    Keep the repository's label-based upsert unchanged for shared vocabulary.
+    Legacy content keys deliberately do not match this digest-based identity.
+    """
+    visibility_order = {"private": 0, "team": 1, "org": 2}
+    base_key = draft.normalized_key
+    scoped_key = f"{base_key}:{user_id or 'unowned'}:{visibility}"
+    attempt = 0
+    node_repo = MemoryNodeRepository(session)
+    while True:
+        match = (await session.execute(select(
+            MemoryNode,
+            memory_node_visibility_predicate(org_id=org_id, user_id=user_id).label("readable"),
+        ).where(
+            MemoryNode.org_id == org_id,
+            MemoryNode.node_kind == "content",
+            MemoryNode.scope_key == draft.scope_key,
+            MemoryNode.normalized_key == draft.normalized_key,
+        ).with_for_update())).first()
+        if match is None:
+            return await node_repo.upsert_node(
+                draft=draft, org_id=org_id, user_id=user_id, visibility=visibility,
+            )
+
+        node, readable = match
+        if readable and node.text == draft.text:
+            wide_enough = visibility_order.get(node.visibility, -1) >= visibility_order[visibility]
+            can_widen = (
+                node.visibility == "private"
+                and bool(user_id)
+                and node.user_id == user_id
+                and visibility in {"team", "org"}
+            )
+            if wide_enough or can_widen:
+                node.confidence = max(float(node.confidence or 0), draft.confidence)
+                if not wide_enough:
+                    from brain.systems.knowledge.service import reindex_updated_memory_node
+
+                    node.visibility = visibility
+                    await session.flush()
+                    await reindex_updated_memory_node(session, node=node)
+                return node
+
+        # The key can also outlive a text/visibility edit. Check every candidate
+        # before reusing it, including disambiguated keys from earlier ingests.
+        key = scoped_key if attempt == 0 else f"{scoped_key}:{attempt}"
+        draft = replace(draft, normalized_key=key)
+        attempt += 1
 
 
 def _clean_content(content: str) -> str:
