@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -38,6 +39,18 @@ class MemoryIndexExclusionReason(StrEnum):
     NOT_A_CONTENT_NODE = "not_a_content_node"
     ARCHIVED_OR_SUPERSEDED = "archived_or_superseded"
     NOT_YET_INDEXED = "not_yet_indexed"
+
+
+class MemoryDraftSkipReason(StrEnum):
+    NOT_A_CANDIDATE = "not_a_candidate"
+    SHARED_WITHOUT_ORG = "shared_without_org"
+    NOT_SHARED_AND_NO_MIRROR = "not_shared_and_no_mirror"
+
+
+@dataclass(frozen=True)
+class MemoryDraftOutcome:
+    draft: KnowledgeDraft | None = None
+    skip_reason: MemoryDraftSkipReason | None = None
 
 
 def _is_superseded(node: Any, superseded_by: int | None) -> bool:
@@ -241,21 +254,34 @@ class MemoryConnector:
     ) -> KnowledgeDraft | None:
         """Build one immediate-index draft with the sweep's eligibility rules."""
 
+        return (await self.outcome_for_node(session, node_id=node_id)).draft
+
+    async def outcome_for_node(
+        self,
+        session: AsyncSession,
+        *,
+        node_id: int,
+    ) -> MemoryDraftOutcome:
+        """Return one draft or the connector's reason for skipping the node."""
+
         node = await session.scalar(
             _candidate_node_query().where(MemoryNode.id == node_id)
         )
         if node is None:
-            return None
-        drafts = await self._drafts_for_rows(session, [node])
-        return drafts[0] if drafts else None
+            return MemoryDraftOutcome(skip_reason=MemoryDraftSkipReason.NOT_A_CANDIDATE)
+        drafts, skipped = await self._drafts_for_rows(session, [node])
+        return MemoryDraftOutcome(
+            draft=drafts[0] if drafts else None,
+            skip_reason=skipped.get(node_id),
+        )
 
     async def _drafts_for_rows(
         self,
         session: AsyncSession,
         rows: list[MemoryNode],
-    ) -> list[KnowledgeDraft]:
+    ) -> tuple[list[KnowledgeDraft], dict[int, MemoryDraftSkipReason]]:
         if not rows:
-            return []
+            return [], {}
         source_refs = [f"memory_node:{node.id}" for node in rows]
         existing_org_ids = {
             source_ref: extra["org_id"]
@@ -268,28 +294,27 @@ class MemoryConnector:
                 )
             ).all()
         }
-        candidate_rows = [
-            node
-            for node in rows
-            if node.visibility in _SHARED_VISIBILITIES
-            or f"memory_node:{node.id}" in existing_org_ids
-        ]
+        skipped: dict[int, MemoryDraftSkipReason] = {}
         draft_rows: list[MemoryNode] = []
         active_rows: list[MemoryNode] = []
-        for node in candidate_rows:
+        for node in rows:
             if node.visibility in _SHARED_VISIBILITIES:
                 if node.org_id is None:
+                    skipped[node.id] = MemoryDraftSkipReason.SHARED_WITHOUT_ORG
                     logger.warning(
                         "Memory knowledge enumeration skipped node %s: org_id is missing",
                         node.id,
                     )
                     continue
                 active_rows.append(node)
+            elif f"memory_node:{node.id}" not in existing_org_ids:
+                skipped[node.id] = MemoryDraftSkipReason.NOT_SHARED_AND_NO_MIRROR
+                continue
             draft_rows.append(node)
         superseded_by = await _load_superseded_by(
             session, [node.id for node in active_rows]
         )
-        return [
+        drafts = [
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
             if node.visibility in _SHARED_VISIBILITIES
             else _withdrawn_draft(
@@ -298,6 +323,7 @@ class MemoryConnector:
             )
             for node in draft_rows
         ]
+        return drafts, skipped
 
     async def enumerate_changed(
         self,
@@ -317,7 +343,7 @@ class MemoryConnector:
         rows = list((await session.scalars(statement)).all())
         if not rows:
             return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
-        drafts = await self._drafts_for_rows(session, rows)
+        drafts, _ = await self._drafts_for_rows(session, rows)
         last = rows[-1]
         return KnowledgeEnumeration(
             drafts=drafts,
@@ -327,6 +353,8 @@ class MemoryConnector:
 
 __all__ = [
     "MemoryConnector",
+    "MemoryDraftOutcome",
+    "MemoryDraftSkipReason",
     "MemoryIndexExclusionReason",
     "get_memory_index_exclusion_reasons",
     "memory_index_exclusion_reason",
