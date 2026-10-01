@@ -86,10 +86,7 @@ async def _check_near_duplicate(content: str, threshold: float = 0.90) -> dict |
                 SELECT id, COALESCE(text, canonical_label) AS content, 1.0 AS similarity
                 FROM memory_nodes
                 WHERE archived_at IS NULL
-                  AND (
-                    normalized_key = :normalized
-                    OR lower(COALESCE(text, canonical_label)) = :normalized
-                  )
+                  AND normalized_key = :normalized
                 LIMIT 1
             """), {"normalized": normalized})).mappings().first()
             if row:

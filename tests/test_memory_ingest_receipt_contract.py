@@ -11,6 +11,10 @@ from tests.test_reconstructive_memory import _TEST_ORG_ID, _TEST_USER_ID, _sessi
 
 @pytest.fixture
 async def memory_ingest_tool(async_sqlite_session_factory, monkeypatch):
+    from brain.systems.reconstructive_memory import embeddings, ingestion
+
+    monkeypatch.setattr(embeddings, "embed_node_texts", AsyncMock())
+    monkeypatch.setattr(ingestion, "_index_committed_memory_node", AsyncMock())
     session = await _session(async_sqlite_session_factory)
 
     class _PatchedUnitOfWork:
@@ -42,11 +46,32 @@ async def test_memory_ingest_source_reports_private_visibility(memory_ingest_too
     assert payload["visibility"] == node.visibility == "private"
     assert payload["knowledge_source_ref"] == f"memory_node:{node.id}"
     assert payload["knowledge_index"] == {"eligible": False, "reason": "private_visibility"}
+    assert payload["content_node_reused"] is False
+    assert payload["content_text_stored"] is True
     assert payload["mutated_target_refs"] == [{
         "kind": "memory_node", "id": node.id, "role": "content",
         "visibility": "private", "knowledge_get": "private_visibility",
     }]
     assert not payload.get("visibility_fallback", False)
+
+
+async def test_memory_ingest_source_reports_reuse_with_older_stored_text(memory_ingest_tool):
+    session, mcp_server = memory_ingest_tool
+    first_text = "Weekly update. The launch is scheduled for Monday."
+    first = await mcp_server.async_tool_memory_ingest_source(
+        content=first_text, user_id=_TEST_USER_ID, org_id=_TEST_ORG_ID,
+    )
+    payload = await mcp_server.async_tool_memory_ingest_source(
+        content="Weekly update. The launch is scheduled for Friday.",
+        user_id=_TEST_USER_ID, org_id=_TEST_ORG_ID,
+    )
+
+    assert payload["content_node_id"] == first["content_node_id"]
+    assert payload["content_node_reused"] is True
+    assert payload["content_text_stored"] is False
+    assert payload["source_id"] != first["source_id"]
+    node = await session.get(MemoryNode, payload["content_node_id"])
+    assert node.text == first_text
 
 
 async def test_memory_ingest_source_reports_team_visibility(memory_ingest_tool):

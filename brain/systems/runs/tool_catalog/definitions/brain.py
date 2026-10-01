@@ -330,7 +330,12 @@ BRAIN_TOOLS = [
     },
     {
         "name": "memory_ingest_source",
-        "description": "Ingest source-backed reconstructive memory and create cue/tag/content graph nodes.",
+        "description": (
+            "Ingest source-backed reconstructive memory and create cue/tag/content graph nodes. "
+            "When content_text_stored is false, the memory with this first sentence already existed, "
+            "the new text was recorded as a new assertion and source on it, and knowledge.get returns "
+            "the OLDER text; start the content with a different first sentence to store it as its own memory."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {

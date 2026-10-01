@@ -56,19 +56,20 @@ conclusion is at most `0.7`; mixed human/inferred content uses the lower value.
 
 ## Stable Phrasing and Dedup
 
-Ingestion derives content-node keys from the normalized first sentence and a
-digest of the full cleaned text. Reuse requires identical text, read access,
-and sufficient visibility. Different text creates a new node; it does not
-automatically supersede an earlier memory. Keep phrasing stable and atomic:
+Ingestion derives `normalized_key` from the first sentence's normalized text.
+Make that sentence stable and atomic so a repeated outcome resolves to the
+same key:
 
 1. Start exactly `What future runs need: <subject> <durable outcome>.`
 2. Use the same canonical subject and identifiers every time (repo-qualified
    issue/PR, chantier slug, person, incident id).
 3. State one outcome. Put evidence or qualifications in later sentences.
-4. Omit timestamps, run ids, “today”, message ids, and delivery receipts unless
-   they are durable facts; changes anywhere in the text create a new key.
-5. When the same outcome is reaffirmed, reuse its full text verbatim.
+4. Never lead with a timestamp, run id, “today”, message id, or delivery
+   receipt; those manufacture a new key for the same outcome.
+5. When the same outcome is reaffirmed, reuse its first sentence verbatim.
    When it is superseded, name the old outcome and the replacement explicitly.
+
+A match is reused only when the caller may read the old memory and it is at least as widely visible as the request; otherwise a separate memory is created.
 
 Curate memory whenever live verification exposes a contradiction, standing
 guidance has gone stale, or recall reveals duplicate saves: use

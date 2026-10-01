@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.reconstructive_memory import MemoryNode
+from brain.platform.db.repositories.memory_visibility import VALID_MEMORY_VISIBILITIES
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.repositories.reconstructive_memory import (
     AssertionDraft,
@@ -29,7 +30,6 @@ from brain.platform.db.repositories.reconstructive_memory import (
     SourceSpanDraft,
     memory_node_visibility_predicate,
     normalize_key,
-    stable_digest,
 )
 from brain.systems.knowledge.memory_eligibility import (
     MemoryIndexExclusionReason,
@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 _INFO_QUEUE_KEY = "illo_memory_knowledge_index_queue"
 _INFO_ARMED_KEY = "illo_memory_knowledge_index_listeners_armed"
 _POST_COMMIT_TASKS: set[asyncio.Task] = set()
+_VISIBILITY_ORDER = {visibility: rank for rank, visibility in enumerate(VALID_MEMORY_VISIBILITIES)}
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 _STOP_WORDS = {
@@ -95,6 +96,8 @@ class IngestedMemorySource:
     edge_ids: tuple[int, ...]
     visibility: str
     knowledge_index_reason: MemoryIndexExclusionReason | None
+    content_node_reused: bool
+    content_text_stored: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +110,8 @@ class IngestedMemorySource:
             "tag_node_ids": list(self.tag_node_ids),
             "edge_ids": list(self.edge_ids),
             "visibility": self.visibility,
+            "content_node_reused": self.content_node_reused,
+            "content_text_stored": self.content_text_stored,
             "knowledge_source_ref": f"memory_node:{self.content_node_id}",
             "knowledge_index": {
                 "eligible": self.knowledge_index_reason is None,
@@ -272,13 +277,13 @@ async def ingest_memory_source(
     span_ids = tuple(span.id for span in spans)
 
     canonical_label = _canonical_label(cleaned)
-    content_node = await _upsert_content_node(
+    content_node, content_node_reused = await _upsert_content_node(
         session,
         draft=NodeDraft(
             node_kind="content",
             content_kind=_normalize_content_kind(content_kind),
             canonical_label=canonical_label,
-            normalized_key=f"{normalize_key(canonical_label)}:{stable_digest(cleaned)[:16]}",
+            normalized_key=normalize_key(canonical_label),
             text=cleaned,
             scope_key=scope_key,
             confidence=confidence,
@@ -407,6 +412,8 @@ async def ingest_memory_source(
         tag_node_ids=tuple(node.id for node in tag_nodes),
         edge_ids=tuple(edge.id for edge in edges),
         visibility=content_node.visibility,
+        content_node_reused=content_node_reused,
+        content_text_stored=content_node.text == cleaned,
         # Report node eligibility at write time; the mirror is populated after commit.
         knowledge_index_reason=await memory_node_index_exclusion_reason(session, content_node),
     )
@@ -424,13 +431,11 @@ async def _upsert_content_node(
     org_id: str | None,
     user_id: str | None,
     visibility: str,
-) -> MemoryNode:
-    """Reuse exact readable content without reducing the requested audience.
+) -> tuple[MemoryNode, bool]:
+    """Return the node and whether a readable first-sentence match was reused.
 
     Keep the repository's label-based upsert unchanged for shared vocabulary.
-    Legacy content keys deliberately do not match this digest-based identity.
     """
-    visibility_order = {"private": 0, "team": 1, "org": 2}
     base_key = draft.normalized_key
     scoped_key = f"{base_key}:{user_id or 'unowned'}:{visibility}"
     attempt = 0
@@ -446,28 +451,31 @@ async def _upsert_content_node(
             MemoryNode.normalized_key == draft.normalized_key,
         ).with_for_update())).first()
         if match is None:
-            return await node_repo.upsert_node(
+            node = await node_repo.upsert_node(
                 draft=draft, org_id=org_id, user_id=user_id, visibility=visibility,
             )
+            return node, False
 
         node, readable = match
-        if readable and node.text == draft.text:
-            wide_enough = visibility_order.get(node.visibility, -1) >= visibility_order[visibility]
+        if readable:
+            wide_enough = _VISIBILITY_ORDER.get(node.visibility, -1) >= _VISIBILITY_ORDER[visibility]
             can_widen = (
                 node.visibility == "private"
                 and bool(user_id)
                 and node.user_id == user_id
                 and visibility in {"team", "org"}
+                and node.text == draft.text
             )
             if wide_enough or can_widen:
                 node.confidence = max(float(node.confidence or 0), draft.confidence)
                 if not wide_enough:
+                    # service imports this package through reconstructive_memory.embeddings.
                     from brain.systems.knowledge.service import reindex_updated_memory_node
 
                     node.visibility = visibility
                     await session.flush()
                     await reindex_updated_memory_node(session, node=node)
-                return node
+                return node, True
 
         # The key can also outlive a text/visibility edit. Check every candidate
         # before reusing it, including disambiguated keys from earlier ingests.
