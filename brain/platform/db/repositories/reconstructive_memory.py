@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from sqlalchemy import and_, exists, false, func, or_, select, true, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.reconstructive_memory import (
@@ -27,8 +28,11 @@ from brain.platform.db.models.reconstructive_memory import (
     ReconstructionStep,
 )
 from brain.platform.db.repositories.base import BaseRepository
+from brain.platform.db.repositories.memory_visibility import MEMORY_VISIBILITY_RANK
 
 _CONTENT_NODE_KINDS = ("content", "summary", "procedure", "policy")
+_MAX_CONTENT_NODE_KEY_CONFLICTS = 5
+_MAX_CONTENT_NODE_DISAMBIGUATIONS = 50
 _QUERY_TERM_RE = re.compile(r"[a-zA-Z0-9_/-]{3,}")
 _QUERY_STOP_WORDS = {
     "about",
@@ -265,6 +269,31 @@ class MemoryNodeEmbeddingRepository(BaseRepository[MemoryNodeEmbedding]):
 class MemoryNodeRepository(BaseRepository[MemoryNode]):
     model = MemoryNode
 
+    @staticmethod
+    def _build_node(
+        *,
+        draft: NodeDraft,
+        normalized_key: str,
+        org_id: str | None,
+        user_id: str | None,
+        visibility: str,
+    ) -> MemoryNode:
+        return MemoryNode(
+            node_kind=draft.node_kind,
+            content_kind=draft.content_kind,
+            canonical_label=draft.canonical_label,
+            text=draft.text,
+            normalized_key=normalized_key,
+            scope_key=draft.scope_key,
+            org_id=org_id,
+            user_id=user_id,
+            visibility=visibility,
+            sensitivity=draft.sensitivity,
+            confidence=draft.confidence,
+            truth_status=draft.truth_status,
+            freshness_status=draft.freshness_status,
+        )
+
     async def upsert_node(
         self,
         *,
@@ -287,24 +316,103 @@ class MemoryNodeRepository(BaseRepository[MemoryNode]):
             existing.confidence = max(float(existing.confidence or 0), draft.confidence)
             return existing
 
-        node = MemoryNode(
-            node_kind=draft.node_kind,
-            content_kind=draft.content_kind,
-            canonical_label=draft.canonical_label,
-            text=draft.text,
+        node = self._build_node(
+            draft=draft,
             normalized_key=normalized,
-            scope_key=draft.scope_key,
             org_id=org_id,
             user_id=user_id,
             visibility=visibility,
-            sensitivity=draft.sensitivity,
-            confidence=draft.confidence,
-            truth_status=draft.truth_status,
-            freshness_status=draft.freshness_status,
         )
         self._session.add(node)
         await self._session.flush()
         return node
+
+    async def get_or_create_content_node(
+        self,
+        *,
+        draft: NodeDraft,
+        org_id: str | None = None,
+        user_id: str | None = None,
+        visibility: str = "private",
+    ) -> tuple[MemoryNode, bool]:
+        """Return a readable first-sentence match or create it, with a reuse flag.
+
+        Every candidate, including a concurrent insert, must pass the same read
+        and audience checks. The caller owns any permitted widening and reindex.
+        """
+        if draft.node_kind != "content":
+            raise ValueError("get_or_create_content_node requires a content draft")
+        base_key = draft.normalized_key or normalize_key(draft.canonical_label)
+        scoped_key = f"{base_key}:{user_id or 'unowned'}:{visibility}"
+        for candidate in range(_MAX_CONTENT_NODE_DISAMBIGUATIONS + 1):
+            key = base_key if candidate == 0 else (
+                scoped_key if candidate == 1 else f"{scoped_key}:{candidate - 1}"
+            )
+            for conflict in range(_MAX_CONTENT_NODE_KEY_CONFLICTS):
+                match = (await self._session.execute(select(
+                    MemoryNode,
+                    memory_node_visibility_predicate(
+                        org_id=org_id, user_id=user_id,
+                    ).label("readable"),
+                ).where(
+                    MemoryNode.org_id == org_id,
+                    MemoryNode.node_kind == "content",
+                    MemoryNode.scope_key == draft.scope_key,
+                    MemoryNode.normalized_key == key,
+                ).with_for_update().execution_options(populate_existing=True))).first()
+                if match is not None:
+                    node, readable = match
+                    wide_enough = (
+                        MEMORY_VISIBILITY_RANK.get(node.visibility, -1)
+                        >= MEMORY_VISIBILITY_RANK[visibility]
+                    )
+                    can_widen = (
+                        node.visibility == "private"
+                        and bool(user_id)
+                        and node.user_id == user_id
+                        and visibility in {"team", "org"}
+                        and node.text == draft.text
+                    )
+                    if readable and (wide_enough or can_widen):
+                        node.confidence = max(float(node.confidence or 0), draft.confidence)
+                        return node, True
+                    # This key is occupied, but cannot be reused by this ingest.
+                    break
+
+                try:
+                    # Only the attempted insert rolls back, not earlier sources/spans.
+                    async with self._session.begin_nested():
+                        node = self._build_node(
+                            draft=draft, normalized_key=key, org_id=org_id,
+                            user_id=user_id, visibility=visibility,
+                        )
+                        self._session.add(node)
+                        await self._session.flush()
+                    return node, False
+                except IntegrityError as exc:
+                    # PostgreSQL names the constraint; SQLite reports its columns.
+                    detail = str(exc.orig)
+                    if not (
+                        '"uq_memory_nodes_scope_key"' in detail
+                        or detail == (
+                            "UNIQUE constraint failed: memory_nodes.org_id, "
+                            "memory_nodes.node_kind, memory_nodes.scope_key, "
+                            "memory_nodes.normalized_key"
+                        )
+                    ):
+                        raise
+                    if conflict + 1 == _MAX_CONTENT_NODE_KEY_CONFLICTS:
+                        raise RuntimeError(
+                            "Content node creation exceeded "
+                            f"{_MAX_CONTENT_NODE_KEY_CONFLICTS} unique-key conflicts "
+                            "for the same candidate key"
+                        ) from exc
+                    # Re-read this key through the guard after the savepoint rollback.
+
+        raise RuntimeError(
+            "Content node creation exhausted "
+            f"{_MAX_CONTENT_NODE_DISAMBIGUATIONS} disambiguated keys"
+        )
 
     async def search_content_nodes(
         self,
