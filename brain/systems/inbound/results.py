@@ -135,9 +135,7 @@ async def read_inbound_submission_result(
     event_id: str,
     include_payload: bool = True,
     limit: int = 25,
-    expected_connection_id: str | None = None,
 ) -> InboundSubmissionResult:
-    """Read an owned event; also check the connection encoded in a thread id, if supplied."""
     try:
         event = await inbound_admin.require_event_for_org(
             session,
@@ -148,9 +146,7 @@ async def read_inbound_submission_result(
         return InboundSubmissionResult(
             state=InboundSubmissionResultState.NOT_FOUND,
         )
-    if str(event.connection_id) != str(connection_id) or (
-        expected_connection_id is not None and expected_connection_id != str(connection_id)
-    ):
+    if str(event.connection_id) != str(connection_id):
         return InboundSubmissionResult(
             state=InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION,
         )

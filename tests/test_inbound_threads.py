@@ -65,11 +65,13 @@ async def test_inbound_thread_contains_submission_and_final_answer(session, prin
     ]
 
 
-async def test_inbound_thread_other_connection_is_not_visible(session, principal, inbound):
+async def test_inbound_thread_other_connection_is_not_visible(principal):
+    session = AsyncMock()
     caller = replace(principal, connection_id="dddddddd-dddd-dddd-dddd-ddddddddddd1")
     assert await service.get_thread(session, caller, idea_id=THREAD) == {
         "event_id": EVENT, "state": "not_visible_to_connection", "owned_by_another_connection": True,
     }
+    assert session.mock_calls == []
 
 
 async def test_inbound_thread_other_org_is_not_found(session, principal, inbound):
@@ -78,12 +80,14 @@ async def test_inbound_thread_other_org_is_not_found(session, principal, inbound
         await service.get_thread(session, caller, idea_id=THREAD)
 
 
-async def test_inbound_thread_forged_connection_is_not_visible(session, principal, inbound):
+async def test_inbound_thread_forged_connection_is_not_visible(principal):
+    session = AsyncMock()
     forged = f"inbound:dddddddd-dddd-dddd-dddd-ddddddddddd1:{EVENT}"
     result = await service.get_thread(session, principal, idea_id=forged)
     assert result == {
         "event_id": EVENT, "state": "not_visible_to_connection", "owned_by_another_connection": True,
     }
+    assert session.mock_calls == []
 
 
 @pytest.mark.parametrize("thread_id", [

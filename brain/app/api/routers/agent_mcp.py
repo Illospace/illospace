@@ -64,10 +64,10 @@ from brain.systems.inbound.results import (
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 from brain.systems.knowledge.search import get_knowledge_items, search_knowledge
 from brain.systems.runs.cortex.read_models import (
-    public_failed_run_artifact,
     public_failure_for_run,
     public_run_debug_event_payload,
     run_stream_payload,
+    serialize_public_run_artifact,
 )
 from brain.systems.runs.tool_event_read_model import tool_call_summary
 
@@ -821,24 +821,6 @@ def _serialize_run_event(
     }
 
 
-def _serialize_run_artifact(
-    artifact: AgentRunArtifactRow,
-    failure: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    return public_failed_run_artifact({
-        "id": artifact.id,
-        "run_id": artifact.run_id,
-        "root_run_id": artifact.root_run_id,
-        "artifact_type": artifact.artifact_type,
-        "title": artifact.title,
-        "payload": artifact.payload or {},
-        "text": artifact.text,
-        "uri": artifact.uri,
-        "visibility": artifact.visibility,
-        "created_at": _iso(artifact.created_at),
-    }, failure)
-
-
 async def _read_run_get(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -909,7 +891,7 @@ async def _read_run_get(
             .limit(limit)
         )
         payload["artifacts"] = [
-            _serialize_run_artifact(artifact, failure)
+            serialize_public_run_artifact(artifact, failure)
             for artifact in (await db.scalars(artifact_stmt)).all()
         ]
     return payload
@@ -1459,16 +1441,22 @@ def _request_id(message: Any) -> Any:
     return message.get("id") if isinstance(message, dict) else None
 
 
-def _mcp_auth_error_response(payload: Any, message: str) -> JSONResponse:
-    data = {"http_status": 401, "auth": "bearer"}
-    if isinstance(payload, list):
-        responses = [
-            _error_response(_request_id(item), code=-32001, message=message, data=data)
-            for item in payload
-            if not isinstance(item, dict) or "id" in item
-        ]
-        return JSONResponse(responses)
-    return JSONResponse(_error_response(_request_id(payload), code=-32001, message=message, data=data))
+def _mcp_error_response(
+    payload: Any,
+    *,
+    code: int,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> Response:
+    messages = payload if isinstance(payload, list) else [payload]
+    responses = [
+        _error_response(_request_id(item), code=code, message=message, data=data)
+        for item in messages
+        if not isinstance(item, dict) or "id" in item
+    ]
+    if not responses:
+        return Response(status_code=202)
+    return JSONResponse(responses if isinstance(payload, list) else responses[0])
 
 
 def _tool_result(value: dict[str, Any]) -> dict[str, Any]:
@@ -1605,23 +1593,20 @@ async def _mcp_endpoint(
         )
     try:
         principal = await _authenticate_mcp_principal(request, db)
-    except external_agents.ExternalAgentAuthError as exc:
-        return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
-    except external_agents.ExternalAgentPermissionError as exc:
-        return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
+    except (external_agents.ExternalAgentAuthError, external_agents.ExternalAgentPermissionError) as exc:
+        return _mcp_error_response(
+            payload,
+            code=-32001,
+            message=f"MCP authentication failed: {exc}",
+            data={"http_status": 401, "auth": "bearer"},
+        )
     except SQLAlchemyError as exc:
         logger.exception("MCP authentication database operation failed")
         try:
             await db.rollback()
         except SQLAlchemyError:
             logger.exception("MCP database rollback failed")
-        messages = payload if isinstance(payload, list) else [payload]
-        errors = [
-            _error_response(_request_id(item), code=-32603, message=_database_error_text(exc))
-            for item in messages
-            if not isinstance(item, dict) or "id" in item
-        ]
-        return JSONResponse(errors if isinstance(payload, list) else errors[0] if errors else None)
+        return _mcp_error_response(payload, code=-32603, message=_database_error_text(exc))
 
     if isinstance(payload, list):
         responses: list[dict[str, Any]] = []

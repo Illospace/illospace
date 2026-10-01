@@ -14,8 +14,8 @@ from brain.systems.inbound.results import (
     read_inbound_submission_result,
 )
 from brain.systems.runs.cortex.read_models import (
-    public_failed_run_artifact,
     public_failures_for_run_ids,
+    serialize_public_run_artifact,
 )
 
 if TYPE_CHECKING:
@@ -30,11 +30,16 @@ async def get_inbound_thread(
     event_id: str,
     limit: int,
 ) -> dict[str, Any]:
+    if connection_id != str(principal.connection_id):
+        return {
+            "event_id": event_id,
+            "state": InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION.value,
+            "owned_by_another_connection": True,
+        }
     result = await read_inbound_submission_result(
         session,
         org_id=principal.org_id,
         connection_id=principal.connection_id,
-        expected_connection_id=connection_id,
         event_id=event_id,
     )
     if result.mutated_inbound:
@@ -76,16 +81,7 @@ async def get_inbound_thread(
     )).all()
     failures = await public_failures_for_run_ids(session, {row.run_id for row in artifacts})
     for row in reversed(artifacts):
-        artifact = public_failed_run_artifact({
-            "id": row.id,
-            "run_id": row.run_id,
-            "artifact_type": row.artifact_type,
-            "title": row.title,
-            "text": row.text,
-            "uri": row.uri,
-            "payload": row.payload or {},
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-        }, failures.get(row.run_id))
+        artifact = serialize_public_run_artifact(row, failures.get(row.run_id))
         messages.append({
             "id": f"run-artifact:{row.id}",
             "idea_id": thread_id,
