@@ -28,10 +28,7 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeConnector,
     KnowledgeDraft,
 )
-from brain.systems.knowledge.connectors.memory import (
-    MemoryConnector,
-    memory_index_exclusion_reason,
-)
+from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -75,6 +72,11 @@ class KnowledgeSyncStats:
         if self.config_faults:
             payload["config_faults"] = self.config_faults
         return payload
+
+
+@dataclass
+class MemoryIndexStats(KnowledgeSyncStats):
+    draft: KnowledgeDraft | None = None
 
 
 @dataclass(frozen=True)
@@ -651,6 +653,10 @@ async def _ingest_drafts(
 ) -> None:
     if not drafts:
         return
+    drafts = [
+        (draft, should_embed and draft.archived_at is None)
+        for draft, should_embed in drafts
+    ]
     runtime: EmbeddingRuntimeConfig | None = None
     runtime_error: Exception | None = None
     if any(should_embed for _draft, should_embed in drafts):
@@ -712,15 +718,15 @@ async def index_memory_node(
     session: AsyncSession,
     *,
     node_id: int,
-) -> KnowledgeSyncStats:
+) -> MemoryIndexStats:
     """Upsert one memory node in the caller's transaction, without a sweep."""
 
-    stats = KnowledgeSyncStats()
     connector = MemoryConnector(max_items=1)
     draft = await connector.draft_for_node(
         session,
         node_id=node_id,
     )
+    stats = MemoryIndexStats(draft=draft)
     if draft is None:
         stats.skipped = 1
         return stats
@@ -729,7 +735,7 @@ async def index_memory_node(
     await _ingest_drafts(
         session,
         source=connector.source_key,
-        drafts=[(bounded_draft, bounded_draft.archived_at is None)],
+        drafts=[(bounded_draft, True)],
         stats=stats,
         run_at=datetime.now(timezone.utc),
     )
@@ -743,14 +749,18 @@ async def reindex_updated_memory_node(
 ) -> None:
     """Withdraw atomically; allow eligible nodes to await a sweep on failure."""
     node_id = node.id
-    withdrawal_required = (
-        memory_index_exclusion_reason(node, superseded_by=None) is not None
-    )
+    # The connector deliberately leaves org-less shared nodes alone.
+    orgless_shared = node.org_id is None and node.visibility in ("org", "team")
+    stats: MemoryIndexStats | None = None
+    withdrawal_required = False
     try:
         # Isolate index errors so a failed shared write cannot poison the
         # caller's memory transaction. Withdrawal errors still escape it.
         async with session.begin_nested():
             stats = await index_memory_node(session, node_id=node_id)
+            withdrawal_required = (
+                stats.draft is not None and stats.draft.archived_at is not None
+            )
             if withdrawal_required and stats.failed:
                 raise RuntimeError(f"Memory mirror withdrawal failed for node {node_id}")
     except Exception:
@@ -760,6 +770,16 @@ async def reindex_updated_memory_node(
             "Memory mirror update deferred to sweep for node %s", node_id,
             exc_info=True,
         )
+    if (stats is None or stats.draft is None) and not orgless_shared:
+        live_mirror = await session.scalar(
+            select(KnowledgeItem.id).where(
+                KnowledgeItem.source == "memory",
+                KnowledgeItem.source_ref == f"memory_node:{node_id}",
+                KnowledgeItem.archived_at.is_(None),
+            )
+        )
+        if live_mirror is not None:
+            raise RuntimeError(f"Memory mirror withdrawal not verified for node {node_id}")
     # A failed or skipped connector read can leave server-updated fields
     # expired (e.g. updated_at). Load them before the router builds its response.
     await session.refresh(node)

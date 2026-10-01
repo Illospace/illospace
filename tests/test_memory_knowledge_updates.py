@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import rate_limit
 from brain.app.api.routers import memory as memory_router
-from brain.platform.db.models.knowledge import KnowledgeItem
-from brain.platform.db.models.reconstructive_memory import MemoryNode
+from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
+from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
 from brain.platform.db.repositories import unit_of_work
 from brain.systems.knowledge import service
+from brain.systems.knowledge.connectors.memory import MemoryConnector
 from brain.systems.knowledge.search import get_knowledge_items, search_knowledge
 from tests.test_knowledge_index import (
     _ORG_ID,
@@ -326,3 +327,113 @@ async def test_index_query_error_obeys_directional_transaction_policy(
     session.expire_all()
     node = await session.get(MemoryNode, _NODE_ID)
     assert node.visibility == (initial_visibility if expected_status == 500 else visibility)
+
+
+async def test_failed_edge_only_supersession_rolls_back_memory_content(
+    session, memory_client, monkeypatch,
+):
+    await _seed_memory(session)
+    replacement_id = _NODE_ID + 1
+    session.add(_memory_node(replacement_id, datetime.now(timezone.utc)))
+    await session.flush()
+    session.add(MemoryEdgeNode(
+        source_node_id=_NODE_ID, target_node_id=replacement_id,
+        edge_kind="superseded_by", org_id=_ORG_ID,
+        visibility="org", created_by="test",
+    ))
+    await session.commit()
+    write = AsyncMock(side_effect=RuntimeError("mirror archive write failed"))
+    monkeypatch.setattr(service, "_upsert_item", write)
+
+    response = await memory_client.patch(
+        f"/api/memory/{_NODE_ID}", json={"content": "Superseded content edit"},
+    )
+
+    assert response.status_code == 500
+    assert write.await_count == 2
+    assert write.await_args.kwargs["draft"].archived_at is not None
+    session.expire_all()
+    node = await session.get(MemoryNode, _NODE_ID)
+    assert node.truth_status == "active"
+    assert node.visibility == "team"
+    assert node.text == _CONTENT
+    mirror = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == _REF)
+    )
+    assert mirror.archived_at is None
+    assert mirror.raw_text == _CONTENT
+
+
+@pytest.mark.parametrize("endpoint", ["patch", "promote"])
+async def test_missing_withdrawal_draft_with_a_live_mirror_fails_the_request(
+    session, memory_client, monkeypatch, endpoint,
+):
+    await _seed_memory(session)
+    draft = AsyncMock(return_value=None)
+    monkeypatch.setattr(MemoryConnector, "draft_for_node", draft)
+
+    response = await _set_visibility(memory_client, endpoint, "private")
+
+    assert response.status_code == 500
+    draft.assert_awaited_once()
+    session.expire_all()
+    assert (await session.get(MemoryNode, _NODE_ID)).visibility == "team"
+    assert (await _read_as_other_member(session))["results"][0]["summary"] == _CONTENT
+
+
+@pytest.mark.parametrize("visibility", ["team", "org"])
+async def test_orgless_shared_node_keeps_the_connectors_skip_behavior(
+    session, embedding_runtime, visibility,
+):
+    await _seed_memory(session, visibility=visibility)
+    node = await session.get(MemoryNode, _NODE_ID)
+    node.org_id = None
+    node.text = "A shared node without an organization is left to the connector."
+    await session.flush()
+    assert await MemoryConnector().draft_for_node(session, node_id=_NODE_ID) is None
+
+    await service.reindex_updated_memory_node(session, node=node)
+
+    mirror = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == _REF)
+    )
+    assert mirror.archived_at is None
+    assert mirror.raw_text == _CONTENT
+
+
+@pytest.mark.parametrize("index_path", ["immediate", "sweep"])
+@pytest.mark.parametrize("retirement", ["withdrawn", "archived"])
+async def test_archiving_drafts_skip_embedding_and_retain_existing_vectors(
+    session, embedding_runtime, monkeypatch, index_path, retirement,
+):
+    await _seed_memory(session)
+    vectors_query = select(KnowledgeItemEmbedding.id, KnowledgeItemEmbedding.content_digest)
+    old_vectors = (await session.execute(vectors_query)).all()
+    assert len(old_vectors) == 1
+    node = await session.get(MemoryNode, _NODE_ID)
+    if retirement == "withdrawn":
+        node.visibility = "private"
+    else:
+        node.archived_at = datetime.now(timezone.utc)
+    await session.flush()
+    runtime = AsyncMock(side_effect=AssertionError("must not load embedding runtime"))
+    embed = MagicMock(side_effect=AssertionError("must not embed archived drafts"))
+    monkeypatch.setattr(service.runtime_settings, "async_get_embedding_runtime_config", runtime)
+    monkeypatch.setattr(service.embedding_client, "embed_document", embed)
+
+    if index_path == "immediate":
+        stats = await service.index_memory_node(session, node_id=_NODE_ID)
+        assert stats.failed == 0
+        assert stats.draft.archived_at is not None
+    else:
+        result = await service.sync_connector(session, MemoryConnector())
+        assert result.stats["failed"] == 0
+
+    runtime.assert_not_awaited()
+    embed.assert_not_called()
+    mirror = await session.scalar(
+        select(KnowledgeItem).where(KnowledgeItem.source_ref == _REF)
+    )
+    assert mirror.archived_at is not None
+    assert (await session.execute(vectors_query)).all() == old_vectors
+    assert (await _read_as_other_member(session))["results"] == []
