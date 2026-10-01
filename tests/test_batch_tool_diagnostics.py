@@ -34,7 +34,7 @@ def test_completed_event_preserves_normal_text(text):
 def test_sqlalchemy_diagnostic_removes_statement_and_parameters():
     public = public_tool_event_payload({
         "tool_name": "parallel_tool_batch", "error_class": "Error",
-        "error": "(psycopg.Error) boom\n[SQL: SELECT id FROM ideas WHERE id = %s]\n[parameters: ('abc',)]",
+        "error_message": "(psycopg.Error) boom\n[SQL: SELECT id FROM ideas WHERE id = %s]\n[parameters: ('abc',)]",
     }, "run.tool_failed")
 
     assert "boom" in public["error_message"]
@@ -124,7 +124,7 @@ async def test_raised_error_keeps_class_message_and_safe_failure():
     assert event.visibility.value == "public"
     assert event.payload["error_class"] == "ValueError"
     assert event.payload["error"] == "boom"
-    assert "error_message" not in event.payload
+    assert event.payload["error_message"] == public["error_message"]
     assert public["error_class"] == "ValueError"
     assert public["error_message"] == "boom"
     assert public["failure"] == {"status": "failed", "category": "internal", "message": DEFAULT_FAILED_RUN_MESSAGE}
@@ -135,7 +135,7 @@ async def test_failure_diagnostic_is_bounded():
     event = await _failed_event("x" * 50_000)
     public = public_tool_event_payload(event.payload, event.event_type)
     assert len(event.payload["error"]) == 1000
-    assert "error_message" not in event.payload
+    assert event.payload["error_message"] == public["error_message"]
     assert 0 < len(public["error_message"]) <= 500
 
 
@@ -157,24 +157,66 @@ def test_failed_event_without_summary_keeps_legacy_error(error):
     public = public_tool_event_payload(payload, "run.tool_failed")
 
     assert "failure" not in public
-    assert public["error_class"] == "ToolError"
-    assert public["error_message"] == ""
+    assert "error_class" not in public
+    assert "error_message" not in public
     if error is None:
         assert "error" not in public
     else:
         assert public["error"] == ""
 
 
-def test_diagnostic_uses_raw_error_instead_of_persisted_public_copy():
+def test_diagnostic_uses_persisted_public_copy():
     public = public_tool_event_payload({
-        "tool_name": "read_file", "error": "current error", "error_message": "stale copy",
+        "tool_name": "read_file", "error": "current error", "error_message": "safe diagnostic",
     }, "run.tool_failed")
-    assert public["error_message"] == "current error"
+    assert public["error_message"] == "safe diagnostic"
 
 
-@pytest.mark.parametrize("message", ["Select a file", "with x as (a placeholder)"])
+@pytest.mark.parametrize("error_class", [None, "ValueError", "not a class!"])
+def test_old_event_never_derives_diagnostic_from_raw_error(error_class):
+    payload = {"error": "private-value"}
+    if error_class is not None:
+        payload["error_class"] = error_class
+    public = public_tool_event_payload(payload, "run.tool_failed")
+    assert "error_message" not in public
+    if error_class is None:
+        assert "error_class" not in public
+    else:
+        assert public["error_class"] == ("ValueError" if error_class == "ValueError" else "ToolError")
+
+
+@pytest.mark.parametrize("statement", [
+    "SELECT 'private-sql-value'",
+    "SELECT id, name FROM users WHERE id = 7",
+    "[SQL: SELECT id FROM users] [parameters: ('abc',)]",
+    "[parameters: ('abc',)]",
+    "SELECT * FROM users",
+    "SELECT 42",
+    "SELECT count(id) FROM users",
+    "SELECT users.id AS user_id FROM users",
+    "INSERT INTO users",
+    "UPDATE users SET id = 7",
+    "DELETE FROM users",
+    "CREATE TABLE users (id int)",
+    "ALTER TABLE users ADD name text",
+    "DROP TABLE users",
+    "TRUNCATE TABLE users",
+])
+async def test_sql_shaped_diagnostic_removes_whole_tail(statement):
+    event = await _failed_event(f"query failed: {statement}\nprivate-tail")
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert public["error_message"] == "query failed: [redacted]"
+
+
+@pytest.mark.parametrize("message", [
+    "Select a file",
+    "Select a file from the list, then continue",
+    "Please select from the menu",
+    "update the settings and retry",
+    "with x as (a placeholder)",
+])
 def test_diagnostic_does_not_treat_bare_keywords_as_sql(message):
-    public = public_tool_event_payload({"error": message}, "run.tool_failed")
+    public = public_tool_event_payload({"error_message": message}, "run.tool_failed")
     assert public["error_message"] == message
 
 
@@ -197,23 +239,22 @@ async def test_failure_diagnostic_redacts_secrets_and_sql(message):
     assert "UPDATE accounts" not in public["error_message"]
 
 
-async def test_failure_diagnostic_does_not_echo_nested_tool_arguments():
-    event = await _failed_event("could not read customer-private-path", args={
-        "operations": [{"tool_name": "read_file", "args": {"path": "customer-private-path"}}],
+async def test_failure_diagnostic_redacts_only_sensitive_argument_values():
+    event = await _failed_event("could not read notes/plan.md with nested-private-value", args={
+        "operations": [{
+            "tool_name": "read_file",
+            "args": {"path": "notes/plan.md", "api_key": {"value": "nested-private-value"}},
+        }],
     })
     public = public_tool_event_payload(event.payload, event.event_type)
-    assert "customer-private-path" not in public["error_message"]
-    assert event.payload["error"] == "could not read customer-private-path"
-    assert "error_message" not in event.payload
-    assert event.payload["error_argument_spans"]
-    assert "error_argument_spans" not in public
+    assert public["error_message"] == "could not read notes/plan.md with [secret redacted]"
+    assert event.payload["error_message"] == public["error_message"]
 
 
 async def test_diagnostic_redacts_arguments_missing_from_safe_args():
     secret = "private-argument-value"
     event = await _failed_event(f"could not read {secret}", args={
-        "password": secret,
-        "operations": [{"padding": "x" * 400, "path": secret}],
+        "operations": [{"padding": "x" * 400, "password": secret}],
     })
     assert secret not in json.dumps(event.payload["args"])
     public = public_tool_event_payload(event.payload, event.event_type)
@@ -229,6 +270,27 @@ async def test_diagnostic_redacts_argument_crossing_storage_limit():
     assert public["error_message"] == "could not read [secret redacted]"
 
 
+async def test_quoted_secret_redacted_before_storage_limit():
+    event = await _failed_event('secret="first private-value ' + 'x' * 2000 + '"')
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert len(event.payload["error"]) == 1000
+    assert public["error_message"] == "[redacted]"
+    assert "private-value" not in public["error_message"]
+
+
+@pytest.mark.parametrize("values, message, expected", [
+    (["abcdef", "defghijk"], "x abcdefghijk y", "x [secret redacted] y"),
+    (["abcdef", "ghijk"], "x abcdefghijk y", "x [secret redacted] y"),
+    (["aaaa"], "x aaaaa y", "x [secret redacted] y"),
+    (["abc"], "x abc y", "x abc y"),
+])
+async def test_diagnostic_redacts_complete_argument_regions(values, message, expected):
+    event = await _failed_event(message, args={"password": values})
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert event.payload["error_message"] == expected
+    assert public["error_message"] == expected
+
+
 @pytest.mark.parametrize("args", [
     {},
     {"operations": []},
@@ -240,7 +302,7 @@ async def test_diagnostic_redacts_argument_crossing_storage_limit():
     {"operations": [{"tool_name": "read_file"}], "max_parallel": "two"},
     {"operations": [{"tool_name": "read_file", "args": []}]},
 ])
-async def test_invalid_batch_is_a_readable_result_not_a_failed_event(args):
+async def test_invalid_batch_is_a_failed_event_with_readable_diagnostic(args):
     from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
     from brain.systems.runs.tool_surface import build_tool_handlers
     from brain.systems.runs.tools import wrap_tool_handlers
@@ -253,20 +315,28 @@ async def test_invalid_batch_is_a_readable_result_not_a_failed_event(args):
     ))
 
     assert json.loads(result.result_text)["error"]
-    assert result.outcome.failure is None
+    assert result.outcome.failure is not None
     from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
 
-    # Validation does not disable the batch tool, but cannot prove task success.
+    # Validation is a failure and cannot prove task success.
     evidence = ToolResultEvidence.capture(
         tool_name="parallel_tool_batch", arguments=args,
-        is_error=False, result=result.result_value,
+        is_error=True, result=result.result_value,
     )
     assert evidence.failed
-    assert not any(event.event_type == "run.tool_failed" for event in runtime.store.events)
-    completed = next(event for event in runtime.store.events if event.event_type == "run.tool_completed")
-    public = public_tool_event_payload(completed.payload, completed.event_type)
-    assert "failure" not in public
-    assert public["display"]["status"] == "completed"
+    assert not any(event.event_type == "run.tool_completed" for event in runtime.store.events)
+    failed = next(event for event in runtime.store.events if event.event_type == "run.tool_failed")
+    public = public_tool_event_payload(failed.payload, failed.event_type)
+    assert public["error_class"] == "ToolError"
+    assert public["error_message"] == failed.payload["error_message"]
+    assert public["error_message"]
+    if not args:
+        assert public["error_message"] == "operations must be a non-empty list"
+    rejected = [op.get("tool_name") for op in args.get("operations", []) if isinstance(op, dict)]
+    if rejected and rejected[0] in {"brain_recall", "search_knowledge", "read_workspace_overview", "exec_command"}:
+        # The diagnostic must name the rejected tool; that is the point of it.
+        assert f"Tool '{rejected[0]}' is not allowed" in public["error_message"]
+    assert public["display"]["status"] == "failed"
 
 
 async def test_run_get_returns_tool_failure_diagnostics():
