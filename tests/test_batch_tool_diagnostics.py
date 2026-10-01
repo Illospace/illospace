@@ -14,6 +14,33 @@ from tests.test_agent import _mock_llm_client
 from tests.test_agent_run_runtime import _runtime
 
 
+@pytest.mark.parametrize("text", [
+    "Select a file from the list, then continue",
+    "token count: 42",
+    "token: 42 tokens used",
+    "password: required",
+    "with x as (a placeholder)",
+])
+def test_completed_event_preserves_normal_text(text):
+    public = public_tool_event_payload({
+        "tool_name": "read_file", "args": {"description": text}, "result": text,
+    }, "run.tool_completed")
+
+    assert public["result_preview"] == text
+    assert public["args"]["description"] == text
+    assert public["display"]["sensitive"] is False
+
+
+def test_sqlalchemy_diagnostic_removes_statement_and_parameters():
+    public = public_tool_event_payload({
+        "tool_name": "parallel_tool_batch", "error_class": "Error",
+        "error": "(psycopg.Error) boom\n[SQL: SELECT id FROM ideas WHERE id = %s]\n[parameters: ('abc',)]",
+    }, "run.tool_failed")
+
+    assert "boom" in public["error_message"]
+    assert all(value not in public["error_message"] for value in ("SELECT", "ideas", "abc"))
+
+
 async def test_first_headless_fast_batch_uses_native_context(monkeypatch):
     from brain.platform.integrations.providers import LLMResponse, TextContentBlock, ToolUseContentBlock, Usage
     from brain.systems.runs import direct_agent
@@ -96,7 +123,8 @@ async def test_raised_error_keeps_class_message_and_safe_failure():
     public = public_tool_event_payload(event.payload, event.event_type)
     assert event.visibility.value == "public"
     assert event.payload["error_class"] == "ValueError"
-    assert event.payload["error_message"] == "boom"
+    assert event.payload["error"] == "boom"
+    assert "error_message" not in event.payload
     assert public["error_class"] == "ValueError"
     assert public["error_message"] == "boom"
     assert public["failure"] == {"status": "failed", "category": "internal", "message": DEFAULT_FAILED_RUN_MESSAGE}
@@ -106,7 +134,8 @@ async def test_raised_error_keeps_class_message_and_safe_failure():
 async def test_failure_diagnostic_is_bounded():
     event = await _failed_event("x" * 50_000)
     public = public_tool_event_payload(event.payload, event.event_type)
-    assert 0 < len(event.payload["error_message"]) <= 500
+    assert len(event.payload["error"]) == 1000
+    assert "error_message" not in event.payload
     assert 0 < len(public["error_message"]) <= 500
 
 
@@ -115,7 +144,38 @@ async def test_empty_exception_message_still_has_failure_identity():
     public = public_tool_event_payload(event.payload, event.event_type)
     assert public["error_class"] == "ValueError"
     assert public["error_message"] == ""
-    assert public["failure"]["category"] == "internal"
+    assert public["error"] == ""
+    assert "failure" not in public
+    assert public["display"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("error", [None, "", "   "])
+def test_failed_event_without_summary_keeps_legacy_error(error):
+    payload = {"tool_name": "read_file"}
+    if error is not None:
+        payload["error"] = error
+    public = public_tool_event_payload(payload, "run.tool_failed")
+
+    assert "failure" not in public
+    assert public["error_class"] == "ToolError"
+    assert public["error_message"] == ""
+    if error is None:
+        assert "error" not in public
+    else:
+        assert public["error"] == ""
+
+
+def test_diagnostic_uses_raw_error_instead_of_persisted_public_copy():
+    public = public_tool_event_payload({
+        "tool_name": "read_file", "error": "current error", "error_message": "stale copy",
+    }, "run.tool_failed")
+    assert public["error_message"] == "current error"
+
+
+@pytest.mark.parametrize("message", ["Select a file", "with x as (a placeholder)"])
+def test_diagnostic_does_not_treat_bare_keywords_as_sql(message):
+    public = public_tool_event_payload({"error": message}, "run.tool_failed")
+    assert public["error_message"] == message
 
 
 @pytest.mark.parametrize("message", [
@@ -124,6 +184,9 @@ async def test_empty_exception_message_still_has_failure_identity():
     "database error\n[SQL: UPDATE accounts SET token = 'private-sql-value']\n[parameters: {'token': 'private-sql-value'}]",
     "provider failed token=private-token-value",
     "query failed: SELECT 'private-sql-value';",
+    "query failed: INSERT INTO accounts (token) VALUES ('private-sql-value');",
+    "query failed: UPDATE accounts SET token = 'private-sql-value';",
+    "query failed: DELETE FROM accounts WHERE token = 'private-sql-value';",
 ])
 async def test_failure_diagnostic_redacts_secrets_and_sql(message):
     event = await _failed_event(message)
@@ -140,12 +203,39 @@ async def test_failure_diagnostic_does_not_echo_nested_tool_arguments():
     })
     public = public_tool_event_payload(event.payload, event.event_type)
     assert "customer-private-path" not in public["error_message"]
-    assert "customer-private-path" not in event.payload["error_message"]
+    assert event.payload["error"] == "could not read customer-private-path"
+    assert "error_message" not in event.payload
+    assert event.payload["error_argument_spans"]
+    assert "error_argument_spans" not in public
+
+
+async def test_diagnostic_redacts_arguments_missing_from_safe_args():
+    secret = "private-argument-value"
+    event = await _failed_event(f"could not read {secret}", args={
+        "password": secret,
+        "operations": [{"padding": "x" * 400, "path": secret}],
+    })
+    assert secret not in json.dumps(event.payload["args"])
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert secret not in json.dumps(public)
+    assert event.payload["error"] == f"could not read {secret}"
+
+
+async def test_diagnostic_redacts_argument_crossing_storage_limit():
+    secret = "private-argument-value" * 60
+    event = await _failed_event(f"could not read {secret}", args={"password": secret})
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert "private-" not in public["error_message"]
+    assert public["error_message"] == "could not read [secret redacted]"
 
 
 @pytest.mark.parametrize("args", [
     {},
     {"operations": []},
+    {"operations": [{}]},
+    {"operations": [{"tool_name": "brain_recall"}]},
+    {"operations": [{"tool_name": "search_knowledge"}]},
+    {"operations": [{"tool_name": "read_workspace_overview"}]},
     {"operations": [{"tool_name": "exec_command", "args": {"command": "pwd"}}]},
     {"operations": [{"tool_name": "read_file"}], "max_parallel": "two"},
     {"operations": [{"tool_name": "read_file", "args": []}]},
@@ -164,6 +254,14 @@ async def test_invalid_batch_is_a_readable_result_not_a_failed_event(args):
 
     assert json.loads(result.result_text)["error"]
     assert result.outcome.failure is None
+    from brain.systems.runs.direct_loop.final_reply_evidence import ToolResultEvidence
+
+    # Validation does not disable the batch tool, but cannot prove task success.
+    evidence = ToolResultEvidence.capture(
+        tool_name="parallel_tool_batch", arguments=args,
+        is_error=False, result=result.result_value,
+    )
+    assert evidence.failed
     assert not any(event.event_type == "run.tool_failed" for event in runtime.store.events)
     completed = next(event for event in runtime.store.events if event.event_type == "run.tool_completed")
     public = public_tool_event_payload(completed.payload, completed.event_type)

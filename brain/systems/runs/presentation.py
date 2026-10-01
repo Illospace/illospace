@@ -42,13 +42,18 @@ SENSITIVE_TEXT_PATTERNS = [
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{12,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+]
+
+# These rules are for exception diagnostics only. Ordinary labels and previews
+# can contain words such as "select" and "token" without containing secrets.
+TOOL_ERROR_TEXT_PATTERNS = [
     re.compile(r"\bBearer\s+[^\s,;\"']+", re.IGNORECASE),
     re.compile(r"\b(?:api[_-]?key|token|password|secret|credential|authorization)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.IGNORECASE),
     # Database exceptions can append statements and parameter dumps. Suppress
     # the entire tail, including multiline SQL and values following it.
     re.compile(
-        r"(?:\[SQL:|\[parameters:|\bSELECT\s+|\bWITH\s+\S+\s+AS\s*\("
-        r"|\bINSERT\s+INTO\b|\bUPDATE\s+\S+\s+SET\b|\bDELETE\s+FROM\b"
+        r"(?:\[SQL:|\[parameters:|\bSELECT\s+(?:[^;\n]+?\s+FROM\b|'(?:[^']|'')*'\s*;)"
+        r"|\bINSERT\s+INTO\s+[^;\n]+?\s+VALUES\b|\bUPDATE\s+\S+\s+SET\b|\bDELETE\s+FROM\b"
         r"|\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE\b).*",
         re.IGNORECASE | re.DOTALL,
     ),
@@ -95,7 +100,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     )
     failure = (
         public_run_failure("failed", failure_category_for_error(failure_summary))
-        if failure_summary or event_type == "run.tool_failed"
+        if failure_summary
         else None
     )
     status = _status_for_event(event_type, raw.get("status"))
@@ -109,7 +114,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
         # result_refs is the backend attribution channel (full-fidelity refs
         # extracted pre-truncation); it never goes to the browser — ref ids
         # are raw result content and receive no _redact_text pass.
-        if key not in {"args", "result", "result_preview", "result_refs", "error_class", "error_message"}
+        if key not in {"args", "result", "result_preview", "result_refs", "error_class", "error_message", "error_argument_spans"}
         and not _is_sensitive_key(str(key).lower())
     }
     public["tool_name"] = tool_name
@@ -121,12 +126,15 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     public["display"] = display
     public["display_label"] = display["label"]
 
+    if failure is not None or event_type == "run.tool_failed":
+        public.update(public_tool_error_diagnostic(
+            raw.get("error_class"), raw.get("error", failure_summary), args=args,
+            argument_spans=raw.get("error_argument_spans"),
+        ))
+
     if failure is not None:
         public["failure"] = failure
         public["error"] = failure["message"]
-        public.update(public_tool_error_diagnostic(
-            raw.get("error_class"), raw.get("error_message", failure_summary), args=args,
-        ))
         return public
 
     if raw.get("error") is not None:
@@ -143,10 +151,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     return public
 
 
-def public_tool_error_diagnostic(
-    error_class: Any, error_message: Any, *, args: dict[str, Any] | None = None,
-) -> dict[str, str]:
-    """Bound tool diagnostics after removing secrets, SQL and argument values."""
+def _tool_argument_values(args: dict[str, Any]) -> list[str]:
     argument_values: list[str] = []
 
     def collect(value: Any) -> None:
@@ -160,8 +165,42 @@ def public_tool_error_diagnostic(
             text = str(value)
             argument_values.extend((text, json.dumps(text)[1:-1]))
 
-    collect(args or {})
-    message = redact_sensitive_output(str(error_message or ""), argument_values)
+    collect(args)
+    return argument_values
+
+
+def tool_error_argument_spans(error: str, args: dict[str, Any]) -> list[list[int]]:
+    """Retain argument locations without storing another message or raw args.
+
+    Stored safe args omit secrets and truncate nested values. Match the original
+    error before its 1000-character storage limit, including boundary matches.
+    """
+    values = sorted(set(filter(None, _tool_argument_values(args))), key=len, reverse=True)
+    if not values:
+        return []
+    pattern = "|".join(re.escape(value) for value in values)
+    return [
+        [match.start(), min(match.end(), 1000)]
+        for match in re.finditer(pattern, error)
+        if match.start() < 1000
+    ]
+
+
+def public_tool_error_diagnostic(
+    error_class: Any, error_message: Any, *, args: dict[str, Any] | None = None,
+    argument_spans: Any = None,
+) -> dict[str, str]:
+    """Bound tool diagnostics after removing secrets, SQL and argument values."""
+    message = str(error_message or "")
+    if isinstance(argument_spans, list):
+        for span in reversed(argument_spans):
+            if (isinstance(span, (list, tuple)) and len(span) == 2
+                    and all(isinstance(index, int) for index in span)
+                    and 0 <= span[0] < span[1] <= len(message)):
+                message = message[:span[0]] + "[secret redacted]" + message[span[1]:]
+    message = redact_sensitive_output(message, _tool_argument_values(args or {}))
+    for pattern in TOOL_ERROR_TEXT_PATTERNS:
+        message = pattern.sub("[redacted]", message)
     class_name = _redact_text(str(error_class or "ToolError"))
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", class_name):
         class_name = "ToolError"

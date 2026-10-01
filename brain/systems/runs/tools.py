@@ -30,7 +30,7 @@ from brain.systems.runs.execution_context import bind_agent_context, current_age
 from brain.systems.runs.outbound_reply_admission import (
     REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
 )
-from brain.systems.runs.presentation import public_tool_error_diagnostic
+from brain.systems.runs.presentation import tool_error_argument_spans
 from brain.systems.runs.secret_mounts import (
     handler_args_with_resolved_secret_env,
     resolve_secret_env_mounts,
@@ -748,7 +748,10 @@ def _event_payload(
             pass
     if error is not None:
         payload["error"] = error[:1000]
-        payload.update(public_tool_error_diagnostic(error_class, error, args=error_args))
+        payload["error_class"] = error_class or "ToolError"
+        spans = tool_error_argument_spans(error, error_args or {})
+        if spans:
+            payload["error_argument_spans"] = spans
     return payload
 
 
