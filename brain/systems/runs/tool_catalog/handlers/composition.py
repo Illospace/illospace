@@ -860,27 +860,31 @@ def _get_tool_handlers(
     except Exception as e:
         logger.debug(f"Extended tools unavailable: {e}")
 
-    def _parallel_tool_batch(operations: list[dict], max_parallel: int | None = None) -> dict:
+    def _parallel_tool_batch(operations: list[dict] | None = None, max_parallel: int | None = None) -> dict:
         if not isinstance(operations, list) or not operations:
-            return {"error": "operations must be a non-empty list"}
+            return {"status": "invalid_input", "error": "operations must be a non-empty list"}
         if len(operations) > _MAX_PARALLEL_BATCH_OPERATIONS:
             return {
+                "status": "invalid_input",
                 "error": (
                     f"parallel_tool_batch supports at most {_MAX_PARALLEL_BATCH_OPERATIONS} operations "
                     f"per call (received {len(operations)})"
                 )
             }
+        if max_parallel is not None and (type(max_parallel) is not int or max_parallel < 1):
+            return {"status": "invalid_input", "error": "max_parallel must be a positive integer"}
 
         normalized_ops: list[tuple[int, str, dict]] = []
         for idx, op in enumerate(operations):
             if not isinstance(op, dict):
-                return {"error": f"operations[{idx}] must be an object"}
+                return {"status": "invalid_input", "error": f"operations[{idx}] must be an object"}
             tool_name = str(op.get("tool_name") or "").strip()
             if not tool_name:
-                return {"error": f"operations[{idx}].tool_name is required"}
+                return {"status": "invalid_input", "error": f"operations[{idx}].tool_name is required"}
             if tool_name not in _PARALLEL_BATCH_SAFE_TOOL_NAMES:
                 allowed = ", ".join(sorted(_PARALLEL_BATCH_SAFE_TOOL_NAMES))
                 return {
+                    "status": "invalid_input",
                     "error": (
                         f"Tool '{tool_name}' is not allowed in parallel_tool_batch. "
                         f"Allowed tools: {allowed}"
@@ -888,10 +892,10 @@ def _get_tool_handlers(
                 }
             handler = handlers.get(tool_name)
             if not callable(handler):
-                return {"error": f"Tool '{tool_name}' is unavailable in this runtime"}
-            args = op.get("args") or {}
+                return {"status": "invalid_input", "error": f"Tool '{tool_name}' is unavailable in this runtime"}
+            args = op.get("args", {})
             if not isinstance(args, dict):
-                return {"error": f"operations[{idx}].args must be an object"}
+                return {"status": "invalid_input", "error": f"operations[{idx}].args must be an object"}
             normalized_ops.append((idx, tool_name, args))
 
         threadlocal_context = snapshot_agent_context()

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from brain.systems.runs.actions import result_failure_summary
 from brain.systems.runs.failures import failure_category_for_error, public_run_failure
+from brain.systems.runs.project_execution_env import redact_sensitive_output
 from brain.systems.runs.tool_event_read_model import (
     parse_persisted_tool_side_effect,
 )
@@ -41,6 +42,16 @@ SENSITIVE_TEXT_PATTERNS = [
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{12,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+    re.compile(r"\bBearer\s+[^\s,;\"']+", re.IGNORECASE),
+    re.compile(r"\b(?:api[_-]?key|token|password|secret|credential|authorization)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.IGNORECASE),
+    # Database exceptions can append statements and parameter dumps. Suppress
+    # the entire tail, including multiline SQL and values following it.
+    re.compile(
+        r"(?:\[SQL:|\[parameters:|\bSELECT\s+|\bWITH\s+\S+\s+AS\s*\("
+        r"|\bINSERT\s+INTO\b|\bUPDATE\s+\S+\s+SET\b|\bDELETE\s+FROM\b"
+        r"|\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE\b).*",
+        re.IGNORECASE | re.DOTALL,
+    ),
 ]
 
 SECRET_TOOL_NAMES = {"brain_vault", "vault", "secrets"}
@@ -84,7 +95,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     )
     failure = (
         public_run_failure("failed", failure_category_for_error(failure_summary))
-        if failure_summary
+        if failure_summary or event_type == "run.tool_failed"
         else None
     )
     status = _status_for_event(event_type, raw.get("status"))
@@ -98,7 +109,7 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
         # result_refs is the backend attribution channel (full-fidelity refs
         # extracted pre-truncation); it never goes to the browser — ref ids
         # are raw result content and receive no _redact_text pass.
-        if key not in {"args", "result", "result_preview", "result_refs"}
+        if key not in {"args", "result", "result_preview", "result_refs", "error_class", "error_message"}
         and not _is_sensitive_key(str(key).lower())
     }
     public["tool_name"] = tool_name
@@ -113,6 +124,9 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
     if failure is not None:
         public["failure"] = failure
         public["error"] = failure["message"]
+        public.update(public_tool_error_diagnostic(
+            raw.get("error_class"), raw.get("error_message", failure_summary), args=args,
+        ))
         return public
 
     if raw.get("error") is not None:
@@ -127,6 +141,31 @@ def public_tool_event_payload(payload: dict[str, Any] | None, event_type: str = 
             public["result_preview"] = _clip(preview, 140)
 
     return public
+
+
+def public_tool_error_diagnostic(
+    error_class: Any, error_message: Any, *, args: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Bound tool diagnostics after removing secrets, SQL and argument values."""
+    argument_values: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        elif value is not None:
+            text = str(value)
+            argument_values.extend((text, json.dumps(text)[1:-1]))
+
+    collect(args or {})
+    message = redact_sensitive_output(str(error_message or ""), argument_values)
+    class_name = _redact_text(str(error_class or "ToolError"))
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", class_name):
+        class_name = "ToolError"
+    return {"error_class": class_name, "error_message": _clip(_redact_text(message), 500)}
 
 
 def public_tool_args(args: dict[str, Any] | None) -> dict[str, str]:

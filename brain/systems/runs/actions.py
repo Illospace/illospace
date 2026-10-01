@@ -615,6 +615,9 @@ def result_failure_summary(result) -> str | None:
     if isinstance(payload, dict):
         if payload.get("blocked") is True:
             return str(payload.get("error") or "blocked")
+        if payload.get("status") == "invalid_input":
+            # A validation response is a normal result the model can correct.
+            return None
         if payload.get("error"):
             return str(payload.get("error"))
         exit_code = payload.get("exit_code")
