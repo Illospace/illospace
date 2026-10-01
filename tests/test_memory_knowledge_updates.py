@@ -16,7 +16,11 @@ from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbed
 from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
 from brain.platform.db.repositories import unit_of_work
 from brain.systems.knowledge import service
-from brain.systems.knowledge.connectors.memory import MemoryConnector
+from brain.systems.knowledge.connectors.memory import (
+    MemoryConnector,
+    MemoryDraftOutcome,
+    MemoryDraftSkipReason,
+)
 from brain.systems.knowledge.search import get_knowledge_items, search_knowledge
 from tests.test_knowledge_index import (
     _ORG_ID,
@@ -234,6 +238,40 @@ async def test_patch_content_edit_updates_the_shared_mirror(session, memory_clie
     assert search["results"][0]["summary"] == new_content
 
 
+async def test_stale_content_patch_cannot_restore_a_private_memory_mirror(
+    session, embedding_runtime,
+):
+    """A content writer must honor another session's committed withdrawal."""
+    await _seed_memory(session)
+    node = await session.get(MemoryNode, _NODE_ID)
+    assert node.visibility == "team"
+
+    factory = async_sessionmaker(session.bind, expire_on_commit=False)
+    async with factory() as other_session:
+        current = await other_session.get(MemoryNode, _NODE_ID)
+        current.visibility = "private"
+        await other_session.flush()
+        await service.reindex_updated_memory_node(other_session, node=current)
+        await other_session.commit()
+
+    assert node.visibility == "team"
+    # Follow the content PATCH path with the first session's stale object.
+    new_content = "The zephyr launch detail changed after withdrawal."
+    node.text = new_content
+    node.canonical_label = new_content[:240]
+    await session.flush()
+    assert await session.scalar(
+        select(MemoryNode.visibility).where(MemoryNode.id == _NODE_ID)
+    ) == "private"
+    await service.reindex_updated_memory_node(session, node=node)
+    await session.commit()
+
+    assert node.visibility == "private"
+    assert node.text == new_content
+    assert node.canonical_label == new_content
+    await _assert_withdrawn(session)
+
+
 async def test_patch_scope_edit_updates_the_shared_mirror(session, memory_client):
     await _seed_memory(session)
 
@@ -310,7 +348,7 @@ async def test_resharing_restores_a_withdrawn_mirror(session, memory_client, end
 
 
 @pytest.mark.parametrize("visibility, expected_status", [("private", 500), ("team", 200)])
-async def test_index_query_error_obeys_directional_transaction_policy(
+async def test_index_query_error_fails_only_when_a_live_mirror_remains(
     session, memory_client, monkeypatch, visibility, expected_status,
 ):
     initial_visibility = "team" if visibility == "private" else "private"
@@ -327,6 +365,28 @@ async def test_index_query_error_obeys_directional_transaction_policy(
     session.expire_all()
     node = await session.get(MemoryNode, _NODE_ID)
     assert node.visibility == (initial_visibility if expected_status == 500 else visibility)
+
+
+async def test_shared_content_index_exception_rolls_back_the_edit(
+    session, memory_client, monkeypatch,
+):
+    """An index exception cannot prove a live mirror is safe to retain."""
+    await _seed_memory(session)
+    index = AsyncMock(side_effect=RuntimeError("connector failed"))
+    monkeypatch.setattr(service, "index_memory_node", index)
+
+    response = await memory_client.patch(
+        f"/api/memory/{_NODE_ID}", json={"content": "Changed shared content"},
+    )
+
+    assert response.status_code == 500
+    index.assert_awaited_once()
+    session.expire_all()
+    node = await session.get(MemoryNode, _NODE_ID)
+    assert node.visibility == "team"
+    assert node.text == _CONTENT
+    assert node.canonical_label == _CONTENT
+    assert (await _read_as_other_member(session))["results"][0]["summary"] == _CONTENT
 
 
 async def test_failed_edge_only_supersession_rolls_back_memory_content(
@@ -369,8 +429,10 @@ async def test_missing_withdrawal_draft_with_a_live_mirror_fails_the_request(
     session, memory_client, monkeypatch, endpoint,
 ):
     await _seed_memory(session)
-    draft = AsyncMock(return_value=None)
-    monkeypatch.setattr(MemoryConnector, "draft_for_node", draft)
+    draft = AsyncMock(return_value=MemoryDraftOutcome(
+        skip_reason=MemoryDraftSkipReason.NOT_A_CANDIDATE,
+    ))
+    monkeypatch.setattr(MemoryConnector, "outcome_for_node", draft)
 
     response = await _set_visibility(memory_client, endpoint, "private")
 
@@ -390,7 +452,9 @@ async def test_orgless_shared_node_keeps_the_connectors_skip_behavior(
     node.org_id = None
     node.text = "A shared node without an organization is left to the connector."
     await session.flush()
-    assert await MemoryConnector().draft_for_node(session, node_id=_NODE_ID) is None
+    stats = await service.index_memory_node(session, node_id=_NODE_ID)
+    assert stats.draft is None
+    assert stats.skip_reason == MemoryDraftSkipReason.SHARED_WITHOUT_ORG
 
     await service.reindex_updated_memory_node(session, node=node)
 

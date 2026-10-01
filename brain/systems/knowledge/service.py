@@ -28,7 +28,7 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeConnector,
     KnowledgeDraft,
 )
-from brain.systems.knowledge.connectors.memory import MemoryConnector
+from brain.systems.knowledge.connectors.memory import MemoryConnector, MemoryDraftSkipReason
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -77,6 +77,7 @@ class KnowledgeSyncStats:
 @dataclass
 class MemoryIndexStats(KnowledgeSyncStats):
     draft: KnowledgeDraft | None = None
+    skip_reason: MemoryDraftSkipReason | None = None
 
 
 @dataclass(frozen=True)
@@ -722,11 +723,12 @@ async def index_memory_node(
     """Upsert one memory node in the caller's transaction, without a sweep."""
 
     connector = MemoryConnector(max_items=1)
-    draft = await connector.draft_for_node(
+    outcome = await connector.outcome_for_node(
         session,
         node_id=node_id,
     )
-    stats = MemoryIndexStats(draft=draft)
+    draft = outcome.draft
+    stats = MemoryIndexStats(draft=draft, skip_reason=outcome.skip_reason)
     if draft is None:
         stats.skipped = 1
         return stats
@@ -747,10 +749,13 @@ async def reindex_updated_memory_node(
     *,
     node: MemoryNode,
 ) -> None:
-    """Withdraw atomically; allow eligible nodes to await a sweep on failure."""
+    """Withdraw atomically; allow failed shared writes to await a sweep.
+
+    A raised index call fails the request if a live mirror remains, because its
+    consistency with the node cannot be proved.
+    """
+    await session.refresh(node, with_for_update=True)
     node_id = node.id
-    # The connector deliberately leaves org-less shared nodes alone.
-    orgless_shared = node.org_id is None and node.visibility in ("org", "team")
     stats: MemoryIndexStats | None = None
     withdrawal_required = False
     try:
@@ -766,11 +771,16 @@ async def reindex_updated_memory_node(
     except Exception:
         if withdrawal_required:
             raise
+        # A savepoint rollback can expire node attributes needed by the response.
+        await session.refresh(node)
         logger.warning(
             "Memory mirror update deferred to sweep for node %s", node_id,
             exc_info=True,
         )
-    if (stats is None or stats.draft is None) and not orgless_shared:
+    if stats is None or (
+        stats.draft is None
+        and stats.skip_reason != MemoryDraftSkipReason.SHARED_WITHOUT_ORG
+    ):
         live_mirror = await session.scalar(
             select(KnowledgeItem.id).where(
                 KnowledgeItem.source == "memory",
@@ -780,9 +790,6 @@ async def reindex_updated_memory_node(
         )
         if live_mirror is not None:
             raise RuntimeError(f"Memory mirror withdrawal not verified for node {node_id}")
-    # A failed or skipped connector read can leave server-updated fields
-    # expired (e.g. updated_at). Load them before the router builds its response.
-    await session.refresh(node)
 
 
 async def sync_connector(
