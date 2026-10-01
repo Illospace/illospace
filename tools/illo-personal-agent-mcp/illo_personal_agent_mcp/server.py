@@ -440,6 +440,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Use knowledge.search for source-backed preserved knowledge and memory, "
                         "or knowledge.get for an exact source_ref such as memory_node:<id> from a preservation receipt. "
+                        "The receipt's content ref states its visibility and whether the shared index can serve it; knowledge.get checks that it does. "
                         "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists. "
                         "workspace.search covers Project Contexts, ideas, and threads. "
                         "Other read capabilities include project_contexts.search, thread.get, handoff.get, "

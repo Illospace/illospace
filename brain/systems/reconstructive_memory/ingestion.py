@@ -26,6 +26,10 @@ from brain.platform.db.repositories.reconstructive_memory import (
     NodeDraft,
     SourceSpanDraft,
 )
+from brain.systems.knowledge.memory_eligibility import (
+    MemoryIndexExclusionReason,
+    memory_node_index_exclusion_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,8 @@ class IngestedMemorySource:
     cue_node_ids: tuple[int, ...]
     tag_node_ids: tuple[int, ...]
     edge_ids: tuple[int, ...]
+    visibility: str
+    knowledge_index_reason: MemoryIndexExclusionReason | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +101,21 @@ class IngestedMemorySource:
             "cue_node_ids": list(self.cue_node_ids),
             "tag_node_ids": list(self.tag_node_ids),
             "edge_ids": list(self.edge_ids),
+            "visibility": self.visibility,
+            "knowledge_source_ref": f"memory_node:{self.content_node_id}",
+            "knowledge_index": {
+                "eligible": self.knowledge_index_reason is None,
+                "reason": self.knowledge_index_reason.value if self.knowledge_index_reason is not None else None,
+            },
+            "mutated_target_refs": [{
+                "kind": "memory_node",
+                "id": self.content_node_id,
+                "role": "content",
+                "visibility": self.visibility,
+                "knowledge_get": (
+                    self.knowledge_index_reason.value if self.knowledge_index_reason is not None else "eligible"
+                ),
+            }],
         }
 
 
@@ -377,6 +398,9 @@ async def ingest_memory_source(
         cue_node_ids=tuple(node.id for node in cue_nodes),
         tag_node_ids=tuple(node.id for node in tag_nodes),
         edge_ids=tuple(edge.id for edge in edges),
+        visibility=content_node.visibility,
+        # Report node eligibility at write time; the mirror is populated after commit.
+        knowledge_index_reason=await memory_node_index_exclusion_reason(session, content_node),
     )
     _schedule_post_commit_knowledge_index(
         session,

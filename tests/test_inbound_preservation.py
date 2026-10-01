@@ -482,6 +482,68 @@ async def test_preservation_submission_with_explicit_memory_evidence_reconciles_
     assert "memory_source" in {ref["kind"] for ref in receipt.tool_use["attribution"]["mutated_target_refs"]}
 
 
+async def test_private_memory_content_ref_is_identified_in_satisfied_receipt(session):
+    from brain.app.api.routers.agent_mcp import _tool_get_result
+    from brain.systems.runs.tools import _event_payload
+
+    principal = await _seed_connection(session)
+    submitted = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.submit",
+            "desired_outcome": "preserve_knowledge",
+            "message": "Preserve this private source-backed memory.",
+            "source": {"source_tool": "codex"},
+            "idempotency_key": "codex:submission:private-memory-evidence",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, submitted["ilo_outcome"])
+    run_id = int(handling["run_id"])
+    store = AsyncAgentRunStore(session)
+    await store.append_event(run_event(
+        run_id,
+        "run.tool_completed",
+        _event_payload("memory_ingest_source", {}, result=json.dumps({
+            "memory_system": "reconstructive",
+            "source_id": 91,
+            "span_ids": [92],
+            "content_node_id": 93,
+            "assertion_id": 96,
+            "cue_node_ids": [94],
+            "tag_node_ids": [95],
+            "edge_ids": [97],
+            "visibility": "private",
+            "knowledge_source_ref": "memory_node:93",
+            "knowledge_index": {"eligible": False, "reason": "private_visibility"},
+            "mutated_target_refs": [{
+                "kind": "memory_node", "id": 93, "role": "content",
+                "visibility": "private", "knowledge_get": "private_visibility",
+            }],
+        })),
+        root_run_id=run_id,
+    ))
+    await _finish_triage_run(
+        session, handling, status=RunStatus.COMPLETED, final_answer="Saved the private memory.",
+    )
+
+    payload = await _tool_get_result(session, principal, {"event_id": submitted["event_id"]})
+    assert payload["status"] == "processed"
+    assert payload["evidence_status"] == "satisfied"
+    refs = payload["evidence_contract"]["mutated_target_refs"]
+    primary = [ref for ref in refs if ref.get("role") == "content"]
+    assert primary == [{
+        "kind": "memory_node", "id": "93", "source": "memory_ingest_source",
+        "role": "content", "visibility": "private", "knowledge_get": "private_visibility",
+    }]
+    for node_id in ("94", "95"):
+        assert {"kind": "memory_node", "id": node_id, "source": "memory_ingest_source"} in refs
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    assert primary[0] in receipt.tool_use["attribution"]["mutated_target_refs"]
+
+
 async def test_preservation_submission_with_memory_supersede_source_reconciles_processed(session):
     principal = await _seed_connection(session)
     result = await inbound.submit_inbound_envelope(

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
 from brain.platform.db.models.knowledge import KnowledgeItem
-from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.reconstructive_memory import memory_node_visibility_predicate
 from brain.systems.knowledge.connectors.base import (
     KnowledgeDraft,
@@ -28,17 +28,17 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeScope,
     UpdatedAtCursor,
 )
+from brain.systems.knowledge.memory_eligibility import (
+    KNOWLEDGE_NODE_KINDS,
+    SHARED_VISIBILITIES,
+    MemoryIndexExclusionReason,
+    is_superseded,
+    load_superseded_by,
+    memory_index_exclusion_reason,
+    memory_node_index_exclusion_reason,
+)
 
-_SHARED_VISIBILITIES = ("org", "team")
-_KNOWLEDGE_NODE_KINDS = ("content",)
 logger = logging.getLogger(__name__)
-
-
-class MemoryIndexExclusionReason(StrEnum):
-    PRIVATE_VISIBILITY = "private_visibility"
-    NOT_A_CONTENT_NODE = "not_a_content_node"
-    ARCHIVED_OR_SUPERSEDED = "archived_or_superseded"
-    NOT_YET_INDEXED = "not_yet_indexed"
 
 
 class MemoryDraftSkipReason(StrEnum):
@@ -53,36 +53,6 @@ class MemoryDraftOutcome:
     skip_reason: MemoryDraftSkipReason | None = None
 
 
-def _is_superseded(node: Any, superseded_by: int | None) -> bool:
-    return node.truth_status == "superseded" or superseded_by is not None
-
-
-def memory_index_exclusion_reason(
-    node: Any,
-    *,
-    superseded_by: int | None,
-    mirror_archived: bool = False,
-    has_mirror: bool = True,
-) -> MemoryIndexExclusionReason | None:
-    """Classify index exclusion, with node-level causes before mirror state.
-
-    The default mirror state checks only whether a node can be mirrored live.
-    ``node`` may be a MemoryNode or a projection of its eligibility fields.
-    """
-
-    if node.archived_at is not None or _is_superseded(node, superseded_by):
-        return MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED
-    if node.node_kind not in _KNOWLEDGE_NODE_KINDS:
-        return MemoryIndexExclusionReason.NOT_A_CONTENT_NODE
-    if node.visibility not in _SHARED_VISIBILITIES:
-        return MemoryIndexExclusionReason.PRIVATE_VISIBILITY
-    if mirror_archived:
-        return MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED
-    if not has_mirror:
-        return MemoryIndexExclusionReason.NOT_YET_INDEXED
-    return None
-
-
 def _knowledge_memory_access_predicate(*, org_id: str, user_id: str | None):
     """Require org access; callers without a user never learn private nodes exist."""
 
@@ -91,20 +61,8 @@ def _knowledge_memory_access_predicate(*, org_id: str, user_id: str | None):
         memory_node_visibility_predicate(org_id=org_id, user_id=user_id),
     )
     if not user_id:
-        access = and_(access, MemoryNode.visibility.in_(_SHARED_VISIBILITIES))
+        access = and_(access, MemoryNode.visibility.in_(SHARED_VISIBILITIES))
     return access
-
-
-async def _load_superseded_by(
-    session: AsyncSession, node_ids: Sequence[int]
-) -> dict[int, int]:
-    rows = (await session.execute(
-        select(MemoryEdgeNode.source_node_id, MemoryEdgeNode.target_node_id)
-        .where(MemoryEdgeNode.source_node_id.in_(node_ids))
-        .where(MemoryEdgeNode.edge_kind == "superseded_by")
-        .order_by(MemoryEdgeNode.id.asc())
-    )).all()
-    return dict(rows)
 
 
 async def get_memory_index_exclusion_reasons(
@@ -134,7 +92,7 @@ async def get_memory_index_exclusion_reasons(
     readable_refs = [ref for ref, node_id in node_ids.items() if node_id in by_id]
     if not readable_refs:
         return {}
-    superseded_by = await _load_superseded_by(session, list(by_id))
+    superseded_by = await load_superseded_by(session, list(by_id))
     mirrors = dict((await session.execute(
         select(KnowledgeItem.source_ref, KnowledgeItem.archived_at).where(
             KnowledgeItem.source == MemoryConnector.source_key,
@@ -157,7 +115,7 @@ async def get_memory_index_exclusion_reasons(
 
 def _candidate_node_query():
     return select(MemoryNode).where(
-        MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS)
+        MemoryNode.node_kind.in_(KNOWLEDGE_NODE_KINDS)
     )
 
 
@@ -175,7 +133,7 @@ def _draft_for_memory(
     content = str(node.text or node.canonical_label).strip()
     memory_kind = str(node.content_kind or node.node_kind).strip()
     scope = str(node.scope_key or "default").strip()
-    superseded = _is_superseded(node, superseded_by)
+    superseded = is_superseded(node, superseded_by)
     reason = memory_index_exclusion_reason(node, superseded_by=superseded_by)
     archived_at = node.archived_at or (
         node.updated_at
@@ -298,7 +256,7 @@ class MemoryConnector:
         draft_rows: list[MemoryNode] = []
         active_rows: list[MemoryNode] = []
         for node in rows:
-            if node.visibility in _SHARED_VISIBILITIES:
+            if node.visibility in SHARED_VISIBILITIES:
                 if node.org_id is None:
                     skipped[node.id] = MemoryDraftSkipReason.SHARED_WITHOUT_ORG
                     logger.warning(
@@ -311,12 +269,12 @@ class MemoryConnector:
                 skipped[node.id] = MemoryDraftSkipReason.NOT_SHARED_AND_NO_MIRROR
                 continue
             draft_rows.append(node)
-        superseded_by = await _load_superseded_by(
+        superseded_by = await load_superseded_by(
             session, [node.id for node in active_rows]
         )
         drafts = [
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
-            if node.visibility in _SHARED_VISIBILITIES
+            if node.visibility in SHARED_VISIBILITIES
             else _withdrawn_draft(
                 node,
                 org_id=existing_org_ids[f"memory_node:{node.id}"],
@@ -358,4 +316,5 @@ __all__ = [
     "MemoryIndexExclusionReason",
     "get_memory_index_exclusion_reasons",
     "memory_index_exclusion_reason",
+    "memory_node_index_exclusion_reason",
 ]

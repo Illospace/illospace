@@ -524,6 +524,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
     "knowledge.get": {
         "description": (
             "Read preserved knowledge or memory by exact source_ref from a preservation receipt, such as memory_node:4881. "
+            "The receipt's content ref states its visibility and whether the shared index can serve it; knowledge.get checks that it does. "
             "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists."
         ),
         "arguments": {"source_ref": "string"},
