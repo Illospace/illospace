@@ -38,6 +38,8 @@ def test_tool_catalog_contains_behavior_guidance():
     assert read_description.index("knowledge.search") < read_description.index("workspace.search")
     assert read_description.index("knowledge.get") < read_description.index("workspace.search")
     assert "memory_node:<id>" in read_description
+    assert "not_indexed with a reason" in read_description
+    assert "missing means no readable node exists" in read_description
     assert "workspace.search covers Project Contexts, ideas, and threads" in read_description
     assert "user's delegate" in tools["illo_act"]["description"]
     assert tools["illo_act"]["inputSchema"]["required"] == ["capability"]

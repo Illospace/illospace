@@ -183,6 +183,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Use knowledge.search for source-backed preserved knowledge and memory, "
                         "or knowledge.get for an exact source_ref such as memory_node:<id> from a preservation receipt. "
+                        "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists. "
                         "workspace.search covers Project Contexts, ideas, and threads. "
                         "Other read capabilities include project_contexts.search, "
                         "thread.get, skills.get, skills.list, handoff.get, team.members.list, "
@@ -521,7 +522,10 @@ async def _tool_submit(
 
 READ_CAPABILITIES: dict[str, dict[str, Any]] = {
     "knowledge.get": {
-        "description": "Read preserved knowledge or memory by exact source_ref from a preservation receipt, such as memory_node:4881.",
+        "description": (
+            "Read preserved knowledge or memory by exact source_ref from a preservation receipt, such as memory_node:4881. "
+            "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists."
+        ),
         "arguments": {"source_ref": "string"},
     },
     "knowledge.search": {
@@ -947,6 +951,7 @@ async def _tool_read(
             db,
             [_required_capability_string(capability_arguments, "source_ref", capability=capability)],
             org_id=principal.org_id,
+            user_id=principal.owner_user_id,
         )
     if capability == "knowledge.search":
         return await search_knowledge(
