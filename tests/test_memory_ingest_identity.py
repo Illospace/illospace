@@ -1,13 +1,20 @@
 """First-sentence content reuse must respect access and requested visibility."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Select, false, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateTable
 
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
-from brain.platform.db.models.reconstructive_memory import MemoryAssertionNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import (
+    MemoryAssertionNode,
+    MemoryNode,
+    MemorySource,
+    MemorySpan,
+)
 from brain.platform.db.repositories.reconstructive_memory import (
     MemoryNodeRepository,
     NodeDraft,
@@ -283,3 +290,179 @@ async def test_missing_read_context_does_not_reuse_an_ownerless_private_node(ses
     second = await ingest_memory_source(session, content=content)
 
     assert first.content_node_id != second.content_node_id
+
+
+def _interleave_content_insert(session, monkeypatch, *, user_id, visibility, text):
+    """Insert after the first lookup has missed, outside the attempted savepoint.
+
+    SQLite cannot model two writers here. Keeping the competing row in the outer
+    transaction models a committed winner that survives the losing insert.
+    """
+    state = SimpleNamespace(
+        node=MemoryNode(
+            node_kind="content", canonical_label="Weekly update.",
+            normalized_key="weekly update.", scope_key="default", text=text,
+            org_id=_TEST_ORG_ID, user_id=user_id, visibility=visibility,
+        ),
+        lookup_keys=[], source_ids=[], span_ids=[],
+    )
+    execute = session.execute
+
+    async def execute_with_interleaving(statement, *args, **kwargs):
+        result = await execute(statement, *args, **kwargs)
+        if isinstance(statement, Select) and "readable" in statement.selected_columns:
+            state.lookup_keys.append(statement.compile().params["normalized_key_1"])
+            if len(state.lookup_keys) == 1:
+                assert not session.in_nested_transaction()
+                state.source_ids = list((await execute(select(MemorySource.id))).scalars())
+                state.span_ids = list((await execute(select(MemorySpan.id))).scalars())
+                assert state.source_ids and state.span_ids
+                session.add(state.node)
+                await session.flush()
+        return result
+
+    monkeypatch.setattr(session, "execute", execute_with_interleaving)
+    return state
+
+
+@pytest.mark.parametrize("visibility", ["team", "org"])
+async def test_interleaved_private_insert_is_guarded_before_shared_ingest(
+    session, monkeypatch, visibility,
+):
+    race = _interleave_content_insert(
+        session, monkeypatch, user_id=_TEST_USER_ID, visibility="private",
+        text="Weekly update. Alice's private launch plan.",
+    )
+    content = "Weekly update. Bob's shared launch plan."
+    result = await _ingest(session, content, user_id=_OTHER_USER_ID, visibility=visibility)
+
+    assert race.lookup_keys == [
+        "weekly update.", "weekly update.", f"weekly update.:{_OTHER_USER_ID}:{visibility}",
+    ]
+    assert result.content_node_id != race.node.id
+    node = await session.get(MemoryNode, result.content_node_id)
+    assert node.user_id == _OTHER_USER_ID
+    assert node.visibility == result.to_dict()["visibility"] == visibility
+    assert node.text == content
+    assert result.to_dict()["content_node_reused"] is False
+    assert await session.scalar(select(MemoryNode.id).where(
+        MemoryNode.id == node.id,
+        memory_node_visibility_predicate(org_id=_TEST_ORG_ID, user_id=_OTHER_USER_ID),
+    )) == node.id
+    assert list(await session.scalars(select(MemoryAssertionNode.id).where(
+        MemoryAssertionNode.node_id == race.node.id,
+    ))) == []
+    assert race.node.visibility == "private"
+
+
+@pytest.mark.parametrize("visibility", ["private", "team", "org"])
+async def test_interleaved_reusable_insert_reports_content_node_reused(
+    session, monkeypatch, visibility,
+):
+    content = "Weekly update. The launch is scheduled for Monday."
+    race = _interleave_content_insert(
+        session, monkeypatch, user_id=_TEST_USER_ID, visibility=visibility, text=content,
+    )
+    result = await _ingest(session, content, visibility=visibility)
+
+    assert race.lookup_keys == ["weekly update.", "weekly update."]
+    assert result.content_node_id == race.node.id
+    assert result.to_dict()["content_node_reused"] is True
+    assert result.to_dict()["content_text_stored"] is True
+    assert list(await session.scalars(select(MemoryNode.id).where(
+        MemoryNode.org_id == _TEST_ORG_ID,
+        MemoryNode.node_kind == "content",
+        MemoryNode.scope_key == "default",
+        MemoryNode.normalized_key == "weekly update.",
+    ))) == [race.node.id]
+
+
+@pytest.mark.parametrize("reusable", [False, True])
+async def test_interleaved_conflict_preserves_source_spans_and_final_assertion(
+    session, monkeypatch, reusable,
+):
+    content = "Weekly update. The launch is scheduled for Monday."
+    race = _interleave_content_insert(
+        session, monkeypatch,
+        user_id=_OTHER_USER_ID if reusable else _TEST_USER_ID,
+        visibility="team" if reusable else "private", text=content,
+    )
+    result = await _ingest(session, content, user_id=_OTHER_USER_ID, visibility="team")
+
+    assert race.lookup_keys[:2] == ["weekly update.", "weekly update."]
+    assert race.source_ids == [result.source_id]
+    assert race.span_ids == list(result.span_ids)
+    assert session.is_active
+    await session.commit()
+    session.expire_all()
+
+    source = await session.get(MemorySource, result.source_id)
+    assert source.raw_content == content
+    spans = list(await session.scalars(select(MemorySpan).where(
+        MemorySpan.source_id == source.id,
+    ).order_by(MemorySpan.id)))
+    assert [span.id for span in spans] == race.span_ids
+    assert all(span.text == content for span in spans)
+    assertion = await session.get(MemoryAssertionNode, result.assertion_id)
+    assert assertion.node_id == result.content_node_id
+    assert assertion.source_span_ids == race.span_ids
+    assert assertion.claim_text == content
+    assert result.to_dict()["content_node_reused"] is reusable
+
+
+async def test_content_node_repeated_key_conflicts_raise_bounded_error(session, monkeypatch):
+    existing = await MemoryNodeRepository(session).upsert_node(
+        draft=NodeDraft(node_kind="content", canonical_label="Weekly update."),
+        org_id=_TEST_ORG_ID, user_id=_TEST_USER_ID,
+    )
+    execute = session.execute
+    lookup_keys = []
+
+    async def always_miss_content_lookup(statement, *args, **kwargs):
+        if isinstance(statement, Select) and "readable" in statement.selected_columns:
+            lookup_keys.append(statement.compile().params["normalized_key_1"])
+            # Each attempted insert meets the real unique constraint, but the
+            # next lookup misses again, as if another writer replaced the row.
+            statement = statement.where(false())
+        return await execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "execute", always_miss_content_lookup)
+    with pytest.raises(RuntimeError, match="5 unique-key conflicts for the same candidate key") as error:
+        await _ingest(session, "Weekly update. The launch is scheduled for Monday.")
+
+    assert isinstance(error.value.__cause__, IntegrityError)
+    assert lookup_keys == ["weekly update."] * 5
+    assert session.is_active
+    assert list(await session.scalars(select(MemoryNode.id))) == [existing.id]
+
+
+async def test_content_node_disambiguation_exhaustion_raises_bounded_error(session):
+    scoped_key = f"weekly update.:{_OTHER_USER_ID}:team"
+    keys = ["weekly update.", scoped_key, *(f"{scoped_key}:{i}" for i in range(1, 50))]
+    session.add_all([
+        MemoryNode(
+            node_kind="content", canonical_label="Weekly update.", normalized_key=key,
+            org_id=_TEST_ORG_ID, user_id=_TEST_USER_ID, visibility="private",
+        )
+        for key in keys
+    ])
+    await session.flush()
+
+    with pytest.raises(RuntimeError, match="exhausted 50 disambiguated keys"):
+        await _ingest(
+            session, "Weekly update. Bob's shared launch plan.",
+            user_id=_OTHER_USER_ID, visibility="team",
+        )
+
+    assert len(list(await session.scalars(select(MemoryNode.id)))) == 51
+
+
+async def test_content_node_non_key_integrity_error_is_not_retried(session):
+    with pytest.raises(IntegrityError, match="FOREIGN KEY constraint failed"):
+        await MemoryNodeRepository(session).get_or_create_content_node(
+            draft=NodeDraft(node_kind="content", canonical_label="Weekly update."),
+            org_id=_TEST_ORG_ID, user_id="00000000-0000-0000-0000-000000000077",
+        )
+
+    assert session.is_active
+    assert list(await session.scalars(select(MemoryNode.id))) == []

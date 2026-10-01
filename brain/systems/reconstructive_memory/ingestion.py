@@ -10,14 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.reconstructive_memory import MemoryNode
-from brain.platform.db.repositories.memory_visibility import VALID_MEMORY_VISIBILITIES
+from brain.platform.db.repositories.memory_visibility import MEMORY_VISIBILITY_RANK
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.repositories.reconstructive_memory import (
     AssertionDraft,
@@ -28,7 +27,6 @@ from brain.platform.db.repositories.reconstructive_memory import (
     MemorySourceRepository,
     NodeDraft,
     SourceSpanDraft,
-    memory_node_visibility_predicate,
     normalize_key,
 )
 from brain.systems.knowledge.memory_eligibility import (
@@ -41,7 +39,6 @@ logger = logging.getLogger(__name__)
 _INFO_QUEUE_KEY = "illo_memory_knowledge_index_queue"
 _INFO_ARMED_KEY = "illo_memory_knowledge_index_listeners_armed"
 _POST_COMMIT_TASKS: set[asyncio.Task] = set()
-_VISIBILITY_ORDER = {visibility: rank for rank, visibility in enumerate(VALID_MEMORY_VISIBILITIES)}
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 _STOP_WORDS = {
@@ -432,56 +429,18 @@ async def _upsert_content_node(
     user_id: str | None,
     visibility: str,
 ) -> tuple[MemoryNode, bool]:
-    """Return the node and whether a readable first-sentence match was reused.
+    """Resolve the content identity, then widen and reindex when allowed."""
+    node, reused = await MemoryNodeRepository(session).get_or_create_content_node(
+        draft=draft, org_id=org_id, user_id=user_id, visibility=visibility,
+    )
+    if reused and MEMORY_VISIBILITY_RANK.get(node.visibility, -1) < MEMORY_VISIBILITY_RANK[visibility]:
+        # service imports this package through reconstructive_memory.embeddings.
+        from brain.systems.knowledge.service import reindex_updated_memory_node
 
-    Keep the repository's label-based upsert unchanged for shared vocabulary.
-    """
-    base_key = draft.normalized_key
-    scoped_key = f"{base_key}:{user_id or 'unowned'}:{visibility}"
-    attempt = 0
-    node_repo = MemoryNodeRepository(session)
-    while True:
-        match = (await session.execute(select(
-            MemoryNode,
-            memory_node_visibility_predicate(org_id=org_id, user_id=user_id).label("readable"),
-        ).where(
-            MemoryNode.org_id == org_id,
-            MemoryNode.node_kind == "content",
-            MemoryNode.scope_key == draft.scope_key,
-            MemoryNode.normalized_key == draft.normalized_key,
-        ).with_for_update())).first()
-        if match is None:
-            node = await node_repo.upsert_node(
-                draft=draft, org_id=org_id, user_id=user_id, visibility=visibility,
-            )
-            return node, False
-
-        node, readable = match
-        if readable:
-            wide_enough = _VISIBILITY_ORDER.get(node.visibility, -1) >= _VISIBILITY_ORDER[visibility]
-            can_widen = (
-                node.visibility == "private"
-                and bool(user_id)
-                and node.user_id == user_id
-                and visibility in {"team", "org"}
-                and node.text == draft.text
-            )
-            if wide_enough or can_widen:
-                node.confidence = max(float(node.confidence or 0), draft.confidence)
-                if not wide_enough:
-                    # service imports this package through reconstructive_memory.embeddings.
-                    from brain.systems.knowledge.service import reindex_updated_memory_node
-
-                    node.visibility = visibility
-                    await session.flush()
-                    await reindex_updated_memory_node(session, node=node)
-                return node, True
-
-        # The key can also outlive a text/visibility edit. Check every candidate
-        # before reusing it, including disambiguated keys from earlier ingests.
-        key = scoped_key if attempt == 0 else f"{scoped_key}:{attempt}"
-        draft = replace(draft, normalized_key=key)
-        attempt += 1
+        node.visibility = visibility
+        await session.flush()
+        await reindex_updated_memory_node(session, node=node)
+    return node, reused
 
 
 def _clean_content(content: str) -> str:
