@@ -286,6 +286,39 @@ async def test_projection_keeps_distinct_data_in_same_id_receipt(submission_resp
     assert "final_answer" not in response["receipts"][0]["outcome"]["handling"]["result"]
 
 
+async def test_triage_only_builder_keeps_base_payload_without_reconciling(submission_response):
+    fixture = submission_response
+    fixture.event.action_result = {"triage": fixture.handling}
+    fixture.receipt.outcome = {"triage": deepcopy(fixture.handling)}
+    inbound_results.read_run_failure_diagnostic.return_value = SimpleNamespace(retry_scheduled=True)
+
+    internal = await fixture.internal()
+
+    inbound_results.reconcile_inbound_triage_run.assert_not_called()
+    inbound_results.read_run_failure_diagnostic.assert_not_called()
+    fixture.db.get.assert_not_called()
+    receipt = inbound_results.inbound_admin.serialize_receipt(fixture.receipt)
+    assert internal == {
+        "event_id": fixture.event.id,
+        "submission_id": fixture.event.id,
+        "result_id": fixture.event.id,
+        "status": "processed",
+        "handling_status": None,
+        "run_id": None,
+        "run_status": None,
+        "retry_attempt": None,
+        "original_run_id": None,
+        "replacement_run_id": None,
+        "retry_lineage": None,
+        "requires_durable_evidence": False,
+        "evidence_status": "not_required",
+        "evidence_contract": None,
+        "event": inbound_results.inbound_admin.serialize_event(fixture.event, include_payload=False),
+        "latest_receipt": receipt,
+        "receipts": [receipt],
+    }
+
+
 async def test_triage_only_uses_one_current_block(submission_response):
     fixture = submission_response
     fixture.event.action_result = {"triage": fixture.handling}
@@ -294,21 +327,66 @@ async def test_triage_only_uses_one_current_block(submission_response):
     fixture.receipt.outcome["triage"]["evidence_contract"] = {"status": "missing"}
     fixture.receipt.tool_use["attribution"] = {"tags": ["different"]}
     internal = await fixture.internal()
-    assert internal["run_status"] == "completed"
-    assert internal["evidence_contract"] == fixture.handling["evidence_contract"]
-    fixture.db.get.assert_awaited_with(inbound_results.AgentRunRow, 918)
     response = await fixture.response(include_payload=False)
-    for key in ("final_answer", "evidence_contract", "attribution", "completed_at", "reconciled_at"):
+    for key in ("final_answer", "attribution", "completed_at", "reconciled_at"):
         assert response[key] == fixture.handling[key]
+    for key in ("run_id", "run_status", "handling_status", "evidence_status", "evidence_contract"):
+        assert response[key] == internal[key]
+    assert "failure" not in response
     assert response["mutated_target_refs"] == ["memory_node:918"]
     assert "final_answer" not in response["event"]["action_result"]["triage"]
-    assert "evidence_contract" not in response["event"]["action_result"]["triage"]
+    assert response["event"]["action_result"]["triage"]["evidence_contract"] == fixture.handling["evidence_contract"]
     assert response["latest_receipt"]["outcome"]["triage"]["evidence_contract"] == {"status": "missing"}
     assert response["latest_receipt"]["outcome"]["triage"]["result"]["final_answer"] == "Different nested answer"
     assert response["latest_receipt"]["tool_use"]["attribution"] == {"tags": ["different"]}
     compact = await fixture.response(compact=True)
-    assert compact["terminal"] is True
-    assert compact["final_answer"] == fixture.answer
+    assert compact["terminal"] is False
+    assert compact["run_status"] is None
+    assert "final_answer" not in compact
+
+
+@pytest.mark.parametrize("status", [None, "running", "completed", "failed", "canceled", "expired"])
+async def test_triage_compact_uses_only_builder_run_status(submission_response, status):
+    fixture = submission_response
+    fixture.event.action_result = {"triage": fixture.handling}
+    internal = await fixture.internal()
+    internal["run_status"] = status
+    response = project_inbound_submission_result(internal, compact=True)
+    terminal = status in {"completed", "failed", "canceled", "expired"}
+    assert response["terminal"] is terminal
+    assert response["run_status"] == status
+    if terminal:
+        assert response["final_answer"] == fixture.answer
+    else:
+        assert "final_answer" not in response
+
+
+@pytest.mark.parametrize("shape", ["empty_handling", "slack_run_admitted"])
+async def test_projection_selection_uses_builder_then_triage(submission_response, shape):
+    fixture = submission_response
+    triage = {"final_answer": "Triage answer"}
+    if shape == "empty_handling":
+        fixture.event.action_result = {"handling": {}, "triage": triage}
+        expected = triage["final_answer"]
+    else:
+        fixture.event.action_result = {
+            **fixture.handling, "operation": "slack_run_admitted", "triage": triage,
+        }
+        expected = fixture.answer
+    response = await fixture.response(include_payload=False)
+    assert response["final_answer"] == expected
+
+
+async def test_projection_keeps_builder_contract_and_failure(submission_response):
+    internal = await submission_response.internal()
+    internal.update(
+        run_id=123, run_status="running", handling_status="pending", evidence_status="pending",
+        evidence_contract={"status": "pending"}, failure={"message": "Existing failure"},
+    )
+    response = project_inbound_submission_result(internal)
+    for key in ("run_id", "run_status", "handling_status", "evidence_status", "evidence_contract", "failure"):
+        assert response[key] == internal[key]
+    assert response["event"]["action_result"]["handling"]["evidence_contract"] == submission_response.handling["evidence_contract"]
 
 
 async def test_current_handling_takes_precedence_over_triage_and_receipt(submission_response):
@@ -370,8 +448,28 @@ async def test_projection_does_not_remove_values_for_empty_top_level_copies(subm
     fixture.event.action_result = {"handling": {"final_answer": "", "attribution": {}, "evidence_contract": {}}}
     internal = await fixture.internal()
     response = project_inbound_submission_result(internal)
-    assert response["event"] == internal["event"]
+    expected_event = deepcopy(internal["event"])
+    del expected_event["action_result"]["handling"]["final_answer"]
+    assert response["event"] == expected_event
     assert response["latest_receipt"] == internal["latest_receipt"]
+    assert response["final_answer"] == ""
+
+
+@pytest.mark.parametrize("compact", [False, True])
+async def test_completed_empty_final_answer_is_published(submission_response, compact):
+    fixture = submission_response
+    fixture.handling["final_answer"] = ""
+    fixture.handling["result"]["final_answer"] = ""
+    response = await fixture.response(compact=compact, include_payload=False)
+    assert response["final_answer"] == ""
+    if compact:
+        assert response["terminal"] is True
+    else:
+        assert json.dumps(response).count('"final_answer":') == 1
+        assert "final_answer" not in response["event"]["action_result"]["handling"]
+        assert "final_answer" not in response["event"]["action_result"]["handling"]["result"]
+        assert "final_answer" not in response["latest_receipt"]["outcome"]["handling"]
+        assert "final_answer" not in response["latest_receipt"]["outcome"]["handling"]["result"]
 
 
 @pytest.mark.parametrize("status", ["failed", "canceled", "expired"])

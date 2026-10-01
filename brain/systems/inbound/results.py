@@ -36,6 +36,15 @@ class InboundSubmissionResult:
             raise ValueError("payload must be present if and only if state is FOUND")
 
 
+def _result_handling(action_result: dict[str, Any]) -> dict[str, Any]:
+    handling = action_result.get("handling")
+    if isinstance(handling, dict):
+        return dict(handling)
+    if action_result.get("operation") == "slack_run_admitted":
+        return dict(action_result)
+    return {}
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -43,24 +52,50 @@ def _as_dict(value: Any) -> dict[str, Any]:
 def _select_result_handling(action_result: Any) -> tuple[dict[str, Any], str | None]:
     """Select the event-owned current block and its path, including legacy runs."""
     action_result = _as_dict(action_result)
-    for source in ("handling", "triage"):
-        block = action_result.get(source)
-        if isinstance(block, dict):
-            return block, source
-    if action_result.get("operation") == "slack_run_admitted":
-        return action_result, None
-    return {}, None
+    handling = _result_handling(action_result)
+    if handling:
+        return handling, "handling" if isinstance(action_result.get("handling"), dict) else None
+    triage = action_result.get("triage")
+    return (triage, "triage") if isinstance(triage, dict) else ({}, None)
 
 
 def _without_equal_value(value: Any, path: tuple[str, ...], published: Any) -> Any:
-    """Copy only a known path, removing its value if a nonempty copy is published."""
-    if not published or not isinstance(value, dict) or path[0] not in value:
+    """Copy only a known path, removing its value if an equal copy is published."""
+    if published is None or published == {} or not isinstance(value, dict) or path[0] not in value:
         return value
     key, *rest = path
     if rest:
         return {**value, key: _without_equal_value(value[key], tuple(rest), published)}
     if value[key] == published:
         return {name: item for name, item in value.items() if name != key}
+    return value
+
+
+# None marks the selected handling or triage block in these known paths.
+_RESULT_DUPLICATE_PATHS = (
+    (("event", "action_result", None, "final_answer"), "final_answer"),
+    (("event", "action_result", None, "result", "final_answer"), "final_answer"),
+    (("event", "action_result", None, "attribution"), "attribution"),
+    (("event", "action_result", None, "evidence_contract"), "evidence_contract"),
+    (("latest_receipt", "outcome", None, "final_answer"), "final_answer"),
+    (("latest_receipt", "outcome", None, "result", "final_answer"), "final_answer"),
+    (("latest_receipt", "outcome", None, "attribution"), "attribution"),
+    (("latest_receipt", "outcome", None, "evidence_contract"), "evidence_contract"),
+    (("latest_receipt", "tool_use", "attribution"), "attribution"),
+    (("latest_receipt", "tool_use", "evidence_contract"), "evidence_contract"),
+)
+
+
+def _without_result_duplicates(
+    value: dict[str, Any], source: str | None, published: dict[str, Any]
+) -> dict[str, Any]:
+    for path, key in _RESULT_DUPLICATE_PATHS:
+        if None in path and source is None:
+            continue
+        if key != "final_answer" and not isinstance(published[key], dict):
+            continue
+        selected_path = tuple(source if part is None else part for part in path)
+        value = _without_equal_value(value, selected_path, published[key])
     return value
 
 
@@ -83,7 +118,7 @@ def project_inbound_submission_result(
     handling, source = _select_result_handling(event.get("action_result"))
     result = _as_dict(handling.get("result"))
     attribution = handling.get("attribution", payload.get("attribution", {}))
-    evidence_contract = handling.get("evidence_contract", payload.get("evidence_contract"))
+    evidence_contract = payload.get("evidence_contract")
     final_answer = handling.get("final_answer", result.get("final_answer", payload.get("final_answer")))
     summary = {
         "event_id": payload.get("event_id"),
@@ -103,7 +138,7 @@ def project_inbound_submission_result(
             summary["attribution"] = {"tags": attribution.get("tags", [])}
         summary["terminal"] = coerce_run_status(summary["run_status"]) in TERMINAL_RUN_STATUSES
         if summary["terminal"]:
-            if final_answer:
+            if final_answer is not None:
                 summary["final_answer"] = final_answer
             failure = payload.get("failure")
             if isinstance(failure, dict):
@@ -114,28 +149,9 @@ def project_inbound_submission_result(
                 summary["failure"] = failure
         return summary
 
-    def block_view(value: Any, path: tuple[str, ...]) -> Any:
-        value = _without_equal_value(value, (*path, "final_answer"), final_answer)
-        value = _without_equal_value(value, (*path, "result", "final_answer"), final_answer)
-        return metadata_view(value, path)
-
-    def metadata_view(value: Any, path: tuple[str, ...]) -> Any:
-        for key, published in (("attribution", attribution), ("evidence_contract", evidence_contract)):
-            if isinstance(published, dict):
-                value = _without_equal_value(value, (*path, key), published)
-        return value
-
-    def receipt_view(value: Any) -> Any:
-        if source is not None:
-            value = block_view(value, ("outcome", source))
-        return metadata_view(value, ("tool_use",))
-
     projected = {**payload, **summary, "final_answer": final_answer, "evidence_contract": evidence_contract}
-    if source is not None:
-        projected = block_view(projected, ("event", "action_result", source))
+    projected = _without_result_duplicates(projected, source, projected)
     latest_receipt = payload.get("latest_receipt")
-    if "latest_receipt" in payload:
-        projected["latest_receipt"] = receipt_view(latest_receipt)
     receipts = payload.get("receipts")
     if (
         isinstance(receipts, list) and receipts
@@ -145,7 +161,12 @@ def project_inbound_submission_result(
         # Omit a fully duplicated receipt; retain any distinct same-id data.
         projected["receipts"] = (
             receipts[1:] if receipts[0] == latest_receipt
-            else [receipt_view(receipts[0]), *receipts[1:]]
+            else [
+                _without_result_duplicates(
+                    {"latest_receipt": receipts[0]}, source, projected
+                )["latest_receipt"],
+                *receipts[1:],
+            ]
         )
     return projected
 
@@ -174,8 +195,8 @@ async def read_inbound_submission_result(
             state=InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION,
         )
 
-    action_result = _as_dict(event.action_result)
-    handling, _ = _select_result_handling(action_result)
+    action_result = dict(event.action_result or {})
+    handling = _result_handling(action_result)
     reconciled = False
     current_run = None
     current_run_status = None
@@ -193,8 +214,8 @@ async def read_inbound_submission_result(
     # Reconciliation can replace a failed monitored-channel run. Re-read the
     # event-owned contract so illo_get_result follows the replacement rather
     # than returning the original terminal run forever.
-    action_result = _as_dict(event.action_result)
-    handling, _ = _select_result_handling(action_result)
+    action_result = dict(event.action_result or {})
+    handling = _result_handling(action_result)
     current_run_id = _run_id(handling.get("run_id"))
     if current_run_id is not None and current_run_id != selected_run_id:
         current_run = await session.get(AgentRunRow, current_run_id)
@@ -211,8 +232,8 @@ async def read_inbound_submission_result(
     receipt_payloads = [inbound_admin.serialize_receipt(receipt) for receipt in receipts]
     event_payload = inbound_admin.serialize_event(event, include_payload=include_payload)
 
-    preservation = _as_dict(action_result.get("preservation"))
-    evidence_contract = _as_dict(handling.get("evidence_contract"))
+    preservation = dict(action_result.get("preservation") or {})
+    evidence_contract = dict(handling.get("evidence_contract") or {})
     requires_evidence = bool(
         evidence_contract.get("required")
         or preservation.get("requires_durable_evidence")
