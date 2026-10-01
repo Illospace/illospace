@@ -27,11 +27,11 @@ from brain.systems.knowledge.connectors.base import (
     UpdatedAtCursor,
 )
 from brain.systems.knowledge.memory_eligibility import (
+    KNOWLEDGE_NODE_KINDS,
+    SHARED_VISIBILITIES,
     MemoryIndexExclusionReason,
-    _KNOWLEDGE_NODE_KINDS,
-    _SHARED_VISIBILITIES,
-    _is_superseded,
-    _load_superseded_by,
+    is_superseded,
+    load_superseded_by,
     memory_index_exclusion_reason,
     memory_node_index_exclusion_reason,
 )
@@ -47,7 +47,7 @@ def _knowledge_memory_access_predicate(*, org_id: str, user_id: str | None):
         memory_node_visibility_predicate(org_id=org_id, user_id=user_id),
     )
     if not user_id:
-        access = and_(access, MemoryNode.visibility.in_(_SHARED_VISIBILITIES))
+        access = and_(access, MemoryNode.visibility.in_(SHARED_VISIBILITIES))
     return access
 
 
@@ -78,7 +78,7 @@ async def get_memory_index_exclusion_reasons(
     readable_refs = [ref for ref, node_id in node_ids.items() if node_id in by_id]
     if not readable_refs:
         return {}
-    superseded_by = await _load_superseded_by(session, list(by_id))
+    superseded_by = await load_superseded_by(session, list(by_id))
     mirrors = dict((await session.execute(
         select(KnowledgeItem.source_ref, KnowledgeItem.archived_at).where(
             KnowledgeItem.source == MemoryConnector.source_key,
@@ -101,7 +101,7 @@ async def get_memory_index_exclusion_reasons(
 
 def _candidate_node_query():
     return select(MemoryNode).where(
-        MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS)
+        MemoryNode.node_kind.in_(KNOWLEDGE_NODE_KINDS)
     )
 
 
@@ -119,7 +119,7 @@ def _draft_for_memory(
     content = str(node.text or node.canonical_label).strip()
     memory_kind = str(node.content_kind or node.node_kind).strip()
     scope = str(node.scope_key or "default").strip()
-    superseded = _is_superseded(node, superseded_by)
+    superseded = is_superseded(node, superseded_by)
     reason = memory_index_exclusion_reason(node, superseded_by=superseded_by)
     archived_at = node.archived_at or (
         node.updated_at
@@ -228,13 +228,13 @@ class MemoryConnector:
         candidate_rows = [
             node
             for node in rows
-            if node.visibility in _SHARED_VISIBILITIES
+            if node.visibility in SHARED_VISIBILITIES
             or f"memory_node:{node.id}" in existing_org_ids
         ]
         draft_rows: list[MemoryNode] = []
         active_rows: list[MemoryNode] = []
         for node in candidate_rows:
-            if node.visibility in _SHARED_VISIBILITIES:
+            if node.visibility in SHARED_VISIBILITIES:
                 if node.org_id is None:
                     logger.warning(
                         "Memory knowledge enumeration skipped node %s: org_id is missing",
@@ -243,12 +243,12 @@ class MemoryConnector:
                     continue
                 active_rows.append(node)
             draft_rows.append(node)
-        superseded_by = await _load_superseded_by(
+        superseded_by = await load_superseded_by(
             session, [node.id for node in active_rows]
         )
         return [
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
-            if node.visibility in _SHARED_VISIBILITIES
+            if node.visibility in SHARED_VISIBILITIES
             else _withdrawn_draft(
                 node,
                 org_id=existing_org_ids[f"memory_node:{node.id}"],

@@ -288,7 +288,7 @@ def test_memory_ref_annotations_remain_bounded():
          "knowledge_get": "y" * 1000, "extra": "z" * 1000},
     ]}, source="memory_ingest_source")
     assert refs == [{
-        "kind": "memory_node", "id": "93", "source": "memory_ingest_source", "role": "content",
+        "kind": "memory_node", "id": "93", "source": "memory_ingest_source",
     }]
 
 
@@ -297,6 +297,74 @@ def test_ref_cap_precedes_value_conversion():
     assert refs == [
         {"kind": "memory_node", "id": str(node_id), "source": "x"}
         for node_id in range(1, 21)
+    ]
+
+
+def test_unconvertible_ref_id_is_dropped_before_cap():
+    refs = collect_result_refs({"cue_node_ids": [10**5000, 1, 2]}, source="x")
+    assert refs == [
+        {"kind": "memory_node", "id": "1", "source": "x"},
+        {"kind": "memory_node", "id": "2", "source": "x"},
+    ]
+
+
+def test_996_level_result_keeps_all_collected_refs():
+    # A JSON-compatible payload with 996 object levels, including the root.
+    nested = None
+    for _ in range(995):
+        nested = {"nested": nested}
+    result = {"cue_node_ids": list(range(1, 21)), "nested": nested}
+
+    assert collect_result_refs(result, source="x") == [
+        {"kind": "memory_node", "id": str(node_id), "source": "x"}
+        for node_id in range(1, 21)
+    ]
+
+
+def test_junk_annotations_leave_collected_refs_unchanged():
+    from brain.systems.inbound.attribution import _annotate_content_memory_refs
+
+    refs = [{"kind": "memory_node", "id": "1", "source": "x"}]
+    original = [ref.copy() for ref in refs]
+    _annotate_content_memory_refs(refs, {"mutated_target_refs": [
+        None, "junk", 42,
+        {"kind": "memory_source", "id": 1, "role": "content", "knowledge_get": "eligible"},
+        {"kind": "memory_node", "id": 1, "role": "content", "knowledge_get": "unknown"},
+    ]})
+
+    assert refs == original
+
+
+@pytest.mark.parametrize("error", [RecursionError, ValueError, RuntimeError])
+def test_annotation_failure_keeps_all_refs_unannotated(error):
+    from brain.systems.inbound.attribution import _annotate_content_memory_refs
+
+    class UnconvertibleId:
+        def __str__(self):
+            raise error("annotation conversion failed")
+
+    refs = collect_result_refs({"cue_node_ids": [1, 2]}, source="x")
+    original = [ref.copy() for ref in refs]
+    annotation = {
+        "kind": "memory_node", "id": 1, "role": "content",
+        "visibility": "team", "knowledge_get": "eligible",
+    }
+    _annotate_content_memory_refs(
+        refs, {"mutated_target_refs": [annotation]},
+        result_refs=[{**annotation, "id": UnconvertibleId()}],
+    )
+
+    assert refs == original
+
+
+def test_nested_explicit_refs_do_not_supply_annotations():
+    result = {"nested": {"mutated_target_refs": [{
+        "kind": "memory_node", "id": 1, "role": "content",
+        "visibility": "team", "knowledge_get": "eligible",
+    }]}}
+
+    assert collect_result_refs(result, source="x") == [
+        {"kind": "memory_node", "id": "1", "source": "x"},
     ]
 
 

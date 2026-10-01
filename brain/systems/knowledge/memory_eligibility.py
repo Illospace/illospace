@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
 
-_SHARED_VISIBILITIES = ("org", "team")
-_KNOWLEDGE_NODE_KINDS = ("content",)
+SHARED_VISIBILITIES = ("org", "team")
+KNOWLEDGE_NODE_KINDS = ("content",)
 
 
 class MemoryIndexExclusionReason(StrEnum):
@@ -22,7 +22,7 @@ class MemoryIndexExclusionReason(StrEnum):
     NOT_YET_INDEXED = "not_yet_indexed"
 
 
-def _is_superseded(node: Any, superseded_by: int | None) -> bool:
+def is_superseded(node: Any, superseded_by: int | None) -> bool:
     return node.truth_status == "superseded" or superseded_by is not None
 
 
@@ -39,11 +39,11 @@ def memory_index_exclusion_reason(
     ``node`` may be a MemoryNode or a projection of its eligibility fields.
     """
 
-    if node.archived_at is not None or _is_superseded(node, superseded_by):
+    if node.archived_at is not None or is_superseded(node, superseded_by):
         return MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED
-    if node.node_kind not in _KNOWLEDGE_NODE_KINDS:
+    if node.node_kind not in KNOWLEDGE_NODE_KINDS:
         return MemoryIndexExclusionReason.NOT_A_CONTENT_NODE
-    if node.visibility not in _SHARED_VISIBILITIES:
+    if node.visibility not in SHARED_VISIBILITIES:
         return MemoryIndexExclusionReason.PRIVATE_VISIBILITY
     if mirror_archived:
         return MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED
@@ -52,7 +52,7 @@ def memory_index_exclusion_reason(
     return None
 
 
-async def _load_superseded_by(
+async def load_superseded_by(
     session: AsyncSession, node_ids: Sequence[int]
 ) -> dict[int, int]:
     rows = (await session.execute(
@@ -68,5 +68,16 @@ async def memory_node_index_exclusion_reason(
     session: AsyncSession, node: MemoryNode,
 ) -> MemoryIndexExclusionReason | None:
     """Check a stored node's eligibility without assuming its mirror exists yet."""
-    superseded_by = await _load_superseded_by(session, [node.id])
+    superseded_by = await load_superseded_by(session, [node.id])
     return memory_index_exclusion_reason(node, superseded_by=superseded_by.get(node.id))
+
+
+__all__ = [
+    "KNOWLEDGE_NODE_KINDS",
+    "SHARED_VISIBILITIES",
+    "MemoryIndexExclusionReason",
+    "is_superseded",
+    "load_superseded_by",
+    "memory_index_exclusion_reason",
+    "memory_node_index_exclusion_reason",
+]

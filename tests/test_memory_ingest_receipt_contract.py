@@ -103,7 +103,7 @@ async def test_ingestion_eligibility_observes_supersession_edges(monkeypatch):
     from brain.systems.knowledge import memory_eligibility
     from brain.systems.reconstructive_memory import ingestion
 
-    monkeypatch.setattr(memory_eligibility, "_load_superseded_by", AsyncMock(return_value={42: 43}))
+    monkeypatch.setattr(memory_eligibility, "load_superseded_by", AsyncMock(return_value={42: 43}))
     node = SimpleNamespace(
         id=42, node_kind="content", visibility="team", archived_at=None, truth_status="active",
     )
