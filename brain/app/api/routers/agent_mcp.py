@@ -236,9 +236,9 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             (
                 "Read the current status and receipts for an async Illo submission. "
                 "For preservation requests, returns whether durable evidence is pending, satisfied, or missing. "
-                "The answer appears once at final_answer; evidence_contract and attribution are top-level. "
-                "latest_receipt is the newest receipt; receipts contains only older receipts. "
-                "Poll with compact: true for status and the final_answer only when completed. "
+                "The current answer is published at final_answer; evidence_contract and attribution are top-level. "
+                "latest_receipt is the newest receipt; receipts preserves distinct receipt history. "
+                "Poll with compact: true for status, terminal, and any final_answer and public failure (category and message) when terminal. "
                 "compact defaults to false and overrides include_payload when true. "
                 "Prefer webhook callbacks when configured; this tool is the polling fallback."
             ),
@@ -253,7 +253,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "compact": {
                     "type": "boolean",
-                    "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, and the completed answer; overrides include_payload.",
+                    "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, terminal, and any terminal answer and public failure (category and message); overrides include_payload.",
                     "default": False,
                 },
                 "limit": {

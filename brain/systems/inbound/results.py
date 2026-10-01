@@ -13,6 +13,7 @@ from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.runs.failure_diagnostic import read_run_failure_diagnostic
 from brain.systems.runs.failures import public_agent_start_retry_failure
+from brain.systems.runs.status import TERMINAL_RUN_STATUSES, coerce_run_status
 
 
 class InboundSubmissionResultState(str, Enum):
@@ -35,13 +36,32 @@ class InboundSubmissionResult:
             raise ValueError("payload must be present if and only if state is FOUND")
 
 
-def _result_handling(action_result: dict[str, Any]) -> dict[str, Any]:
-    handling = action_result.get("handling")
-    if isinstance(handling, dict):
-        return dict(handling)
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _select_result_handling(action_result: Any) -> tuple[dict[str, Any], str | None]:
+    """Select the event-owned current block and its path, including legacy runs."""
+    action_result = _as_dict(action_result)
+    for source in ("handling", "triage"):
+        block = action_result.get(source)
+        if isinstance(block, dict):
+            return block, source
     if action_result.get("operation") == "slack_run_admitted":
-        return dict(action_result)
-    return {}
+        return action_result, None
+    return {}, None
+
+
+def _without_equal_value(value: Any, path: tuple[str, ...], published: Any) -> Any:
+    """Copy only a known path, removing its value if a nonempty copy is published."""
+    if not published or not isinstance(value, dict) or path[0] not in value:
+        return value
+    key, *rest = path
+    if rest:
+        return {**value, key: _without_equal_value(value[key], tuple(rest), published)}
+    if value[key] == published:
+        return {name: item for name, item in value.items() if name != key}
+    return value
 
 
 def _run_id(value: Any) -> int | None:
@@ -54,77 +74,80 @@ def _run_id(value: Any) -> int | None:
 def project_inbound_submission_result(
     payload: dict[str, Any], *, compact: bool = False
 ) -> dict[str, Any]:
-    """Project the full internal result for external MCP callers without mutating it.
+    """Publish current result fields once at known paths; retain distinct history.
 
-    final_answer, evidence_contract and attribution have one top-level home.
-    Evidence remains readable at evidence_status and evidence_contract.status;
-    evidence_contract.mutated_target_refs remains available as well. Top-level
-    mutated_target_refs, attribution.tags, completed_at and reconciled_at expose
-    the current handling result without traversing receipt history.
-    latest_receipt holds the newest receipt; receipts holds only older receipts.
-    Existing status fields and nested completion timestamps remain readable.
+    Unknown shapes and unequal nested values are preserved. Compact polling includes
+    terminal status, any terminal answer, and the existing public failure summary.
     """
-    event = payload.get("event") or {}
-    action_result = event.get("action_result") or {}
-    latest_receipt = payload.get("latest_receipt") or {}
-    outcome = latest_receipt.get("outcome") or {}
-    handling = (
-        _result_handling(action_result)
-        or action_result.get("triage")
-        or outcome.get("handling")
-        or outcome.get("triage")
-        or {}
-    )
-    result = handling.get("result") or {}
-    tool_use = latest_receipt.get("tool_use") or {}
-    attribution = handling.get("attribution") or tool_use.get("attribution") or {}
-    evidence_contract = payload.get("evidence_contract")
-    final_answer = handling.get("final_answer", result.get("final_answer"))
+    event = _as_dict(payload.get("event"))
+    handling, source = _select_result_handling(event.get("action_result"))
+    result = _as_dict(handling.get("result"))
+    attribution = handling.get("attribution", payload.get("attribution", {}))
+    evidence_contract = handling.get("evidence_contract", payload.get("evidence_contract"))
+    final_answer = handling.get("final_answer", result.get("final_answer", payload.get("final_answer")))
     summary = {
         "event_id": payload.get("event_id"),
         "run_id": payload.get("run_id"),
         "run_status": payload.get("run_status"),
         "handling_status": payload.get("handling_status"),
         "evidence_status": payload.get("evidence_status"),
-        "completed_at": handling.get("completed_at"),
-        "reconciled_at": handling.get("reconciled_at"),
-        "mutated_target_refs": (evidence_contract or {}).get(
-            "mutated_target_refs", attribution.get("mutated_target_refs", [])
+        "completed_at": handling.get("completed_at", payload.get("completed_at")),
+        "reconciled_at": handling.get("reconciled_at", payload.get("reconciled_at")),
+        "mutated_target_refs": _as_dict(evidence_contract).get(
+            "mutated_target_refs", _as_dict(attribution).get("mutated_target_refs", [])
         ),
         "attribution": attribution,
     }
     if compact:
-        summary["attribution"] = {"tags": attribution.get("tags", [])}
-        if str(payload.get("run_status") or "").upper() == "COMPLETED":
-            summary["final_answer"] = final_answer
+        if isinstance(attribution, dict):
+            summary["attribution"] = {"tags": attribution.get("tags", [])}
+        summary["terminal"] = coerce_run_status(summary["run_status"]) in TERMINAL_RUN_STATUSES
+        if summary["terminal"]:
+            if final_answer:
+                summary["final_answer"] = final_answer
+            failure = payload.get("failure")
+            if isinstance(failure, dict):
+                summary["failure"] = {
+                    key: failure[key] for key in ("status", "category", "message") if key in failure
+                }
+            elif failure is not None:
+                summary["failure"] = failure
         return summary
 
-    def without_duplicates(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: without_duplicates(item)
-                for key, item in value.items()
-                if key not in {"final_answer", "evidence_contract", "attribution"}
-            }
-        if isinstance(value, list):
-            return [without_duplicates(item) for item in value]
+    def block_view(value: Any, path: tuple[str, ...]) -> Any:
+        value = _without_equal_value(value, (*path, "final_answer"), final_answer)
+        value = _without_equal_value(value, (*path, "result", "final_answer"), final_answer)
+        return metadata_view(value, path)
+
+    def metadata_view(value: Any, path: tuple[str, ...]) -> Any:
+        for key, published in (("attribution", attribution), ("evidence_contract", evidence_contract)):
+            if isinstance(published, dict):
+                value = _without_equal_value(value, (*path, key), published)
         return value
 
-    def receipt_view(receipt: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: without_duplicates(value) if key in {"outcome", "tool_use"} else value
-            for key, value in receipt.items()
-        }
+    def receipt_view(value: Any) -> Any:
+        if source is not None:
+            value = block_view(value, ("outcome", source))
+        return metadata_view(value, ("tool_use",))
 
-    return {
-        **payload,
-        **summary,
-        "final_answer": final_answer,
-        "evidence_contract": evidence_contract,
-        "event": {**event, "action_result": without_duplicates(action_result)},
-        "latest_receipt": receipt_view(latest_receipt) if latest_receipt else None,
-        "receipts": [receipt_view(receipt) for receipt in (payload.get("receipts") or [])[1:]],
-    }
+    projected = {**payload, **summary, "final_answer": final_answer, "evidence_contract": evidence_contract}
+    if source is not None:
+        projected = block_view(projected, ("event", "action_result", source))
+    latest_receipt = payload.get("latest_receipt")
+    if "latest_receipt" in payload:
+        projected["latest_receipt"] = receipt_view(latest_receipt)
+    receipts = payload.get("receipts")
+    if (
+        isinstance(receipts, list) and receipts
+        and _as_dict(latest_receipt).get("id") is not None
+        and _as_dict(receipts[0]).get("id") == latest_receipt["id"]
+    ):
+        # Omit a fully duplicated receipt; retain any distinct same-id data.
+        projected["receipts"] = (
+            receipts[1:] if receipts[0] == latest_receipt
+            else [receipt_view(receipts[0]), *receipts[1:]]
+        )
+    return projected
 
 
 async def read_inbound_submission_result(
@@ -151,8 +174,8 @@ async def read_inbound_submission_result(
             state=InboundSubmissionResultState.NOT_VISIBLE_TO_CONNECTION,
         )
 
-    action_result = dict(event.action_result or {})
-    handling = _result_handling(action_result)
+    action_result = _as_dict(event.action_result)
+    handling, _ = _select_result_handling(action_result)
     reconciled = False
     current_run = None
     current_run_status = None
@@ -170,8 +193,8 @@ async def read_inbound_submission_result(
     # Reconciliation can replace a failed monitored-channel run. Re-read the
     # event-owned contract so illo_get_result follows the replacement rather
     # than returning the original terminal run forever.
-    action_result = dict(event.action_result or {})
-    handling = _result_handling(action_result)
+    action_result = _as_dict(event.action_result)
+    handling, _ = _select_result_handling(action_result)
     current_run_id = _run_id(handling.get("run_id"))
     if current_run_id is not None and current_run_id != selected_run_id:
         current_run = await session.get(AgentRunRow, current_run_id)
@@ -188,8 +211,8 @@ async def read_inbound_submission_result(
     receipt_payloads = [inbound_admin.serialize_receipt(receipt) for receipt in receipts]
     event_payload = inbound_admin.serialize_event(event, include_payload=include_payload)
 
-    preservation = dict(action_result.get("preservation") or {})
-    evidence_contract = dict(handling.get("evidence_contract") or {})
+    preservation = _as_dict(action_result.get("preservation"))
+    evidence_contract = _as_dict(handling.get("evidence_contract"))
     requires_evidence = bool(
         evidence_contract.get("required")
         or preservation.get("requires_durable_evidence")

@@ -49,6 +49,8 @@ def test_tool_catalog_contains_behavior_guidance():
     assert tools["illo_get_result"]["inputSchema"]["properties"]["include_payload"]["default"] is True
     assert "compact: true" in tools["illo_get_result"]["description"]
     assert "final_answer" in tools["illo_get_result"]["description"]
+    assert "terminal" in tools["illo_get_result"]["description"]
+    assert "failure (category and message)" in tools["illo_get_result"]["description"]
 
 
 def test_get_result_forwards_compact_mode(monkeypatch):

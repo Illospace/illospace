@@ -895,7 +895,11 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
     )
     result_payload = json.loads(response.json()["result"]["content"][0]["text"])
 
-    assert result_payload["failure"] == failure
+    assert {key: result_payload["failure"][key] for key in failure} == failure
+    assert result_payload["run_id"] == triage["run_id"]
+    assert result_payload["run_status"] == "failed"
+    assert result_payload["failure"]["diagnostic"]["stage"] == "agent_execution"
+    assert result_payload["failure"]["diagnostic"]["retry_scheduled"] is False
     assert result_payload["event"]["failure"] == failure
     assert result_payload["latest_receipt"]["failure"] == failure
     assert raw_diagnostic not in json.dumps(result_payload)

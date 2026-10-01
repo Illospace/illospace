@@ -487,10 +487,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Retrieve or poll the outcome of an asynchronous Illo operation returned by "
             "illo_submit, illo_read, or illo_act. Preservation results include whether durable "
             "evidence is pending, satisfied, or missing. Use this for result_id receipts instead "
-            "of repeating the original request. The answer appears once at final_answer; "
+            "of repeating the original request. The current answer is published at final_answer; "
             "evidence_contract and attribution are top-level. latest_receipt is the newest "
-            "receipt; receipts contains only older receipts. Poll with compact: true for "
-            "status and the final_answer only when completed. compact defaults to false "
+            "receipt; receipts preserves distinct receipt history. Poll with compact: true for "
+            "status, terminal, and any final_answer and public failure (category and message) when terminal. compact defaults to false "
             "and overrides include_payload when true."
         ),
         "inputSchema": {
@@ -500,7 +500,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "event_id": {"type": "string", "description": "Inbound event id returned by illo_submit."},
                 "submission_id": {"type": "string", "description": "Alias for event_id."},
                 "include_payload": {"type": "boolean", "description": "Whether to include stored payloads.", "default": True},
-                "compact": {"type": "boolean", "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, and the completed answer; overrides include_payload.", "default": False},
+                "compact": {"type": "boolean", "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, terminal, and any terminal answer and public failure (category and message); overrides include_payload.", "default": False},
                 "limit": {"type": "integer", "description": "Maximum decision receipts to return.", "default": 25},
             },
             "required": [],
