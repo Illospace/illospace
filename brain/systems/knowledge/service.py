@@ -20,6 +20,7 @@ from brain.platform.db.models.knowledge import (
     KnowledgeItemEmbedding,
     KnowledgeSyncState,
 )
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
     EnumerationFailureKind,
@@ -27,7 +28,10 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeConnector,
     KnowledgeDraft,
 )
-from brain.systems.knowledge.connectors.memory import MemoryConnector
+from brain.systems.knowledge.connectors.memory import (
+    MemoryConnector,
+    memory_index_exclusion_reason,
+)
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -709,7 +713,7 @@ async def index_memory_node(
     *,
     node_id: int,
 ) -> KnowledgeSyncStats:
-    """Upsert one committed memory node without advancing the sweep cursor."""
+    """Upsert one memory node in the caller's transaction, without a sweep."""
 
     stats = KnowledgeSyncStats()
     connector = MemoryConnector(max_items=1)
@@ -725,11 +729,40 @@ async def index_memory_node(
     await _ingest_drafts(
         session,
         source=connector.source_key,
-        drafts=[(bounded_draft, True)],
+        drafts=[(bounded_draft, bounded_draft.archived_at is None)],
         stats=stats,
         run_at=datetime.now(timezone.utc),
     )
     return stats
+
+
+async def reindex_updated_memory_node(
+    session: AsyncSession,
+    *,
+    node: MemoryNode,
+) -> None:
+    """Withdraw atomically; allow eligible nodes to await a sweep on failure."""
+    node_id = node.id
+    withdrawal_required = (
+        memory_index_exclusion_reason(node, superseded_by=None) is not None
+    )
+    try:
+        # Isolate index errors so a failed shared write cannot poison the
+        # caller's memory transaction. Withdrawal errors still escape it.
+        async with session.begin_nested():
+            stats = await index_memory_node(session, node_id=node_id)
+            if withdrawal_required and stats.failed:
+                raise RuntimeError(f"Memory mirror withdrawal failed for node {node_id}")
+    except Exception:
+        if withdrawal_required:
+            raise
+        logger.warning(
+            "Memory mirror update deferred to sweep for node %s", node_id,
+            exc_info=True,
+        )
+    # A failed or skipped connector read can leave server-updated fields
+    # expired (e.g. updated_at). Load them before the router builds its response.
+    await session.refresh(node)
 
 
 async def sync_connector(
@@ -916,5 +949,6 @@ __all__ = [
     "build_search_text",
     "content_digest",
     "index_memory_node",
+    "reindex_updated_memory_node",
     "sync_connector",
 ]
