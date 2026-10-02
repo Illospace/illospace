@@ -63,6 +63,12 @@ TOOL_ERROR_TEXT_PATTERNS = [
         rf"|\bDELETE\s+FROM\s+{_SQL_IDENTIFIER}|\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE\b).*",
         re.IGNORECASE | re.DOTALL,
     ),
+    # Upper-case driver SQL can have aliases without AS. Keep this bounded
+    # and case-sensitive so ordinary "Select a file from ..." prose survives.
+    re.compile(
+        rf"\bSELECT\b[^\r\n]{{0,400}}?\bFROM[ \t]+{_SQL_IDENTIFIER}.*",
+        re.DOTALL,
+    ),
 ]
 
 SECRET_TOOL_NAMES = {"brain_vault", "vault", "secrets"}
@@ -185,14 +191,16 @@ def _tool_argument_values(args: dict[str, Any]) -> list[str]:
     return argument_values
 
 
-def _redact_tool_arguments(error: str, args: dict[str, Any]) -> str:
-    """Redact each merged region once, including overlapping occurrences."""
+def _redact_tool_error(error: str, args: dict[str, Any]) -> str:
+    """Collect all matches on the original text, then redact merged regions once."""
     intervals = []
     for value in set(_tool_argument_values(args)):
         intervals.extend(
             (match.start(), match.start() + len(value))
             for match in re.finditer(rf"(?={re.escape(value)})", error)
         )
+    for pattern in TOOL_ERROR_TEXT_PATTERNS:
+        intervals.extend(match.span() for match in pattern.finditer(error))
     merged: list[tuple[int, int]] = []
     for start, end in sorted(intervals):
         if merged and start <= merged[-1][1]:
@@ -203,7 +211,7 @@ def _redact_tool_arguments(error: str, args: dict[str, Any]) -> str:
     cursor = 0
     for start, end in merged:
         parts.append(error[cursor:start])
-        parts.append("[secret redacted]")
+        parts.append("[redacted]")
         cursor = end
     parts.append(error[cursor:])
     return "".join(parts)
@@ -214,9 +222,7 @@ def public_tool_error_diagnostic(
 ) -> dict[str, str]:
     """Bound tool diagnostics after removing secrets, SQL and sensitive argument values."""
     message = str(error_message or "")
-    message = _redact_tool_arguments(message, args or {})
-    for pattern in TOOL_ERROR_TEXT_PATTERNS:
-        message = pattern.sub("[redacted]", message)
+    message = _redact_tool_error(message, args or {})
     class_name = _redact_text(str(error_class or "ToolError"))
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", class_name):
         class_name = "ToolError"
