@@ -99,12 +99,16 @@ def _upgrade(bind: sa.Connection) -> None:
 
     metadata = sa.MetaData()
     cycles = _table(bind, metadata, "cycles")
+    # Lock the row before the read: an application edit that commits between
+    # the read and the update must not be overwritten with the old prompt.
     cycle = bind.execute(
-        sa.select(cycles).where(
+        sa.select(cycles)
+        .where(
             cycles.c.id == 8,
             cycles.c.name.startswith("GitHub Reflex"),
             cycles.c.prompt.contains("Domain id `38`"),
         )
+        .with_for_update()
     ).mappings().first()
     if cycle is None or _RULE_MARKER in cycle["prompt"]:
         return
