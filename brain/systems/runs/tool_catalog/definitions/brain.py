@@ -826,7 +826,8 @@ BRAIN_TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "Return only this Cycle's latest completed-run timestamp using one bounded query."
+                        "Return started_at and completed_at for this Cycle's latest run with status "
+                        "completed; skipped and blocked runs do not count."
                     ),
                 },
                 "cursor": {
