@@ -1,6 +1,7 @@
 """Headless Fast tool execution and its public failure diagnostics (issue #917)."""
 
 import json
+from time import perf_counter
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from brain.systems.runs.presentation import public_tool_event_payload
+from brain.systems.runs.presentation import public_tool_error_diagnostic, public_tool_event_payload
 from brain.systems.runs.tools import ToolExecution
 from tests.test_agent import _mock_llm_client
 from tests.test_agent_run_runtime import _runtime
@@ -210,6 +211,8 @@ async def test_sql_shaped_diagnostic_removes_whole_tail(statement):
 
 @pytest.mark.parametrize("message", [
     "Select a file",
+    "Select a file from the list",
+    "Tool 'brain_recall' is not allowed in parallel_tool_batch. Allowed tools: a, b",
     "Select a file from the list, then continue",
     "Please select from the menu",
     "update the settings and retry",
@@ -243,6 +246,48 @@ async def test_failure_diagnostic_redacts_secrets_and_sql(message):
     assert "UPDATE accounts" not in public["error_message"]
 
 
+async def test_argument_redaction_cannot_break_bearer_match():
+    event = await _failed_event("Authorization: Bearer abc.def.ghi", args={"password": "r"})
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert "abc.def.ghi" not in public["error_message"]
+
+
+async def test_regex_redaction_cannot_leave_argument_tail():
+    event = await _failed_event("token=abc def tail", args={"api_key": "abc def"})
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert "abc" not in public["error_message"]
+    assert "def" not in public["error_message"]
+
+
+async def test_one_character_secret_and_token_do_not_survive():
+    event = await _failed_event("r Authorization: Bearer abc.def.ghi r", args={"password": "r"})
+    public = public_tool_event_payload(event.payload, event.event_type)
+    # The marker itself contains r. Check only text outside markers, not readability.
+    remaining = public["error_message"].replace("[redacted]", "")
+    assert "r" not in remaining
+    assert "abc.def.ghi" not in remaining
+
+
+async def test_uppercase_sql_without_as_removes_alias_and_tail():
+    event = await _failed_event("SELECT DISTINCT secret exposed FROM users WHERE id = 1\nprivate-tail")
+    public = public_tool_event_payload(event.payload, event.event_type)
+    assert all(value not in public["error_message"] for value in ("secret", "exposed", "users"))
+    assert public["error_message"] == "[redacted]"
+    # Lower-case SQL aliases without AS remain a known limit of this heuristic.
+
+
+def test_uppercase_sql_heuristic_also_redacts_uppercase_prose():
+    public = public_tool_event_payload({"error_message": "SELECT a file FROM the list"}, "run.tool_failed")
+    assert public["error_message"] == "[redacted]"
+
+
+def test_sql_redaction_handles_long_adversarial_input_quickly():
+    message = "SELECT " + "a " * 500
+    start = perf_counter()
+    public_tool_error_diagnostic("ToolError", message)
+    assert perf_counter() - start < 0.25
+
+
 async def test_failure_diagnostic_redacts_only_sensitive_argument_values():
     event = await _failed_event("could not read notes/plan.md with nested-private-value", args={
         "operations": [{
@@ -251,7 +296,7 @@ async def test_failure_diagnostic_redacts_only_sensitive_argument_values():
         }],
     })
     public = public_tool_event_payload(event.payload, event.event_type)
-    assert public["error_message"] == "could not read notes/plan.md with [secret redacted]"
+    assert public["error_message"] == "could not read notes/plan.md with [redacted]"
     assert event.payload["error_message"] == public["error_message"]
 
 
@@ -271,7 +316,7 @@ async def test_diagnostic_redacts_argument_crossing_storage_limit():
     event = await _failed_event(f"could not read {secret}", args={"password": secret})
     public = public_tool_event_payload(event.payload, event.event_type)
     assert "private-" not in public["error_message"]
-    assert public["error_message"] == "could not read [secret redacted]"
+    assert public["error_message"] == "could not read [redacted]"
 
 
 async def test_quoted_secret_redacted_before_storage_limit():
@@ -283,10 +328,11 @@ async def test_quoted_secret_redacted_before_storage_limit():
 
 
 @pytest.mark.parametrize("values, message, expected", [
-    (["abcdef", "defghijk"], "x abcdefghijk y", "x [secret redacted] y"),
-    (["abcdef", "ghijk"], "x abcdefghijk y", "x [secret redacted] y"),
-    (["aaaa"], "x aaaaa y", "x [secret redacted] y"),
-    (["abc"], "x abc y", "x [secret redacted] y"),
+    (["abcdef", "defghijk"], "x abcdefghijk y", "x [redacted] y"),
+    (["abcdef", "ghijk"], "x abcdefghijk y", "x [redacted] y"),
+    (["aaaa"], "x aaaaa y", "x [redacted] y"),
+    (["abc"], "x abc y", "x [redacted] y"),
+    (["abc"], "x abc y abc z", "x [redacted] y [redacted] z"),
 ])
 async def test_diagnostic_redacts_complete_argument_regions(values, message, expected):
     event = await _failed_event(message, args={"password": values})
