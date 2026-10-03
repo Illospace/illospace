@@ -36,6 +36,7 @@ class Usage:
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    reasoning_tokens: int | None = None
 
 
 @dataclass
@@ -46,6 +47,7 @@ class LLMResponse:
     stop_reason: StopReason | str
     usage: Usage
     model: str = ""
+    service_tier: str | None = None
 
     def __post_init__(self) -> None:
         self.content = content_blocks_from_legacy(self.content)

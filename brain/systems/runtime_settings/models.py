@@ -7,6 +7,7 @@ from brain.platform.db.models.org import Org, User
 from brain.platform.model_catalog import get_model_catalog_entry, normalize_model_effort
 from brain.platform.providers.model_policy import (
     EFFORT_TIERS,
+    DEFAULT_THINKING_TIER,
     async_get_default_model,
     async_get_default_thinking,
     get_model_catalog_contract,
@@ -84,7 +85,7 @@ async def async_update_runtime_models(
         else:
             # Switching models must not retain an unsupported legacy none tier.
             config["default_thinking"] = normalize_model_effort(
-                model, config.get("default_thinking") or "high"
+                model, config.get("default_thinking") or DEFAULT_THINKING_TIER
             )
         for stale_key in (
             "session_harvest",

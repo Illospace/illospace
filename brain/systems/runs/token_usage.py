@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Iterable
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent import AgentApiCall
@@ -179,6 +179,20 @@ def _add_call_usage(target: dict[str, Any], row: Any) -> None:
         target["last_used_at"] = last_call_at
 
 
+def _long_context_pricing_band():
+    from brain.platform.model_catalog import MODEL_CATALOG
+
+    return case(
+        *(
+            (AgentApiCall.model.in_((entry.id, entry.model_name, entry.id.replace("/", ":", 1))),
+             AgentApiCall.tokens_input > entry.long_context_threshold_tokens)
+            for entry in MODEL_CATALOG
+            if entry.long_context_threshold_tokens is not None
+        ),
+        else_=False,
+    )
+
+
 def _model_cost(row: Any) -> float:
     return calculate_model_cost(
         model=getattr(row, "model", None),
@@ -186,6 +200,7 @@ def _model_cost(row: Any) -> float:
         tokens_output=_coerce_int(row.tokens_output),
         cache_read=_coerce_int(row.cache_read),
         cache_write=_coerce_int(row.cache_write),
+        long_context=bool(getattr(row, "long_context", False)),
     )
 
 
@@ -417,6 +432,7 @@ def _run_usage_call_stmt(run_ids: list[int]):
             AgentApiCall.run_id.label("run_id"),
             AgentApiCall.model.label("model"),
             AgentApiCall.effort.label("effort"),
+            _long_context_pricing_band().label("long_context"),
             func.count(AgentApiCall.id).label("api_calls"),
             func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
             func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
@@ -425,7 +441,7 @@ def _run_usage_call_stmt(run_ids: list[int]):
             func.max(AgentApiCall.created_at).label("last_call_at"),
         )
         .where(AgentApiCall.run_id.in_(run_ids))
-        .group_by(AgentApiCall.run_id, AgentApiCall.model, AgentApiCall.effort)
+        .group_by(AgentApiCall.run_id, AgentApiCall.model, AgentApiCall.effort, "long_context")
     )
 
 
@@ -482,6 +498,7 @@ def _member_cost_stmt(*, org_id: str, since: datetime):
             AgentRunRow.user_id.label("user_id"),
             AgentApiCall.model.label("model"),
             AgentApiCall.effort.label("effort"),
+            _long_context_pricing_band().label("long_context"),
             func.count(AgentApiCall.id).label("api_calls"),
             func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
             func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
@@ -490,7 +507,7 @@ def _member_cost_stmt(*, org_id: str, since: datetime):
         )
         .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
         .where(AgentRunRow.org_id == org_id, AgentApiCall.created_at >= since)
-        .group_by(AgentRunRow.user_id, AgentApiCall.model, AgentApiCall.effort)
+        .group_by(AgentRunRow.user_id, AgentApiCall.model, AgentApiCall.effort, "long_context")
     )
 
 
@@ -534,6 +551,7 @@ async def async_summarize_token_totals(
         select(
             AgentApiCall.model.label("model"),
             AgentApiCall.effort.label("effort"),
+            _long_context_pricing_band().label("long_context"),
             func.count(AgentApiCall.id).label("api_calls"),
             func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
             func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
@@ -542,7 +560,7 @@ async def async_summarize_token_totals(
         )
         .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
         .where(*filters)
-        .group_by(AgentApiCall.model, AgentApiCall.effort)
+        .group_by(AgentApiCall.model, AgentApiCall.effort, "long_context")
     )
     cost_stmt = _apply_status_filter(cost_stmt, statuses)
 

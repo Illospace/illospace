@@ -1934,6 +1934,9 @@ async def run_agent_async(
             await _async_record_api_call(
                 session_id=session_id, run_id=run_id, turn=turn,
                 model=model, effort=thinking,
+                auth_mode=getattr(llm, "auth_mode", None),
+                service_tier=getattr(response, "service_tier", None),
+                reasoning_tokens=getattr(response.usage, "reasoning_tokens", None),
                 tokens_input=getattr(response.usage, "input_tokens", 0),
                 tokens_output=getattr(response.usage, "output_tokens", 0),
                 cache_read=getattr(response.usage, "cache_read_input_tokens", 0) or 0,

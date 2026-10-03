@@ -168,12 +168,15 @@ def resolve_model_context_budget(
     if effective_input_limit < context_window // 4:
         effective_input_limit = max(1, context_window // 4)
 
+    catalog_entry = get_model_catalog_entry(f"{resolved_provider}/{normalized_model}")
+    preferred_threshold = catalog_entry.preferred_compact_threshold_tokens if catalog_entry else None
     configured_limit = os.environ.get("AGENT_AUTO_COMPACT_TOKEN_LIMIT")
     if configured_limit:
         threshold = max(1, _env_int("AGENT_AUTO_COMPACT_TOKEN_LIMIT", effective_input_limit * 9 // 10))
         threshold = min(threshold, effective_input_limit)
     else:
-        threshold = max(1, effective_input_limit * 9 // 10)
+        threshold = min(effective_input_limit * 9 // 10, preferred_threshold or effective_input_limit)
+        threshold = max(1, threshold)
 
     configured_target = os.environ.get("AGENT_AUTO_COMPACT_TARGET_TOKENS")
     if configured_target:

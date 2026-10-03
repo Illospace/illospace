@@ -19,7 +19,7 @@ def test_astra_catalog_drives_subscription_routing_and_fallback(model):
     assert normalize_model_name(model) == entry.id
     assert required_openai_auth_mode(model) == "chatgpt"
     assert coerce_openai_api_key_model(model) is None
-    assert fallback_model_for(model) == "openai/gpt-5.6-sol"
+    assert fallback_model_for(model) == "openai/gpt-6.1-sol"
     assert get_extended_prompt_cache_retention(model) is None
     assert entry.supported_effort_tiers == ("low", "medium", "high", "xhigh")
     assert entry.input_price_per_million == 10.0
@@ -152,3 +152,37 @@ def test_runtime_schema_validates_every_catalog_contract_entry():
     assert [entry.id for entry in validated_entries] == [
         item["id"] for item in contract
     ]
+
+
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "openai/gpt-6.1-sol", "openai:gpt-6.1-sol", "gpt-6-sol"])
+def test_sol_subscription_routing_effort_and_context(model, monkeypatch):
+    from brain.platform.model_catalog import get_model_catalog_entry, normalize_model_effort
+    from brain.platform.providers.model_policy import coerce_openai_api_key_model, required_openai_auth_mode
+    from brain.systems.context.budget import resolve_model_context_budget
+
+    monkeypatch.delenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", raising=False)
+    entry = get_model_catalog_entry(model)
+    assert entry is not None
+    assert required_openai_auth_mode(model) == "chatgpt"
+    assert coerce_openai_api_key_model(model) is None
+    assert normalize_model_effort(model, "none") == "low"
+    assert normalize_model_effort(model, "medium") == "medium"
+    budget = resolve_model_context_budget(model=model, reasoning_effort="medium")
+    assert budget.context_window_tokens == 1_050_000
+    assert budget.auto_compact_threshold_tokens == 240_000
+    assert budget.target_tokens == 168_000
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "500000")
+    assert resolve_model_context_budget(model=model).auto_compact_threshold_tokens == 500_000
+
+
+def test_automatic_fallback_is_finite_and_excludes_retiring_model():
+    from brain.platform.model_catalog import MODEL_CATALOG, availability_fallback_for
+
+    for entry in MODEL_CATALOG:
+        seen = {entry.id}
+        model = availability_fallback_for(entry.id)
+        while model:
+            assert model not in seen
+            assert model != "openai/gpt-5.5"
+            seen.add(model)
+            model = availability_fallback_for(model)

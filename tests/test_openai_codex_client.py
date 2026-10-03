@@ -213,3 +213,32 @@ def test_codex_client_accepts_reasoning_summary_part_events_without_warning():
         "response.completed",
     ]
     mock_warning.assert_not_called()
+
+
+def test_model_discovery_sends_a_valid_default_client_version():
+    from brain.platform.integrations.openai_codex_client import OpenAICodexClient
+
+    fake_http = MagicMock()
+    fake_http.get.return_value.status_code = 200
+    fake_http.get.return_value.json.return_value = {"models": []}
+    with patch("brain.platform.integrations.openai_codex_client.httpx.Client", return_value=fake_http):
+        client = OpenAICodexClient("access-test", "account-test")
+        assert client.list_models() == {"models": []}
+        assert fake_http.get.call_args.kwargs["params"] == {"client_version": "0.153.3"}
+        client.list_models(client_version="0.154.0")
+        assert fake_http.get.call_args.kwargs["params"] == {"client_version": "0.154.0"}
+        client.close()
+
+
+def test_responses_usage_preserves_cache_writes_and_reasoning_breakdown():
+    from brain.platform.integrations.transports.openai_responses import _usage_from_openai
+
+    usage = _usage_from_openai({"usage": {"input_tokens": 123, "output_tokens": 45,
+        "input_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 10},
+        "output_tokens_details": {"reasoning_tokens": 30}}})
+    assert usage.input_tokens == 123
+    assert usage.output_tokens == 45  # Reasoning is already included; never add it again.
+    assert usage.cache_read_input_tokens == 80
+    assert usage.cache_creation_input_tokens == 10
+    assert usage.reasoning_tokens == 30
+    assert _usage_from_openai({}).reasoning_tokens is None

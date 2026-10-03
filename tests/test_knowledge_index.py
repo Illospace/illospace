@@ -1604,7 +1604,7 @@ async def test_distillation_admission_is_restart_safe_and_holds_cursor_until_har
     assert len(runs) == 1
     assert runs[0].model_policy == {
         "model": "openai/gpt-5.6-luna",
-        "thinking": "xhigh",
+        "thinking": "low",
     }
     assert runs[0].source_idempotency_scope == "knowledge"
     assert state is not None

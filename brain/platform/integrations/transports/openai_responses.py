@@ -217,6 +217,8 @@ def _usage_from_openai(response: Any) -> Usage:
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_input_tokens=cache_read_tokens,
+        cache_creation_input_tokens=_block_get(input_details, "cache_write_tokens", 0) or 0,
+        reasoning_tokens=_block_get(_block_get(usage, "output_tokens_details", {}), "reasoning_tokens", None),
     )
 
 
@@ -562,6 +564,7 @@ def _openai_response_to_unified(response, model: str = "") -> LLMResponse:
         stop_reason=stop_reason,
         usage=usage,
         model=model or _block_get(response, "model", ""),
+        service_tier=_block_get(response, "service_tier", None),
     )
 
 

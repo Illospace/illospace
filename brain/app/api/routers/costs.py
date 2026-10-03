@@ -358,6 +358,7 @@ def _build_cost_payload(runs: list[Any]) -> dict[str, Any]:
     return {
         "summary": {
             "total_cost": round(total_cost, 6),
+            "cost_basis": "standard_api_equivalent_usd",
             "total_runs": len(runs),
             "total_tokens": total_tokens,
             "total_input_tokens": total_input,

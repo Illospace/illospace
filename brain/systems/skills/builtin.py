@@ -262,20 +262,23 @@ or resources as another active slice.
 
 - `spawn_worker` queues a child run and returns immediately with
   `status="queued"` and a `child_run_id`; queued is not completed.
-- Omitted `model` and `effort` inherit the parent's effective routing.
-- Reasoning/judgment/review/long-context work: `openai/gpt-6-astra`, routed by
-  effort (`xhigh` judgment, `high` standard). `openai/gpt-5.6-sol` is the
-  availability fallback and an explicit option for standard reasoning or
-  chatty tool loops. Astra requires at least `low` effort; legacy `none`
-  settings run at `low` and the effective routing receipt records this.
-  Bulk/mechanical/single-shot/small-context execution:
-  `openai/gpt-5.6-luna` at `xhigh`. Luna caveats: quality collapses above ~200K
-  context; `xhigh` pays a long first-token pause per turn — never use Luna
-  `xhigh` for many-short-turn loops. Reserve non-OpenAI models for a
-  cross-provider verifier. Free local lane: `ollama/qwen3.6-27b` — zero cost,
-  unlimited volume, ≤64k context, quality well below Luna; use for
-  heartbeat-class, high-volume, low-stakes single-shot work; never for judgment
-  or anything user-facing.
+- Choose each child's model and effort explicitly; omission inherits the parent.
+- Routine coordination, tool loops, plans and implementation:
+  `openai/gpt-6.1-sol` at `medium`; use `high` for difficult diagnosis or synthesis.
+- Bounded extraction, classification and unchanged-state checks:
+  `openai/gpt-5.6-luna` at `low`; use `medium` when task checks require it.
+  Use deterministic tools for exact lookups. Keep assignments and retrieved
+  context small; send source references and relevant facts, not whole histories.
+- Reserve `openai/gpt-6-astra` at `high` for a narrow unresolved review or failed
+  acceptance check. Use `xhigh` only with an explicit task-specific reason.
+  Allow at most one quality escalation, then report unresolved evidence.
+  Authentication failures, unavailable tools and missing evidence do not call
+  for more reasoning. Availability fallback is separate: Astra → Sol 6.1 →
+  Sol 6 → Sol 5.6; it never automatically escalates back to Astra.
+- Sol 6.1, Sol 6 and Astra require at least `low`; legacy `none` runs at `low`
+  and the effective routing receipt records this. Use Standard speed.
+- Use non-OpenAI models for an explicit cross-provider check. The local
+  `ollama/qwen3.6-27b` lane is for bounded, low-stakes, single-shot work only.
 - Set `headless=true` when the child needs no user input or visible thread
   updates. Headless children use a hidden thread and have visible reply tools
   disabled.

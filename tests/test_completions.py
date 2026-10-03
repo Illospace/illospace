@@ -12,8 +12,8 @@ class UnavailableModelError(Exception):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.parametrize("route", [
-    ["gpt-6-astra", "gpt-5.6-sol"],
-    ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5"],
+    ["gpt-6-astra", "gpt-6.1-sol"],
+    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
     ["gpt-5.6-luna", "gpt-5.6-sol"],
 ])
 async def test_completion_retries_unavailable_catalog_models(async_mode, route):
@@ -93,7 +93,7 @@ async def test_async_title_generation_uses_completion_fallback():
         title = await _async_generate_with_provider_title_model("a title", provider="openai", model="openai/gpt-6-astra", user_id="user-1", org_id="org-1")
     assert title == "Provider Fallback Review"
     requests = [call.args[0] for call in provider.create.call_args_list]
-    assert [request.model for request in requests] == ["gpt-6-astra", "gpt-5.6-sol"]
+    assert [request.model for request in requests] == ["gpt-6-astra", "gpt-6.1-sol"]
     assert all(request.operation_type == "title_generation" for request in requests)
 
 
