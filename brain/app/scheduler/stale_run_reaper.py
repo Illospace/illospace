@@ -125,6 +125,8 @@ class _StaleRunReaperCheck:
     overdue_run_ids: tuple[int, ...]
     alert_sent: bool
     errors: tuple[str, ...] = ()
+    skipped: int = 0
+    skipped_run_ids: tuple[int, ...] = ()
 
 
 def agent_run_maintenance_snapshot(
@@ -142,6 +144,8 @@ def agent_run_maintenance_snapshot(
             "reaped": 0,
             "closeout_requested": 0,
             "expired": 0,
+            "skipped": 0,
+            "skipped_run_ids": [],
             "overdue_run_ids": [],
             "alert_sent": False,
             "errors": [],
@@ -171,6 +175,8 @@ def agent_run_maintenance_snapshot(
         "reaped": check.reaped,
         "closeout_requested": check.closeout_requested,
         "expired": check.expired,
+        "skipped": check.skipped,
+        "skipped_run_ids": list(check.skipped_run_ids),
         "overdue_run_ids": list(check.overdue_run_ids),
         "alert_sent": check.alert_sent,
         "errors": list(check.errors),
@@ -389,6 +395,8 @@ class StaleRunReaper:
             reaped=reaped,
             closeout_requested=deadline_result.closeout_requested,
             expired=deadline_result.expired,
+            skipped=deadline_result.skipped,
+            skipped_run_ids=deadline_result.skipped_run_ids,
             overdue_run_ids=tuple(candidate.run_id for candidate in candidates or ()),
             alert_sent=alert_sent,
             errors=tuple(errors),
@@ -434,6 +442,8 @@ class StaleRunReaper:
                 "reaped": check.reaped,
                 "expired": check.expired,
                 "closeout_requested": check.closeout_requested,
+                "skipped": check.skipped,
+                "skipped_run_ids": list(check.skipped_run_ids),
                 "overdue_run_ids": list(check.overdue_run_ids),
                 "alert_sent": check.alert_sent,
                 "errors": list(check.errors),

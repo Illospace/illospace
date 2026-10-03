@@ -29,6 +29,8 @@ class DeadlineSweepResult:
     closeout_requested: int = 0
     expired: int = 0
     expired_run_ids: tuple[int, ...] = ()
+    skipped: int = 0
+    skipped_run_ids: tuple[int, ...] = ()
 
 
 def deadline_closeout_grace_seconds() -> int:
@@ -125,6 +127,8 @@ async def _expire_after_closeout(
     run_id: int,
     now: datetime,
 ) -> bool:
+    """Expire under the row and event-stream locks already held by the sweep."""
+
     row = await session.get(AgentRunRow, int(run_id), populate_existing=True)
     if row is None or str(row.status or "") not in _OPEN_STATUS_VALUES:
         return False
@@ -132,17 +136,6 @@ async def _expire_after_closeout(
     if closeout_expires_at is None or _as_utc(closeout_expires_at) > now:
         return False
     store = AsyncAgentRunStore(session)
-    anchor_run_id = int(row.parent_run_id or row.id)
-    await store.commit_event_boundary(int(run_id))
-    row = await store.lock_terminal_boundary(
-        int(run_id),
-        anchor_run_id=anchor_run_id,
-    )
-    if str(row.status or "") not in _OPEN_STATUS_VALUES:
-        return False
-    closeout_expires_at = row.closeout_expires_at
-    if closeout_expires_at is None or _as_utc(closeout_expires_at) > now:
-        return False
     expired, changed = await store.set_status_with_result(
         int(run_id),
         RunStatus.EXPIRED,
@@ -202,7 +195,13 @@ async def sweep_agent_run_deadlines(
     grace_seconds: int | None = None,
     limit: int = 25,
 ) -> DeadlineSweepResult:
-    """Request graceful close-out, then expire runs whose grace window elapsed."""
+    """Request graceful close-out, then expire runs whose grace window elapsed.
+
+    Commit the session before every candidate, including skipped and
+    closeout-only candidates. This publishes prior work and releases the
+    previous candidate's locks, including partial acquisitions on a skip.
+    The caller owns the final candidate's commit, even when it was skipped.
+    """
 
     resolved_now = _as_utc(now or datetime.now(timezone.utc))
     resolved_grace = max(
@@ -226,7 +225,16 @@ async def sweep_agent_run_deadlines(
     requested = 0
     expired = 0
     expired_run_ids: list[int] = []
+    skipped_run_ids: list[int] = []
+    store = AsyncAgentRunStore(session)
     for run_id in candidate_ids:
+        # Release prior locks, then try the row pair before the event stream.
+        # A busy lock at this boundary skips the candidate without waiting;
+        # successful acquisitions stay held through its deadline writes.
+        await store.commit_event_boundary(int(run_id))
+        if not await store.try_lock_maintenance_boundary(int(run_id)):
+            skipped_run_ids.append(int(run_id))
+            continue
         row = await session.get(AgentRunRow, int(run_id), populate_existing=True)
         if row is None:
             continue
@@ -241,10 +249,10 @@ async def sweep_agent_run_deadlines(
             )
             continue
         did_expire = await _expire_after_closeout(
-                session,
-                run_id=int(run_id),
-                now=resolved_now,
-            )
+            session,
+            run_id=int(run_id),
+            now=resolved_now,
+        )
         expired += int(did_expire)
         if did_expire:
             expired_run_ids.append(int(run_id))
@@ -252,6 +260,8 @@ async def sweep_agent_run_deadlines(
         closeout_requested=requested,
         expired=expired,
         expired_run_ids=tuple(expired_run_ids),
+        skipped=len(skipped_run_ids),
+        skipped_run_ids=tuple(skipped_run_ids),
     )
 
 

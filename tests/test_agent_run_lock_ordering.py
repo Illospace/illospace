@@ -420,6 +420,58 @@ async def test_lock_only_acquisition_does_not_query_non_postgres_dialects():
     session.scalars.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("parent_run_id", "locked_ids", "advisory_available", "expected"),
+    [
+        (3024, [3024, 3065], True, True),
+        (3088, [3065, 3088], True, True),
+        (None, [3065], True, True),
+        (3024, [3024], True, False),
+        (3024, [3065], True, False),
+        (3024, [], True, False),
+        (3024, [3024, 3065], False, False),
+    ],
+)
+async def test_maintenance_boundary_tries_complete_row_pair_before_advisory(
+    parent_run_id, locked_ids, advisory_available, expected
+):
+    run_id = 3065
+    row = SimpleNamespace(id=run_id, parent_run_id=parent_run_id)
+    session = SimpleNamespace(
+        get_bind=lambda: _PostgresBind(),
+        scalars=AsyncMock(side_effect=[_Rows([row]), _Rows(locked_ids)]),
+    )
+
+    async def try_advisory(statement, params):
+        assert session.scalars.await_count == 2
+        assert str(statement) == "SELECT pg_try_advisory_xact_lock(:run_id)"
+        assert params == {"run_id": run_id}
+        return advisory_available
+
+    session.scalar = AsyncMock(side_effect=try_advisory)
+    acquired = await AsyncAgentRunStore(session).try_lock_maintenance_boundary(run_id)
+
+    assert acquired is expected
+    read, lock = session.scalars.await_args_list
+    assert "FOR " not in str(read.args[0].compile(dialect=postgresql.dialect()))
+    compiled = lock.args[0].compile(dialect=postgresql.dialect())
+    assert "ORDER BY agent_runs.id ASC FOR NO KEY UPDATE SKIP LOCKED" in str(compiled)
+    requested_ids = sorted({parent_run_id or run_id, run_id})
+    assert requested_ids in compiled.params.values()
+    assert session.scalar.await_count == int(set(locked_ids) == set(requested_ids))
+
+
+async def test_maintenance_boundary_skips_missing_run_without_taking_locks():
+    session = SimpleNamespace(
+        scalars=AsyncMock(return_value=_Rows([])),
+        scalar=AsyncMock(),
+    )
+
+    assert not await AsyncAgentRunStore(session).try_lock_maintenance_boundary(3065)
+    session.scalars.assert_awaited_once()
+    session.scalar.assert_not_awaited()
+
+
 async def test_lock_run_returns_none_for_a_missing_run():
     # The callers migrated onto lock_run (chantier continuation, evidence
     # receipts) guard on a None row. A vanished run must stay a clean no-op
