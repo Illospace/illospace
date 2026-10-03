@@ -1157,7 +1157,8 @@ async def async_tool_memory_ingest_source(
     if not user_id:
         return {"error": "memory_ingest_source requires user context (missing user_id)"}
 
-    if visibility not in ("private", "team", "org"):
+    visibility_fallback = visibility not in ("private", "team", "org")
+    if visibility_fallback:
         visibility = "private"
 
     async with UnitOfWork() as uow:
@@ -1178,6 +1179,8 @@ async def async_tool_memory_ingest_source(
     payload = result.to_dict()
     payload["content_kind"] = content_kind
     payload["source_kind"] = source_kind
+    if visibility_fallback:
+        payload["visibility_fallback"] = True
     return payload
 
 

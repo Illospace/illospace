@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_EMBEDDING_DIM
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
+from brain.systems.knowledge.connectors.memory import (
+    MemoryIndexExclusionReason,
+    get_memory_index_exclusion_reasons,
+)
 from brain.systems.knowledge.scope import (
     KNOWLEDGE_SCOPE_EXTRA_KEY,
     KnowledgeScope,
@@ -361,13 +365,54 @@ def _serialize_result(
     }
 
 
+_NOT_INDEXED_DETAILS = {
+    MemoryIndexExclusionReason.PRIVATE_VISIBILITY: "The memory node is private and is not available in the shared index.",
+    MemoryIndexExclusionReason.NOT_A_CONTENT_NODE: "The memory node has a kind that the shared index does not include.",
+    MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED: "The memory node or its shared index entry is archived or superseded.",
+    MemoryIndexExclusionReason.NOT_YET_INDEXED: "The memory node is eligible for the shared index but has no index entry yet.",
+}
+
+
+async def _get_not_indexed_memory_refs(
+    session: AsyncSession,
+    refs: Sequence[str],
+    *,
+    org_id: str,
+    user_id: str | None,
+) -> list[dict[str, str]]:
+    node_ids = {}
+    for ref in refs:
+        match = re.fullmatch(r"memory_node:([1-9][0-9]*)", ref)
+        if match is None:
+            continue
+        digits = match.group(1)
+        # MemoryNode.id is a PostgreSQL INTEGER; larger IDs cannot exist.
+        if len(digits) <= 10 and int(digits) <= 2**31 - 1:
+            node_ids[ref] = int(digits)
+    if not node_ids:
+        return []
+
+    reasons = await get_memory_index_exclusion_reasons(
+        session, node_ids, org_id=org_id, user_id=user_id
+    )
+    return [
+        {
+            "source_ref": ref,
+            "reason": reason.value,
+            "detail": _NOT_INDEXED_DETAILS[reason],
+        }
+        for ref, reason in reasons.items()
+    ]
+
+
 async def get_knowledge_items(
     session: AsyncSession,
     source_refs: Sequence[str],
     *,
     org_id: str,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Read exact source references with the same visibility as knowledge search."""
+    """Read shared index entries and explain unreadable index handles without content."""
 
     refs = list(dict.fromkeys(source_refs))
     filters = knowledge_item_filters(org_id=org_id, sources=None, kinds=None)
@@ -377,6 +422,11 @@ async def get_knowledge_items(
         .order_by(KnowledgeItem.id.asc())
     )).all())
     found_refs = {item.source_ref for item in items}
+    missing_refs = [ref for ref in refs if ref not in found_refs]
+    not_indexed = await _get_not_indexed_memory_refs(
+        session, missing_refs, org_id=org_id, user_id=user_id
+    )
+    not_indexed_refs = {entry["source_ref"] for entry in not_indexed}
     return {
         "source_refs": refs,
         "results": [
@@ -388,7 +438,8 @@ async def get_knowledge_items(
             )
             for item in items
         ],
-        "missing": [ref for ref in refs if ref not in found_refs],
+        "missing": [ref for ref in missing_refs if ref not in not_indexed_refs],
+        "not_indexed": not_indexed,
     }
 
 

@@ -15,6 +15,7 @@ from brain.contracts.github import (
     github_pull_request_ref,
 )
 from brain.platform.db.models.agent_run import AgentRunEventRow
+from brain.systems.knowledge.memory_eligibility import MemoryIndexExclusionReason
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get_tool_registration
 
@@ -173,7 +174,10 @@ def _tool_is_read_only(tool_name: str, args: Mapping[str, Any]) -> bool:
 def _add_ref(refs: list[dict[str, str]], seen: set[tuple[str, str]], *, kind: str, value: Any, source: str) -> None:
     if len(refs) >= _MAX_TARGET_REFS:
         return
-    text = str(value or "").strip()
+    try:
+        text = str(value or "").strip()
+    except ValueError:
+        return
     kind_text = str(kind or "").strip()
     if not text or not kind_text:
         return
@@ -259,6 +263,42 @@ def _collect_refs(value: Any, refs: list[dict[str, str]], seen: set[tuple[str, s
             _collect_refs(child, refs, seen, source=source)
 
 
+def _annotate_content_memory_refs(
+    refs: list[dict[str, str]], result: Any, *, result_refs: Any = None,
+) -> None:
+    """Apply explicit content annotations without changing collected identities."""
+    if not refs:
+        return
+    try:
+        # _parse_result returns the decoded payload without adding a wrapper.
+        sources = [result.get(key) for key in _EXPLICIT_REF_KEYS] if isinstance(result, Mapping) else []
+        sources.append(result_refs)
+        updates: list[tuple[dict[str, str], dict[str, str]]] = []
+        for value in sources:
+            annotations = value if isinstance(value, list | tuple | set) else [value]
+            for annotation in annotations:
+                if not isinstance(annotation, Mapping):
+                    continue
+                if annotation.get("kind") != "memory_node" or annotation.get("role") != "content":
+                    continue
+                knowledge_get = annotation.get("knowledge_get")
+                if knowledge_get not in ("eligible", *MemoryIndexExclusionReason):
+                    continue
+                ref_id = str(annotation.get("id") or "")
+                fields = {"role": "content", "knowledge_get": str(knowledge_get)}
+                if annotation.get("visibility") in ("private", "team", "org"):
+                    fields["visibility"] = annotation["visibility"]
+                for ref in refs:
+                    if (ref["kind"], ref["id"]) == ("memory_node", ref_id):
+                        updates.append((ref, fields))
+    except Exception:
+        # Optional enrichment must not discard refs, even on RecursionError.
+        # No ref is changed until every annotation source has been read.
+        return
+    for ref, fields in updates:
+        ref.update(fields)
+
+
 def collect_result_refs(result: Any, *, source: str) -> list[dict[str, str]]:
     """Extract entity refs from a FULL tool result (pre-truncation).
 
@@ -270,7 +310,9 @@ def collect_result_refs(result: Any, *, source: str) -> list[dict[str, str]]:
     """
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    _collect_refs(_parse_result(result), refs, seen, source=source)
+    result = _parse_result(result)
+    _collect_refs(result, refs, seen, source=source)
+    _annotate_content_memory_refs(refs, result)
     return refs
 
 
@@ -371,6 +413,7 @@ def _target_refs(tool_events: list[AgentRunEventRow]) -> list[dict[str, str]]:
         # Full-fidelity channel: refs the executor extracted from the
         # complete result before the stored preview truncated it.
         _add_explicit_ref_values(refs, seen, value=payload.get("result_refs"), source=source)
+        _annotate_content_memory_refs(refs, result, result_refs=payload.get("result_refs"))
     return refs
 
 

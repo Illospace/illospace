@@ -10,29 +10,112 @@ index has an ACL-aware read path.  The mirror is derived and additive: it reads
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.config import KNOWLEDGE_CONNECTOR_BATCH_SIZE
 from brain.platform.db.models.knowledge import KnowledgeItem
-from brain.platform.db.models.reconstructive_memory import MemoryEdgeNode, MemoryNode
+from brain.platform.db.models.reconstructive_memory import MemoryNode
+from brain.platform.db.repositories.reconstructive_memory import memory_node_visibility_predicate
 from brain.systems.knowledge.connectors.base import (
     KnowledgeDraft,
     KnowledgeEnumeration,
     KnowledgeScope,
     UpdatedAtCursor,
 )
+from brain.systems.knowledge.memory_eligibility import (
+    KNOWLEDGE_NODE_KINDS,
+    SHARED_VISIBILITIES,
+    MemoryIndexExclusionReason,
+    is_superseded,
+    load_superseded_by,
+    memory_index_exclusion_reason,
+    memory_node_index_exclusion_reason,
+)
 
-_SHARED_VISIBILITIES = ("org", "team")
-_KNOWLEDGE_NODE_KINDS = ("content",)
 logger = logging.getLogger(__name__)
+
+
+class MemoryDraftSkipReason(StrEnum):
+    NOT_A_CANDIDATE = "not_a_candidate"
+    SHARED_WITHOUT_ORG = "shared_without_org"
+    NOT_SHARED_AND_NO_MIRROR = "not_shared_and_no_mirror"
+
+
+@dataclass(frozen=True)
+class MemoryDraftOutcome:
+    draft: KnowledgeDraft | None = None
+    skip_reason: MemoryDraftSkipReason | None = None
+
+
+def _knowledge_memory_access_predicate(*, org_id: str, user_id: str | None):
+    """Require org access; callers without a user never learn private nodes exist."""
+
+    access = and_(
+        MemoryNode.org_id == org_id,
+        memory_node_visibility_predicate(org_id=org_id, user_id=user_id),
+    )
+    if not user_id:
+        access = and_(access, MemoryNode.visibility.in_(SHARED_VISIBILITIES))
+    return access
+
+
+async def get_memory_index_exclusion_reasons(
+    session: AsyncSession,
+    node_ids: Mapping[str, int],
+    *,
+    org_id: str,
+    user_id: str | None,
+) -> dict[str, MemoryIndexExclusionReason]:
+    """Explain readable memory handles using eligibility fields only."""
+
+    if not node_ids:
+        return {}
+    nodes = (await session.execute(
+        select(
+            MemoryNode.id,
+            MemoryNode.node_kind,
+            MemoryNode.visibility,
+            MemoryNode.archived_at,
+            MemoryNode.truth_status,
+        ).where(
+            MemoryNode.id.in_(node_ids.values()),
+            _knowledge_memory_access_predicate(org_id=org_id, user_id=user_id),
+        )
+    )).all()
+    by_id = {node.id: node for node in nodes}
+    readable_refs = [ref for ref, node_id in node_ids.items() if node_id in by_id]
+    if not readable_refs:
+        return {}
+    superseded_by = await load_superseded_by(session, list(by_id))
+    mirrors = dict((await session.execute(
+        select(KnowledgeItem.source_ref, KnowledgeItem.archived_at).where(
+            KnowledgeItem.source == MemoryConnector.source_key,
+            KnowledgeItem.source_ref.in_(readable_refs),
+        )
+    )).all())
+    reasons = {}
+    for ref in readable_refs:
+        node_id = node_ids[ref]
+        reason = memory_index_exclusion_reason(
+            by_id[node_id],
+            superseded_by=superseded_by.get(node_id),
+            mirror_archived=mirrors.get(ref) is not None,
+            has_mirror=ref in mirrors,
+        )
+        if reason is not None:
+            reasons[ref] = reason
+    return reasons
 
 
 def _candidate_node_query():
     return select(MemoryNode).where(
-        MemoryNode.node_kind.in_(_KNOWLEDGE_NODE_KINDS)
+        MemoryNode.node_kind.in_(KNOWLEDGE_NODE_KINDS)
     )
 
 
@@ -50,8 +133,13 @@ def _draft_for_memory(
     content = str(node.text or node.canonical_label).strip()
     memory_kind = str(node.content_kind or node.node_kind).strip()
     scope = str(node.scope_key or "default").strip()
-    superseded = node.truth_status == "superseded" or superseded_by is not None
-    archived_at = node.archived_at or (node.updated_at if superseded else None)
+    superseded = is_superseded(node, superseded_by)
+    reason = memory_index_exclusion_reason(node, superseded_by=superseded_by)
+    archived_at = node.archived_at or (
+        node.updated_at
+        if reason == MemoryIndexExclusionReason.ARCHIVED_OR_SUPERSEDED
+        else None
+    )
     return KnowledgeDraft(
         source="memory",
         kind="memory",
@@ -124,21 +212,34 @@ class MemoryConnector:
     ) -> KnowledgeDraft | None:
         """Build one immediate-index draft with the sweep's eligibility rules."""
 
+        return (await self.outcome_for_node(session, node_id=node_id)).draft
+
+    async def outcome_for_node(
+        self,
+        session: AsyncSession,
+        *,
+        node_id: int,
+    ) -> MemoryDraftOutcome:
+        """Return one draft or the connector's reason for skipping the node."""
+
         node = await session.scalar(
             _candidate_node_query().where(MemoryNode.id == node_id)
         )
         if node is None:
-            return None
-        drafts = await self._drafts_for_rows(session, [node])
-        return drafts[0] if drafts else None
+            return MemoryDraftOutcome(skip_reason=MemoryDraftSkipReason.NOT_A_CANDIDATE)
+        drafts, skipped = await self._drafts_for_rows(session, [node])
+        return MemoryDraftOutcome(
+            draft=drafts[0] if drafts else None,
+            skip_reason=skipped.get(node_id),
+        )
 
     async def _drafts_for_rows(
         self,
         session: AsyncSession,
         rows: list[MemoryNode],
-    ) -> list[KnowledgeDraft]:
+    ) -> tuple[list[KnowledgeDraft], dict[int, MemoryDraftSkipReason]]:
         if not rows:
-            return []
+            return [], {}
         source_refs = [f"memory_node:{node.id}" for node in rows]
         existing_org_ids = {
             source_ref: extra["org_id"]
@@ -151,52 +252,36 @@ class MemoryConnector:
                 )
             ).all()
         }
-        candidate_rows = [
-            node
-            for node in rows
-            if node.visibility in _SHARED_VISIBILITIES
-            or f"memory_node:{node.id}" in existing_org_ids
-        ]
+        skipped: dict[int, MemoryDraftSkipReason] = {}
         draft_rows: list[MemoryNode] = []
         active_rows: list[MemoryNode] = []
-        for node in candidate_rows:
-            if node.visibility in _SHARED_VISIBILITIES:
+        for node in rows:
+            if node.visibility in SHARED_VISIBILITIES:
                 if node.org_id is None:
+                    skipped[node.id] = MemoryDraftSkipReason.SHARED_WITHOUT_ORG
                     logger.warning(
                         "Memory knowledge enumeration skipped node %s: org_id is missing",
                         node.id,
                     )
                     continue
                 active_rows.append(node)
+            elif f"memory_node:{node.id}" not in existing_org_ids:
+                skipped[node.id] = MemoryDraftSkipReason.NOT_SHARED_AND_NO_MIRROR
+                continue
             draft_rows.append(node)
-        supersession_rows = (
-            await session.execute(
-                select(
-                    MemoryEdgeNode.source_node_id,
-                    MemoryEdgeNode.target_node_id,
-                )
-                .where(
-                    MemoryEdgeNode.source_node_id.in_(
-                        [node.id for node in active_rows]
-                    )
-                )
-                .where(MemoryEdgeNode.edge_kind == "superseded_by")
-                .order_by(MemoryEdgeNode.id.asc())
-            )
-        ).all()
-        superseded_by = {
-            source_node_id: target_node_id
-            for source_node_id, target_node_id in supersession_rows
-        }
-        return [
+        superseded_by = await load_superseded_by(
+            session, [node.id for node in active_rows]
+        )
+        drafts = [
             _draft_for_memory(node, superseded_by=superseded_by.get(node.id))
-            if node.visibility in _SHARED_VISIBILITIES
+            if node.visibility in SHARED_VISIBILITIES
             else _withdrawn_draft(
                 node,
                 org_id=existing_org_ids[f"memory_node:{node.id}"],
             )
             for node in draft_rows
         ]
+        return drafts, skipped
 
     async def enumerate_changed(
         self,
@@ -216,7 +301,7 @@ class MemoryConnector:
         rows = list((await session.scalars(statement)).all())
         if not rows:
             return KnowledgeEnumeration(drafts=[], cursor=dict(cursor))
-        drafts = await self._drafts_for_rows(session, rows)
+        drafts, _ = await self._drafts_for_rows(session, rows)
         last = rows[-1]
         return KnowledgeEnumeration(
             drafts=drafts,
@@ -224,4 +309,12 @@ class MemoryConnector:
         )
 
 
-__all__ = ["MemoryConnector"]
+__all__ = [
+    "MemoryConnector",
+    "MemoryDraftOutcome",
+    "MemoryDraftSkipReason",
+    "MemoryIndexExclusionReason",
+    "get_memory_index_exclusion_reasons",
+    "memory_index_exclusion_reason",
+    "memory_node_index_exclusion_reason",
+]

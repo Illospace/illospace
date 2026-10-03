@@ -38,11 +38,36 @@ def test_tool_catalog_contains_behavior_guidance():
     assert read_description.index("knowledge.search") < read_description.index("workspace.search")
     assert read_description.index("knowledge.get") < read_description.index("workspace.search")
     assert "memory_node:<id>" in read_description
+    assert "not_indexed with a reason" in read_description
+    assert "missing means no readable node exists" in read_description
     assert "workspace.search covers Project Contexts, ideas, and threads" in read_description
     assert "user's delegate" in tools["illo_act"]["description"]
     assert tools["illo_act"]["inputSchema"]["required"] == ["capability"]
     assert "result_id" in tools["illo_get_result"]["description"]
     assert tools["illo_get_result"]["inputSchema"]["required"] == []
+    assert tools["illo_get_result"]["inputSchema"]["properties"]["compact"]["default"] is False
+    assert tools["illo_get_result"]["inputSchema"]["properties"]["include_payload"]["default"] is True
+    assert "compact: true" in tools["illo_get_result"]["description"]
+    assert "final_answer" in tools["illo_get_result"]["description"]
+    assert "terminal" in tools["illo_get_result"]["description"]
+    assert "failure (category and message)" in tools["illo_get_result"]["description"]
+
+
+def test_get_result_forwards_compact_mode(monkeypatch):
+    module = _load_mcp_module()
+    calls = []
+    client = module.IlloBridgeClient(module.IlloBridgeConfig(
+        base_url="https://illo.test", token="bridge-token",
+    ))
+    monkeypatch.setattr(client, "call_tool", lambda name, arguments: calls.append((name, arguments)) or {})
+    monkeypatch.setattr(module, "_client", lambda: client)
+
+    module.tool_illo_get_result(event_id="evt-918", compact=True, include_payload=True)
+
+    assert calls[0][0] == "illo_get_result"
+    assert calls[0][1]["event_id"] == "evt-918"
+    assert calls[0][1]["compact"] is True
+    assert calls[0][1]["include_payload"] is True
 
 
 @pytest.mark.parametrize(

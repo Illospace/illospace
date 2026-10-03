@@ -560,6 +560,47 @@ def test_classifier_ignores_legacy_payload_category():
     )
 
 
+def test_invalid_input_status_does_not_hide_nonzero_exit_code():
+    resolved = resolve_tool_call(PendingToolCall(
+        block_id="exit-code", tool_name="unrelated_tool", tool_input={},
+        handler=lambda: {"status": "invalid_input", "exit_code": 1},
+    ))
+    assert resolved.outcome.failure == ToolFailure(
+        message="exit_code=1", category=DEFAULT_TOOL_FAILURE_CATEGORY,
+    )
+
+
+def test_failure_policy_keeps_zero_success_guard_after_batch_rejections():
+    from brain.systems.runs.tool_surface import build_tool_handlers
+
+    handler = build_tool_handlers(workspace_root=None)["parallel_tool_batch"]
+    policy = RunControlPolicy(
+        failure_threshold=10, failure_window_calls=10,
+        zero_success_failure_threshold=5,
+    )
+    for index in range(3):
+        rejected = resolve_tool_call(PendingToolCall(
+            block_id=str(index), tool_name="parallel_tool_batch", tool_input={}, handler=handler,
+        ))
+        assert rejected.outcome.failure is not None
+        assert policy.observe_tool_result(rejected).disablement is None
+
+    def raise_error():
+        raise RuntimeError("real failure")
+
+    for index in range(2):
+        failed = resolve_tool_call(PendingToolCall(
+            block_id=f"failure-{index}", tool_name="parallel_tool_batch", tool_input={}, handler=raise_error,
+        ))
+        decision = policy.observe_tool_result(failed)
+        if index == 0:
+            assert decision.disablement is None
+    assert decision.disablement is not None
+    assert decision.disablement.triggers == (ToolFailureTrigger.ZERO_SUCCESS,)
+    assert decision.disablement.total_successes == 0
+    assert decision.disablement.total_failures == 5
+
+
 def test_tool_handler_result_keeps_outcome_in_identity_and_serialization():
     value = json.dumps({"error": "invalid tool input"})
     failure = ToolHandlerResult(

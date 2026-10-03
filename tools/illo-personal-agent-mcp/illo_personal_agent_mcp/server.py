@@ -247,6 +247,7 @@ class IlloBridgeClient:
         submission_id: str | None = None,
         include_payload: bool | None = None,
         limit: int | None = None,
+        compact: bool | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
         return self.call_tool(
@@ -258,6 +259,7 @@ class IlloBridgeClient:
                 "result_id": result_id,
                 "include_payload": include_payload,
                 "limit": limit,
+                "compact": compact,
             },
         )
 
@@ -344,6 +346,7 @@ def tool_illo_get_result(
     submission_id: str | None = None,
     include_payload: bool | None = None,
     limit: int | None = None,
+    compact: bool | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     return _client().get_result(
@@ -352,6 +355,7 @@ def tool_illo_get_result(
         submission_id=submission_id,
         include_payload=include_payload,
         limit=limit,
+        compact=compact,
         **extra,
     )
 
@@ -440,9 +444,12 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Use knowledge.search for source-backed preserved knowledge and memory, "
                         "or knowledge.get for an exact source_ref such as memory_node:<id> from a preservation receipt. "
+                        "The receipt's content ref states its visibility and whether the shared index can serve it; knowledge.get checks that it does. "
+                        "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists. "
                         "workspace.search covers Project Contexts, ideas, and threads. "
                         "Other read capabilities include project_contexts.search, thread.get, handoff.get, "
-                        "team.members.list, domain.inspect, or capabilities."
+                        "team.members.list, domain.inspect, or capabilities. "
+                        "thread.get also accepts the inbound:<connection_id>:<event_id> id returned by run.get."
                     ),
                 },
                 "arguments": {"type": "object", "description": "Capability-specific arguments.", "default": {}},
@@ -481,7 +488,11 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Retrieve or poll the outcome of an asynchronous Illo operation returned by "
             "illo_submit, illo_read, or illo_act. Preservation results include whether durable "
             "evidence is pending, satisfied, or missing. Use this for result_id receipts instead "
-            "of repeating the original request."
+            "of repeating the original request. The current answer is published at final_answer; "
+            "evidence_contract and attribution are top-level. latest_receipt is the newest "
+            "receipt; receipts preserves distinct receipt history. Poll with compact: true for "
+            "status, terminal, and any final_answer and public failure (category and message) when terminal. compact defaults to false "
+            "and overrides include_payload when true."
         ),
         "inputSchema": {
             "type": "object",
@@ -490,6 +501,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "event_id": {"type": "string", "description": "Inbound event id returned by illo_submit."},
                 "submission_id": {"type": "string", "description": "Alias for event_id."},
                 "include_payload": {"type": "boolean", "description": "Whether to include stored payloads.", "default": True},
+                "compact": {"type": "boolean", "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, terminal, and any terminal answer and public failure (category and message); overrides include_payload.", "default": False},
                 "limit": {"type": "integer", "description": "Maximum decision receipts to return.", "default": 25},
             },
             "required": [],
