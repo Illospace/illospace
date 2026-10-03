@@ -42,3 +42,42 @@ def test_compose_upgrade_runs_live_cycle_gate_after_doctor():
         "compose exec -T api python3 -m brain.jobs.check_cycle_context_admission --live"
     )
     assert live_gate > doctor
+
+
+def test_large_sol_cycle_preserves_guidance_without_replaying_audit_snapshots(monkeypatch):
+    from types import SimpleNamespace
+    from brain.jobs.check_cycle_context_admission import CycleAdmissionSpec, check_cycle_context_admission
+    from brain.systems.cycles.prompts import cycle_memory_payload
+
+    monkeypatch.delenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", raising=False)
+    guidance = [{"id": 1, "guidance": "G" * 1_100_000}]
+    audit = {
+        "id": 12, "version": 3, "rationale": "Update routing",
+        "changed_fields": ["thinking_override"],
+        "before_snapshot": {"guidance": "B" * 1_000_000},
+        "after_snapshot": {"guidance": "A" * 1_100_000},
+    }
+    context = {"behavior_change": audit, "revision": {"id": 42}}
+    spec = CycleAdmissionSpec(
+        cycle_id=2, name="Large coordinator", prompt="Review workspace",
+        model="openai/gpt-6.1-sol", thinking="medium",
+        guidance_snapshot=guidance, context_snapshot=context,
+    )
+    report = check_cycle_context_admission(spec)
+    assert report["status"] == "passed"
+    assert 275_000 < report["floor"] < 350_000
+    assert report["floor"] < report["compaction_threshold"] < 400_000
+    assert report["compaction_threshold"] < report["ceiling"]
+
+    payload = cycle_memory_payload(SimpleNamespace(
+        guidance_snapshot=guidance, context_snapshot=context, output_targets_snapshot=[],
+    ))
+    assert payload["guidance"] == guidance
+    assert payload["context"]["behavior_change"] == {
+        k: v for k, v in audit.items() if k not in {"before_snapshot", "after_snapshot"}
+    }
+    assert context["behavior_change"]["before_snapshot"]["guidance"] == "B" * 1_000_000
+    assert context["behavior_change"]["after_snapshot"]["guidance"] == "A" * 1_100_000
+
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "240000")
+    assert check_cycle_context_admission(spec)["status"] == "failed"
