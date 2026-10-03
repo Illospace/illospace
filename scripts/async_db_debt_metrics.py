@@ -113,6 +113,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },
+    "tests/test_reflex_missing_record_rule_migration.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
     "tests/test_scheduler.py": {
         "sqlalchemy_create_engine",
         "sqlalchemy_sync_session",
