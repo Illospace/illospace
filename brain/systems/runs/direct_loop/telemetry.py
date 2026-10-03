@@ -25,6 +25,9 @@ def _api_call_params(
     stop_reason: str | None,
     latency_ms: int,
     error: str | None,
+    auth_mode: str | None,
+    service_tier: str | None,
+    reasoning_tokens: int | None,
 ) -> dict[str, Any]:
     from brain.systems.runs.ids import trace_id_for_run_id
 
@@ -35,6 +38,9 @@ def _api_call_params(
         "trace_id": trace_id_for_run_id(run_id),
         "model": model,
         "effort": (str(effort).strip().lower() or None) if effort is not None else None,
+        "auth_mode": auth_mode,
+        "service_tier": service_tier,
+        "reasoning_tokens": reasoning_tokens,
         "ti": tokens_input,
         "to": tokens_output,
         "cr": cache_read,
@@ -66,6 +72,9 @@ async def async_record_api_call(
     error: str | None = None,
     *,
     session: Any | None = None,
+    auth_mode: str | None = None,
+    service_tier: str | None = None,
+    reasoning_tokens: int | None = None,
 ) -> None:
     """Record a single API call to agent_api_calls using native async DB access."""
     try:
@@ -90,6 +99,9 @@ async def async_record_api_call(
             stop_reason=stop_reason,
             latency_ms=latency_ms,
             error=error,
+            auth_mode=auth_mode,
+            service_tier=service_tier,
+            reasoning_tokens=reasoning_tokens,
         )
 
         async def _write(active_session: Any) -> None:
@@ -98,9 +110,9 @@ async def async_record_api_call(
                     "INSERT INTO agent_api_calls "
                     "(session_id, run_id, trace_id, turn_number, model, effort, tokens_input, tokens_output, "
                     "cache_read, cache_write, context_messages, system_prompt_chars, "
-                    "status, stop_reason, latency_ms, error) "
+                    "status, stop_reason, latency_ms, error, auth_mode, service_tier, reasoning_tokens) "
                     "VALUES (:sid, :did, :trace_id, :turn, :model, :effort, :ti, :to, :cr, :cw, :ctx, :spc, "
-                    ":status, :stop, :lat, :err)"
+                    ":status, :stop, :lat, :err, :auth_mode, :service_tier, :reasoning_tokens)"
                 ), params)
             except SQLAlchemyError:
                 await active_session.rollback()

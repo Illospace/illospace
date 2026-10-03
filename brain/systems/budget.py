@@ -19,13 +19,9 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Iterable
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.db.models.agent import AgentApiCall
-from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.runs.modeling import calculate_cost
 
 logger = logging.getLogger("cortex.budget")
 
@@ -68,43 +64,6 @@ class BudgetDecision:
         return f"BudgetDecision(allowed={self.allowed}, reason={self.reason!r})"
 
 
-def _coerce_int(value: Any) -> int:
-    return int(value or 0)
-
-
-def _empty_usage() -> dict[str, Any]:
-    return {
-        "runs": 0,
-        "api_calls": 0,
-        "tokens_input": 0,
-        "tokens_output": 0,
-        "tokens_total": 0,
-        "cache_read": 0,
-        "cache_write": 0,
-        "estimated_cost": 0.0,
-        "last_used_at": None,
-    }
-
-
-def _apply_status_filter(stmt: Any, statuses: Iterable[str] | None) -> Any:
-    if statuses is None:
-        return stmt
-    status_values = [status for status in statuses if status]
-    if not status_values:
-        return stmt
-    return stmt.where(AgentRunRow.status.in_(status_values))
-
-
-def _model_cost(row: Any) -> float:
-    return calculate_cost(
-        model=getattr(row, "model", None),
-        tokens_input=_coerce_int(row.tokens_input),
-        tokens_output=_coerce_int(row.tokens_output),
-        cache_read=_coerce_int(row.cache_read),
-        cache_write=_coerce_int(row.cache_write),
-    )
-
-
 async def _async_summarize_token_totals(
     session: AsyncSession,
     *,
@@ -113,54 +72,12 @@ async def _async_summarize_token_totals(
     thread_id: str | None = None,
     statuses: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    """Summarize run-linked token usage without sync DB compatibility."""
-    filters = [AgentApiCall.created_at >= since]
-    if org_id:
-        filters.append(AgentRunRow.org_id == org_id)
-    if thread_id:
-        filters.append(AgentRunRow.thread_id == thread_id)
+    # Reporting and budget warnings must use the same per-request price bands.
+    from brain.systems.runs.token_usage import async_summarize_token_totals
 
-    total_stmt = (
-        select(
-            func.count(func.distinct(AgentRunRow.id)).label("runs"),
-            func.count(AgentApiCall.id).label("api_calls"),
-            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
-            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
-            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
-            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
-            func.max(AgentApiCall.created_at).label("last_call_at"),
-        )
-        .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
-        .where(*filters)
+    return await async_summarize_token_totals(
+        session, since=since, org_id=org_id, thread_id=thread_id, statuses=statuses,
     )
-    total_stmt = _apply_status_filter(total_stmt, statuses)
-    totals = (await session.execute(total_stmt)).one()
-
-    result = _empty_usage()
-    result["runs"] = _coerce_int(totals.runs)
-    result["api_calls"] = _coerce_int(totals.api_calls)
-    result["tokens_input"] = _coerce_int(totals.tokens_input)
-    result["tokens_output"] = _coerce_int(totals.tokens_output)
-    result["tokens_total"] = result["tokens_input"] + result["tokens_output"]
-    result["cache_read"] = _coerce_int(totals.cache_read)
-    result["cache_write"] = _coerce_int(totals.cache_write)
-    result["last_used_at"] = getattr(totals, "last_call_at", None)
-
-    cost_stmt = (
-        select(
-            AgentApiCall.model.label("model"),
-            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
-            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
-            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
-            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
-        )
-        .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
-        .where(*filters)
-        .group_by(AgentApiCall.model)
-    )
-    cost_stmt = _apply_status_filter(cost_stmt, statuses)
-    result["estimated_cost"] = sum(_model_cost(row) for row in (await session.execute(cost_stmt)).all())
-    return result
 
 
 async def check_budget(idea_id: str, estimated_input_tokens: int,

@@ -26,6 +26,10 @@ class ModelCatalogEntry:
     input_price_per_million: float
     output_price_per_million: float
     provider_default: bool = False
+    cached_input_multiplier: float = 0.10
+    long_context_threshold_tokens: int | None = None
+    # A soft compaction trigger, not the model's maximum context size.
+    preferred_compact_threshold_tokens: int | None = None
 
     @property
     def model_name(self) -> str:
@@ -40,30 +44,60 @@ CREDENTIAL_FREE_PROVIDERS: frozenset[str] = frozenset({"ollama"})
 
 MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     ModelCatalogEntry(
+        id="openai/gpt-6.1-sol",
+        label="GPT-6.1 Sol",
+        provider="openai",
+        description="Default for coordination and tool use; medium effort for routine work.",
+        supported_effort_tiers=tuple(tier for tier in EFFORT_TIERS if tier != "none"),
+        availability_fallback="openai/gpt-6-sol",
+        # https://developers.openai.com/api/docs/models/gpt-6.1-sol
+        context_window_tokens=1_050_000,
+        input_price_per_million=2.0,
+        output_price_per_million=10.0,
+        provider_default=True,
+        cached_input_multiplier=0.05,
+        long_context_threshold_tokens=272_000,
+        preferred_compact_threshold_tokens=240_000,
+    ),
+    ModelCatalogEntry(
+        id="openai/gpt-6-sol",
+        label="GPT-6 Sol",
+        provider="openai",
+        description="Availability fallback for GPT-6.1 Sol.",
+        supported_effort_tiers=tuple(tier for tier in EFFORT_TIERS if tier != "none"),
+        availability_fallback="openai/gpt-5.6-sol",
+        context_window_tokens=1_050_000,
+        input_price_per_million=2.0,
+        output_price_per_million=10.0,
+        long_context_threshold_tokens=272_000,
+        preferred_compact_threshold_tokens=240_000,
+    ),
+    ModelCatalogEntry(
         id="openai/gpt-6-astra",
         label="GPT-6 Astra",
         provider="openai",
-        description="Reasoning default; falls back to GPT-5.6 Sol when unavailable.",
+        description="Escalation for difficult review with unresolved evidence; use high effort.",
         supported_effort_tiers=tuple(tier for tier in EFFORT_TIERS if tier != "none"),
-        availability_fallback="openai/gpt-5.6-sol",
+        availability_fallback="openai/gpt-6.1-sol",
         # https://developers.openai.com/api/docs/models/gpt-6-astra
         context_window_tokens=1_050_000,
         input_price_per_million=10.0,
         output_price_per_million=50.0,
-        provider_default=True,
+        long_context_threshold_tokens=272_000,
     ),
     ModelCatalogEntry(
         id="openai/gpt-5.6-sol",
         label="GPT-5.6 Sol",
         provider="openai",
-        description="Standard reasoning and Astra fallback; falls back to GPT-5.5.",
+        description="Legacy reasoning route and final availability fallback.",
         supported_effort_tiers=_ALL_EFFORT_TIERS,
-        availability_fallback="openai/gpt-5.5",
+        availability_fallback=None,
         # https://developers.openai.com/api/docs/models/gpt-5.6-sol
         # Provider contract: 1,050,000 total tokens (922,000 input + 128,000 output).
         context_window_tokens=1_050_000,
         input_price_per_million=4.0,
         output_price_per_million=20.0,
+        long_context_threshold_tokens=272_000,
     ),
     ModelCatalogEntry(
         id="openai/gpt-5.6-luna",
@@ -84,8 +118,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         label="GPT-5.5",
         provider="openai",
         description=(
-            "Availability fallback for GPT-5.6 Sol; not user-selectable policy — "
-            "subscription-metered emergency fallback only."
+            "Legacy explicit selection; retires from ChatGPT/Codex on October 14, 2026. "
+            "Excluded from automatic fallback."
         ),
         supported_effort_tiers=_ALL_EFFORT_TIERS,
         availability_fallback=None,
@@ -160,7 +194,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
 
 MODEL_CATALOG_BY_ID = {entry.id: entry for entry in MODEL_CATALOG}
 _AVAILABILITY_FALLBACK_ALIASES = {
-    "openai/gpt-5.6": "openai/gpt-5.5",
+    "openai/gpt-5.6": "openai/gpt-5.6-sol",
 }
 
 

@@ -39,19 +39,13 @@ def test_effort_vocabulary_contract_matches_all_schema_boundaries():
 def test_spawn_worker_description_teaches_routing_patterns():
     description = _tool("spawn_worker")["description"].lower()
 
-    assert "xhigh" in description and "judgment" in description
-    assert "high" in description and "standard" in description
-    assert "gpt-5.6-sol" in description
-    assert "openai/gpt-6-astra" in description
-    assert "openai/gpt-5.6-luna" in description
-    assert "~200k context" in description
-    assert "many-short-turn loops" in description
-    assert "cross-provider verifier" in description
+    assert "openai/gpt-6.1-sol at medium" in description
+    assert "sol 6.1 at high" in description
+    assert "openai/gpt-5.6-luna at low" in description
+    assert "openai/gpt-6-astra at high" in description
+    assert "xhigh needs an explicit reason" in description
+    assert "at most one quality escalation" in description
+    assert "availability fallback is separate" in description
+    assert "not whole histories" in description
+    assert "cross-provider check" in description
     assert "ollama/qwen3.6-27b" in description
-    assert "zero cost" in description
-    assert "unlimited volume" in description
-    assert "≤64k context" in description
-    assert "quality well below luna" in description
-    assert "heartbeat-class" in description
-    assert "never for judgment" in description
-    assert "anything user-facing" in description

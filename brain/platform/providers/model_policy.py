@@ -19,13 +19,14 @@ from brain.platform.model_catalog import (
     CREDENTIAL_FREE_PROVIDERS,
     MODEL_CATALOG,
     canonical_catalog_model_id,
+    get_model_catalog_entry,
 )
 
 
 DEFAULT_RUNTIME_PROVIDER = "openai"
-DEFAULT_THINKING_TIER = "high"
+DEFAULT_THINKING_TIER = "medium"
 DEFAULT_BULK_MODEL = "openai/gpt-5.6-luna"
-DEFAULT_BULK_THINKING_TIER = "xhigh"
+DEFAULT_BULK_THINKING_TIER = "low"
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     entry.provider: entry.model_name
     for entry in MODEL_CATALOG
@@ -254,7 +255,7 @@ async def async_resolve_default_provider(
 def required_openai_auth_mode(model: str | None) -> str | None:
     """Return the OpenAI auth mode a model requires, or None when either works.
 
-    Illo routes GPT-6 Astra, GPT-5.5, and every GPT-5.6 variant through the
+    Illo routes cataloged GPT-6 models, GPT-5.5, and every GPT-5.6 variant through the
     ChatGPT/Codex subscription backend, never an API key. Callers pass the
     result to credential resolution so a run validates and uses the credential
     it will actually need.
@@ -264,7 +265,7 @@ def required_openai_auth_mode(model: str | None) -> str | None:
         if value.startswith(prefix):
             value = value[len(prefix):]
             break
-    return "chatgpt" if value in {"gpt-6-astra", "gpt-5.5"} or value.startswith("gpt-5.6") else None
+    return "chatgpt" if value in {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.5"} or value.startswith("gpt-5.6") else None
 
 
 def coerce_openai_api_key_model(model: str) -> str | None:
@@ -482,7 +483,7 @@ async def async_get_bulk_route(
 def normalize_model_name(model: str | None) -> str:
     """Normalize a model string to the canonical priced identifier."""
     if not model:
-        return "openai/gpt-5.5"
+        return f"openai/{DEFAULT_PROVIDER_MODELS['openai']}"
 
     value = model.strip()
     lower = value.lower()
@@ -513,7 +514,7 @@ def normalize_model_name(model: str | None) -> str:
         return "openai/gpt-5.6-sol"
     if "gpt-5.6" in lower:
         return "openai/gpt-5.6-sol"
-    return "openai/gpt-5.5"
+    return value
 
 
 def calculate_model_cost(
@@ -523,8 +524,13 @@ def calculate_model_cost(
     *,
     cache_read: int = 0,
     cache_write: int = 0,
+    long_context: bool | None = None,
 ) -> float:
-    """Calculate estimated cost for a model run."""
+    """Estimate Standard API-equivalent USD, not a subscription invoice.
+
+    Input includes cache reads. Aggregate callers must split calls by pricing
+    band and pass long_context explicitly; summed tokens are not a prompt size.
+    """
     normalized_model = normalize_model_name(model)
     if normalized_model == "local":
         return 0.0
@@ -533,10 +539,21 @@ def calculate_model_cost(
         normalized_model,
         MODEL_PRICING_PER_MILLION["openai/gpt-5.5"],
     )
+    entry = get_model_catalog_entry(normalized_model)
+    threshold = entry.long_context_threshold_tokens if entry else None
+    is_long = bool(threshold and (long_context if long_context is not None else tokens_input > threshold))
+    input_multiplier = 2.0 if is_long else 1.0
+    output_multiplier = 1.5 if is_long else 1.0
+    cache_multiplier = entry.cached_input_multiplier if entry else 0.10
     cached_input_tokens = max(0, min(int(cache_read or 0), int(tokens_input or 0)))
     uncached_input_tokens = max(0, int(tokens_input or 0) - cached_input_tokens)
-    input_cost = (uncached_input_tokens / 1_000_000.0) * rates["input"]
-    output_cost = (tokens_output / 1_000_000.0) * rates["output"]
-    cache_read_cost = (cached_input_tokens / 1_000_000.0) * rates["input"] * 0.10
-    cache_write_cost = (cache_write / 1_000_000.0) * rates["input"] * 1.25
+    cache_write_tokens = max(0, int(cache_write or 0))
+    if entry and entry.provider == "openai":
+        # Responses input_tokens includes both cache reads and cache writes.
+        cache_write_tokens = min(cache_write_tokens, uncached_input_tokens)
+        uncached_input_tokens -= cache_write_tokens
+    input_cost = (uncached_input_tokens / 1_000_000.0) * rates["input"] * input_multiplier
+    output_cost = (tokens_output / 1_000_000.0) * rates["output"] * output_multiplier
+    cache_read_cost = (cached_input_tokens / 1_000_000.0) * rates["input"] * cache_multiplier * input_multiplier
+    cache_write_cost = (cache_write_tokens / 1_000_000.0) * rates["input"] * 1.25 * input_multiplier
     return round(input_cost + output_cost + cache_read_cost + cache_write_cost, 6)

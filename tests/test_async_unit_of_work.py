@@ -323,6 +323,9 @@ async def test_async_record_api_call_uses_supplied_async_session():
 
     await telemetry_module.async_record_api_call(
         session_id="session-1",
+        auth_mode="chatgpt",
+        service_tier="default",
+        reasoning_tokens=8,
         run_id=7,
         turn=2,
         model="test-model",
@@ -346,6 +349,9 @@ async def test_async_record_api_call_uses_supplied_async_session():
     assert params["did"] == 7
     assert params["trace_id"] == "run:7"
     assert params["effort"] == "low"
+    assert params["auth_mode"] == "chatgpt"
+    assert params["service_tier"] == "default"
+    assert params["reasoning_tokens"] == 8
     assert params["ti"] == 11
     assert params["to"] == 13
 

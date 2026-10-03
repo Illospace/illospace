@@ -140,13 +140,13 @@ async def test_api_key_openai_metadata_model_is_coerced_with_structured_log(capl
             WorkIntakeEvent.from_trigger_payload(trigger),
         )
 
-    assert request.model_policy["model"] == "openai/gpt-6-astra"
+    assert request.model_policy["model"] == "openai/gpt-6.1-sol"
     record = next(
         record for record in caplog.records if record.event == "api_key_model_coerced"
     )
     assert record.routing_source == "chat"
     assert record.requested_value == "openai/gpt-4.1"
-    assert record.coerced_value == "openai/gpt-6-astra"
+    assert record.coerced_value == "openai/gpt-6.1-sol"
 
 
 @pytest.mark.asyncio
@@ -162,18 +162,20 @@ async def test_bare_api_key_model_is_normalized_away_with_structured_log(caplog)
             WorkIntakeEvent.from_trigger_payload(trigger),
         )
 
-    assert request.model_policy["model"] == "openai/gpt-5.5"
+    assert request.model_policy["model"] == "openai/gpt-6.1-sol"
     record = next(
         record for record in caplog.records if record.event == "api_key_model_coerced"
     )
     assert record.requested_value == "gpt-4.1"
-    assert record.coerced_value == "openai/gpt-5.5"
+    assert record.coerced_value == "openai/gpt-6.1-sol"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model, expected", [
     (" OPENAI/GPT-5.6-SOL ", "openai/gpt-5.6-sol"),
     ("gpt-6-astra", "openai/gpt-6-astra"),
+    ("gpt-6.1-sol", "openai/gpt-6.1-sol"),
+    ("openai:gpt-6.1-sol", "openai/gpt-6.1-sol"),
     ("openai/gpt-6-astra", "openai/gpt-6-astra"),
     ("openai:gpt-6-astra", "openai/gpt-6-astra"),
 ])
@@ -623,7 +625,7 @@ async def test_cycle_api_key_payload_model_policy_is_coerced(monkeypatch):
 
     request = await build_agent_run_request(_Session(), WorkIntakeEvent.from_trigger_payload(trigger))
 
-    assert request.model_policy == {"model": "openai/gpt-6-astra", "thinking": "low"}
+    assert request.model_policy == {"model": "openai/gpt-6.1-sol", "thinking": "low"}
     assert request.deadline_at == deadline_at
 
 

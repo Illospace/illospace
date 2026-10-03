@@ -111,7 +111,7 @@ class TestExtractHarvestItems:
         assert all(not item.raw_episode for item in items)
         assert "python" in items[0].topic_tags
         requests = [call.args[0] for call in provider.create.call_args_list]
-        assert [request.model for request in requests] == ["gpt-6-astra", "gpt-5.6-sol"]
+        assert [request.model for request in requests] == ["gpt-6-astra", "gpt-6.1-sol"]
         assert all(request.response_format == _response_format() for request in requests)
         assert all(request.operation_type == "memory_extraction" for request in requests)
 

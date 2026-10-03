@@ -100,8 +100,8 @@ class TestProviderInference:
         )
         expired = SimpleNamespace(status_code=401, response_body="access token expired")
 
-        assert fallback_model_for("openai/gpt-5.6-sol") == "openai/gpt-5.5"
-        assert fallback_model_for("openai/gpt-5.6") == "openai/gpt-5.5"
+        assert fallback_model_for("openai/gpt-5.6-sol") is None
+        assert fallback_model_for("openai/gpt-5.6") == "openai/gpt-5.6-sol"
         assert fallback_model_for("qwen3.6-27b") == "openai/gpt-5.6-luna"
         assert fallback_model_for("gpt-5.5") is None
         assert is_model_unavailable_error(unsupported) is True
@@ -229,10 +229,10 @@ class TestProviderInference:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route, thinking, effective_effort", [
-    (["gpt-5.6-sol", "gpt-5.5"], "xhigh", "xhigh"),
-    (["gpt-6-astra", "gpt-5.6-sol"], "high", "high"),
-    (["gpt-6-astra", "gpt-5.6-sol"], "none", "low"),
-    (["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5"], "high", "high"),
+    (["gpt-6.1-sol", "gpt-6-sol"], "xhigh", "xhigh"),
+    (["gpt-6-astra", "gpt-6.1-sol"], "high", "high"),
+    (["gpt-6-astra", "gpt-6.1-sol"], "none", "low"),
+    (["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"], "high", "high"),
 ])
 async def test_agent_retries_subscription_model_when_account_lacks_entitlement(
     monkeypatch, route, thinking, effective_effort,
@@ -433,7 +433,7 @@ async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(
         requests.append(request)
         if len(requests) == 1:
             raise OpenAICodexError(
-                "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
                 status_code=400,
             )
         return LLMResponse(
@@ -446,7 +446,7 @@ async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(
             ],
             stop_reason="tool_use",
             usage=Usage(input_tokens=3, output_tokens=2),
-            model="gpt-5.5",
+            model="gpt-6-sol",
         )
 
     review = MagicMock(return_value={
@@ -480,7 +480,7 @@ async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(
     with bind_agent_context(context):
         result = await run_agent_async(
             "Reply after fallback",
-            model="openai/gpt-5.6-sol",
+            model="openai/gpt-6.1-sol",
             thinking="xhigh",
             tools=[CORTEX_REPLY_TOOL],
             tool_handlers={"cortex_reply": _handle_cortex_reply},
@@ -492,11 +492,11 @@ async def test_cortex_reply_checker_reuses_run_client_with_model_after_fallback(
         )
 
     assert result.success is True
-    assert [request.model for request in requests] == ["gpt-5.6-sol", "gpt-5.5"]
+    assert [request.model for request in requests] == ["gpt-6.1-sol", "gpt-6-sol"]
     review.assert_called_once()
     assert review.call_args.kwargs["llm"] is llm
     assert review.call_args.kwargs["provider"] is resolved_provider
-    assert review.call_args.kwargs["model"] == "openai/gpt-5.5"
+    assert review.call_args.kwargs["model"] == "openai/gpt-6-sol"
 
 
 @pytest.mark.asyncio
@@ -517,7 +517,7 @@ async def test_agent_does_not_use_shared_key_for_subscription_only_fallback(monk
 
     result = await run_agent_async(
         "Test subscription fallback",
-        model="openai/gpt-5.6-sol",
+        model="openai/gpt-6.1-sol",
         thinking="xhigh",
         tools=[],
         tool_handlers={},

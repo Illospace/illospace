@@ -164,9 +164,8 @@
       {(data.summary.total_runs || 0).toLocaleString()} runs &middot;
       {fmtTokens(data.summary.total_tokens)} tokens
     </p>
-  {:else}
-    <p class="page-subtitle">Token &amp; cost analytics</p>
   {/if}
+  <p class="page-subtitle">Standard API-equivalent estimates. ChatGPT subscription charges can differ.</p>
 </div>
 
 {#if loading}

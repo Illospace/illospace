@@ -213,7 +213,9 @@ class OpenAICodexClient:
     def close(self) -> None:
         self._client.close()
 
-    def list_models(self, *, client_version: str = "illo-brain") -> dict[str, Any]:
+    def list_models(self, *, client_version: str = "0.153.3") -> dict[str, Any]:
+        # The discovery endpoint requires a semantic Codex client version.
+        # Verified against the subscription backend; omission is not denial of access.
         response = self._client.get(
             "/models",
             params={"client_version": client_version},
