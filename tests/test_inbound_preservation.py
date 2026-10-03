@@ -9,6 +9,8 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
 from brain.systems.inbound import service as inbound
 from brain.systems.inbound.preservation import (
+    MAX_SUBMISSION_FILE_REFERENCE_CHARS,
+    MAX_SUBMISSION_FILE_REFERENCES,
     PRESERVATION_MISSING_REASON,
     PRESERVATION_NON_DURABLE_REASON,
 )
@@ -116,7 +118,8 @@ async def test_language_only_preservation_match_is_prompt_hint_not_evidence_cont
     assert "Possible preservation workflow:" in run.input_message
 
 
-async def test_submission_tags_human_message_for_introspection_routing(session):
+@pytest.mark.parametrize("files_touched", [[], ["docs/where-is-your-source.md", "docs/what-tools-do-you-have.md"]])
+async def test_submission_tags_human_message_for_introspection_routing(session, files_touched):
     # Regression for issue #249: the headless submission wrapper used to embed
     # boilerplate ("Handle this external coordination submission.", "Source metadata:")
     # that could trip the self-context heuristic and hijack the final answer with a
@@ -138,7 +141,11 @@ async def test_submission_tags_human_message_for_introspection_routing(session):
             "origin": "claude-code.submit",
             "desired_outcome": "seo_post_deploy_health_report",
             "message": message,
-            "source": {"source_tool": "claude-code", "repo": "uwear-website"},
+            "source": {
+                "source_tool": "claude-code",
+                "repo": "uwear-website",
+                "files_touched": files_touched,
+            },
             "idempotency_key": "claude-code:submission:seo-249",
         },
         ingress_context={"surface": "test"},
@@ -160,6 +167,125 @@ async def test_submission_tags_human_message_for_introspection_routing(session):
         run_introspection.message_for_required_introspection(run.input_message, run.metadata_)
         == message
     )
+    for path in files_touched:
+        assert path in run.input_message
+    assert run_introspection.required_introspection_tool(run.input_message) == (None, None)
+    assert run_introspection.required_introspection_tool(
+        run.input_message, explicit_tool="read_self_context"
+    )[0] == "read_self_context"
+
+
+@pytest.mark.parametrize(
+    ("message", "desired_outcome", "expects_preservation"),
+    [
+        ("Article and draft are ready.", "preserve_knowledge", True),
+        ("Preserve the article and draft.", None, True),
+        ("Article and draft are ready.", None, False),
+    ],
+)
+async def test_submission_includes_supplied_artifact_references(
+    session, message, desired_outcome, expects_preservation
+):
+    principal = await _seed_connection(session)
+    files = ["articles/product-update.html", "drafts/product-update.md"]
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "kind": "submission",
+            "origin": "codex.submit",
+            "desired_outcome": desired_outcome,
+            "message": message,
+            "source": {"files_touched": files, "repo": "private-source-envelope"},
+            "idempotency_key": "codex:submission:file-references",
+        },
+        ingress_context={"surface": "test"},
+    )
+    handling = await _assert_queued_submission(session, result["ilo_outcome"])
+    run = await session.get(AgentRunRow, handling["run_id"])
+    assert run is not None
+    assert run.input_message.startswith(message)
+    assert "Files the submitter touched (artifact references supplied with this submission):" in run.input_message
+    for path in files:
+        assert json.dumps(path) in run.input_message.splitlines()
+    assert run.metadata_["submission"]["source"]["files_touched"] == files
+    assert "private-source-envelope" not in run.input_message
+    assert "Source metadata:" not in run.input_message
+    guidance = (
+        "- Carry the supplied file references above into the durable record, "
+        "or explain in the final answer why a reference could not be used."
+    )
+    assert (guidance in run.input_message) is expects_preservation
+
+
+@pytest.mark.parametrize("desired_outcome", [None, "preserve_knowledge"])
+@pytest.mark.parametrize("source", [{}, {"files_touched": []}])
+async def test_submission_prompt_without_files_is_unchanged(desired_outcome, source):
+    normalized = {
+        "message": "Article and draft are ready.",
+        "parts": [{"type": "text", "content": "Article context."}],
+        "source": source,
+        "desired_outcome": desired_outcome,
+    }
+    expected = (
+        'Article and draft are ready.\n\nContext parts: 1\n'
+        '[\n  {\n    "content": "Article context.",\n    "type": "text"\n  }\n]'
+    )
+    if desired_outcome:
+        expected += (
+            "\n\nPossible preservation workflow:"
+            "\n- The wording may indicate a preservation request. Treat this as a hint, not a storage mandate."
+            "\n- If durable storage is appropriate, choose an Illo-owned memory, domain, project, handoff, thread, artifact, or workspace-app surface and list the durable handle in the final answer."
+        )
+    expected += (
+        "\n\nUse Illo's memory, team preferences, and available tools to decide the appropriate outcome. "
+        "You may answer privately, create or update workspace state, delegate work, ask follow-up, or no-op when that is best. "
+        "Record a clear final answer describing what you decided and what happened."
+    )
+    assert inbound._submission_prompt(normalized=normalized) == expected
+
+
+async def test_submission_file_references_bound_count_and_path_length():
+    boundary_path = "x" * (MAX_SUBMISSION_FILE_REFERENCE_CHARS - 2)
+    oversized_path = boundary_path + "y"
+    files = [boundary_path, oversized_path] + [
+        f"articles/article-{i}.md" for i in range(MAX_SUBMISSION_FILE_REFERENCES)
+    ]
+    prompt = inbound._submission_prompt(normalized={"message": "Review these.", "source": {"files_touched": files}})
+    assert json.dumps(boundary_path) in prompt.splitlines()
+    assert oversized_path not in prompt
+    for path in files[2:MAX_SUBMISSION_FILE_REFERENCES]:
+        assert json.dumps(path) in prompt.splitlines()
+    for path in files[MAX_SUBMISSION_FILE_REFERENCES:]:
+        assert path not in prompt
+    assert "3 file reference(s) omitted" in prompt
+    assert "oversized or non-string entries are omitted" in prompt
+
+
+async def test_submission_file_references_survive_total_prompt_limit():
+    files = [f"articles/{i}-" + "x" * 200 + ".md" for i in range(MAX_SUBMISSION_FILE_REFERENCES + 1)]
+    prompt = inbound._submission_prompt(
+        normalized={
+            "message": "Preserve these articles. " + "x" * inbound.MAX_TRIAGE_MESSAGE_CHARS,
+            "parts": [{"type": "text", "content": "y" * inbound.MAX_TRIAGE_PAYLOAD_CHARS}],
+            "source": {"files_touched": files},
+            "desired_outcome": "preserve_knowledge",
+        }
+    )
+    assert len(prompt) <= inbound.MAX_TRIAGE_MESSAGE_CHARS
+    assert prompt.startswith("Preserve these articles.")
+    for path in files[:MAX_SUBMISSION_FILE_REFERENCES]:
+        assert json.dumps(path) in prompt.splitlines()
+    assert "1 file reference(s) omitted" in prompt
+    assert "explain in the final answer why a reference could not be used." in prompt
+    assert prompt.endswith("Record a clear final answer describing what you decided and what happened.")
+
+
+async def test_submission_file_references_escape_line_breaks():
+    path = 'articles/été\n"draft".md'
+    prompt = inbound._submission_prompt(normalized={"message": "Review this.", "source": {"files_touched": [path]}})
+    assert json.dumps(path, ensure_ascii=False) in prompt.splitlines()
+    assert path not in prompt
 
 
 async def test_preservation_submission_without_durable_evidence_stays_actionable(session):

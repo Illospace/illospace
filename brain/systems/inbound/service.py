@@ -48,6 +48,7 @@ from brain.systems.inbound.status import (
 )
 from brain.systems.inbound.assignment import default_rules, resolve_owner
 from brain.systems.inbound.preservation import (
+    submission_file_reference_prompt_lines,
     submission_preservation_contract,
     submission_preservation_prompt_lines,
 )
@@ -1399,7 +1400,8 @@ async def _queue_illo_submission(
                     # Route required-introspection detection off the operator's actual
                     # request rather than any surrounding coordination text (issue #249).
                     # The run message now leads with the raw operator message and origin/
-                    # source/constraints live in metadata, but keep this tag as the
+                    # source/constraints live in metadata (with file references also
+                    # shown in the prompt), but keep this tag as the
                     # authoritative human-message signal for introspection routing.
                     "human_message": normalized.get("message"),
                     "inbound_event": _inbound_event_metadata(context, event, normalized, None),
@@ -1439,9 +1441,9 @@ async def _queue_illo_submission(
 def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
     """Build the run message with the operator's raw request as the primary content.
 
-    Origin, source, constraints, and correlation are NOT embedded as authoritative
-    prompt text (that "Source metadata:" envelope is what tripped issue #249). They
-    are carried as structured run metadata in the ``submission`` payload instead.
+    Origin, source, constraints, and correlation stay in structured run metadata
+    (the "Source metadata:" envelope tripped issue #249). Only source.files_touched
+    is also rendered as bounded, submitter-supplied artifact references.
     """
 
     preservation = submission_preservation_contract(normalized)
@@ -1449,8 +1451,11 @@ def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
     parts = list(normalized.get("parts") or [])
     if parts:
         lines.extend(["", f"Context parts: {len(parts)}", _json_preview(parts, limit=MAX_TRIAGE_PAYLOAD_CHARS)])
-    lines.extend(submission_preservation_prompt_lines(preservation))
-    lines.extend(
+    file_lines = submission_file_reference_prompt_lines(normalized.get("source") or {})
+    closing_lines = file_lines + submission_preservation_prompt_lines(
+        preservation, has_file_references=bool(file_lines)
+    )
+    closing_lines.extend(
         [
             "",
             "Use Illo's memory, team preferences, and available tools to decide the appropriate outcome. "
@@ -1458,6 +1463,12 @@ def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
             "Record a clear final answer describing what you decided and what happened.",
         ]
     )
+    if file_lines:
+        # Reserve room for references and preservation guidance even when the
+        # operator message and context parts exhaust the normal prompt budget.
+        content_budget = MAX_TRIAGE_MESSAGE_CHARS - len("\n".join(closing_lines)) - 1
+        lines = [_truncate("\n".join(lines), content_budget)]
+    lines.extend(closing_lines)
     return _truncate("\n".join(lines), MAX_TRIAGE_MESSAGE_CHARS)
 
 
