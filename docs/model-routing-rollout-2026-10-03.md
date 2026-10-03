@@ -17,6 +17,11 @@ Sol 6/6.1 use the existing semantic compaction path at a soft 240,000-token
 trigger, targeting 168,000 tokens. This is an operating policy, not a reduced
 model context window. Explicit compaction configuration still takes precedence.
 The purpose is to avoid repeatedly sending large histories in routine loops.
+If required instructions or an indivisible tool turn exceed that preference,
+the run allows 10% working headroom above the compacted floor, capped by the
+model-derived admission ceiling. Explicit operator caps remain hard. Cycle
+prompts include policy-audit metadata; full before/after audit snapshots stay
+in durable storage instead of replaying old instructions on every launch.
 
 Cost reports are Standard API-equivalent estimates, not ChatGPT invoices. The
 estimator uses the model's cache rate and the full-request long-context price
@@ -66,6 +71,15 @@ actual model/effort/auth attribution independently of its completion message.
 
 The sanitized audit, evaluation fixtures and raw results are retained in the
 operator's durable report directory `illo-sol61-rollout-2026-10-03`.
+
+The first live gate after #924 exposed [#925](https://github.com/Illospace/illospace/issues/925):
+the preferred compaction threshold was enforced as a hard admission limit.
+Ticket Coordinator was temporarily pinned to Astra/high while this was fixed.
+A read-only candidate check against the actual stored cycles passed all three
+routes; removing duplicated audit snapshots reduced the coordinator floor
+from 834,074 to 332,269 estimated tokens. Its remaining active guidance still
+exceeds the ordinary preference. Guidance migration remains tracked in
+[#819](https://github.com/Illospace/illospace/issues/819).
 
 ## Primary references
 

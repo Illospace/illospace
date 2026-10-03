@@ -125,7 +125,11 @@ def check_cycle_context_admission(
             "diagnostic": str(exc),
         }
 
-    ratio = admission.floor_tokens / admission.budget.auto_compact_threshold_tokens
+    ceiling = (
+        admission.budget.admission_ceiling_tokens
+        or admission.budget.auto_compact_threshold_tokens
+    )
+    ratio = admission.floor_tokens / ceiling
     return {
         "cycle_id": spec.cycle_id,
         "cycle_name": spec.name,
@@ -133,7 +137,8 @@ def check_cycle_context_admission(
         "model": spec.model,
         "thinking": spec.thinking,
         "floor": admission.floor_tokens,
-        "ceiling": admission.budget.auto_compact_threshold_tokens,
+        "ceiling": ceiling,
+        "compaction_threshold": admission.budget.auto_compact_threshold_tokens,
         "tools": admission.tool_count,
         "headroom_ratio": round(1.0 - ratio, 6),
     }

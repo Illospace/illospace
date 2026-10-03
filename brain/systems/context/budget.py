@@ -47,6 +47,8 @@ class ModelContextBudget:
     target_tokens: int
     emergency_target_tokens: int
     source: str = "model_context_budget_v1"
+    # Only catalog preferences are soft. Explicit operator caps stay hard.
+    admission_ceiling_tokens: int | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -62,6 +64,7 @@ class ModelContextBudget:
             "target_tokens": self.target_tokens,
             "emergency_target_tokens": self.emergency_target_tokens,
             "source": self.source,
+            "admission_ceiling_tokens": self.admission_ceiling_tokens,
         }
 
 
@@ -170,11 +173,14 @@ def resolve_model_context_budget(
 
     catalog_entry = get_model_catalog_entry(f"{resolved_provider}/{normalized_model}")
     preferred_threshold = catalog_entry.preferred_compact_threshold_tokens if catalog_entry else None
+    admission_ceiling = None
     configured_limit = os.environ.get("AGENT_AUTO_COMPACT_TOKEN_LIMIT")
     if configured_limit:
         threshold = max(1, _env_int("AGENT_AUTO_COMPACT_TOKEN_LIMIT", effective_input_limit * 9 // 10))
         threshold = min(threshold, effective_input_limit)
     else:
+        if preferred_threshold is not None:
+            admission_ceiling = max(1, effective_input_limit * 9 // 10)
         threshold = min(effective_input_limit * 9 // 10, preferred_threshold or effective_input_limit)
         threshold = max(1, threshold)
 
@@ -204,4 +210,5 @@ def resolve_model_context_budget(
         auto_compact_threshold_tokens=threshold,
         target_tokens=target,
         emergency_target_tokens=emergency_target,
+        admission_ceiling_tokens=admission_ceiling,
     )
