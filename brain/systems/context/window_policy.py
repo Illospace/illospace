@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from brain.systems.context.budget import ModelContextBudget, resolve_model_context_budget
@@ -87,6 +87,17 @@ class ContextWindowPolicy:
 
         return int(tokens) > self.threshold_tokens
 
+    def _relax_preferred_threshold(self, tokens: int) -> bool:
+        """Let an irreducible prompt exceed a preference, never a hard ceiling."""
+        ceiling = self.budget.admission_ceiling_tokens
+        if ceiling is None or not self.threshold_tokens < tokens <= ceiling:
+            return False
+        # Allow modest working headroom without disabling early compaction for
+        # the rest of a large run. The provider-derived ceiling remains hard.
+        threshold = min(ceiling, max(tokens, tokens * 11 // 10))
+        self.budget = replace(self.budget, auto_compact_threshold_tokens=threshold)
+        return True
+
     def admit(
         self,
         messages: list[dict],
@@ -110,6 +121,7 @@ class ContextWindowPolicy:
             min_messages=self.min_messages,
             force=True,
         )
+        self._relax_preferred_threshold(minimum_plan.estimated_tokens)
         admission = ContextAdmission(
             budget=self.budget,
             floor_tokens=minimum_plan.estimated_tokens,
@@ -168,8 +180,9 @@ class ContextWindowPolicy:
             emergency=emergency,
             semantic_compactor=semantic_compactor,
         )
+        relaxed = self._relax_preferred_threshold(plan.estimated_tokens)
         made_sufficient_progress = (
-            plan.report.omitted_count > 0
+            (plan.report.omitted_count > 0 or relaxed)
             and self.admits(plan.estimated_tokens)
         )
         if made_sufficient_progress:

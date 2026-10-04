@@ -142,12 +142,18 @@ def cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
 
 
 def cycle_memory_payload(run: CycleRun) -> dict:
-    context = json_dict(getattr(run, "context_snapshot", None))
-    if "schedule_skills" in context:
-        context = {
+    context = {
+        key: value
+        for key, value in json_dict(getattr(run, "context_snapshot", None)).items()
+        if key != "schedule_skills"
+    }
+    if isinstance(context.get("behavior_change"), dict):
+        # Full before/after snapshots remain in the durable run/audit records.
+        # They duplicate current guidance and include superseded instructions.
+        context["behavior_change"] = {
             key: value
-            for key, value in context.items()
-            if key != "schedule_skills"
+            for key, value in context["behavior_change"].items()
+            if key not in {"before_snapshot", "after_snapshot"}
         }
     return {
         "guidance": json_list(getattr(run, "guidance_snapshot", None)),

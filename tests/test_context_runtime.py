@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 
 def _pack():
     from brain.systems.context.runtime import ContextRuntime
@@ -562,3 +563,51 @@ def test_thread_handoff_incrementally_carries_previous_summary():
     assert payload["message_count"] == 4
     assert payload["previous_message_count"] == 2
     assert payload["metadata"]["previous_handoff_digest"] == first.digest
+
+
+def test_sol_soft_threshold_admits_large_required_prompt(monkeypatch):
+    from brain.systems.context.window_policy import ContextWindowPolicy
+    from brain.systems.context.errors import ContextFloorExceedsBudgetError
+
+    monkeypatch.delenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", raising=False)
+    messages = [{"role": "user", "content": "x" * 1_200_000}]
+    policy = ContextWindowPolicy.resolve(model="gpt-6.1-sol", reasoning_effort="medium")
+    assert policy.threshold_tokens == 240_000
+    admission = policy.admit(messages)
+    assert admission.floor_tokens > 240_000
+    assert admission.floor_tokens < policy.threshold_tokens < admission.budget.admission_ceiling_tokens
+    assert policy.admits(admission.floor_tokens)
+    for _ in range(4):
+        assert policy.compact(messages, session_id="large-prompt", phase="test", max_messages=20).messages == messages
+
+    # A real provider ceiling is still enforced.
+    too_large = [{"role": "user", "content": "x" * 4_400_000}]
+    with pytest.raises(ContextFloorExceedsBudgetError):
+        policy.admit(too_large)
+
+    # An explicit operator cap is never relaxed.
+    monkeypatch.setenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", "240000")
+    capped = ContextWindowPolicy.resolve(model="gpt-6.1-sol")
+    with pytest.raises(ContextFloorExceedsBudgetError):
+        capped.admit(messages)
+
+
+def test_sol_soft_compaction_can_retain_an_irreducible_tool_turn(monkeypatch):
+    from brain.systems.context.window_policy import ContextWindowPolicy
+
+    monkeypatch.delenv("AGENT_AUTO_COMPACT_TOKEN_LIMIT", raising=False)
+    policy = ContextWindowPolicy.resolve(model="gpt-6.1-sol", reasoning_effort="medium")
+    policy.admit([{"role": "user", "content": "Small initial request"}])
+    messages = [
+        {"role": "user", "content": "Read the required source"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "read-1", "name": "read_file", "input": {}}
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "read-1", "content": "x" * 1_200_000}
+        ]},
+    ]
+    for _ in range(4):
+        outcome = policy.compact(messages, session_id="large-tool-turn", phase="test", max_messages=20)
+        assert outcome.messages == messages
+    assert policy.consecutive_no_progress == 0
