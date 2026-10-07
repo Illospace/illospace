@@ -1070,8 +1070,10 @@ def invoke_predict_rlm_agent(
                     "Use the provided Illo tools for filesystem, shell, browser, memory, and worker orchestration work. "
                     "Do not import or call subprocess, os.system, multiprocessing, or other process APIs inside the JSPI interpreter; "
                     "that runtime cannot spawn OS processes. Use the provided Illo shell/file tools instead. "
-                    "For independent read/search/fetch operations, prefer the `parallel_tool_batch` tool so the runtime "
-                    "executes them concurrently. Use asyncio.gather() only when you are already writing a custom script "
+                    "For independent read/search/fetch operations listed in the `parallel_tool_batch` allowlist, "
+                    "prefer that tool so the runtime executes them concurrently. Call tools outside that allowlist "
+                    "directly; workspace, Domain and memory reads are not automatically batch-safe. "
+                    "Use asyncio.gather() only when you are already writing a custom script "
                     "via run_script and need in-script orchestration."
                 ),
             )

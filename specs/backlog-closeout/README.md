@@ -12,7 +12,7 @@ Use the attached managed worktree on branch `codex/retire-staging-routine`, PR #
 - [x] Cue extraction and measured recall decision (#670, #723); agent backlog_plan_c plus root live measurement.
 - [x] Event drain, Cycle authority, scheduler diagnostic cause (#926, #928, #929); root.
 - [x] Verify merged fixes (#903, #908, #914-#919) through consumers and historical evidence.
-- [ ] Tracker reconciliation and backfill (#900, #905, #920).
+- [x] Tracker reconciliation and backfill source (#900, #905, #920); live acceptance follows deploy.
 - [x] Retire old routine migration (#817, #819, #821, #822), per user decision.
 - [x] Close recovered connectivity reports (#874, #907) and retire public addresses (#829), per user decision.
 - [ ] Full backend, database, migration, context admission gates and final code review.
