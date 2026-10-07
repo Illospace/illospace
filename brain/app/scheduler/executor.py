@@ -279,6 +279,15 @@ _TRACEBACK_EXCEPTION_LINE = re.compile(
 
 
 def _command_exception(*, stdout: str | None, stderr: str | None) -> dict[str, str] | None:
+    from brain.systems.runs.presentation import public_tool_error_diagnostic
+
+    def sanitized(exception_type: str, message: str) -> dict[str, str]:
+        diagnostic = public_tool_error_diagnostic(exception_type or None, message)
+        return {
+            **({"type": diagnostic["error_class"]} if exception_type else {}),
+            "message": diagnostic.get("error_message", "Command failed"),
+        }
+
     for payload in _json_objects(stdout):
         failure = _failed_result(payload)
         if failure is None:
@@ -287,14 +296,11 @@ def _command_exception(*, stdout: str | None, stderr: str | None) -> dict[str, s
         if not message:
             continue
         exception_type = str(failure.get("exception_type") or "").strip()
-        return {
-            **({"type": exception_type} if exception_type else {}),
-            "message": message,
-        }
+        return sanitized(exception_type, message)
     for line in reversed(str(stderr or "").splitlines()):
         match = _TRACEBACK_EXCEPTION_LINE.match(line.strip())
         if match:
-            return {"type": match.group("type"), "message": match.group("message")}
+            return sanitized(match.group("type"), match.group("message"))
     return None
 
 

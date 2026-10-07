@@ -7,6 +7,7 @@ Opted-in non-chantier fan-outs fall back to their parent run's own thread.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Mapping
 
 from sqlalchemy import select
@@ -16,6 +17,9 @@ from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
     AgentRunRow,
 )
+from brain.platform.db.models.cycle import CycleRun
+from brain.systems.cycles.common import cycle_run_launch_context
+from brain.systems.cycles.exception_ping import cycle_exception_ping_context
 from brain.systems.runs.domain import ArtifactType
 from brain.systems.runs.evidence_health import (
     WorkerEvidenceReceipt,
@@ -137,6 +141,7 @@ async def queue_chantier_continuation_for_terminal_run(
                     fanout_run_id=anchor.id,
                     worker_ids=[int(worker.id) for worker in workers],
                     evidence_health=evidence_health,
+                    cycle_context=await _inherited_cycle_context(session, scope.source_run),
                 ),
             },
             policy={
@@ -211,6 +216,7 @@ async def _queue_generic_continuation(
                     anchor,
                     worker_ids=[int(worker.id) for worker in workers],
                     evidence_health=evidence_health,
+                    cycle_context=await _inherited_cycle_context(session, anchor),
                 ),
             },
             policy={
@@ -391,6 +397,44 @@ def _continuation_target(
     return target
 
 
+async def _inherited_cycle_context(session: AsyncSession, source_run: AgentRunRow) -> dict[str, Any]:
+    """Carry launch authority only from the persisted occurrence's own lineage."""
+    source_metadata = source_run.metadata_ if isinstance(source_run.metadata_, dict) else {}
+    context = cycle_exception_ping_context(source_metadata)
+    if context is None:
+        return {}
+    occurrence = await session.get(CycleRun, context["cycle_run_id"])
+    if occurrence is None or not occurrence.run_id:
+        return {}
+    launch_context = cycle_run_launch_context(occurrence)
+    if launch_context.get("run_kind") != context["run_kind"]:
+        return {}
+    current = source_run
+    visited: set[int] = set()
+    while current is not None and int(current.id) not in visited and len(visited) < 64:
+        visited.add(int(current.id))
+        if (current.org_id, current.user_id, current.thread_id) != (
+            source_run.org_id, source_run.user_id, source_run.thread_id
+        ):
+            return {}
+        if int(current.id) == int(occurrence.run_id):
+            original = current.metadata_ if isinstance(current.metadata_, dict) else {}
+            original_context = cycle_exception_ping_context(original)
+            if original_context != context:
+                return {}
+            return {
+                "cycle_run_id": context["cycle_run_id"],
+                **{key: deepcopy(original[key]) for key in ("launch_envelope", "launch_context") if key in original},
+            }
+        metadata = current.metadata_ if isinstance(current.metadata_, dict) else {}
+        continuation = metadata.get("worker_continuation") or metadata.get("chantier_continuation")
+        parent_id = continuation.get("anchor_run_id") if isinstance(continuation, dict) else current.parent_run_id
+        if isinstance(parent_id, bool) or not isinstance(parent_id, int) or parent_id <= 0:
+            return {}
+        current = await session.get(AgentRunRow, parent_id)
+    return {}
+
+
 def _continuation_metadata(
     source_run: AgentRunRow,
     *,
@@ -398,9 +442,11 @@ def _continuation_metadata(
     fanout_run_id: int,
     worker_ids: list[int],
     evidence_health: dict[str, Any],
+    cycle_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_metadata = source_run.metadata_ if isinstance(source_run.metadata_, dict) else {}
     metadata: dict[str, Any] = {
+        **(cycle_context or {}),
         "execution_profile": source_run.profile,
         "evidence_health": dict(evidence_health),
         "chantier_continuation": {
@@ -443,9 +489,11 @@ def _generic_continuation_metadata(
     *,
     worker_ids: list[int],
     evidence_health: dict[str, Any],
+    cycle_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_metadata = anchor.metadata_ if isinstance(anchor.metadata_, dict) else {}
     metadata: dict[str, Any] = {
+        **(cycle_context or {}),
         "execution_profile": anchor.profile,
         "evidence_health": dict(evidence_health),
         "worker_continuation": {

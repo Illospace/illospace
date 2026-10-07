@@ -15,6 +15,30 @@ from brain.jobs.pipelines import illo_heartbeat
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.asyncio
+async def test_heartbeat_failure_emits_sanitized_scheduler_cause(monkeypatch, capsys):
+    from brain.app.scheduler.executor import _command_exception, _command_failure_error_text
+
+    monkeypatch.setattr(illo_heartbeat, "run_heartbeat", AsyncMock(side_effect=RuntimeError(
+        "GitHub returned 500 while minting an installation token. Bearer secret-auth-value"
+    )))
+    assert await illo_heartbeat.async_main() == 1
+    output = capsys.readouterr().out
+    assert "secret-auth-value" not in output
+    exception = _command_exception(stdout=output, stderr="")
+    assert "GitHub returned 500" in _command_failure_error_text({"exception": exception, "returncode": 1})
+
+
+def test_scheduler_command_causes_are_bounded_and_redact_secrets_and_sql():
+    from brain.app.scheduler.executor import _command_exception
+
+    message = "token=xoxb-super-secret SELECT secret FROM credentials; " + "x" * 1000
+    result = _command_exception(stdout=json.dumps({"ok": False, "error": message}), stderr="")
+    assert len(result["message"]) <= 500
+    assert "xoxb-super-secret" not in result["message"]
+    assert "SELECT secret FROM credentials" not in result["message"]
+
+
 class FakeResponse:
     def __init__(self, status_code, payload):
         self.status_code = status_code
