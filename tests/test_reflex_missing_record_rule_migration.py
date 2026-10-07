@@ -8,7 +8,7 @@ import pytest
 import sqlalchemy as sa
 
 
-MIGRATION_MODULE = "brain.platform.db.alembic.versions.0067_reflex_missing_record_rule"
+MIGRATION_MODULE = "brain.platform.db.alembic.versions.0068_reflex_missing_record_rule"
 ORIGINAL_PROMPT = "Read the GitHub Event Feed Domain id `38`. Ignore routine noise."
 RATIONALE = (
     "Record an open issue or PR that has no tracker record, even when a bot "

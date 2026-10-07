@@ -1,7 +1,7 @@
 """Record open GitHub items whose latest webhook hides their opened event.
 
-Revision ID: 0067_reflex_missing_record_rule
-Revises: 0066_provider_alert_filing_claims
+Revision ID: 0068_reflex_missing_record_rule
+Revises: 0067_api_call_usage_details
 Create Date: 2026-10-02
 """
 
@@ -13,8 +13,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0067_reflex_missing_record_rule"
-down_revision = "0066_provider_alert_filing_claims"
+revision = "0068_reflex_missing_record_rule"
+down_revision = "0067_api_call_usage_details"
 branch_labels = None
 depends_on = None
 
