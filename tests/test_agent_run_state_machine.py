@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, AsyncIterator
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import event, func, select
@@ -403,6 +403,8 @@ async def test_deadline_sweep_expires_after_grace_and_preserves_partial_state(
     ).all()
     assert result.expired == 1
     assert result.expired_run_ids == (run.id,)
+    assert result.skipped == 0
+    assert result.skipped_run_ids == ()
     assert row is not None
     assert row.status == RunStatus.EXPIRED.value
     assert row.expired_at.replace(tzinfo=timezone.utc) == now
@@ -410,6 +412,208 @@ async def test_deadline_sweep_expires_after_grace_and_preserves_partial_state(
     assert len(final_answers) == 1
     assert "timed out" in str(final_answers[0].text)
     assert (await _event_types(session, run.id)).count("run.expired") == 1
+
+
+@pytest.mark.parametrize("locked_needs_closeout", [False, True])
+@pytest.mark.parametrize("busy_lock", ["row", "advisory"])
+async def test_deadline_sweep_skips_busy_lock_and_processes_remaining_candidates(
+    session_factory,
+    monkeypatch,
+    locked_needs_closeout,
+    busy_lock,
+):
+    from brain.systems.runs.deadlines import sweep_agent_run_deadlines
+
+    async with session_factory() as session:
+        store = AsyncAgentRunStore(session)
+        now = datetime(2026, 9, 22, 20, 35, tzinfo=timezone.utc)
+        run_ids = []
+        for index, needs_closeout in enumerate(
+            [locked_needs_closeout, False, True, False]
+        ):
+            run = await store.create_run(
+                _run_request(
+                    thread_id=f"thread-busy-deadline-{index}",
+                    message="bounded work",
+                    deadline_at=now - timedelta(minutes=4 - index),
+                )
+            )
+            await store.set_status(run.id, RunStatus.STARTING)
+            await store.set_status(run.id, RunStatus.RUNNING)
+            row = await session.get(AgentRunRow, run.id)
+            if not needs_closeout:
+                row.closeout_expires_at = now - timedelta(seconds=1)
+            run_ids.append(run.id)
+        await session.commit()
+        locked_id, *remaining_ids = run_ids
+        locked_events_before = await _event_types(session, locked_id)
+        candidate_transactions = []
+        row_transactions = {}
+        acquired_transactions = {}
+        attempted_ids = []
+        advisory_attempted_ids = []
+
+        async def acquire_agent_run_locks(
+            self, lock_ids, *, key_share, no_key_update=False, skip_locked=False
+        ):
+            transaction = self.session.sync_session.get_transaction()
+            assert transaction is not None
+            if skip_locked:
+                assert not key_share and no_key_update
+                assert all(not prior.is_active for prior in candidate_transactions)
+                candidate_transactions.append(transaction)
+                attempted_ids.extend(sorted(lock_ids))
+                if busy_lock == "row" and locked_id in lock_ids:
+                    return set()
+                for lock_id in lock_ids:
+                    row_transactions[lock_id] = transaction
+            else:
+                # Normal status/event writes can only re-enter locks already
+                # held by the maintenance boundary in this transaction.
+                for lock_id in lock_ids:
+                    assert row_transactions[lock_id] is transaction
+            return set(lock_ids)
+
+        async def try_lock_event_stream(self, run_id):
+            advisory_attempted_ids.append(run_id)
+            assert row_transactions[run_id] is self.session.sync_session.get_transaction()
+            if run_id == locked_id:
+                return False
+            # Model a transaction-scoped lock: a commit after this point must
+            # invalidate the fence before any terminal or event write.
+            acquired_transactions[run_id] = self.session.sync_session.get_transaction()
+            return True
+
+        async def lock_event_stream(self, run_id):
+            if run_id == locked_id:
+                raise TimeoutError("another transaction owns this event stream")
+            assert acquired_transactions[run_id] is not None
+            assert acquired_transactions[run_id] is self.session.sync_session.get_transaction()
+
+        monkeypatch.setattr(AsyncAgentRunStore, "_dialect_name", lambda self: "postgresql")
+        monkeypatch.setattr(AsyncAgentRunStore, "_acquire_agent_run_locks", acquire_agent_run_locks)
+        monkeypatch.setattr(AsyncAgentRunStore, "try_lock_event_stream", try_lock_event_stream)
+        monkeypatch.setattr(AsyncAgentRunStore, "lock_event_stream", lock_event_stream)
+        monkeypatch.setattr(
+            AsyncAgentRunStore,
+            "lock_terminal_boundary",
+            AsyncMock(side_effect=AssertionError("sweep repeated the terminal lock boundary")),
+        )
+        with patch(
+            "brain.systems.runs.chantier_continuation.queue_chantier_continuation_for_terminal_run",
+            return_value=None,
+        ):
+            result = await sweep_agent_run_deadlines(session, now=now)
+
+        assert attempted_ids == run_ids
+        assert advisory_attempted_ids == (remaining_ids if busy_lock == "row" else run_ids)
+        assert candidate_transactions[-1].is_active
+        await session.commit()
+        assert all(not transaction.is_active for transaction in candidate_transactions)
+        assert result.skipped == 1
+        assert result.skipped_run_ids == (locked_id,)
+        assert result.expired == 2
+        expired_ids = (remaining_ids[0], remaining_ids[2])
+        assert result.expired_run_ids == expired_ids
+        assert result.closeout_requested == 1
+        locked_row = await session.get(AgentRunRow, locked_id, populate_existing=True)
+        assert locked_row.status == RunStatus.RUNNING.value
+        assert (locked_row.closeout_expires_at is None) == locked_needs_closeout
+        assert await _event_types(session, locked_id) == locked_events_before
+        for run_id in expired_ids:
+            row = await session.get(AgentRunRow, run_id, populate_existing=True)
+            assert row.status == RunStatus.EXPIRED.value
+            answers = (
+                await session.scalars(
+                    select(AgentRunArtifactRow).where(
+                        AgentRunArtifactRow.run_id == run_id,
+                        AgentRunArtifactRow.artifact_type == "final_answer",
+                    )
+                )
+            ).all()
+            assert len(answers) == 1
+            assert "timed out" in answers[0].text
+            assert (await _event_types(session, run_id)).count("run.expired") == 1
+        assert "run.deadline_closeout_requested" in await _event_types(session, remaining_ids[1])
+
+
+@pytest.mark.requires_db
+async def test_postgres_deadline_sweep_skips_lock_held_by_another_transaction(db_engine):
+    import uuid
+
+    from brain.platform.db.models.org import Org
+    from brain.systems.runs.deadlines import sweep_agent_run_deadlines
+
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    org_id = str(uuid.uuid4())
+    run_ids = []
+    now = datetime.now(timezone.utc)
+    try:
+        async with factory() as session:
+            session.add(
+                Org(
+                    id=org_id,
+                    name="Deadline Lock Test",
+                    slug=f"deadline-lock-{uuid.uuid4().hex[:12]}",
+                )
+            )
+            await session.flush()
+            store = AsyncAgentRunStore(session)
+            for index in range(3):
+                run = await store.create_run(
+                    _run_request(
+                        org_id=org_id,
+                        thread_id=f"thread-{uuid.uuid4().hex}",
+                        message="deadline lock contention",
+                        deadline_at=now - timedelta(minutes=3 - index),
+                    )
+                )
+                run_ids.append(run.id)
+                await store.set_status(run.id, RunStatus.STARTING)
+                await store.set_status(run.id, RunStatus.RUNNING)
+                row = await session.get(AgentRunRow, run.id)
+                row.closeout_expires_at = now - timedelta(seconds=1)
+            await session.commit()
+
+        async with factory() as owner_session, factory() as sweep_session:
+            await AsyncAgentRunStore(owner_session).lock_event_stream(run_ids[0])
+            with patch(
+                "brain.systems.runs.chantier_continuation.queue_chantier_continuation_for_terminal_run",
+                return_value=None,
+            ):
+                result = await asyncio.wait_for(
+                    sweep_agent_run_deadlines(sweep_session, now=now), timeout=5
+                )
+            await sweep_session.commit()
+
+            assert result.skipped == 1
+            assert result.skipped_run_ids == (run_ids[0],)
+            assert result.expired == 2
+            assert result.expired_run_ids == tuple(run_ids[1:])
+            locked_row = await sweep_session.get(AgentRunRow, run_ids[0])
+            assert locked_row.status == RunStatus.RUNNING.value
+            for run_id in run_ids[1:]:
+                row = await sweep_session.get(AgentRunRow, run_id)
+                assert row.status == RunStatus.EXPIRED.value
+                answer = await sweep_session.scalar(
+                    select(AgentRunArtifactRow).where(
+                        AgentRunArtifactRow.run_id == run_id,
+                        AgentRunArtifactRow.artifact_type == "final_answer",
+                    )
+                )
+                assert answer is not None
+                assert "timed out" in answer.text
+    finally:
+        async with factory() as session:
+            for model in (AgentRunArtifactRow, AgentRunEventRow):
+                await session.execute(
+                    model.__table__.delete().where(model.run_id.in_(run_ids))
+                )
+            await session.execute(
+                AgentRunRow.__table__.delete().where(AgentRunRow.id.in_(run_ids))
+            )
+            await session.execute(Org.__table__.delete().where(Org.id == org_id))
+            await session.commit()
 
 
 async def test_interruption_requeue_cap_expires_instead_of_looping_forever(

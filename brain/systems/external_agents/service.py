@@ -753,7 +753,15 @@ async def _thread_context(session: AsyncSession, idea_id: str, *, limit: int = 3
     ]
 
 
+def _thread_uuid(value: str) -> str:
+    try:
+        return str(uuid.UUID(str(value)))
+    except ValueError:
+        raise ValueError("Thread id must be a UUID or inbound:<connection_id>:<event_id>") from None
+
+
 async def _idea_for_org(session: AsyncSession, *, idea_id: str, org_id: str) -> Idea:
+    idea_id = _thread_uuid(idea_id)
     idea = (
         await session.scalars(
             select(Idea).where(Idea.id == str(idea_id), Idea.org_id == str(org_id))
@@ -1292,6 +1300,16 @@ async def get_thread(
     limit: int = 100,
 ) -> dict[str, Any]:
     thread_id = thread_id_from_reference(str(idea_id), allow_raw_id=True) or str(idea_id)
+    if thread_id.startswith("inbound:"):
+        parts = thread_id.split(":")
+        if len(parts) != 3:
+            raise ValueError("Thread id must be a UUID or inbound:<connection_id>:<event_id>")
+        connection_id, event_id = (_thread_uuid(part) for part in parts[1:])
+        from brain.systems.external_agents.inbound_threads import get_inbound_thread
+
+        return await get_inbound_thread(
+            session, principal, connection_id=connection_id, event_id=event_id, limit=limit
+        )
     idea = await _idea_for_org(session, idea_id=thread_id, org_id=principal.org_id)
     links = thread_link_payload(idea.id)
     return {

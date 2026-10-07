@@ -15,6 +15,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.db.models.reconstructive_memory import MemoryNode
+from brain.platform.db.repositories.memory_visibility import MEMORY_VISIBILITY_RANK
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.repositories.reconstructive_memory import (
     AssertionDraft,
@@ -25,6 +27,11 @@ from brain.platform.db.repositories.reconstructive_memory import (
     MemorySourceRepository,
     NodeDraft,
     SourceSpanDraft,
+    normalize_key,
+)
+from brain.systems.knowledge.memory_eligibility import (
+    MemoryIndexExclusionReason,
+    memory_node_index_exclusion_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +91,10 @@ class IngestedMemorySource:
     cue_node_ids: tuple[int, ...]
     tag_node_ids: tuple[int, ...]
     edge_ids: tuple[int, ...]
+    visibility: str
+    knowledge_index_reason: MemoryIndexExclusionReason | None
+    content_node_reused: bool
+    content_text_stored: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +106,23 @@ class IngestedMemorySource:
             "cue_node_ids": list(self.cue_node_ids),
             "tag_node_ids": list(self.tag_node_ids),
             "edge_ids": list(self.edge_ids),
+            "visibility": self.visibility,
+            "content_node_reused": self.content_node_reused,
+            "content_text_stored": self.content_text_stored,
+            "knowledge_source_ref": f"memory_node:{self.content_node_id}",
+            "knowledge_index": {
+                "eligible": self.knowledge_index_reason is None,
+                "reason": self.knowledge_index_reason.value if self.knowledge_index_reason is not None else None,
+            },
+            "mutated_target_refs": [{
+                "kind": "memory_node",
+                "id": self.content_node_id,
+                "role": "content",
+                "visibility": self.visibility,
+                "knowledge_get": (
+                    self.knowledge_index_reason.value if self.knowledge_index_reason is not None else "eligible"
+                ),
+            }],
         }
 
 
@@ -245,11 +273,14 @@ async def ingest_memory_source(
     )
     span_ids = tuple(span.id for span in spans)
 
-    content_node = await node_repo.upsert_node(
+    canonical_label = _canonical_label(cleaned)
+    content_node, content_node_reused = await _upsert_content_node(
+        session,
         draft=NodeDraft(
             node_kind="content",
             content_kind=_normalize_content_kind(content_kind),
-            canonical_label=_canonical_label(cleaned),
+            canonical_label=canonical_label,
+            normalized_key=normalize_key(canonical_label),
             text=cleaned,
             scope_key=scope_key,
             confidence=confidence,
@@ -377,12 +408,39 @@ async def ingest_memory_source(
         cue_node_ids=tuple(node.id for node in cue_nodes),
         tag_node_ids=tuple(node.id for node in tag_nodes),
         edge_ids=tuple(edge.id for edge in edges),
+        visibility=content_node.visibility,
+        content_node_reused=content_node_reused,
+        content_text_stored=content_node.text == cleaned,
+        # Report node eligibility at write time; the mirror is populated after commit.
+        knowledge_index_reason=await memory_node_index_exclusion_reason(session, content_node),
     )
     _schedule_post_commit_knowledge_index(
         session,
         node_id=result.content_node_id,
     )
     return result
+
+
+async def _upsert_content_node(
+    session: AsyncSession,
+    *,
+    draft: NodeDraft,
+    org_id: str | None,
+    user_id: str | None,
+    visibility: str,
+) -> tuple[MemoryNode, bool]:
+    """Resolve the content identity, then widen and reindex when allowed."""
+    node, reused = await MemoryNodeRepository(session).get_or_create_content_node(
+        draft=draft, org_id=org_id, user_id=user_id, visibility=visibility,
+    )
+    if reused and MEMORY_VISIBILITY_RANK.get(node.visibility, -1) < MEMORY_VISIBILITY_RANK[visibility]:
+        # service imports this package through reconstructive_memory.embeddings.
+        from brain.systems.knowledge.service import reindex_updated_memory_node
+
+        node.visibility = visibility
+        await session.flush()
+        await reindex_updated_memory_node(session, node=node)
+    return node, reused
 
 
 def _clean_content(content: str) -> str:

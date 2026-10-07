@@ -20,6 +20,7 @@ from brain.platform.db.models.knowledge import (
     KnowledgeItemEmbedding,
     KnowledgeSyncState,
 )
+from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.systems.knowledge.connectors.base import (
     EnumerationFailure,
     EnumerationFailureKind,
@@ -27,7 +28,7 @@ from brain.systems.knowledge.connectors.base import (
     KnowledgeConnector,
     KnowledgeDraft,
 )
-from brain.systems.knowledge.connectors.memory import MemoryConnector
+from brain.systems.knowledge.connectors.memory import MemoryConnector, MemoryDraftSkipReason
 from brain.systems.knowledge.distillation import (
     DISTILLATION_CURSOR_KEY,
     DISTILLATION_MANIFEST_VERSION,
@@ -71,6 +72,12 @@ class KnowledgeSyncStats:
         if self.config_faults:
             payload["config_faults"] = self.config_faults
         return payload
+
+
+@dataclass
+class MemoryIndexStats(KnowledgeSyncStats):
+    draft: KnowledgeDraft | None = None
+    skip_reason: MemoryDraftSkipReason | None = None
 
 
 @dataclass(frozen=True)
@@ -647,6 +654,10 @@ async def _ingest_drafts(
 ) -> None:
     if not drafts:
         return
+    drafts = [
+        (draft, should_embed and draft.archived_at is None)
+        for draft, should_embed in drafts
+    ]
     runtime: EmbeddingRuntimeConfig | None = None
     runtime_error: Exception | None = None
     if any(should_embed for _draft, should_embed in drafts):
@@ -708,15 +719,16 @@ async def index_memory_node(
     session: AsyncSession,
     *,
     node_id: int,
-) -> KnowledgeSyncStats:
-    """Upsert one committed memory node without advancing the sweep cursor."""
+) -> MemoryIndexStats:
+    """Upsert one memory node in the caller's transaction, without a sweep."""
 
-    stats = KnowledgeSyncStats()
     connector = MemoryConnector(max_items=1)
-    draft = await connector.draft_for_node(
+    outcome = await connector.outcome_for_node(
         session,
         node_id=node_id,
     )
+    draft = outcome.draft
+    stats = MemoryIndexStats(draft=draft, skip_reason=outcome.skip_reason)
     if draft is None:
         stats.skipped = 1
         return stats
@@ -730,6 +742,54 @@ async def index_memory_node(
         run_at=datetime.now(timezone.utc),
     )
     return stats
+
+
+async def reindex_updated_memory_node(
+    session: AsyncSession,
+    *,
+    node: MemoryNode,
+) -> None:
+    """Withdraw atomically; allow failed shared writes to await a sweep.
+
+    A raised index call fails the request if a live mirror remains, because its
+    consistency with the node cannot be proved.
+    """
+    await session.refresh(node, with_for_update=True)
+    node_id = node.id
+    stats: MemoryIndexStats | None = None
+    withdrawal_required = False
+    try:
+        # Isolate index errors so a failed shared write cannot poison the
+        # caller's memory transaction. Withdrawal errors still escape it.
+        async with session.begin_nested():
+            stats = await index_memory_node(session, node_id=node_id)
+            withdrawal_required = (
+                stats.draft is not None and stats.draft.archived_at is not None
+            )
+            if withdrawal_required and stats.failed:
+                raise RuntimeError(f"Memory mirror withdrawal failed for node {node_id}")
+    except Exception:
+        if withdrawal_required:
+            raise
+        # A savepoint rollback can expire node attributes needed by the response.
+        await session.refresh(node)
+        logger.warning(
+            "Memory mirror update deferred to sweep for node %s", node_id,
+            exc_info=True,
+        )
+    if stats is None or (
+        stats.draft is None
+        and stats.skip_reason != MemoryDraftSkipReason.SHARED_WITHOUT_ORG
+    ):
+        live_mirror = await session.scalar(
+            select(KnowledgeItem.id).where(
+                KnowledgeItem.source == "memory",
+                KnowledgeItem.source_ref == f"memory_node:{node_id}",
+                KnowledgeItem.archived_at.is_(None),
+            )
+        )
+        if live_mirror is not None:
+            raise RuntimeError(f"Memory mirror withdrawal not verified for node {node_id}")
 
 
 async def sync_connector(
@@ -916,5 +976,6 @@ __all__ = [
     "build_search_text",
     "content_digest",
     "index_memory_node",
+    "reindex_updated_memory_node",
     "sync_connector",
 ]

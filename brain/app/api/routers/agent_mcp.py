@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
@@ -56,19 +58,21 @@ from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.results import (
     InboundSubmissionResultState,
+    project_inbound_submission_result,
     read_inbound_submission_result,
 )
 from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 from brain.systems.knowledge.search import get_knowledge_items, search_knowledge
 from brain.systems.runs.cortex.read_models import (
-    public_failed_run_artifact,
     public_failure_for_run,
     public_run_debug_event_payload,
     run_stream_payload,
+    serialize_public_run_artifact,
 )
 from brain.systems.runs.tool_event_read_model import tool_call_summary
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
 
 SUBMIT_TOOL_NAME = "illo_submit"
@@ -183,6 +187,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Use knowledge.search for source-backed preserved knowledge and memory, "
                         "or knowledge.get for an exact source_ref such as memory_node:<id> from a preservation receipt. "
+                        "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists. "
                         "workspace.search covers Project Contexts, ideas, and threads. "
                         "Other read capabilities include project_contexts.search, "
                         "thread.get, skills.get, skills.list, handoff.get, team.members.list, "
@@ -234,6 +239,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             (
                 "Read the current status and receipts for an async Illo submission. "
                 "For preservation requests, returns whether durable evidence is pending, satisfied, or missing. "
+                "The current answer is published at final_answer; evidence_contract and attribution are top-level. "
+                "latest_receipt is the newest receipt; receipts preserves distinct receipt history. "
+                "Poll with compact: true for status, terminal, and any final_answer and public failure (category and message) when terminal. "
+                "compact defaults to false and overrides include_payload when true. "
                 "Prefer webhook callbacks when configured; this tool is the polling fallback."
             ),
             {
@@ -244,6 +253,11 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                     "type": "boolean",
                     "description": "Whether to include stored raw and normalized event payloads.",
                     "default": True,
+                },
+                "compact": {
+                    "type": "boolean",
+                    "description": "Return only poll status, evidence status, timestamps, target refs, attribution.tags, terminal, and any terminal answer and public failure (category and message); overrides include_payload.",
+                    "default": False,
                 },
                 "limit": {
                     "type": "integer",
@@ -521,7 +535,11 @@ async def _tool_submit(
 
 READ_CAPABILITIES: dict[str, dict[str, Any]] = {
     "knowledge.get": {
-        "description": "Read preserved knowledge or memory by exact source_ref from a preservation receipt, such as memory_node:4881.",
+        "description": (
+            "Read preserved knowledge or memory by exact source_ref from a preservation receipt, such as memory_node:4881. "
+            "The receipt's content ref states its visibility and whether the shared index can serve it; knowledge.get checks that it does. "
+            "Handles the shared index cannot serve are returned under not_indexed with a reason, and missing means no readable node exists."
+        ),
         "arguments": {"source_ref": "string"},
     },
     "knowledge.search": {
@@ -546,7 +564,7 @@ READ_CAPABILITIES: dict[str, dict[str, Any]] = {
         },
     },
     "thread.get": {
-        "description": "Read messages from an existing Illo idea/thread.",
+        "description": "Read messages from an existing Illo idea/thread, including the inbound:<connection_id>:<event_id> id returned by run.get.",
         "arguments": {"idea_id": "string", "limit": "integer"},
     },
     "run.get": {
@@ -803,24 +821,6 @@ def _serialize_run_event(
     }
 
 
-def _serialize_run_artifact(
-    artifact: AgentRunArtifactRow,
-    failure: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    return public_failed_run_artifact({
-        "id": artifact.id,
-        "run_id": artifact.run_id,
-        "root_run_id": artifact.root_run_id,
-        "artifact_type": artifact.artifact_type,
-        "title": artifact.title,
-        "payload": artifact.payload or {},
-        "text": artifact.text,
-        "uri": artifact.uri,
-        "visibility": artifact.visibility,
-        "created_at": _iso(artifact.created_at),
-    }, failure)
-
-
 async def _read_run_get(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
@@ -891,7 +891,7 @@ async def _read_run_get(
             .limit(limit)
         )
         payload["artifacts"] = [
-            _serialize_run_artifact(artifact, failure)
+            serialize_public_run_artifact(artifact, failure)
             for artifact in (await db.scalars(artifact_stmt)).all()
         ]
     return payload
@@ -947,6 +947,7 @@ async def _tool_read(
             db,
             [_required_capability_string(capability_arguments, "source_ref", capability=capability)],
             org_id=principal.org_id,
+            user_id=principal.owner_user_id,
         )
     if capability == "knowledge.search":
         return await search_knowledge(
@@ -1390,7 +1391,9 @@ async def _tool_get_result(
             "owned_by_another_connection": True,
         }
     assert result.payload is not None
-    return result.payload
+    return project_inbound_submission_result(
+        result.payload, compact=bool(arguments.get("compact", False))
+    )
 
 
 async def _add_thread_trigger_result_if_needed(
@@ -1438,16 +1441,22 @@ def _request_id(message: Any) -> Any:
     return message.get("id") if isinstance(message, dict) else None
 
 
-def _mcp_auth_error_response(payload: Any, message: str) -> JSONResponse:
-    data = {"http_status": 401, "auth": "bearer"}
-    if isinstance(payload, list):
-        responses = [
-            _error_response(_request_id(item), code=-32001, message=message, data=data)
-            for item in payload
-            if not isinstance(item, dict) or "id" in item
-        ]
-        return JSONResponse(responses)
-    return JSONResponse(_error_response(_request_id(payload), code=-32001, message=message, data=data))
+def _mcp_error_response(
+    payload: Any,
+    *,
+    code: int,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> Response:
+    messages = payload if isinstance(payload, list) else [payload]
+    responses = [
+        _error_response(_request_id(item), code=code, message=message, data=data)
+        for item in messages
+        if not isinstance(item, dict) or "id" in item
+    ]
+    if not responses:
+        return Response(status_code=202)
+    return JSONResponse(responses if isinstance(payload, list) else responses[0])
 
 
 def _tool_result(value: dict[str, Any]) -> dict[str, Any]:
@@ -1557,8 +1566,18 @@ async def _handle_mcp_request(
             await _broadcast_thread_result(tool_payload, org_id=principal.org_id)
         return _result(req_id, _tool_result(tool_payload))
     except Exception as exc:
-        await db.rollback()
+        try:
+            await db.rollback()
+        except SQLAlchemyError:
+            logger.exception("MCP database rollback failed")
+        if isinstance(exc, SQLAlchemyError):
+            logger.exception("MCP database operation failed")
+            return _result(req_id, _tool_error(_database_error_text(exc)))
         return _result(req_id, _tool_error(str(exc)))
+
+
+def _database_error_text(exc: SQLAlchemyError) -> str:
+    return f"Illo could not complete this request: internal database error ({type(exc).__name__})"
 
 
 async def _mcp_endpoint(
@@ -1574,10 +1593,20 @@ async def _mcp_endpoint(
         )
     try:
         principal = await _authenticate_mcp_principal(request, db)
-    except external_agents.ExternalAgentAuthError as exc:
-        return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
-    except external_agents.ExternalAgentPermissionError as exc:
-        return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
+    except (external_agents.ExternalAgentAuthError, external_agents.ExternalAgentPermissionError) as exc:
+        return _mcp_error_response(
+            payload,
+            code=-32001,
+            message=f"MCP authentication failed: {exc}",
+            data={"http_status": 401, "auth": "bearer"},
+        )
+    except SQLAlchemyError as exc:
+        logger.exception("MCP authentication database operation failed")
+        try:
+            await db.rollback()
+        except SQLAlchemyError:
+            logger.exception("MCP database rollback failed")
+        return _mcp_error_response(payload, code=-32603, message=_database_error_text(exc))
 
     if isinstance(payload, list):
         responses: list[dict[str, Any]] = []

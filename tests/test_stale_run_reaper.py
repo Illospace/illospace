@@ -216,6 +216,8 @@ async def test_quiet_interval_emits_zero_work_liveness(capsys):
         "reaped": 0,
         "expired": 0,
         "closeout_requested": 0,
+        "skipped": 0,
+        "skipped_run_ids": [],
         "overdue_run_ids": [],
         "alert_sent": False,
         "errors": [],
@@ -225,6 +227,8 @@ async def test_quiet_interval_emits_zero_work_liveness(capsys):
     assert snapshot["reaped"] == 0
     assert snapshot["expired"] == 0
     assert snapshot["closeout_requested"] == 0
+    assert snapshot["skipped"] == 0
+    assert snapshot["skipped_run_ids"] == []
     assert snapshot["overdue_run_ids"] == []
 
 
@@ -258,6 +262,28 @@ async def test_blocked_owner_times_out_without_stopping_later_maintenance(capsys
     assert payloads[-1]["event"] == "agent_run_stale_reap"
     assert payloads[-1]["reaped"] == 1
     assert payloads[-1]["ok"] is False
+
+
+async def test_deadline_lock_skips_report_success_with_run_ids(capsys):
+    async def deadline_sweep(_session, **_kwargs):
+        return DeadlineSweepResult(skipped=2, skipped_run_ids=(15266, 15267))
+
+    result = await _reaper(deadline_sweep=deadline_sweep)._run_once(now=NOW)
+
+    payloads = [
+        json.loads(line) for line in capsys.readouterr().out.strip().splitlines()
+    ]
+    assert result.errors == ()
+    assert result.skipped == 2
+    assert result.skipped_run_ids == (15266, 15267)
+    assert [payload["event"] for payload in payloads] == ["agent_run_stale_reap"]
+    assert payloads[0]["ok"] is True
+    assert payloads[0]["skipped"] == 2
+    assert payloads[0]["skipped_run_ids"] == [15266, 15267]
+    snapshot = agent_run_maintenance_snapshot(now=NOW)
+    assert snapshot["state"] == "good"
+    assert snapshot["skipped"] == 2
+    assert snapshot["skipped_run_ids"] == [15266, 15267]
 
 
 async def test_one_maintenance_failure_does_not_block_the_other_owners():

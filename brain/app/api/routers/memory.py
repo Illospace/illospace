@@ -22,6 +22,7 @@ from brain.app.api.schemas.memories import (
 )
 from brain.platform.db.models.reconstructive_memory import MemoryNode
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.knowledge.service import reindex_updated_memory_node
 
 router = APIRouter(
     prefix="/api/memory",
@@ -224,6 +225,7 @@ async def update_memory(
         if node is None:
             raise HTTPException(status_code=404, detail="Memory not found")
         updates = body.model_dump(exclude_unset=True)
+        before = (node.visibility, node.text, node.canonical_label, node.scope_key)
         if "visibility" in updates:
             updates["visibility"] = _validate_visibility_update(updates["visibility"], user)
         if "content" in updates and updates["content"] is not None:
@@ -234,6 +236,8 @@ async def update_memory(
         if "visibility" in updates and updates["visibility"] is not None:
             node.visibility = updates["visibility"]
         await uow.session.flush()
+        if before != (node.visibility, node.text, node.canonical_label, node.scope_key):
+            await reindex_updated_memory_node(uow.session, node=node)
         return await uow.memories.get(memory_id)
 
 
@@ -295,8 +299,11 @@ async def promote_memory(
         node = await uow.session.get(MemoryNode, memory_id)
         if node is None:
             raise HTTPException(status_code=404, detail="Memory not found")
+        previous_visibility = node.visibility
         node.visibility = _validate_visibility_update(body.visibility, user)
         await uow.session.flush()
+        if node.visibility != previous_visibility:
+            await reindex_updated_memory_node(uow.session, node=node)
         return await uow.memories.get(memory_id)
 
 

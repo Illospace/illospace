@@ -30,6 +30,7 @@ from brain.systems.runs.execution_context import bind_agent_context, current_age
 from brain.systems.runs.outbound_reply_admission import (
     REPLY_ADMISSION_BLOCK_COUNT_METADATA_KEY,
 )
+from brain.systems.runs.presentation import public_tool_error_diagnostic
 from brain.systems.runs.secret_mounts import (
     handler_args_with_resolved_secret_env,
     resolve_secret_env_mounts,
@@ -238,7 +239,9 @@ class AsyncRunToolExecutor:
                     run_event(
                         run_id,
                         "run.tool_failed",
-                        _event_payload(tool.name, safe_args, error=failure),
+                        _event_payload(tool.name, safe_args, error=failure,
+                                       error_class=type(exc.error).__name__ if exc.error else None,
+                                       error_args=tool.args),
                         root_run_id=root_run_id,
                     )
                 )
@@ -312,7 +315,8 @@ class AsyncRunToolExecutor:
                 run_event(
                     run_id,
                     "run.tool_failed",
-                    _event_payload(tool.name, safe_args, error=error_text),
+                    _event_payload(tool.name, safe_args, error=error_text,
+                                   error_class=type(exc).__name__, error_args=tool.args),
                     root_run_id=root_run_id,
                 )
             )
@@ -362,7 +366,7 @@ class AsyncRunToolExecutor:
                 run_event(
                     run_id,
                     "run.tool_failed",
-                    _event_payload(tool.name, safe_args, error=failure),
+                    _event_payload(tool.name, safe_args, error=failure, error_args=tool.args),
                     root_run_id=root_run_id,
                 )
             )
@@ -522,7 +526,7 @@ class AsyncRunToolExecutor:
             run_event(
                 run_id,
                 "run.tool_failed",
-                _event_payload(tool.name, safe_args, error=policy_failure),
+                _event_payload(tool.name, safe_args, error=policy_failure, error_args=tool.args),
                 root_run_id=root_run_id,
             )
         )
@@ -718,6 +722,8 @@ def _event_payload(
     *,
     result: str | None = None,
     error: str | None = None,
+    error_class: str | None = None,
+    error_args: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "tool_name": tool_name,
@@ -742,6 +748,9 @@ def _event_payload(
             pass
     if error is not None:
         payload["error"] = error[:1000]
+        payload.update(public_tool_error_diagnostic(
+            error_class or "ToolError", error, args=error_args,
+        ))
     return payload
 
 
