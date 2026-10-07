@@ -470,8 +470,10 @@ async def test_staging_promotion_job_stays_retired_after_restart(session):
     repeated = await async_sync_scheduler_catalog(session, now=restart)
     assert repeated == {"upserted": 8, "retired": 0}
     assert job.enabled is False
-    due_runs = await async_materialize_due_runs(session, now=restart)
-    assert all(run.job_id != original_id for run in due_runs)
+    due_runs = await async_materialize_due_runs(
+        session, now=restart, job_keys=("uwear_staging_promotion_pr",)
+    )
+    assert due_runs == []
 
 
 async def test_sync_scheduler_catalog_is_idempotent_and_reseeds_forward_on_restart(session):
