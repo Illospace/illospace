@@ -14,7 +14,7 @@ The starting queue contained 26 issues and seven PRs. PR #930 combines the sourc
 | [#821](https://github.com/Illospace/illospace/issues/821) | Release radar remains paused; its executor migration was retired. |
 | [#822](https://github.com/Illospace/illospace/issues/822) | Retired migration epic. Past definitions and results remain available. |
 | [#829](https://github.com/Illospace/illospace/issues/829) | Reda retired the old public addresses. Closed as not planned. Private MCP works; no repository client configuration uses the retired addresses. See [retirement decision](public-endpoint-repair.md). |
-| [#869](https://github.com/Illospace/illospace/issues/869) | Persist credential expiry on its connection, stop repeated refresh, alert one transition and clear on replacement. Transient failure leaves health unchanged. Verify reauthentication and a real expired episode after deploy. |
+| [#869](https://github.com/Illospace/illospace/issues/869) | Persist credential expiry on its connection, stop repeated refresh, alert one transition and clear on replacement. Transient failure leaves health unchanged. Preserve settled refresh results before propagating cancellation. The existing watchdog retries pending connection alerts and blocked continuations; revoked OAuth stays blocked. Verify reauthentication and a real expired episode after deploy. |
 | [#874](https://github.com/Illospace/illospace/issues/874) | Historical 502 incident recovered. This session received an event ID and a satisfied preservation receipt with mutated refs. Closed with that evidence. |
 | [#897](https://github.com/Illospace/illospace/issues/897) | Validate the complete submission before acknowledgement; reject oversize messages, parts or file references with numeric size diagnostics. No accepted text is silently clipped. |
 | [#900](https://github.com/Illospace/illospace/issues/900) | Apply every matching configured projection of an inbound event. Source sync updates GitHub state and timestamps; it preserves editorial status, assignee and release evidence. In particular, closing a GitHub issue cannot mark pending production work Done. Reconcile old tracker rows from current GitHub state after deploy; dry-run replay does not repair them. |
@@ -26,7 +26,7 @@ The starting queue contained 26 issues and seven PRs. PR #930 combines the sourc
 | [#915](https://github.com/Illospace/illospace/issues/915) | Read-time visibility and canonical eligibility checks block stale shared mirrors after a node becomes private. Verify both search and get after deploy. |
 | [#916](https://github.com/Illospace/illospace/issues/916) | Preserve intentional first-sentence reuse, enforce owner and visibility scope, and disclose reused/stored text. The corrected acceptance is authoritative; different same-heading text does not change the identity rule. |
 | [#917](https://github.com/Illospace/illospace/issues/917) | Preserve bounded tool-failure diagnostics, test first-call batches in fast context, and clarify the safe-tool allowlist. The historical failing payload was not recovered; deploy verification must name its actual rejected tool or argument. |
-| [#918](https://github.com/Illospace/illospace/issues/918) | Return one canonical final answer by default; detailed payloads are explicit. Verify compact get_result with a large deployed answer. |
+| [#918](https://github.com/Illospace/illospace/issues/918) | Return one canonical final answer by default; detailed payloads are explicit. A rejected admission with no run is terminal and returns a canonical safe failure, including credential expiry. Compact polling cannot wait for a nonexistent run. Verify compact get_result with a large deployed answer. |
 | [#919](https://github.com/Illospace/illospace/issues/919) | Resolve inbound thread handles through their owner; reject malformed UUIDs before querying and redact SQL error diagnostics. Verify an inbound thread through MCP after deploy. |
 | [#920](https://github.com/Illospace/illospace/issues/920) | The live feed has a GitHub Events projection but no Domain 1 tracker projection. Add validated issue/PR tracker projections while preserving the feed, then backfill website rows from current GitHub snapshots after deploy. The setup and recovery commands default to preview; applying recovery requires an unchanged reviewed plan. Run duplicate-only repair separately from source reconciliation. Only completed Cycle runs advance the feed watermark; migration 0068 also adds the missing-record rule when later comments hide an opened event. |
 | [#926](https://github.com/Illospace/illospace/issues/926) | Own pending event tasks, provide flush_event_writes, drain during API shutdown and handle cancellation without an unhandled callback. One-shot callers must await flush before closing the loop. |
@@ -41,9 +41,16 @@ Claude shows dispatcher, SEO, usage digest, R3 worker, R2 evaluator, release rad
 
 ## Validation
 
-The imported base passed 5670 fast tests. Runtime additions passed 104 event/heartbeat/scheduler checks and 29 continuation/Cycle-gate checks. The current integrated base passed 5678 fast tests in the independent review. A clean PostgreSQL instance ran the full Alembic chain through 0068 and 93 database tests. New slice results and final integrated gates are recorded below when complete.
+Final integrated source: `a19a87495cc5a80aa71bc1d4d776b6b3d1810446`.
 
-The tracker and submission slice passed 670 tests with 4 skips. Its final independent review found no actionable issue and passed 440 selected tests. The credential concurrency regression passed against real PostgreSQL: expiry waiters share one connection episode and one alert; a stale failed refresh cannot replace a committed new sign-in.
+- Offline fast suite: 5,849 passed, 11 skipped, 99 deselected.
+- PostgreSQL suite: 95 passed on a fresh test database, including real credential expiry/replacement serialization and overlapping tracker recovery/webhook locks.
+- Complete clean Alembic upgrade: passed through the single 0069 head. Migration 0068 follows the existing 0067 usage migration; 0069 follows 0068.
+- Cycle context fixture gate: all three historical fixture cases passed. The live read-only gate passed for the two enabled Cycles; the retired Cycle 9 remains disabled.
+- Full branch review identified one remaining admission-polling interaction. It was corrected, passed 136 related endpoint tests and received a clean independent source re-review. The final fast suite ran in parallel with that re-review.
+- Public change scan: no added personal operator paths or credential patterns. Private recall inputs and database output remain outside the public tree. No new environment variables or dependencies.
+
+The stricter credential admission required explicit healthy-auth setup in unrelated continuation/chat fixtures. Credential failure tests retain their real failure paths. The tracker concurrency fixture also now removes its owned user before its organization, as PostgreSQL requires. All final gates passed with those corrections.
 
 After deployment, use [the tracker recovery runbook](github-tracker-recovery.md) to add the missing projections, repair duplicates, and then reconcile fresh GitHub state. Inspect each original symptom before closing its ticket. Deployment alone does not repair historical rows.
 

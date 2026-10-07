@@ -4,19 +4,19 @@ Goal: review every issue open on 2026-10-07, resolve each source defect or compl
 
 ## Next Agent Prompt
 
-Use the attached managed worktree on branch `codex/retire-staging-routine`, PR #930. The dirty primary checkout belongs to other work and must remain untouched. Imported #910, #911 and #921; joined Reflex migration after the main usage migration at 0068. Continue independent slices below, integrate their focused commits, run full gates and review. Do not merge or deploy: the user will merge the single final PR and then redeploy. Update this section at each checkpoint.
+Source work is complete on `codex/retire-staging-routine`, PR #930. The six earlier PR heads are included and closed as superseded. Integrated source `a19a87495cc5a80aa71bc1d4d776b6b3d1810446` passed 5,849 fast tests, 95 PostgreSQL tests, clean migrations through 0069 and final source review. The user will merge and redeploy. Then use `docs/github-tracker-recovery.md` to add the missing projections, repair duplicates and reconcile fresh source state. Verify each remaining ticket's original symptom before closing it. Eight decisions/recovered incidents are closed; 18 deployment acceptance tickets remain open. Preserve the dirty primary checkout. Never repair a production memory node by assuming that its number matches the historical dev number.
 
 - [x] Import existing PR work and retire staging routine.
 - [x] Inbound metadata and size integrity (#770, #897); agent backlog_plan_a.
-- [ ] Provider credential circuit (#869); agent backlog_plan_b.
+- [x] Provider credential circuit (#869); agent backlog_plan_b, integrated and verified.
 - [x] Cue extraction and measured recall decision (#670, #723); agent backlog_plan_c plus root live measurement.
 - [x] Event drain, Cycle authority, scheduler diagnostic cause (#926, #928, #929); root.
 - [x] Verify merged fixes (#903, #908, #914-#919) through consumers and historical evidence.
 - [x] Tracker reconciliation and backfill source (#900, #905, #920); live acceptance follows deploy.
 - [x] Retire old routine migration (#817, #819, #821, #822), per user decision.
 - [x] Close recovered connectivity reports (#874, #907) and retire public addresses (#829), per user decision.
-- [ ] Full backend, database, migration, context admission gates and final code review.
-- [ ] One rewritten ready PR, complete ticket evidence ledger, close only completed/retired issues and superseded PRs.
+- [x] Full backend, database, migration, context admission gates and final code review.
+- [x] Single PR and complete ticket evidence ledger; close only completed/retired issues and superseded PRs.
 
 ## Contracts
 
