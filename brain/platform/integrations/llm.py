@@ -16,6 +16,7 @@ To add another LLM provider, add ONE branch: in this file.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.async_io import BlockingInvocationCancelled, _await_task_uninterruptibly, run_tool_blocking
 from brain.kernel.common.env import env_flag as _shared_env_flag
 from brain.platform.integrations.anthropic_adapter import build_auth_adapter, get_oauth_betas
 from brain.platform.integrations.openai_cache import (
@@ -34,6 +36,7 @@ from brain.platform.integrations.openai_cache import (
     normalize_openai_request_kwargs,
 )
 from brain.platform.integrations.openai_codex_auth import (
+    CodexCredentialExpiredError,
     OpenAICodexCredential,
     encode_codex_auth_payload,
     refresh_codex_access_token,
@@ -145,6 +148,13 @@ class ResolvedProviderAuth:
 
 # ── Resolution ───────────────────────────────────────────────────
 
+def _provider_vault():
+    """Use the existing lazy provider-vault boundary for all DB operations."""
+    import brain.systems.vault as vault
+
+    return vault
+
+
 async def _async_resolve_key_from_db(
     session: AsyncSession,
     user_id: str | None = None,
@@ -154,15 +164,16 @@ async def _async_resolve_key_from_db(
 ) -> tuple[str | None, str]:
     """Resolve provider credentials from DB using an async session."""
     try:
-        from brain.systems.vault import async_resolve_api_key
-
-        return await async_resolve_api_key(
+        return await _provider_vault().async_resolve_api_key(
             user_id=user_id,
             org_id=org_id,
             provider=provider,
             auth_mode=auth_mode,
             session=session,
         )
+    except CodexCredentialExpiredError:
+        # A personal credential failure must not switch to another identity.
+        raise
     except Exception as exc:
         logger.warning("Async DB key resolution failed: %s", exc)
         return None, "none"
@@ -350,11 +361,8 @@ def _refresh_codex_credential_if_needed(
     if cred.auth_mode != "chatgpt" or not _codex_access_token_expired(cred):
         return cred
     if not cred.refresh_token:
-        raise RuntimeError("OpenAI Codex token expired and no refresh token is available. Please sign in again.")
-    try:
-        refreshed = refresh_codex_access_token(cred.refresh_token)
-    except Exception as exc:
-        raise RuntimeError("OpenAI Codex token expired and refresh failed. Please sign in again.") from exc
+        raise CodexCredentialExpiredError()
+    refreshed = refresh_codex_access_token(cred.refresh_token)
 
     refreshed.source = source
     refreshed.external_source_path = refreshed.external_source_path or cred.external_source_path
@@ -384,20 +392,21 @@ async def _async_persist_refreshed_openai_codex_db_credential(
     org_id: str | None,
     source: str,
     cred: OpenAICodexCredential,
+    expected_payload: str | None,
 ) -> None:
     if source not in {"codex_subscription", "org_main"}:
         return
 
-    from brain.systems.vault import async_update_resolved_api_key
-
     stored_payload = json.dumps(encode_codex_auth_payload(cred))
-    updated = await async_update_resolved_api_key(
+    updated = await _provider_vault().async_update_resolved_api_key(
         user_id=user_id,
         org_id=org_id,
         provider="openai",
         source=source,
         api_key=stored_payload,
         session=session,
+        expected_api_key=expected_payload,
+        durable=True,
     )
     if not updated:
         logger.warning(
@@ -495,6 +504,20 @@ def _resolve_openai_local_auth(
     return None
 
 
+async def _async_record_codex_credential_expiry(
+    session: AsyncSession, *, user_id: str | None, source: str, payload: str | None,
+) -> bool:
+    if source != "codex_subscription" or not user_id or not payload:
+        return False
+    try:
+        return await _provider_vault().async_mark_codex_credential_expired(
+            user_id=user_id, credential_payload=payload, session=session,
+        )
+    except Exception as exc:
+        logger.warning("codex_credential_health_write_failed exception_class=%s", type(exc).__name__)
+        return False
+
+
 async def _async_resolve_openai_auth(
     session: AsyncSession,
     user_id: str | None = None,
@@ -510,26 +533,78 @@ async def _async_resolve_openai_auth(
         auth_mode=auth_mode,
     )
     refreshed_cred: OpenAICodexCredential | None = None
+    cancellation: asyncio.CancelledError | None = None
 
     def _capture_refresh(cred: OpenAICodexCredential) -> None:
         nonlocal refreshed_cred
         refreshed_cred = cred
 
-    db_auth = _coerce_openai_stored_auth(
-        db_value,
-        db_source,
-        auth_mode,
-        _capture_refresh,
-    )
+    try:
+        db_auth = await run_tool_blocking(
+            _coerce_openai_stored_auth,
+            db_value,
+            db_source,
+            auth_mode,
+            _capture_refresh,
+        )
+    except BlockingInvocationCancelled as exc:
+        if exc.error is not None:
+            if isinstance(exc.error, CodexCredentialExpiredError):
+                # A canceled request still owns the permanent rejection from
+                # its started refresh. Release tentative writes before marking
+                # the matching committed credential, then preserve cancellation.
+                try:
+                    await _await_task_uninterruptibly(asyncio.create_task(session.rollback()))
+                    await _await_task_uninterruptibly(asyncio.create_task(
+                        _async_record_codex_credential_expiry(
+                            session, user_id=user_id, source=db_source, payload=db_value,
+                        )
+                    ))
+                except Exception as health_exc:
+                    logger.warning("codex_credential_health_write_failed exception_class=%s",
+                                   type(health_exc).__name__)
+            raise
+        # A started refresh can rotate the token even after its caller stops.
+        # Its settled result must be saved before cancellation reaches the UOW.
+        db_auth = exc.result
+        cancellation = exc
+    except CodexCredentialExpiredError:
+        if await _async_record_codex_credential_expiry(
+            session, user_id=user_id, source=db_source, payload=db_value,
+        ):
+            from brain.platform.integrations.openai_codex_auth import CodexConnectionExpiredError
+
+            raise CodexConnectionExpiredError() from None
+        raise
     if refreshed_cred is not None:
         try:
-            await _async_persist_refreshed_openai_codex_db_credential(
+            if cancellation is not None:
+                # Release tentative writes before durable writeback. A canceled
+                # sign-in must not hold the connection lock that writeback needs.
+                await _await_task_uninterruptibly(asyncio.create_task(session.rollback()))
+            writeback = asyncio.create_task(_async_persist_refreshed_openai_codex_db_credential(
                 session=session,
                 user_id=user_id,
                 org_id=org_id,
                 source=db_source,
                 cred=refreshed_cred,
-            )
+                expected_payload=db_value,
+            ))
+            try:
+                await asyncio.shield(writeback)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+                await _await_task_uninterruptibly(writeback)
+                # Cancellation may have arrived while writeback was using a
+                # tentative caller-owned connection. Release it and preserve
+                # the rotation only if the committed identity still matches.
+                await _await_task_uninterruptibly(asyncio.create_task(session.rollback()))
+                await _await_task_uninterruptibly(asyncio.create_task(
+                    _async_persist_refreshed_openai_codex_db_credential(
+                        session=session, user_id=user_id, org_id=org_id,
+                        source=db_source, cred=refreshed_cred, expected_payload=db_value,
+                    )
+                ))
         except Exception as exc:
             logger.warning(
                 "Failed to persist refreshed OpenAI Codex credential for source=%s: %s",
@@ -537,6 +612,8 @@ async def _async_resolve_openai_auth(
                 exc,
                 exc_info=True,
             )
+    if cancellation is not None:
+        raise cancellation
     if db_auth is not None:
         return db_auth
 

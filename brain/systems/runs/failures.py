@@ -7,6 +7,7 @@ from typing import TypedDict
 
 from brain.platform.integrations.provider_error_sentinel import provider_error_kind
 from brain.platform.integrations.providers import is_transient_transport_disconnect
+from brain.platform.integrations.openai_codex_auth import CodexCredentialExpiredError
 from brain.contracts.statuses import project_run_status_value
 from brain.systems.runs.status import RunStatus, coerce_run_status
 
@@ -16,6 +17,7 @@ class RunFailureCategory(str, Enum):
     UPSTREAM = "upstream"
     VERIFICATION = "verification"
     PRESERVATION_SETUP = "preservation_setup"
+    CREDENTIAL_EXPIRED = "credential_expired"
 
 
 class PublicRunFailure(TypedDict):
@@ -54,7 +56,17 @@ def coerce_failure_category(value: RunFailureCategory | str | None) -> RunFailur
     return RunFailureCategory.INTERNAL
 
 
-def failure_category_for_error(error: BaseException | str | None) -> RunFailureCategory:
+def failure_category_for_error(
+    error: BaseException | str | None,
+    *,
+    exception_type: type[BaseException] | None = None,
+) -> RunFailureCategory:
+    if (
+        isinstance(error, CodexCredentialExpiredError)
+        or (exception_type is not None and issubclass(exception_type, CodexCredentialExpiredError))
+        or str(error or "").startswith("credential_expired:")
+    ):
+        return RunFailureCategory.CREDENTIAL_EXPIRED
     if is_transient_transport_disconnect(error) or provider_error_kind(error):
         return RunFailureCategory.UPSTREAM
     return RunFailureCategory.INTERNAL
@@ -78,6 +90,8 @@ def safe_terminal_run_message(
         return EXPIRED_RUN_MESSAGE
 
     failure_category = coerce_failure_category(category)
+    if failure_category == RunFailureCategory.CREDENTIAL_EXPIRED:
+        return str(CodexCredentialExpiredError())
     if failure_category == RunFailureCategory.UPSTREAM:
         return UPSTREAM_FAILED_RUN_MESSAGE
     if failure_category == RunFailureCategory.VERIFICATION:

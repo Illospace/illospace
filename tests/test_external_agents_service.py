@@ -285,7 +285,7 @@ async def test_headless_ask_whitelist_keeps_security_stamps_forced():
 
 
 @pytest.fixture
-async def external_agent_session(async_sqlite_session_factory):
+async def external_agent_session(async_sqlite_session_factory, healthy_provider_auth):
     _patch_sqlite_for_external_agent_tables()
     session = await async_sqlite_session_factory(
         [

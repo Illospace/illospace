@@ -54,7 +54,7 @@ def _patch_sqlite_for_pg_types():
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory):
+async def session(async_sqlite_session_factory, healthy_provider_auth):
     _patch_sqlite_for_pg_types()
     return await async_sqlite_session_factory(
         [

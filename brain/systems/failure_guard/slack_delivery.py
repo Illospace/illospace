@@ -36,6 +36,7 @@ class SlackFailureAlertPolicy:
     reason: str
     channel: str
     unknown_error_text: str
+    client_msg_id: str | None = None
 
 
 async def _resolve_channel(client: Any, configured: str) -> str:
@@ -88,6 +89,7 @@ async def async_deliver_failure_alert(
         ),
         policy.unknown_error_text,
     )
+    message_options = {"client_msg_id": policy.client_msg_id} if policy.client_msg_id else {}
     await client.post_message(
         channel=channel,
         text=(
@@ -97,4 +99,5 @@ async def async_deliver_failure_alert(
             f"Error: {first_error_line}\n"
             f"{subject.url_label}: <{subject.url}|{subject.link_label}>"
         ),
+        **message_options,
     )

@@ -35,7 +35,7 @@ _REPLY_RESULT = json.dumps({"operation": "posted", "channel_id": "C0PROD",
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch, healthy_provider_auth):
     return await async_sqlite_session_factory([
         AgentRunRow.__table__,
         AgentRunEventRow.__table__,

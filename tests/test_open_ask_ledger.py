@@ -45,7 +45,7 @@ def _patch_sqlite_for_models() -> None:
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory):
+async def session(async_sqlite_session_factory, healthy_provider_auth):
     _patch_sqlite_for_models()
     db = await async_sqlite_session_factory(
         [

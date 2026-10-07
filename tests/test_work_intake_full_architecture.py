@@ -269,7 +269,7 @@ async def test_external_headless_ask_uses_async_work_intake_policy():
 
 
 @pytest.mark.asyncio
-async def test_admit_work_is_the_only_public_agent_run_creation_boundary(monkeypatch):
+async def test_admit_work_is_the_only_public_agent_run_creation_boundary(monkeypatch, healthy_provider_auth):
     from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
     created_requests = []

@@ -102,7 +102,7 @@ async def test_app_report_work_intake_carries_customer_request_contract():
 
 
 @pytest.mark.asyncio
-async def test_app_report_envelope_is_admitted_and_acknowledged_as_processed(session):
+async def test_app_report_envelope_is_admitted_and_acknowledged_as_processed(session, healthy_provider_auth):
     from brain.systems.inbound.service import submit_inbound_envelope
 
     connection = await _seed_app_report_connection(session)

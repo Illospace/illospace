@@ -1118,6 +1118,7 @@ class _HistoryClient:
 async def test_slack_history_backfill_ingests_alert_and_mention_with_partial_dedup(
     slack_session,
     monkeypatch,
+    healthy_provider_auth,
 ):
     import brain.systems.slack.connector as connector
 

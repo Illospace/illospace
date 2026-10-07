@@ -52,7 +52,9 @@ class TestResolveApiKey:
                 "account_id": "acct_123",
             },
         })
-        codex_connection = SimpleNamespace(encrypted_credential=b"codex-enc")
+        codex_connection = SimpleNamespace(
+            encrypted_credential=b"codex-enc", credential_error_code=None,
+        )
         sess.scalars.return_value.first.return_value = codex_connection
 
         from brain.systems.vault import resolve_api_key
@@ -181,9 +183,10 @@ class TestSetCredentials:
 
 
 class TestUpdateResolvedApiKey:
+    @patch("brain.systems.vault._decrypt", side_effect=lambda value: value.decode())
     @patch("brain.systems.vault._encrypt", return_value=b"enc-refreshed")
     @patch("brain.systems.vault.UnitOfWork")
-    async def test_updates_codex_subscription_refresh(self, mock_uow_cls, mock_encrypt):
+    async def test_updates_codex_subscription_refresh(self, mock_uow_cls, mock_encrypt, mock_decrypt):
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
         uow.session = sess

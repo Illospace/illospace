@@ -885,6 +885,7 @@ async def async_resolve_api_key(
                     UserCodexConnection.user_id == user_id,
                     UserCodexConnection.is_active == True,  # noqa: E712
                 )
+                .execution_options(populate_existing=True)
                 .limit(1)
             )
             codex_connection = (await active_session.scalars(stmt)).first()
@@ -896,8 +897,11 @@ async def async_resolve_api_key(
                         return credential, user_source
                 elif auth_mode == "chatgpt":
                     if user_source == USER_OPENAI_CODEX_SOURCE:
+                        await _check_codex_connection_health(active_session, codex_connection)
                         return credential, user_source
                 elif user_source:
+                    if user_source == USER_OPENAI_CODEX_SOURCE:
+                        await _check_codex_connection_health(active_session, codex_connection)
                     return credential, user_source
 
         effective_org_id = org_id
@@ -924,6 +928,29 @@ async def async_resolve_api_key(
         return await _resolve(session)
     async with UnitOfWork() as uow:
         return await _resolve(uow.session)  # type: ignore[arg-type]
+
+
+async def async_mark_codex_credential_expired(
+    *, user_id: str, credential_payload: str, session: AsyncSession | None = None,
+) -> bool:
+    """Expose connection health through the existing provider-vault boundary."""
+    from brain.systems.vault.codex_health import mark_codex_credential_expired
+
+    return await mark_codex_credential_expired(
+        user_id=user_id, credential_payload=credential_payload, session=session,
+    )
+
+
+async def _check_codex_connection_health(
+    session: AsyncSession, connection: UserCodexConnection,
+) -> None:
+    from brain.platform.integrations.openai_codex_auth import CodexConnectionExpiredError, CodexCredentialExpiredError
+    from brain.systems.vault.codex_health import owns_codex_credential_write, retry_codex_credential_alert
+
+    if connection.credential_error_code == CodexCredentialExpiredError.error_code:
+        if not owns_codex_credential_write(session, str(connection.user_id)):
+            await retry_codex_credential_alert(connection_id=int(connection.id))
+        raise CodexConnectionExpiredError()
 
 
 async def update_resolved_api_key(
@@ -956,6 +983,8 @@ async def async_update_resolved_api_key(
     source: str,
     api_key: str,
     session: AsyncSession | None = None,
+    expected_api_key: str | None = None,
+    durable: bool = False,
 ) -> bool:
     """Update the credential row selected by ``async_resolve_api_key``."""
     if source not in {USER_OPENAI_CODEX_SOURCE, USER_OPENAI_API_KEY_SOURCE, "org_main"}:
@@ -964,6 +993,10 @@ async def async_update_resolved_api_key(
     encrypted = _encrypt(api_key)
 
     async def _update(active_session: AsyncSession) -> bool:
+        from brain.systems.vault.codex_health import (
+            _credential_identity, note_codex_credential_write, replace_codex_credential,
+        )
+
         normalized_provider = provider.strip().lower()
         if (
             source in {USER_OPENAI_CODEX_SOURCE, USER_OPENAI_API_KEY_SOURCE}
@@ -976,13 +1009,19 @@ async def async_update_resolved_api_key(
                     UserCodexConnection.user_id == user_id,
                     UserCodexConnection.is_active == True,  # noqa: E712
                 )
+                .with_for_update()
+                .execution_options(populate_existing=True)
                 .limit(1)
             )
             connection = (await active_session.scalars(stmt)).first()
             if connection:
-                connection.encrypted_credential = encrypted
-                connection.is_active = True
+                if expected_api_key is not None and _credential_identity(
+                    _decrypt(bytes(connection.encrypted_credential))
+                ) != _credential_identity(expected_api_key):
+                    return False
+                replace_codex_credential(connection, encrypted)
                 await active_session.flush()
+                note_codex_credential_write(active_session, str(user_id))
                 return True
 
         if source == "org_main":
@@ -996,16 +1035,26 @@ async def async_update_resolved_api_key(
                 stmt = select(OrgApiKey).where(
                     OrgApiKey.org_id == effective_org_id,
                     OrgApiKey.provider == normalized_provider,
-                )
+                ).with_for_update().execution_options(populate_existing=True)
                 org_key = (await active_session.scalars(stmt)).first()
                 if org_key:
+                    if expected_api_key is not None and _credential_identity(
+                        _decrypt(bytes(org_key.encrypted_key))
+                    ) != _credential_identity(expected_api_key):
+                        return False
                     org_key.encrypted_key = encrypted
                     await active_session.flush()
                     return True
 
         return False
 
-    if session is not None:
+    if session is not None and durable:
+        from brain.systems.vault.codex_health import owns_codex_credential_write
+
+        if user_id and owns_codex_credential_write(session, user_id):
+            # A Settings upload still belongs to the caller's transaction.
+            return await _update(session)
+    elif session is not None:
         return await _update(session)
     async with UnitOfWork() as uow:
         return await _update(uow.session)  # type: ignore[arg-type]
@@ -1084,15 +1133,20 @@ async def async_set_user_codex_connection(
     encrypted = _encrypt(credential_payload)
 
     async def _set(active_session: AsyncSession) -> int:
-        stmt = select(UserCodexConnection).where(
-            UserCodexConnection.user_id == clean_user_id,
+        from brain.systems.vault.codex_health import note_codex_credential_write, replace_codex_credential
+
+        stmt = (
+            select(UserCodexConnection)
+            .where(UserCodexConnection.user_id == clean_user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         existing = (await active_session.scalars(stmt)).first()
         if existing:
-            existing.encrypted_credential = encrypted
+            replace_codex_credential(existing, encrypted)
             existing.label = label
-            existing.is_active = True
             await active_session.flush()
+            note_codex_credential_write(active_session, clean_user_id)
             return int(existing.id)
 
         connection = UserCodexConnection(
@@ -1102,6 +1156,7 @@ async def async_set_user_codex_connection(
         )
         active_session.add(connection)
         await active_session.flush()
+        note_codex_credential_write(active_session, clean_user_id)
         return int(connection.id)
 
     if session is not None:

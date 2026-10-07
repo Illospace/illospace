@@ -1040,7 +1040,8 @@ class TestLLMClientOpenAI:
                 with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
                     resolve_llm_client(provider="openai")
 
-    def test_resolve_openai_from_codex_cache(self):
+    def test_resolve_openai_from_codex_cache(self, monkeypatch):
+        monkeypatch.setenv("ILLO_ALLOW_LOCAL_CODEX_AUTH_FALLBACK", "true")
         from brain.platform.integrations.llm import resolve_llm_client
         from brain.platform.integrations.openai_codex_auth import OpenAICodexCredential
 

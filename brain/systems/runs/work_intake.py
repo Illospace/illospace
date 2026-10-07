@@ -1169,7 +1169,7 @@ async def admit_work(
                 model_policy["model"] = model
                 request = replace(request, model_policy=model_policy)
         provider = infer_provider_from_model(model, default=requested_provider or None)
-        if provider == "anthropic":
+        if provider in {"anthropic", "openai"}:
             auth_preflight = await async_probe_provider_auth(
                 session,
                 user_id=request.user_id,

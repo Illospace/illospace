@@ -10,6 +10,17 @@ from sqlalchemy.schema import CreateTable
 
 from tests.db_engine_utils import create_async_test_engine
 
+
+@pytest.fixture
+def healthy_provider_auth(monkeypatch):
+    """Declare healthy admission auth for tests of unrelated consumer behavior."""
+    from brain.platform.integrations.provider_auth_preflight import ProviderAuthPassedPreflightResult
+
+    async def passed(_session, *, provider, model, **_kwargs):
+        return ProviderAuthPassedPreflightResult(provider=provider, model=model)
+
+    monkeypatch.setattr("brain.systems.runs.work_intake.async_probe_provider_auth", passed)
+
 # Ensure the repository package is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 

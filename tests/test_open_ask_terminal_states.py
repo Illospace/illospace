@@ -33,7 +33,7 @@ from tests.test_contact_form_lead_obligation import (
 
 
 @pytest.fixture
-async def terminal_session(async_sqlite_session_factory):
+async def terminal_session(async_sqlite_session_factory, healthy_provider_auth):
     _patch_sqlite_for_models()
     session = await async_sqlite_session_factory(
         [

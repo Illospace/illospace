@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateTable
@@ -31,6 +33,9 @@ from brain.systems.runs.evidence_health import (
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
+
+
+pytestmark = pytest.mark.usefixtures("healthy_provider_auth")
 
 
 def test_worker_evidence_receipt_deduplicates_by_full_canonical_identity():
