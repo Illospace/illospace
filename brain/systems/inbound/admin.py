@@ -474,6 +474,10 @@ async def update_projection(
         if field_mapping is not None
         else None
     )
+    validated_metadata = (
+        inbound_service.validate_projection_metadata(metadata)
+        if metadata is not None else None
+    )
     if policy_id is not None:
         policy = await require_policy_for_org(session, org_id=org_id, policy_id=policy_id)
         if str(policy.connection_id) != str(row.connection_id):
@@ -490,7 +494,7 @@ async def update_projection(
     if validated_mapping is not None:
         row.field_mapping = validated_mapping
     if metadata is not None:
-        row.metadata_ = dict(metadata)
+        row.metadata_ = validated_metadata
     await session.flush()
     await session.refresh(row)
     return row
@@ -750,18 +754,47 @@ async def _preview_envelope(
         schema_error = None
     except Exception as exc:
         schema_error = str(exc)
-    projection = await inbound_service._projection_for_policy(session, policy)
-    external_id, projection_error = _dry_run_projection_identity(policy, projection, envelope)
+    projections = await inbound_service._projections_for_policy(session, policy)
+    previews = [
+        _preview_projection(policy, projection, envelope, schema_error=schema_error)
+        for projection in projections or [None]
+    ]
+    result = {
+        "matched_policy_id": str(policy.id),
+        "would_store_event": True,
+        **previews[0],
+    }
+    if len(previews) > 1:
+        result["projections"] = previews
+        result["would_project_domain_record"] = any(item["would_project_domain_record"] for item in previews)
+        result["would_require_ilo"] = any(item["would_require_ilo"] for item in previews)
+        if result["would_project_domain_record"]:
+            result.pop("reason", None)
+        result["would_status"] = next(
+            (status for status in (
+                inbound_service.STATUS_REVIEW_REQUIRED, inbound_service.STATUS_FAILED,
+                inbound_service.STATUS_QUARANTINED,
+            ) if any(item["would_status"] == status for item in previews)),
+            inbound_service.STATUS_PROCESSED,
+        )
+    return result
+
+
+def _preview_projection(
+    policy: InboundSourcePolicyRow,
+    projection: InboundDomainProjectionRow | None,
+    envelope: Mapping[str, Any],
+    *,
+    schema_error: str | None,
+) -> dict[str, Any]:
+    external_id, projection_error, skipped = _dry_run_projection_identity(policy, projection, envelope)
     would_assign_projection = (
-        projection is not None
-        and schema_error is None
+        projection is not None and schema_error is None
         and inbound_service._policy_allows_domain_projection(policy)
     )
-    would_project = projection is not None and schema_error is None and projection_error is None
-    return {
-        "matched_policy_id": str(policy.id),
+    would_project = projection is not None and schema_error is None and projection_error is None and not skipped
+    result = {
         "domain_projection_id": str(projection.id) if would_assign_projection else None,
-        "would_store_event": True,
         "would_require_ilo": _dry_run_would_require_ilo(
             projection,
             schema_error=schema_error,
@@ -773,11 +806,15 @@ async def _preview_envelope(
             schema_error=schema_error,
             projection_error=projection_error,
             would_project_domain_record=would_project,
+            condition_skipped=skipped,
         ),
         "schema_error": schema_error,
         "projection_error": projection_error,
         "external_id": external_id if would_project else None,
     }
+    if skipped and schema_error is None:
+        result["reason"] = "condition_not_matched"
+    return result
 
 
 async def _replay_event(
@@ -1148,23 +1185,27 @@ def _dry_run_projection_identity(
     policy: InboundSourcePolicyRow,
     projection: InboundDomainProjectionRow | None,
     envelope: Mapping[str, Any],
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, bool]:
     if projection is None:
-        return None, None
+        return None, None, False
     if not inbound_service._policy_allows_domain_projection(policy):
-        return None, "domain_projection_not_allowed"
+        return None, "domain_projection_not_allowed", False
     root = inbound_service._path_root(envelope)
     try:
+        if not inbound_service.projection_applies(
+            envelope=envelope, projection=projection, clock=lambda: datetime.now().isoformat(),
+        ):
+            return None, None, True
         value = render_path_template(
             projection.external_id_path, root,
             resolve_path=inbound_service._extract_path, missing=inbound_service._MISSING,
         )
-    except MappingExpressionError as exc:
-        return None, str(exc)
+    except (MappingExpressionError, inbound_service.InboundValidationError) as exc:
+        return None, str(exc), False
     external_id = inbound_service._string_value(value)
     if not external_id:
-        return None, f"Missing projection external id at '{projection.external_id_path}'"
-    return external_id, None
+        return None, f"Missing projection external id at '{projection.external_id_path}'", False
+    return external_id, None, False
 
 
 def _dry_run_would_require_ilo(
@@ -1193,10 +1234,11 @@ def _dry_run_would_status(
     schema_error: str | None,
     projection_error: str | None,
     would_project_domain_record: bool,
+    condition_skipped: bool = False,
 ) -> str:
     if schema_error is not None:
         return inbound_service.STATUS_QUARANTINED
-    if would_project_domain_record:
+    if would_project_domain_record or condition_skipped:
         return inbound_service.STATUS_PROCESSED
     if projection is None:
         return inbound_service.STATUS_REVIEW_REQUIRED

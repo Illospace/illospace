@@ -170,7 +170,7 @@ async def create_domain_projection(
         title_path=optional_text(title_path),
         upsert_mode=str(upsert_mode or "upsert"),
         validation_failure_status=str(validation_failure_status or STATUS_REVIEW_REQUIRED),
-        metadata_=dict(metadata or {}),
+        metadata_=validate_projection_metadata(metadata),
     )
     session.add(projection)
     await session.flush()
@@ -376,7 +376,7 @@ async def submit_inbound_envelope(
             action_type=ACTION_DOMAIN_PROJECTION_UPSERT,
             action_result=action_result,
             confidence=1.0,
-            target={
+            target={} if action_result.get("operation") == "skipped" else {
                 "domain_id": projection.domain_id,
                 "object_key": projection.object_key,
                 "record_id": action_result.get("record_id"),
@@ -847,7 +847,10 @@ async def _apply_domain_projections(
             )
             errors.append(error)
         else:
-            targets.append({**outcome, "record_id": result.get("record_id")})
+            if result.get("operation") == "skipped":
+                outcome["reason"] = result["reason"]
+            else:
+                targets.append({**outcome, "record_id": result.get("record_id")})
             outcome.update(status=STATUS_PROCESSED, result=result)
         outcomes.append(outcome)
 
@@ -895,18 +898,42 @@ async def _apply_domain_projections(
     )
 
 
-async def _apply_domain_projection(
-    session: AsyncSession,
+def validate_projection_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate the optional projection condition through the mapping owner."""
+    result = dict(metadata or {})
+    condition = result.get("when")
+    if condition is not None:
+        try:
+            validate_mapping_expression(
+                "projection.metadata.when", {"if": condition, "then": True, "else": False},
+            )
+        except MappingExpressionError as exc:
+            raise InboundValidationError(str(exc)) from exc
+    return result
+
+
+def projection_applies(
+    *, envelope: Mapping[str, Any], projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
+) -> bool:
+    condition = validate_projection_metadata(projection.metadata_).get("when")
+    if condition is None:
+        return True
+
+    return evaluate_mapping_expression(
+        {"if": condition, "then": True, "else": False}, _path_root(envelope),
+        resolve_path=_extract_path, clock=clock, missing=_MISSING,
+    )
+
+
+def domain_projection_values(
     *,
-    context: InboundHandlerContext,
-    event: InboundEventRow,
     envelope: Mapping[str, Any],
     projection: InboundDomainProjectionRow,
     clock: Callable[[], str],
-) -> dict[str, Any]:
-    if projection.upsert_mode not in VALID_PROJECTION_UPSERT_MODES:
-        raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
-
+    freshness_fields: set[str] | None = None,
+) -> tuple[str, dict[str, Any], str | None]:
+    """Render one projection's identity and values without writing records."""
     root = _path_root(envelope)
     try:
         value = render_path_template(
@@ -920,23 +947,58 @@ async def _apply_domain_projection(
 
     data = {projection.external_id_field: external_id}
     for field_key, source_path in dict(projection.field_mapping or {}).items():
+        observed_freshness = False
+
+        def resolve_path(source: Any, path: str) -> Any:
+            nonlocal observed_freshness
+            if path.removeprefix("envelope.") in {"hints.source_updated_at", "payload.issue.updated_at", "payload.pull_request.updated_at"}:
+                observed_freshness = True
+            return _extract_path(source, path)
+
+        def observation_clock() -> str:
+            nonlocal observed_freshness
+            observed_freshness = True
+            return clock()
+
         if isinstance(source_path, Mapping):
             try:
                 value = evaluate_mapping_expression(
-                    source_path, root, resolve_path=_extract_path, clock=clock,
+                    source_path, root, resolve_path=resolve_path, clock=observation_clock, missing=_MISSING,
                 )
             except MappingExpressionError as exc:
                 raise InboundValidationError(str(exc)) from exc
         else:
-            value = _extract_path(root, str(source_path))
+            value = resolve_path(root, str(source_path))
         if value is _MISSING:
             continue
         data[str(field_key)] = value
+        if observed_freshness and freshness_fields is not None:
+            freshness_fields.add(str(field_key))
 
     title = None
     if projection.title_path:
         title_value = _extract_path(root, projection.title_path)
         title = _string_value(title_value) if title_value is not _MISSING else None
+
+    return external_id, data, title
+
+
+async def _apply_domain_projection(
+    session: AsyncSession,
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    envelope: Mapping[str, Any],
+    projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
+) -> dict[str, Any]:
+    if not projection_applies(envelope=envelope, projection=projection, clock=clock):
+        return {"operation": "skipped", "reason": "condition_not_matched"}
+    if projection.upsert_mode not in VALID_PROJECTION_UPSERT_MODES:
+        raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
+    external_id, data, title = domain_projection_values(
+        envelope=envelope, projection=projection, clock=clock,
+    )
 
     domain_service = AsyncDomainService(session)
     projection_key = await _get_projection_key(session, projection, external_id=external_id)
@@ -1882,10 +1944,7 @@ def validate_projection_field_mapping(
     for field_key, expr in field_mapping.items():
         field_path = f"field_mapping.{field_key}"
         if isinstance(expr, Mapping):
-            if len(expr) != 1 or not set(expr).issubset({"const", "path", "now"}):
-                raise InboundValidationError(
-                    f"{field_path} mapping expression must use exactly one of const, path, or now"
-                )
+            _validate_projection_expression_vocabulary(field_path, expr)
             try:
                 validate_mapping_expression(field_path, expr)
             except MappingExpressionError as exc:
@@ -1896,6 +1955,21 @@ def validate_projection_field_mapping(
         else:
             raise InboundValidationError(f"{field_path} must be a string path or mapping expression")
     return result
+
+
+def _validate_projection_expression_vocabulary(field_path: str, expr: Mapping[str, Any]) -> None:
+    """Restrict conditional branches to the same projection vocabulary."""
+    if "if" in expr:
+        if not set(expr).issubset({"if", "then", "else"}):
+            raise InboundValidationError(f"{field_path} conditional mapping must use if, then, and else")
+        for branch in ("then", "else"):
+            value = expr.get(branch)
+            if isinstance(value, Mapping):
+                _validate_projection_expression_vocabulary(f"{field_path}.{branch}", value)
+    elif len(expr) != 1 or not set(expr).issubset({"const", "path", "now"}):
+        raise InboundValidationError(
+            f"{field_path} mapping expression must use exactly one of const, path, or now"
+        )
 
 
 def _extract_path(root: Mapping[str, Any], path: str) -> Any:

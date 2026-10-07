@@ -664,6 +664,7 @@ class AsyncDomainService:
                     reason=reason,
                 )
 
+        prepared_data = with_record_creation_defaults(domain, obj, fields, prepared_data)
         normalized = self.validate_record_data(fields, prepared_data)
         await self._extend_open_enum_options(fields, normalized)
         if domain.slug == "github-ticket-tracker" and obj.key == "chantier":
@@ -746,13 +747,7 @@ class AsyncDomainService:
         # Domain record ids are monotonically assigned, so the lowest id is the
         # deterministic proxy for the earliest-created canonical row.
         canonical, *duplicates = sorted(records, key=lambda record: record.id)
-        merged_data = dict(canonical.data or {})
-        for duplicate in duplicates:
-            for key, value in (duplicate.data or {}).items():
-                if _is_empty(merged_data.get(key)) and not _is_empty(value):
-                    merged_data[key] = value
-        # The current observation is authoritative for every field it supplies.
-        merged_data.update(data)
+        merged_data = merge_record_observation(records, data)
 
         canonical = await self.update_record(
             org_id,
@@ -1547,6 +1542,39 @@ def _title_from_key(key: str) -> str:
 
 def _is_empty(value: Any) -> bool:
     return value is None or value == ""
+
+
+def with_record_creation_defaults(
+    domain: Domain,
+    obj: DomainObjectType,
+    fields: Sequence[DomainFieldDefinition],
+    data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply creation-only defaults after existing-record detection."""
+    result = dict(data)
+    if domain.slug == "github-ticket-tracker" and obj.key == "ticket" and "status" not in result:
+        status_field = next((field for field in fields if field.key == "status"), None)
+        if status_field is not None and status_field.default_value is None and "Backlog" in (status_field.options or []):
+            # Existing editorial state stays with its owner; explicit source
+            # closure stays Done. A schema-defined default takes precedence.
+            result["status"] = "Backlog"
+    return result
+
+
+def merge_record_observation(
+    records: Sequence[DomainRecord],
+    data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Combine duplicate rows and the current observation in canonical order."""
+    ordered = sorted(records, key=lambda record: record.id)
+    merged = dict(ordered[0].data or {}) if ordered else {}
+    for duplicate in ordered[1:]:
+        for key, value in (duplicate.data or {}).items():
+            if _is_empty(merged.get(key)) and not _is_empty(value):
+                merged[key] = value
+    # A supplied field belongs to the current source observation.
+    merged.update(data)
+    return merged
 
 
 @dataclass(frozen=True)

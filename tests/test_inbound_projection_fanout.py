@@ -13,6 +13,7 @@ from brain.platform.db.models.inbound import (
     InboundEventRow,
 )
 from brain.systems.inbound import service as inbound
+from brain.systems.inbound import admin as inbound_admin
 from brain.systems.user_domains.service import AsyncDomainService
 from tests.inbound_admin_support import session as session
 from tests.inbound_preservation_support import (
@@ -77,6 +78,32 @@ async def _add_projection(session, policy, name):
     )
 
 
+@pytest.mark.parametrize("github_event, expected_tracker", [
+    ("issues", "ticket"), ("pull_request", "pull_request"), ("issue_comment", None),
+])
+async def test_projection_conditions_keep_feed_and_route_only_matching_tracker_type(
+    session, source, github_event, expected_tracker,
+):
+    principal, policy, envelope = source
+    feed = await _add_projection(session, policy, "Feed")
+    ticket = await _add_projection(session, policy, "Tickets")
+    pull_request = await _add_projection(session, policy, "Pull Requests")
+    ticket.metadata_ = {"when": {"path": "hints.event", "equals": "issues"}}
+    pull_request.metadata_ = {"when": {"path": "hints.event", "equals": "pull_request"}}
+    envelope["hints"] = {"event": github_event}
+    result = await inbound.submit_inbound_envelope(session, connection=principal, envelope=envelope)
+    records = list(await session.scalars(select(DomainRecord)))
+    expected_domains = {feed.domain_id}
+    if expected_tracker == "ticket": expected_domains.add(ticket.domain_id)
+    if expected_tracker == "pull_request": expected_domains.add(pull_request.domain_id)
+    assert {row.domain_id for row in records} == expected_domains
+    assert result["status"] == inbound.STATUS_PROCESSED and result["error"] is None
+    outcomes = result["ilo_outcome"]["projections"]
+    assert sum(row["result"]["operation"] == "skipped" for row in outcomes) == 3 - len(expected_domains)
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    assert {row["domain_id"] for row in receipt.target["projections"]} == expected_domains
+
+
 @pytest.fixture
 async def projections(session, source):
     _, policy, _ = source
@@ -86,6 +113,37 @@ async def projections(session, source):
     tracker.created_at = feed.created_at + timedelta(days=1)
     await session.flush()
     return feed, tracker
+
+
+@pytest.mark.parametrize("second_matches", [None, False, True])
+async def test_condition_skip_has_no_writes_and_matches_preview(session, source, second_matches):
+    principal, policy, envelope = source
+    primary = await _add_projection(session, policy, "PRs only")
+    primary.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    primary.metadata_ = {"when": {"path": "hints.event", "equals": "pull_request"}}
+    if second_matches is not None:
+        secondary = await _add_projection(session, policy, "Second tracker")
+        secondary.created_at = primary.created_at + timedelta(days=1)
+        secondary.metadata_ = {"when": {"path": "hints.event", "equals": "issues" if second_matches else "pull_request"}}
+    envelope["hints"] = {"event": "issues"}
+    preview = await inbound_admin._preview_envelope(
+        session, org_id=ORG_ID, connection_id=CONNECTION_ID, **envelope,
+    )
+    result = await inbound.submit_inbound_envelope(session, connection=principal, envelope=envelope)
+    records = list(await session.scalars(select(DomainRecord)))
+    assert len(records) == int(second_matches is True)
+    assert preview["would_project_domain_record"] is (second_matches is True)
+    assert preview["would_status"] == result["status"] == inbound.STATUS_PROCESSED
+    assert preview["would_require_ilo"] is False and preview["projection_error"] is None
+    assert result["error"] is None
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    if second_matches is None:
+        assert result["ilo_outcome"] == {"operation": "skipped", "reason": "condition_not_matched"}
+        assert receipt.target == {} and preview["reason"] == "condition_not_matched"
+    else:
+        assert preview["projections"][0]["reason"] == "condition_not_matched"
+        assert len(receipt.target["projections"]) == len(records)
+    assert len(list(await session.scalars(select(InboundDomainProjectionKeyRow)))) == len(records)
 
 
 @pytest.mark.parametrize("order_by", ["created_at", "id"])

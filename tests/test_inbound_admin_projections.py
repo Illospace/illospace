@@ -31,6 +31,36 @@ from tests.inbound_admin_support import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.mark.parametrize("branch", ["then", "else"])
+async def test_conditional_projection_branches_use_restricted_vocabulary(branch):
+    expression = {"if": {"path": "hints.event", "exists": True}, "then": "present", "else": "absent"}
+    expression[branch] = {"if": {"path": "payload.missing", "exists": False}, "then": {"template": "{payload.missing}"}}
+    with pytest.raises(inbound_service.InboundValidationError, match="exactly one of const, path, or now"):
+        inbound_service.validate_projection_field_mapping({"summary": expression})
+
+
+@pytest.mark.parametrize("condition", [{}, {"path": "hints.event", "in": "issues"}, {"path": "hints.event", "exists": "true"}])
+async def test_projection_condition_rejected_before_configuration_mutation(seeded_session, github_projection, condition):
+    connection, projection, _envelope = github_projection
+    original_metadata = dict(projection.metadata_ or {})
+    with pytest.raises(inbound_service.InboundValidationError):
+        await inbound_admin.update_projection(
+            seeded_session, org_id=ORG_ID, projection_id=projection.id,
+            title_path="payload.issue.changed", metadata={"when": condition},
+        )
+    assert projection.metadata_ == original_metadata and projection.title_path is None
+    before = list(await seeded_session.scalars(select(InboundDomainProjectionRow)))
+    with pytest.raises(inbound_service.InboundValidationError):
+        await inbound_admin.create_projection(
+            seeded_session, org_id=ORG_ID, connection_id=connection.id,
+            policy_id=projection.policy_id, domain_id=projection.domain_id,
+            object_key="issue", external_id_path=projection.external_id_path,
+            external_id_field="external_id", field_mapping=projection.field_mapping,
+            metadata={"when": condition},
+        )
+    assert list(await seeded_session.scalars(select(InboundDomainProjectionRow))) == before
+
+
 @pytest.fixture
 async def github_projection(seeded_session):
     domain = await _create_issue_domain(seeded_session)

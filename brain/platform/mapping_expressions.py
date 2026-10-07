@@ -39,6 +39,7 @@ def evaluate_mapping_expression(
     *,
     resolve_path: Callable[[Any, str], Any],
     clock: Callable[[], str],
+    missing: Any = None,
 ) -> Any:
     """Evaluate using the caller's path semantics and ISO timestamp clock.
 
@@ -61,10 +62,10 @@ def evaluate_mapping_expression(
             condition = expr.get("if")
             if not isinstance(condition, Mapping):
                 raise MappingExpressionError("mapping expression.if must be an object")
-            matches = _condition_matches(condition, source, resolve_path=resolve_path)
+            matches = _condition_matches(condition, source, resolve_path=resolve_path, missing=missing)
             branch = expr.get("then") if matches else expr.get("else")
             if isinstance(branch, Mapping):
-                return evaluate_mapping_expression(branch, source, resolve_path=resolve_path, clock=clock)
+                return evaluate_mapping_expression(branch, source, resolve_path=resolve_path, clock=clock, missing=missing)
             return branch
         raise MappingExpressionError("mapping expressions must use const, path, template, now, or if/then/else")
     if expr is None:
@@ -77,11 +78,14 @@ def _condition_matches(
     source: Mapping[str, Any],
     *,
     resolve_path: Callable[[Any, str], Any],
+    missing: Any = None,
 ) -> bool:
     path = condition.get("path") if "path" in condition else condition.get("field")
     if path is None:
         raise MappingExpressionError("mapping condition requires field or path")
     value = resolve_path(source, str(path))
+    if value is missing:
+        value = None
     if "exists" in condition:
         return (value is not None) is bool(condition.get("exists"))
     if "equals" in condition:
