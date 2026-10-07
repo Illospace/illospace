@@ -12,7 +12,11 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.runs.failure_diagnostic import read_run_failure_diagnostic
-from brain.systems.runs.failures import public_agent_start_retry_failure
+from brain.systems.runs.failures import (
+    failure_category_for_error,
+    public_agent_start_retry_failure,
+    public_run_failure,
+)
 from brain.systems.runs.status import TERMINAL_RUN_STATUSES, coerce_run_status
 
 
@@ -106,6 +110,10 @@ def _run_id(value: Any) -> int | None:
         return None
 
 
+def _rejected_admission_without_run(handling_status: Any, run_id: Any, run_status: Any) -> bool:
+    return handling_status == "run_admission_failed" and run_id is None and run_status is None
+
+
 def project_inbound_submission_result(
     payload: dict[str, Any], *, compact: bool = False
 ) -> dict[str, Any]:
@@ -136,7 +144,12 @@ def project_inbound_submission_result(
     if compact:
         if isinstance(attribution, dict):
             summary["attribution"] = {"tags": attribution.get("tags", [])}
-        summary["terminal"] = coerce_run_status(summary["run_status"]) in TERMINAL_RUN_STATUSES
+        summary["terminal"] = (
+            coerce_run_status(summary["run_status"]) in TERMINAL_RUN_STATUSES
+            or _rejected_admission_without_run(
+                summary["handling_status"], summary["run_id"], summary["run_status"],
+            )
+        )
         if summary["terminal"]:
             if final_answer is not None:
                 summary["final_answer"] = final_answer
@@ -217,8 +230,8 @@ async def read_inbound_submission_result(
     action_result = dict(event.action_result or {})
     handling = _result_handling(action_result)
     current_run_id = _run_id(handling.get("run_id"))
-    if current_run_id is not None and current_run_id != selected_run_id:
-        current_run = await session.get(AgentRunRow, current_run_id)
+    if current_run_id != selected_run_id:
+        current_run = await session.get(AgentRunRow, current_run_id) if current_run_id is not None else None
         current_run_status = (
             getattr(current_run, "status", None) if current_run is not None else None
         )
@@ -251,6 +264,10 @@ async def read_inbound_submission_result(
         ),
         None,
     )
+    if failure is None and _rejected_admission_without_run(
+        handling.get("status"), handling.get("run_id"), handling.get("run_status") or current_run_status,
+    ):
+        failure = public_run_failure("failed", failure_category_for_error(handling.get("error")))
     if current_run is not None:
         diagnostic = await read_run_failure_diagnostic(session, run=current_run)
         if diagnostic is not None and failure is None and diagnostic.retry_scheduled:

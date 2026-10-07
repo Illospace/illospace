@@ -111,6 +111,6 @@ async def test_recovery_overlaps_secondary_projection_webhook_without_deadlock(d
         if event.contains(db_engine.sync_engine, "before_cursor_execute", observe_key_query):
             event.remove(db_engine.sync_engine, "before_cursor_execute", observe_key_query)
         async with sessions() as session:
-            await session.execute(delete(Org).where(Org.id == org_id))
             await session.execute(delete(User).where(User.id == user_id))
+            await session.execute(delete(Org).where(Org.id == org_id))
             await session.commit()

@@ -496,6 +496,54 @@ async def test_compact_keeps_available_answer_for_every_terminal_status(submissi
     assert response["final_answer"] == submission_response.answer
 
 
+@pytest.mark.parametrize("reason,category", [
+    ("credential_expired: private provider diagnostic", "credential_expired"),
+    ("provider_credential_unavailable: private provider diagnostic", "internal"),
+    ("[SQL: SELECT private_data] private provider diagnostic", "internal"),
+])
+async def test_rejected_admission_is_terminal_without_a_run(submission_response, reason, category):
+    fixture = submission_response
+    rejected = {"status": "run_admission_failed", "error": reason}
+    fixture.event.action_result = {"handling": rejected}
+    fixture.receipt.outcome = {"handling": rejected}
+    internal = await fixture.internal()
+    assert internal["run_id"] is None and internal["run_status"] is None
+    assert internal["failure"] == public_run_failure("failed", category)
+    response = await fixture.response(compact=True)
+    assert response["terminal"] is True
+    assert response["handling_status"] == "run_admission_failed"
+    assert response["failure"] == internal["failure"]
+    assert "private provider diagnostic" not in json.dumps(response)
+    assert "SELECT private_data" not in json.dumps(response)
+    fixture.db.get.assert_not_awaited()
+
+
+async def test_reconciled_admission_rejection_does_not_keep_the_previous_run(submission_response, monkeypatch):
+    fixture = submission_response
+    fixture.db.get.return_value = SimpleNamespace(status="failed")
+
+    async def reject_replacement(_session, _run_id):
+        fixture.event.action_result = {"handling": {
+            "status": "run_admission_failed", "error": "credential_expired: private diagnostic",
+        }}
+        return fixture.receipt
+
+    monkeypatch.setattr(inbound_results, "reconcile_inbound_triage_run", reject_replacement)
+    response = await fixture.response(compact=True)
+    assert response["terminal"] is True
+    assert response["run_id"] is None and response["run_status"] is None
+    assert response["failure"] == public_run_failure("failed", "credential_expired")
+
+
+async def test_compact_current_admission_fields_override_old_rejection(submission_response):
+    internal = await submission_response.internal()
+    internal["event"]["action_result"]["handling"] = {"status": "run_admission_failed", "error": "old failure"}
+    internal.update(handling_status="queued", run_id=999, run_status="running")
+    response = project_inbound_submission_result(internal, compact=True)
+    assert response["terminal"] is False
+    assert "failure" not in response
+
+
 async def test_mcp_result_defaults_keep_event_payload(submission_response):
     response = await submission_response.response()
     assert response["event"]["raw_payload"] == submission_response.event.raw_payload
