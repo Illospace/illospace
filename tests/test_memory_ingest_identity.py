@@ -11,6 +11,7 @@ from sqlalchemy.schema import CreateTable
 from brain.platform.db.models.knowledge import KnowledgeItem, KnowledgeItemEmbedding
 from brain.platform.db.models.reconstructive_memory import (
     MemoryAssertionNode,
+    MemoryEdgeNode,
     MemoryNode,
     MemorySource,
     MemorySpan,
@@ -238,11 +239,31 @@ async def test_ingests_still_share_cue_and_tag_nodes(session):
 
     assert first.content_node_id != second.content_node_id
     assert first.tag_node_ids == second.tag_node_ids
-    weekly_cue = await session.scalar(select(MemoryNode.id).where(
-        MemoryNode.node_kind == "cue", MemoryNode.canonical_label == "weekly",
+    launch_cue = await session.scalar(select(MemoryNode.id).where(
+        MemoryNode.node_kind == "cue", MemoryNode.canonical_label == "launch",
     ))
-    assert weekly_cue in first.cue_node_ids
-    assert weekly_cue in second.cue_node_ids
+    assert launch_cue in first.cue_node_ids
+    assert launch_cue in second.cue_node_ids
+
+
+async def test_ingest_persists_identifiers_and_subject_phrases_as_connected_cues(session):
+    result = await _ingest(session, (
+        "Principle: vague low-quality reports, especially generic ones. "
+        "Cedar; requester briver; company 424242. "
+        "Ask for the background, art direction, product description, "
+        "reference photo and bug report."
+    ))
+    cues = set(await session.scalars(select(MemoryNode.canonical_label).where(
+        MemoryNode.id.in_(result.cue_node_ids),
+        MemoryNode.node_kind == "cue",
+    )))
+
+    assert {"cedar", "briver", "424242", "background", "art direction", "product description"} <= cues
+    connected = set(await session.scalars(select(MemoryEdgeNode.target_node_id).where(
+        MemoryEdgeNode.source_node_id == result.content_node_id,
+        MemoryEdgeNode.edge_kind == "content_to_cue",
+    )))
+    assert connected == set(result.cue_node_ids)
 
 
 async def test_legacy_first_sentence_key_is_reused(session):

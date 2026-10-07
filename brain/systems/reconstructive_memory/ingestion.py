@@ -33,54 +33,13 @@ from brain.systems.knowledge.memory_eligibility import (
     MemoryIndexExclusionReason,
     memory_node_index_exclusion_reason,
 )
+from brain.systems.reconstructive_memory.cues import extract_memory_cues
 
 logger = logging.getLogger(__name__)
 
 _INFO_QUEUE_KEY = "illo_memory_knowledge_index_queue"
 _INFO_ARMED_KEY = "illo_memory_knowledge_index_listeners_armed"
 _POST_COMMIT_TASKS: set[asyncio.Task] = set()
-
-_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
-_STOP_WORDS = {
-    "about",
-    "after",
-    "again",
-    "also",
-    "and",
-    "are",
-    "because",
-    "been",
-    "before",
-    "being",
-    "but",
-    "can",
-    "could",
-    "did",
-    "does",
-    "for",
-    "from",
-    "had",
-    "has",
-    "have",
-    "into",
-    "its",
-    "not",
-    "our",
-    "out",
-    "should",
-    "that",
-    "the",
-    "their",
-    "then",
-    "there",
-    "this",
-    "was",
-    "were",
-    "when",
-    "with",
-    "would",
-}
-
 
 @dataclass(frozen=True)
 class IngestedMemorySource:
@@ -319,7 +278,7 @@ async def ingest_memory_source(
         )
 
     cue_nodes = []
-    for cue in _extract_cues(cleaned):
+    for cue in extract_memory_cues(cleaned):
         cue_nodes.append(
             await node_repo.upsert_node(
                 draft=NodeDraft(
@@ -460,17 +419,3 @@ def _normalize_content_kind(value: str | None) -> str:
 def _tag_labels(content_kind: str | None) -> tuple[str, ...]:
     kind = _normalize_content_kind(content_kind)
     return ("memory", kind) if kind != "memory" else ("memory",)
-
-
-def _extract_cues(content: str, *, limit: int = 8) -> tuple[str, ...]:
-    seen: set[str] = set()
-    cues: list[str] = []
-    for match in _WORD_RE.finditer(content):
-        word = match.group(0).lower()
-        if word in _STOP_WORDS or word in seen:
-            continue
-        seen.add(word)
-        cues.append(word)
-        if len(cues) >= limit:
-            break
-    return tuple(cues)
