@@ -19,7 +19,7 @@ def test_invalid_cycle_occurrence_handles_fail_closed(value):
 
 @pytest.mark.parametrize("chantier", [False, True])
 async def test_persisted_cycle_binding_survives_two_joined_continuations(
-    async_sqlite_session_factory, sqlite_postgres_ddl_patch, chantier
+    async_sqlite_session_factory, sqlite_postgres_ddl_patch, healthy_provider_auth, chantier
 ):
     session = await async_sqlite_session_factory([
         AgentRunRow.__table__, AgentRunEventRow.__table__, AgentRunArtifactRow.__table__, CycleRun.__table__
@@ -38,6 +38,7 @@ async def test_persisted_cycle_binding_survives_two_joined_continuations(
         worker = await _worker(store, anchor, step=f"reader-{hop}", role="reader", join_parent=True)
         await store.set_status(worker.id, RunStatus.COMPLETED)
         continuation_id = await queue_worker_continuation_for_terminal_run(session, terminal_run_id=worker.id)
+        assert continuation_id is not None
         continuation = await session.get(AgentRunRow, continuation_id)
         assert cycle_exception_ping_context(continuation.metadata_) == {"cycle_run_id": 42, "run_kind": "scheduled_digest"}
         assert continuation.metadata_["launch_envelope"] == metadata["launch_envelope"]
