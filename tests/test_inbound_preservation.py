@@ -245,40 +245,32 @@ async def test_submission_prompt_without_files_is_unchanged(desired_outcome, sou
     assert inbound._submission_prompt(normalized=normalized) == expected
 
 
-async def test_submission_file_references_bound_count_and_path_length():
+async def test_submission_file_references_reject_count_and_path_length_loss():
     boundary_path = "x" * (MAX_SUBMISSION_FILE_REFERENCE_CHARS - 2)
     oversized_path = boundary_path + "y"
     files = [boundary_path, oversized_path] + [
         f"articles/article-{i}.md" for i in range(MAX_SUBMISSION_FILE_REFERENCES)
     ]
-    prompt = inbound._submission_prompt(normalized={"message": "Review these.", "source": {"files_touched": files}})
+    with pytest.raises(inbound.SubmissionSizeError) as error:
+        inbound._submission_prompt(normalized={"message": "Review these.", "source": {"files_touched": files}})
+    assert error.value.details["field"] == "source.files_touched"
+    with pytest.raises(inbound.SubmissionSizeError) as error:
+        inbound._submission_prompt(normalized={"message": "Review these.", "source": {"files_touched": [oversized_path]}})
+    assert error.value.details["field"] == "source.files_touched[0]"
+    prompt = inbound._submission_prompt(normalized={"message": "Review these.", "source": {"files_touched": [boundary_path]}})
     assert json.dumps(boundary_path) in prompt.splitlines()
-    assert oversized_path not in prompt
-    for path in files[2:MAX_SUBMISSION_FILE_REFERENCES]:
-        assert json.dumps(path) in prompt.splitlines()
-    for path in files[MAX_SUBMISSION_FILE_REFERENCES:]:
-        assert path not in prompt
-    assert "3 file reference(s) omitted" in prompt
-    assert "oversized or non-string entries are omitted" in prompt
 
 
-async def test_submission_file_references_survive_total_prompt_limit():
-    files = [f"articles/{i}-" + "x" * 200 + ".md" for i in range(MAX_SUBMISSION_FILE_REFERENCES + 1)]
-    prompt = inbound._submission_prompt(
-        normalized={
+async def test_submission_rejects_total_prompt_loss_with_parts_and_files():
+    files = [f"articles/{i}-" + "x" * 200 + ".md" for i in range(MAX_SUBMISSION_FILE_REFERENCES)]
+    with pytest.raises(inbound.SubmissionSizeError) as error:
+        inbound._submission_prompt(normalized={
             "message": "Preserve these articles. " + "x" * inbound.MAX_TRIAGE_MESSAGE_CHARS,
             "parts": [{"type": "text", "content": "y" * inbound.MAX_TRIAGE_PAYLOAD_CHARS}],
             "source": {"files_touched": files},
             "desired_outcome": "preserve_knowledge",
-        }
-    )
-    assert len(prompt) <= inbound.MAX_TRIAGE_MESSAGE_CHARS
-    assert prompt.startswith("Preserve these articles.")
-    for path in files[:MAX_SUBMISSION_FILE_REFERENCES]:
-        assert json.dumps(path) in prompt.splitlines()
-    assert "1 file reference(s) omitted" in prompt
-    assert "explain in the final answer why a reference could not be used." in prompt
-    assert prompt.endswith("Record a clear final answer describing what you decided and what happened.")
+        })
+    assert error.value.details["field"] == "assembled_prompt"
 
 
 async def test_submission_file_references_escape_line_breaks():

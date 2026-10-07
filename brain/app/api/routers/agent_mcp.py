@@ -56,6 +56,7 @@ from brain.systems.cycles.serializers import (
 from brain.systems.cycles.service import async_run_cycle_now
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
+from brain.systems.inbound.errors import SubmissionSizeError
 from brain.systems.inbound.results import (
     InboundSubmissionResultState,
     project_inbound_submission_result,
@@ -111,7 +112,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             {
                 "message": {
                     "type": "string",
-                    "description": "Natural-language instruction or context for Illo to handle.",
+                    "description": "Natural-language instruction or context for Illo to handle. The complete handling prompt, including parts, file references and guidance, must fit 8000 characters; oversized input is rejected before an event id is issued.",
                 },
                 "desired_outcome": {
                     "type": "string",
@@ -167,7 +168,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "session_id": {"type": "string", "description": "Optional external-tool session id."},
                 "run_id": {"type": "string", "description": "Optional external-tool run id."},
-                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
+                "metadata": {"type": "object", "description": "Optional machine-readable metadata. model or model_name selects a catalog model; thinking_tier, effort, effort_level or thinking selects reasoning effort; provider, preferred_provider or model_provider selects the provider. Runtime admission rules still apply.", "default": {}},
             },
             ["message"],
         ),
@@ -383,6 +384,7 @@ def _build_submit_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
     correlation = _clean_dict(arguments.get("correlation"))
     response = _clean_dict(arguments.get("response"))
     parts = _clean_submit_parts(arguments.get("parts"))
+    metadata = _clean_dict(arguments.get("metadata"))
     payload = {
         "message": message,
         "parts": parts,
@@ -406,6 +408,9 @@ def _build_submit_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
     }
     if desired_outcome:
         envelope["desired_outcome"] = desired_outcome
+    if metadata:
+        payload["metadata"] = metadata
+        envelope["metadata"] = metadata
     return envelope
 
 
@@ -1470,7 +1475,10 @@ def _tool_result(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tool_error(message: str) -> dict[str, Any]:
+def _tool_error(message: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    if data is not None:
+        payload = {"error": {**data, "message": message}}
+        return {**_tool_result(payload), "structuredContent": payload, "isError": True}
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
@@ -1573,6 +1581,8 @@ async def _handle_mcp_request(
         if isinstance(exc, SQLAlchemyError):
             logger.exception("MCP database operation failed")
             return _result(req_id, _tool_error(_database_error_text(exc)))
+        if isinstance(exc, SubmissionSizeError):
+            return _result(req_id, _tool_error(str(exc), data=exc.details))
         return _result(req_id, _tool_error(str(exc)))
 
 

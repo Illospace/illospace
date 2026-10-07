@@ -32,6 +32,8 @@ from brain.platform.mapping_expressions import (
     render_path_template,
     validate_mapping_expression,
 )
+from brain.platform.model_catalog import canonical_catalog_model_id
+from brain.platform.providers.model_policy import coerce_openai_api_key_model
 from brain.platform.provider_alerts import parse_rollbar_alert
 from brain.systems.external_agents import service as external_agents
 from brain.systems.cortex.thread_links import thread_link_payload
@@ -46,6 +48,7 @@ from brain.systems.inbound.status import (
     STATUS_QUARANTINED,
     STATUS_REVIEW_REQUIRED,
 )
+from brain.systems.inbound.errors import InboundValidationError, SubmissionSizeError
 from brain.systems.inbound.assignment import default_rules, resolve_owner
 from brain.systems.inbound.preservation import (
     submission_file_reference_prompt_lines,
@@ -82,10 +85,6 @@ MAX_TRIAGE_MESSAGE_CHARS = 8000
 MAX_TRIAGE_PAYLOAD_CHARS = 5000
 
 logger = logging.getLogger(__name__)
-
-
-class InboundValidationError(ValueError):
-    """Raised when an inbound envelope or configured projection is invalid."""
 
 
 def utcnow() -> datetime:
@@ -553,6 +552,9 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
     }
     if kind == SUBMISSION_ENVELOPE_KIND:
         normalized.update(_normalize_submission_fields(data, normalized["payload"]))
+        # Validate the complete handoff before creating an event or issuing its id.
+        # The exact same builder supplies the handling run, with no truncation.
+        _submission_prompt(normalized=normalized)
     if normalized["idempotency_key"] and len(str(normalized["idempotency_key"])) > 160:
         raise InboundValidationError("idempotency_key must be 160 characters or fewer")
     return normalized
@@ -607,6 +609,7 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
     correlation = data.get("correlation", payload.get("correlation", {}))
     response = data.get("response", payload.get("response", {}))
     parts = data.get("parts", payload.get("parts", []))
+    metadata = data.get("metadata", payload.get("metadata", {}))
     if source is None:
         source = {}
     if constraints is None:
@@ -617,6 +620,8 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
         response = {}
     if parts is None:
         parts = []
+    if metadata is None:
+        metadata = {}
     if not isinstance(source, dict):
         raise InboundValidationError("source must be an object")
     if not isinstance(constraints, dict):
@@ -627,8 +632,19 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
         raise InboundValidationError("response must be an object")
     if not isinstance(parts, list):
         raise InboundValidationError("parts must be an array")
+    if not isinstance(metadata, dict):
+        raise InboundValidationError("metadata must be an object")
     if not message:
         raise InboundValidationError("submission envelope requires message")
+    model = metadata.get("model") or metadata.get("model_name")
+    if model and (
+        not isinstance(model, str)
+        or not (
+            canonical_catalog_model_id(model)
+            or coerce_openai_api_key_model(model)
+        )
+    ):
+        raise InboundValidationError("Submission metadata model must be a supported catalog model.")
     return {
         "message": message,
         "source": dict(source),
@@ -636,6 +652,7 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
         "correlation": dict(correlation),
         "response": dict(response),
         "parts": list(parts),
+        **({"metadata": dict(metadata)} if metadata else {}),
     }
 
 
@@ -1512,6 +1529,9 @@ async def _queue_illo_submission(
             payload={
                 "message": message,
                 "workspace_ref": {"source": "inbound", "mode": "headless_submission"},
+                # Caller metadata is data, not launch authority. Work intake owns
+                # model-policy parsing; do not merge this into launch metadata.
+                "submission_metadata": dict(normalized.get("metadata") or {}),
                 "metadata": {
                     "execution_profile": "fast",
                     "origin": normalized.get("origin"),
@@ -1531,6 +1551,7 @@ async def _queue_illo_submission(
                         "response": dict(normalized.get("response") or {}),
                         "part_count": len(list(normalized.get("parts") or [])),
                         "preservation": preservation,
+                        "metadata": dict(normalized.get("metadata") or {}),
                     },
                 },
             },
@@ -1561,14 +1582,19 @@ def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
 
     Origin, source, constraints, and correlation stay in structured run metadata
     (the "Source metadata:" envelope tripped issue #249). Only source.files_touched
-    is also rendered as bounded, submitter-supplied artifact references.
+    is also rendered as submitter-supplied artifact references. An oversized
+    handoff is rejected rather than shortened.
     """
 
     preservation = submission_preservation_contract(normalized)
     lines = [str(normalized.get("message") or normalized.get("summary") or "")]
     parts = list(normalized.get("parts") or [])
     if parts:
-        lines.extend(["", f"Context parts: {len(parts)}", _json_preview(parts, limit=MAX_TRIAGE_PAYLOAD_CHARS)])
+        lines.extend([
+            "",
+            f"Context parts: {len(parts)}",
+            json.dumps(parts, ensure_ascii=False, sort_keys=True, indent=2, default=str),
+        ])
     file_lines = submission_file_reference_prompt_lines(normalized.get("source") or {})
     closing_lines = file_lines + submission_preservation_prompt_lines(
         preservation, has_file_references=bool(file_lines)
@@ -1581,13 +1607,13 @@ def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
             "Record a clear final answer describing what you decided and what happened.",
         ]
     )
-    if file_lines:
-        # Reserve room for references and preservation guidance even when the
-        # operator message and context parts exhaust the normal prompt budget.
-        content_budget = MAX_TRIAGE_MESSAGE_CHARS - len("\n".join(closing_lines)) - 1
-        lines = [_truncate("\n".join(lines), content_budget)]
     lines.extend(closing_lines)
-    return _truncate("\n".join(lines), MAX_TRIAGE_MESSAGE_CHARS)
+    prompt = "\n".join(lines)
+    if len(prompt) > MAX_TRIAGE_MESSAGE_CHARS:
+        raise SubmissionSizeError(
+            field="assembled_prompt", received=len(prompt), limit=MAX_TRIAGE_MESSAGE_CHARS,
+        )
+    return prompt
 
 
 def _submission_target(handling: Mapping[str, Any], *, event: InboundEventRow) -> dict[str, Any]:
@@ -1767,7 +1793,20 @@ def _result_from_replay(
     # "Materially identical" means the complete normalized envelope matches.
     # Ingress context is excluded because it is transport metadata stored outside
     # the envelope; normalization does not inject timestamps or other volatile data.
-    stored_envelope = event.normalized_payload or event.envelope or {}
+    stored_envelope = dict(event.normalized_payload or event.envelope or {})
+    if stored_envelope.get("kind") == SUBMISSION_ENVELOPE_KIND and "metadata" not in stored_envelope:
+        ingress = dict(event.ingress_context or {})
+        if ingress.get("surface") == "mcp_personal_tool":
+            # Older MCP submissions stored caller metadata only in provenance.
+            # Compare that recorded data in today's envelope shape so an
+            # unchanged retry still matches, without rewriting the old event.
+            metadata = dict(ingress.get("metadata") or {})
+            metadata.pop("mcp_tool", None)
+            if metadata:
+                stored_envelope["metadata"] = metadata
+                stored_envelope["payload"] = {
+                    **dict(stored_envelope.get("payload") or {}), "metadata": metadata,
+                }
     submitted_digest = stable_digest(submitted_envelope)
     stored_digest = stable_digest(stored_envelope)
     replay_body_matches = submitted_digest == stored_digest

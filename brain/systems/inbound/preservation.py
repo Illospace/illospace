@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from brain.systems.inbound.errors import InboundValidationError, SubmissionSizeError
+
 
 PRESERVATION_INTENT_KEYWORDS = frozenset(
     {
@@ -215,32 +217,34 @@ def submission_preservation_contract(normalized: Mapping[str, Any]) -> dict[str,
 
 
 def submission_file_reference_prompt_lines(source: Mapping[str, Any]) -> list[str]:
-    """Render already-cleaned file references without exposing the source envelope."""
+    """Render every file reference, or reject an input that would lose references."""
     files = source.get("files_touched")
-    if not isinstance(files, list) or not files:
+    if files is None or files == []:
         return []
+    if not isinstance(files, list):
+        raise InboundValidationError("source.files_touched must be an array")
+    if len(files) > MAX_SUBMISSION_FILE_REFERENCES:
+        raise SubmissionSizeError(
+            field="source.files_touched", received=len(files),
+            limit=MAX_SUBMISSION_FILE_REFERENCES, unit="items",
+        )
     references = []
-    for path in files[:MAX_SUBMISSION_FILE_REFERENCES]:
+    for index, path in enumerate(files):
         if not isinstance(path, str):
-            continue
-        # Quote paths so embedded newlines stay on one display line. Omit
-        # oversized paths rather than presenting a truncated, unusable reference.
+            raise InboundValidationError("source.files_touched must contain only strings")
+        # Quote paths so embedded newlines stay on one display line.
         reference = json.dumps(path, ensure_ascii=False)
-        if len(reference) <= MAX_SUBMISSION_FILE_REFERENCE_CHARS:
-            references.append(reference)
-    lines = [
+        if len(reference) > MAX_SUBMISSION_FILE_REFERENCE_CHARS:
+            raise SubmissionSizeError(
+                field=f"source.files_touched[{index}]", received=len(reference),
+                limit=MAX_SUBMISSION_FILE_REFERENCE_CHARS, unit="quoted_characters",
+            )
+        references.append(reference)
+    return [
         "",
         "Files the submitter touched (artifact references supplied with this submission):",
         *references,
     ]
-    omitted = len(files) - len(references)
-    if omitted:
-        lines.append(
-            f"{omitted} file reference(s) omitted: show at most {MAX_SUBMISSION_FILE_REFERENCES} "
-            f"paths, each at most {MAX_SUBMISSION_FILE_REFERENCE_CHARS} quoted characters; "
-            "oversized or non-string entries are omitted."
-        )
-    return lines
 
 
 def submission_preservation_prompt_lines(

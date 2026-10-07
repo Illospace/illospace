@@ -1588,6 +1588,7 @@ async def test_hosted_mcp_submit_builds_submission_envelope():
             "constraints": {},
             "correlation": {},
             "response": {"mode": "webhook"},
+            "metadata": {"hook": "post-message"},
         },
         "summary": "Ask Illo to review the implementation context and decide next steps.",
         "message": "Ask Illo to review the implementation context and decide next steps.",
@@ -1603,6 +1604,7 @@ async def test_hosted_mcp_submit_builds_submission_envelope():
         "correlation": {},
         "response": {"mode": "webhook"},
         "idempotency_key": "codex:run-1",
+        "metadata": {"hook": "post-message"},
     }
     ingress_context = captured["ingress_context"]
     assert ingress_context["surface"] == "mcp_personal_tool"

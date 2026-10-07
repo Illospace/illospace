@@ -84,8 +84,7 @@ async def test_monitored_direct_liveness_probe_replies_on_interrupt_path(
     monkeypatch.setattr(connector, "SlackWebClient", FakeSlackClient)
     monkeypatch.setattr(interrupt_delivery, "SlackWebClient", FakeSlackClient)
     monkeypatch.setattr(
-        connector,
-        "submit_inbound_envelope",
+        "brain.systems.inbound.service.submit_inbound_envelope",
         submit_inbound_envelope,
     )
     connection = FakeSlackConnection(

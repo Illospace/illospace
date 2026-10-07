@@ -18,7 +18,6 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import InboundEventRow
 from brain.platform.db.models.org import User
-from brain.systems.inbound.service import submit_inbound_envelope
 from brain.systems.slack.client import (
     SlackApiError,
     SlackConfigurationError,
@@ -364,6 +363,10 @@ async def process_normalized_slack_envelope(
     set_processing_status: bool = False,
 ) -> dict[str, Any]:
     """Run every Slack ingress adapter through one normalized-envelope owner."""
+
+    # Inbound imports Slack's intake vocabulary; importing its service while
+    # the Slack package initializes would make either entry point cyclic.
+    from brain.systems.inbound.service import submit_inbound_envelope
 
     monitored_intake = is_monitored_intake(envelope)
     existing_run_for_message = await _has_slack_run_for_envelope(session, connection, envelope)

@@ -219,6 +219,19 @@ async def _post_mcp_raw(session, *, headers: dict[str, str] | None = None, conte
         app.dependency_overrides.update(overrides)
 
 
+async def _mcp_submit(session, arguments: dict) -> dict:
+    response = await _post_mcp(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json_body={
+            "jsonrpc": "2.0", "id": 770, "method": "tools/call",
+            "params": {"name": "illo_submit", "arguments": arguments},
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["result"]
+
+
 def _slack_channel_alert_envelope(text: str, *, idempotency_key: str) -> dict:
     return {
         "origin": "slack.channel_message",
@@ -728,6 +741,218 @@ async def test_mcp_submit_requires_non_empty_message(session):
     assert body["isError"] is True
     assert "message" in body["content"][0]["text"]
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
+
+
+@pytest.mark.parametrize("effort_key", ["thinking_tier", "effort", "effort_level", "thinking"])
+@pytest.mark.parametrize("model_key", ["model", "model_name"])
+async def test_mcp_submit_model_metadata_reaches_stored_event_and_run(session, effort_key, model_key):
+    await _seed_connection(session)
+    metadata = {
+        model_key: "ollama:qwen3.6-27b",
+        effort_key: "none",
+        "hook": "receipt",
+        "cycle_run_id": 123,
+        "launch_context": {"run_kind": "scheduled_digest"},
+        "execution_profile": "deep",
+    }
+    tool_result = await _mcp_submit(session, {
+        "message": "Review these test conclusions.",
+        "metadata": metadata,
+        "idempotency_key": "model-metadata",
+    })
+    body = json.loads(tool_result["content"][0]["text"])
+    handling = await _assert_queued_submission(session, body["ilo_outcome"])
+    event = await session.get(InboundEventRow, body["event_id"])
+    run = await session.get(AgentRunRow, handling["run_id"])
+    stored_metadata = metadata
+    assert event.raw_payload["metadata"] == stored_metadata
+    assert event.normalized_payload["metadata"] == stored_metadata
+    assert event.envelope["metadata"] == stored_metadata
+    assert run.model_policy == {"model": "ollama/qwen3.6-27b", "thinking": "none"}
+    assert run.metadata_["submission"]["metadata"] == stored_metadata
+    assert run.profile == "fast"
+    assert "cycle_run_id" not in run.metadata_
+    assert "launch_context" not in run.metadata_
+
+
+@pytest.mark.parametrize("provider_key", ["provider", "preferred_provider", "model_provider"])
+async def test_mcp_submit_provider_metadata_reaches_existing_admission(session, monkeypatch, provider_key):
+    from brain.platform.integrations.provider_auth_preflight import ProviderAuthPassedPreflightResult
+    from brain.systems.runs import work_intake
+
+    await _seed_connection(session)
+    probe = AsyncMock(return_value=ProviderAuthPassedPreflightResult(
+        provider="anthropic", model="anthropic/claude-sonnet-5",
+    ))
+    monkeypatch.setattr(work_intake, "async_probe_provider_auth", probe)
+    tool_result = await _mcp_submit(session, {
+        "message": "Review these test conclusions.",
+        "metadata": {"model": "anthropic/claude-sonnet-5", provider_key: "anthropic", "effort": "high"},
+    })
+    body = json.loads(tool_result["content"][0]["text"])
+    handling = await _assert_queued_submission(session, body["ilo_outcome"])
+    run = await session.get(AgentRunRow, handling["run_id"])
+    assert run.model_policy == {"model": "anthropic/claude-sonnet-5", "provider": "anthropic", "thinking": "high"}
+    probe.assert_awaited_once_with(session, user_id=USER_ID, org_id=ORG_ID, provider="anthropic", model="anthropic/claude-sonnet-5")
+
+
+async def test_mcp_submit_keeps_api_key_model_admission_coercion(session, caplog):
+    await _seed_connection(session)
+    with caplog.at_level("WARNING", logger="work_intake"):
+        tool_result = await _mcp_submit(session, {
+            "message": "Review these test conclusions.",
+            "metadata": {"model": "gpt-4.1", "thinking": "low"},
+        })
+    body = json.loads(tool_result["content"][0]["text"])
+    run = await session.get(AgentRunRow, body["ilo_outcome"]["handling"]["run_id"])
+    assert run.model_policy == {"model": "openai/gpt-6.1-sol", "thinking": "low"}
+    assert any(getattr(record, "event", None) == "api_key_model_coerced" for record in caplog.records)
+
+
+@pytest.mark.parametrize("provider_key", ["provider", "preferred_provider", "model_provider"])
+async def test_mcp_submit_provider_only_policy_stores_the_admitted_model(session, monkeypatch, provider_key):
+    from brain.systems.runs import work_intake
+
+    await _seed_connection(session)
+    resolve_model = AsyncMock(return_value="ollama/qwen3.6-27b")
+    monkeypatch.setattr(work_intake, "async_get_default_model", resolve_model)
+    result = await _mcp_submit(session, {
+        "message": "Review these test conclusions.",
+        "metadata": {provider_key: "ollama", "thinking": "none"},
+    })
+    body = json.loads(result["content"][0]["text"])
+    run = await session.get(AgentRunRow, body["ilo_outcome"]["handling"]["run_id"])
+    assert run.model_policy == {"model": "ollama/qwen3.6-27b", "provider": "ollama", "thinking": "none"}
+    resolve_model.assert_awaited_once_with(
+        session, provider="ollama", include_provider_prefix=True, user_id=USER_ID, org_id=ORG_ID,
+    )
+
+
+@pytest.mark.parametrize("model", ["unknown-model", "anthropic/unknown-model", "ollama/unknown-model", 123])
+async def test_mcp_submit_rejects_unknown_model_before_event_id(session, model):
+    await _seed_connection(session)
+    result = await _mcp_submit(session, {"message": "Review these test conclusions.", "metadata": {"model": model}})
+    assert result["isError"] is True
+    assert "supported catalog model" in result["content"][0]["text"]
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 0
+
+
+async def test_submission_payload_metadata_uses_the_same_run_policy_path(session):
+    principal = await _seed_connection(session)
+    result = await inbound.submit_inbound_envelope(session, connection=principal, envelope={
+        "kind": "submission", "origin": "script.submit",
+        "payload": {"message": "Review these test conclusions.", "metadata": {"model_name": "ollama/qwen3.6-27b", "effort_level": "none"}},
+    })
+    run = await session.get(AgentRunRow, result["ilo_outcome"]["handling"]["run_id"])
+    assert run.model_policy == {"model": "ollama/qwen3.6-27b", "thinking": "none"}
+
+
+async def test_mcp_submit_idempotency_includes_model_metadata(session):
+    await _seed_connection(session)
+    arguments = {"message": "Review these test conclusions.", "metadata": {"model": "ollama/qwen3.6-27b", "thinking": "none"}, "idempotency_key": "same-model"}
+    first = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    replay = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    assert replay["event_id"] == first["event_id"]
+    assert replay["replay_body_matches"] is True
+    changed = {**arguments, "metadata": {"model": "openai/gpt-6-astra", "thinking": "high"}}
+    mismatch = json.loads((await _mcp_submit(session, changed))["content"][0]["text"])
+    assert mismatch["event_id"] == first["event_id"]
+    assert mismatch["ilo_outcome"]["evidence_status"] == "replay_mismatch"
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
+
+
+async def test_mcp_submit_legacy_metadata_provenance_keeps_identical_replay(session):
+    await _seed_connection(session)
+    arguments = {"message": "Review these test conclusions.", "metadata": {"hook": "receipt"}, "idempotency_key": "legacy-metadata"}
+    first = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    event = await session.get(InboundEventRow, first["event_id"])
+    legacy = dict(event.normalized_payload)
+    legacy.pop("metadata")
+    legacy["payload"] = {key: value for key, value in legacy["payload"].items() if key != "metadata"}
+    event.envelope = legacy
+    event.normalized_payload = legacy
+    event.raw_payload = legacy["payload"]
+    await session.flush()
+    replay = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    assert replay["event_id"] == first["event_id"]
+    assert replay["replay_body_matches"] is True
+    assert "metadata" not in event.normalized_payload
+    mismatch = json.loads((await _mcp_submit(session, {**arguments, "metadata": {"hook": "changed"}}))["content"][0]["text"])
+    assert mismatch["replay_body_matches"] is False
+    assert mismatch["ilo_outcome"]["evidence_status"] == "replay_mismatch"
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
+
+
+async def test_mcp_submit_accepts_complete_parts_above_old_preview_limit(session):
+    await _seed_connection(session)
+    context = "é" * inbound.MAX_TRIAGE_PAYLOAD_CHARS + " complete-tail-897"
+    arguments = {
+        "message": "Review this context.",
+        "parts": [{"type": "text", "text": context}],
+        "files_touched": ['articles/été\n"draft".md'],
+    }
+    body = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    event = await session.get(InboundEventRow, body["event_id"])
+    run = await session.get(AgentRunRow, body["ilo_outcome"]["handling"]["run_id"])
+    assert context in run.input_message
+    assert json.dumps(arguments["files_touched"][0], ensure_ascii=False) in run.input_message
+    assert event.normalized_payload["parts"] == arguments["parts"]
+
+
+@pytest.mark.parametrize("extra", [
+    {},
+    {"parts": [{"type": "text", "text": "complete context tail"}]},
+    {"files_touched": ["articles/complete.md"], "desired_outcome": "preserve_knowledge"},
+])
+async def test_mcp_submit_exact_prompt_boundary_then_rejects_without_partial_event(session, extra):
+    from brain.app.api.routers.agent_mcp import _build_submit_envelope
+
+    await _seed_connection(session)
+    seed = {"message": "é😀", **extra}
+    normalized = inbound._normalize_envelope(_build_submit_envelope(seed))
+    overhead = len(inbound._submission_prompt(normalized=normalized)) - len(seed["message"])
+    message = "é😀" + "é" * (inbound.MAX_TRIAGE_MESSAGE_CHARS - overhead - 2)
+    arguments = {**seed, "message": message, "idempotency_key": "whole-unicode"}
+    first = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    run = await session.get(AgentRunRow, first["ilo_outcome"]["handling"]["run_id"])
+    assert run.input_message.startswith(message)
+    assert len(run.input_message) == inbound.MAX_TRIAGE_MESSAGE_CHARS
+    assert len(run.input_message.encode("utf-8")) > inbound.MAX_TRIAGE_MESSAGE_CHARS
+    replay = json.loads((await _mcp_submit(session, arguments))["content"][0]["text"])
+    assert replay["replay_body_matches"] is True
+    oversized = {**arguments, "message": message + "é", "idempotency_key": "too-large-unicode"}
+    for _ in range(2):
+        rejected = await _mcp_submit(session, oversized)
+        assert rejected["isError"] is True
+        error = rejected["structuredContent"]["error"]
+        assert error["code"] == "submission_too_large"
+        assert error["field"] == "assembled_prompt"
+        assert error["received"] == inbound.MAX_TRIAGE_MESSAGE_CHARS + 1
+        assert error["limit"] == inbound.MAX_TRIAGE_MESSAGE_CHARS
+        assert error["unit"] == "characters"
+        assert "event_id" not in json.dumps(rejected)
+        assert "é" not in json.dumps(rejected, ensure_ascii=False)
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 1
+    assert await session.scalar(select(func.count()).select_from(InboundDecisionReceiptRow)) == 1
+
+
+@pytest.mark.parametrize("files, field, unit", [
+    ([f"articles/{i}.md" for i in range(11)], "source.files_touched", "items"),
+    (["é" * 255], "source.files_touched[0]", "quoted_characters"),
+])
+async def test_mcp_submit_rejects_file_references_that_would_be_omitted(session, files, field, unit):
+    await _seed_connection(session)
+    rejected = await _mcp_submit(session, {"message": "Review these paths.", "files_touched": files})
+    assert rejected["isError"] is True
+    error = rejected["structuredContent"]["error"]
+    assert error["code"] == "submission_too_large"
+    assert error["field"] == field
+    assert error["unit"] == unit
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
+    assert await session.scalar(select(func.count()).select_from(AgentRunRow)) == 0
 
 
 async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session):

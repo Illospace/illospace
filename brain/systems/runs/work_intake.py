@@ -467,6 +467,10 @@ def _event_model_policy(event: WorkIntakeEvent, metadata: dict[str, Any]) -> dic
     model_policy = payload.get("model_policy")
     if isinstance(model_policy, dict):
         return dict(model_policy)
+    if event.source == "inbound" and event.event_type == "inbound.submission_received":
+        submission_metadata = payload.get("submission_metadata")
+        if isinstance(submission_metadata, dict):
+            return model_policy_from_metadata(submission_metadata)
     return model_policy_from_metadata(metadata)
 
 
@@ -1159,6 +1163,11 @@ async def admit_work(
                 user_id=request.user_id,
                 org_id=request.org_id,
             )
+            if requested_provider:
+                # Preserve the provider's resolved model for recipes that consume
+                # the concrete model policy rather than the provider hint.
+                model_policy["model"] = model
+                request = replace(request, model_policy=model_policy)
         provider = infer_provider_from_model(model, default=requested_provider or None)
         if provider == "anthropic":
             auth_preflight = await async_probe_provider_auth(
