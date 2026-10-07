@@ -12,6 +12,11 @@ from brain.systems.runs.store import AsyncAgentRunStore
 from tests.test_worker_continuation import _anchor, _worker, _slack_target
 
 
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, {}, [], "nope"])
+def test_invalid_cycle_occurrence_handles_fail_closed(value):
+    assert cycle_exception_ping_context({"cycle_run_id": value, "launch_context": {"run_kind": "scheduled_digest"}}) is None
+
+
 @pytest.mark.parametrize("chantier", [False, True])
 async def test_persisted_cycle_binding_survives_two_joined_continuations(
     async_sqlite_session_factory, sqlite_postgres_ddl_patch, chantier
