@@ -6,21 +6,21 @@ The starting queue contained26 issues and seven PRs. PR#930 combines the source 
 
 | Issue | Resolution and remaining acceptance |
 |---|---|
-| [#670](https://github.com/Illospace/illospace/issues/670) | Extract identifiers and subject phrases before generic prose, with bounded scanner work. Preserve the established content identity. Reingest historical924 through the existing ingestion service after deploy to attach new cues without replacing its content. |
+| [#670](https://github.com/Illospace/illospace/issues/670) | Extract identifiers and subject phrases before generic prose, with bounded scanner work. Preserve the established content identity. The reported dev924 is not the current production924: the named company/requester facts are absent from the production text. Verify the reported shape in a synthetic ingest fixture; only repair an old note after checking its canonical source, never by copying a dev node number into production. |
 | [#723](https://github.com/Illospace/illospace/issues/723) | Measured16 source-verified live cases through both recall engines. Retain memory; the deletion gate does not cover documents, Domain records or private owner memory. See [decision](memory-recall-decision.md). |
 | [#770](https://github.com/Illospace/illospace/issues/770) | Carry documented caller metadata through storage. Work intake owns model-policy parsing; caller data cannot supply Cycle authority. Verify stored event and admitted run policy after deploy. |
 | [#817](https://github.com/Illospace/illospace/issues/817) | Retired by Reda. All eight old laptop routines are paused in Claude. No migration is planned. |
 | [#819](https://github.com/Illospace/illospace/issues/819) | The old routine architecture migration was retired, not executed. Active Illo coordinator and Reflex Cycles continue with their current guidance. |
 | [#821](https://github.com/Illospace/illospace/issues/821) | Release radar remains paused; its executor migration was retired. |
 | [#822](https://github.com/Illospace/illospace/issues/822) | Retired migration epic. Past definitions and results remain available. |
-| [#829](https://github.com/Illospace/illospace/issues/829) | Still reproduces on the public hostnames. Private MCP works. Requires host administrator and Cloudflare access; [repair steps](public-endpoint-repair.md). |
+| [#829](https://github.com/Illospace/illospace/issues/829) | Reda retired the old public addresses. Closed as not planned. Private MCP works; no repository client configuration uses the retired addresses. See [retirement decision](public-endpoint-repair.md). |
 | [#869](https://github.com/Illospace/illospace/issues/869) | Persist credential expiry on its connection, stop repeated refresh, alert one transition and clear on replacement. Transient failure leaves health unchanged. Verify reauthentication and a real expired episode after deploy. |
 | [#874](https://github.com/Illospace/illospace/issues/874) | Historical502 incident recovered. This session received an event ID and a satisfied preservation receipt with mutated refs. Closed with that evidence. |
 | [#897](https://github.com/Illospace/illospace/issues/897) | Validate the complete submission before acknowledgement; reject oversize messages, parts or file references with numeric size diagnostics. No accepted text is silently clipped. |
 | [#900](https://github.com/Illospace/illospace/issues/900) | Apply every configured projection of an inbound event. Reconcile old tracker rows from current GitHub state after deploy; dry-run replay does not repair them. |
 | [#903](https://github.com/Illospace/illospace/issues/903) | Carry artifact paths through the submission prompt and preservation attribution. Verify a deployed receipt for supplied files. |
 | [#905](https://github.com/Illospace/illospace/issues/905) | Serialize external identity upserts, use the canonical earliest record and archive duplicates. Repair existing identities through the same service after deploy. |
-| [#907](https://github.com/Illospace/illospace/issues/907) | Current workspace.search, cycles.inspect and seven knowledge.get reads succeeded. Historical transport incident closed; public routing remains separately tracked. |
+| [#907](https://github.com/Illospace/illospace/issues/907) | Current workspace.search, cycles.inspect and seven knowledge.get reads succeeded. Historical transport incident closed; the old public addresses were separately retired. |
 | [#908](https://github.com/Illospace/illospace/issues/908) | Use non-blocking per-run advisory admission so one busy run cannot starve the deadline sweep. Verify sweep progress after deploy. |
 | [#914](https://github.com/Illospace/illospace/issues/914) | Return an authorized exclusion reason instead of claiming missing data. Read-only audit:4214,4458,5366,5549 are active private content nodes, with no shared mirrors and no supersession. Their satisfied receipts did not lose the nodes. |
 | [#915](https://github.com/Illospace/illospace/issues/915) | Read-time visibility and canonical eligibility checks block stale shared mirrors after a node becomes private. Verify both search and get after deploy. |
@@ -43,4 +43,4 @@ Claude shows dispatcher, SEO, usage digest, R3 worker, R2 evaluator, release rad
 
 The imported base passed5670 fast tests. Runtime additions passed104 event/heartbeat/scheduler checks and29 continuation/Cycle-gate checks. The current integrated base passed5678 fast tests in the independent review. A clean PostgreSQL instance ran the full Alembic chain through0068 and93 database tests. New slice results and final integrated gates are recorded below when complete.
 
-No production image was changed, no PR was merged, and no credential or raw private corpus was committed. The public outage is an open operator dependency; pending runtime verification is not zero operational backlog.
+No production image was changed, no PR was merged, and no credential or raw private corpus was committed. The old public addresses were retired; source fixes still require deployment and runtime verification.
