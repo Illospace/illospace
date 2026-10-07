@@ -161,7 +161,10 @@ EXEC_TOOLS = [
         "description": (
             "Execute multiple independent read/search/fetch-style tool calls concurrently in the runtime. "
             "Use this instead of serial tool calls when you need several files, searches, or web fetches "
-            "that do not depend on each other. Safe tools only; write/edit/exec side effects are blocked."
+            "that do not depend on each other. Only tools on this batch's safe-tool allowlist are accepted; "
+            "a read-only tool is not automatically batch-safe. Workspace, Domain and memory reads that "
+            "are not on that list must be called directly. Rejected batches return the allowed names. "
+            "Write/edit/exec side effects are blocked."
         ),
         "input_schema": {
             "type": "object",
