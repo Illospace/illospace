@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
@@ -52,6 +53,105 @@ def _principal() -> external_agents.AgentBridgePrincipal:
         connection_display_name="Hermes",
         agent_kind="hermes",
     )
+
+
+@pytest.mark.parametrize("error", [
+    DBAPIError("SELECT private FROM secrets", {"token": "private-parameter"}, Exception("driver detail")),
+    SQLAlchemyError("SELECT private-parameter"),
+    ValueError("Inbound event not found"),
+])
+async def test_hosted_mcp_tool_errors_hide_sql_and_preserve_value_errors(error):
+    session = _AsyncSession()
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch.dict(
+        "brain.app.api.routers.agent_mcp.TOOL_HANDLERS",
+        {"illo_read": AsyncMock(side_effect=error)},
+    ):
+        response = await _request(
+            "POST", "/mcp", session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={"jsonrpc": "2.0", "id": 919, "method": "tools/call",
+                  "params": {"name": "illo_read", "arguments": {}}},
+        )
+    result = response.json()["result"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    if isinstance(error, ValueError):
+        assert text == "Inbound event not found"
+    else:
+        assert text == f"Illo could not complete this request: internal database error ({type(error).__name__})"
+        assert "SELECT" not in response.text
+        assert "private-parameter" not in response.text
+    assert session.order == ["rollback"]
+
+
+@pytest.mark.parametrize("shape", [
+    "request", "batch", "notification", "notification_batch", "mixed_batch",
+])
+async def test_hosted_mcp_auth_database_errors_use_safe_json_rpc_error(shape):
+    session = _AsyncSession()
+    request = {"jsonrpc": "2.0", "id": 919, "method": "tools/list"}
+    notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    payloads = {
+        "request": request,
+        "batch": [request],
+        "notification": notification,
+        "notification_batch": [notification, notification],
+        "mixed_batch": [notification, request, notification, {**request, "id": 920}],
+    }
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        side_effect=DBAPIError("SELECT secret", {"token": "private-parameter"}, Exception("driver detail")),
+    ):
+        response = await _request(
+            "POST", "/mcp", session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json=payloads[shape],
+        )
+    if shape in {"notification", "notification_batch"}:
+        assert response.status_code == 202
+        assert response.content == b""
+    else:
+        assert response.status_code == 200
+        errors = [{
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32603,
+                "message": "Illo could not complete this request: internal database error (DBAPIError)",
+            },
+        } for request_id in ([919, 920] if shape == "mixed_batch" else [919])]
+        assert response.json() == (errors[0] if shape == "request" else errors)
+    assert "SELECT" not in response.text
+    assert "private-parameter" not in response.text
+    assert session.order == ["rollback"]
+
+
+async def test_hosted_mcp_commit_and_rollback_database_errors_are_safe():
+    session = _AsyncSession()
+    error = DBAPIError("SELECT secret", {"token": "private-parameter"}, Exception("driver detail"))
+    session.commit = AsyncMock(side_effect=error)
+    session.rollback = AsyncMock(side_effect=error)
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch.dict(
+        "brain.app.api.routers.agent_mcp.TOOL_HANDLERS",
+        {"illo_submit": AsyncMock(return_value={})},
+    ):
+        response = await _request(
+            "POST", "/mcp", session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={"jsonrpc": "2.0", "id": 919, "method": "tools/call",
+                  "params": {"name": "illo_submit", "arguments": {}}},
+        )
+    assert response.json()["result"] == {
+        "isError": True,
+        "content": [{"type": "text", "text": "Illo could not complete this request: internal database error (DBAPIError)"}],
+    }
+    session.rollback.assert_awaited_once()
 
 
 def _handoff_row(**overrides):
@@ -563,6 +663,35 @@ async def test_hosted_mcp_invalid_token_returns_json_rpc_error():
     assert body["error"]["data"] == {"http_status": 401, "auth": "bearer"}
 
 
+@pytest.mark.parametrize("error_type", [
+    external_agents.ExternalAgentAuthError,
+    external_agents.ExternalAgentPermissionError,
+])
+async def test_hosted_mcp_auth_error_mixed_batch_preserves_error_response(error_type):
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        side_effect=error_type("Invalid bridge token"),
+    ):
+        response = await _request(
+            "POST", "/mcp",
+            headers={"Authorization": "Bearer revoked-token"},
+            json=[
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+            ],
+        )
+    assert response.status_code == 200
+    assert response.json() == [{
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32001,
+            "message": "MCP authentication failed: Invalid bridge token",
+            "data": {"http_status": 401, "auth": "bearer"},
+        },
+    }]
+
+
 async def test_hosted_mcp_malformed_json_returns_invalid_request_without_auth():
     with patch(
         "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
@@ -794,7 +923,18 @@ async def test_hosted_mcp_run_get_returns_tool_events_and_artifacts():
         "last_write_tool_call_at": None,
         "seconds_since_last_write_tool_call": None,
     }
-    assert payload["artifacts"][0]["text"] == "Finished."
+    assert payload["artifacts"] == [{
+        "id": 92,
+        "run_id": 55,
+        "root_run_id": None,
+        "artifact_type": "final_answer",
+        "title": "Done",
+        "payload": {},
+        "text": "Finished.",
+        "uri": None,
+        "visibility": "public",
+        "created_at": now.isoformat(),
+    }]
     assert "events" not in payload
     assert any(
         "LIKE" in statement and "LIMIT" in statement
@@ -1448,6 +1588,7 @@ async def test_hosted_mcp_submit_builds_submission_envelope():
             "constraints": {},
             "correlation": {},
             "response": {"mode": "webhook"},
+            "metadata": {"hook": "post-message"},
         },
         "summary": "Ask Illo to review the implementation context and decide next steps.",
         "message": "Ask Illo to review the implementation context and decide next steps.",
@@ -1463,6 +1604,7 @@ async def test_hosted_mcp_submit_builds_submission_envelope():
         "correlation": {},
         "response": {"mode": "webhook"},
         "idempotency_key": "codex:run-1",
+        "metadata": {"hook": "post-message"},
     }
     ingress_context = captured["ingress_context"]
     assert ingress_context["surface"] == "mcp_personal_tool"

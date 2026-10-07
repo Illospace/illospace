@@ -8,6 +8,7 @@ from typing import Any, Self, TypeAlias
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.integrations.llm import async_resolve_llm_client
+from brain.platform.integrations.openai_codex_auth import CodexCredentialExpiredError
 from brain.platform.providers.model_policy import required_openai_auth_mode
 
 
@@ -56,6 +57,7 @@ class ProviderAuthBlockedPreflightResult(_ProviderAuthPreflightResult):
     error_code: str
     repair_action: str | None = None
     visible_message: str | None = None
+    credential_alert_owned: bool = False
 
     def with_presentation(
         self,
@@ -70,13 +72,16 @@ class ProviderAuthBlockedPreflightResult(_ProviderAuthPreflightResult):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return self._to_dict(
+        result = self._to_dict(
             status="auth_blocked",
             credential=self.credential,
             error_code=self.error_code,
             repair_action=self.repair_action,
             visible_message=self.visible_message,
         )
+        if self.credential_alert_owned:
+            result["credential_alert_owned"] = True
+        return result
 
 
 ProviderAuthPreflightResult: TypeAlias = (
@@ -157,7 +162,14 @@ async def async_probe_provider_auth(
                 auth_mode=auth_mode,
                 error_text=str(exc),
             ),
-            error_code="provider_credential_unavailable",
+            error_code=(
+                CodexCredentialExpiredError.error_code
+                if isinstance(exc, CodexCredentialExpiredError)
+                else "provider_credential_unavailable"
+            ),
+            credential_alert_owned=(
+                isinstance(exc, CodexCredentialExpiredError) and exc.alert_owned
+            ),
         )
 
     return ProviderAuthPassedPreflightResult(

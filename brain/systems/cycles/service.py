@@ -414,6 +414,25 @@ def _agent_run_terminal_cycle_status(agent_run: AgentRun | None) -> str | None:
     return RUN_STATUS_TO_CYCLE_RUN_STATUS.get(str(agent_run.status or "").strip().lower())
 
 
+def _preserve_credential_alert_owner(run: CycleRun, agent_run: AgentRun | None) -> None:
+    """Keep the stored terminal failure's alert owner across every finalizer."""
+    if (
+        agent_run is None or run.run_id != agent_run.id
+        or _agent_run_terminal_cycle_status(agent_run) != "failed"
+    ):
+        return
+    failure = json_dict(json_dict(agent_run.metadata_).get("failure"))
+    if (
+        failure.get("exception_class") == "CodexConnectionExpiredError"
+        and failure.get("exception_module") == "brain.platform.integrations.openai_codex_auth"
+    ):
+        # Re-authentication may have completed before Cycle settlement. The
+        # terminal evidence still belongs to the original connection alert.
+        run.context_snapshot = {
+            **dict(run.context_snapshot or {}), "credential_alert_owned": True,
+        }
+
+
 def _cycle_max_concurrency(cycle: Cycle) -> int:
     return max(int(cycle.max_concurrency or 1), 1)
 
@@ -609,6 +628,7 @@ async def async_recover_stale_cycle_runs_once(
             agent_run = await uow.session.get(AgentRun, run.run_id) if run.run_id else None
             terminal_status = _agent_run_terminal_cycle_status(agent_run)
             if terminal_status is not None:
+                _preserve_credential_alert_owner(run, agent_run)
                 await _finalize_stale_cycle_run(
                     run,
                     cycle,
@@ -1096,6 +1116,7 @@ async def async_finalize_cycle_run_from_run(
         cycle = await uow.session.get(Cycle, run.cycle_id) if run else None
         if not run or not cycle or run.status in TERMINAL_RUN_STATUSES:
             return
+        _preserve_credential_alert_owner(run, agent_run)
         if status == "canceled":
             if effective_status == "failed" and not str(error or "").strip():
                 error = "Agent run was canceled"

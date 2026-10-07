@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sqlalchemy import select
 
 from brain.platform.db.models.agent_run import (
@@ -17,6 +19,9 @@ from brain.systems.runs.domain import AgentRunRequest, RunRecipe
 from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
+
+
+pytestmark = pytest.mark.usefixtures("healthy_provider_auth")
 
 
 async def _session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):

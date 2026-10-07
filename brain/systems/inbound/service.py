@@ -32,6 +32,8 @@ from brain.platform.mapping_expressions import (
     render_path_template,
     validate_mapping_expression,
 )
+from brain.platform.model_catalog import canonical_catalog_model_id
+from brain.platform.providers.model_policy import coerce_openai_api_key_model
 from brain.platform.provider_alerts import parse_rollbar_alert
 from brain.systems.external_agents import service as external_agents
 from brain.systems.cortex.thread_links import thread_link_payload
@@ -46,8 +48,10 @@ from brain.systems.inbound.status import (
     STATUS_QUARANTINED,
     STATUS_REVIEW_REQUIRED,
 )
+from brain.systems.inbound.errors import InboundValidationError, SubmissionSizeError
 from brain.systems.inbound.assignment import default_rules, resolve_owner
 from brain.systems.inbound.preservation import (
+    submission_file_reference_prompt_lines,
     submission_preservation_contract,
     submission_preservation_prompt_lines,
 )
@@ -81,10 +85,6 @@ MAX_TRIAGE_MESSAGE_CHARS = 8000
 MAX_TRIAGE_PAYLOAD_CHARS = 5000
 
 logger = logging.getLogger(__name__)
-
-
-class InboundValidationError(ValueError):
-    """Raised when an inbound envelope or configured projection is invalid."""
 
 
 def utcnow() -> datetime:
@@ -170,7 +170,7 @@ async def create_domain_projection(
         title_path=optional_text(title_path),
         upsert_mode=str(upsert_mode or "upsert"),
         validation_failure_status=str(validation_failure_status or STATUS_REVIEW_REQUIRED),
-        metadata_=dict(metadata or {}),
+        metadata_=validate_projection_metadata(metadata),
     )
     session.add(projection)
     await session.flush()
@@ -319,7 +319,8 @@ async def submit_inbound_envelope(
 
         event.policy_id = str(policy.id)
         _validate_schema_config(policy.schema_config or {}, normalized)
-        projection = await _projection_for_policy(session, policy)
+        projections = await _projections_for_policy(session, policy)
+        projection = projections[0] if projections else None
         if projection is None:
             return await _complete_event_with_illo_triage(
                 session,
@@ -347,7 +348,18 @@ async def submit_inbound_envelope(
                 reasoning_summary="Source policy matched a projection, but the policy does not allow projection writes.",
             )
 
+        # Keep the legacy primary reference and single-projection result unchanged.
         event.domain_projection_id = str(projection.id)
+        if len(projections) > 1:
+            return await _apply_domain_projections(
+                session,
+                context=context,
+                event=event,
+                envelope=normalized,
+                policy=policy,
+                projections=projections,
+                clock=projection_clock,
+            )
         action_result = await _apply_domain_projection(
             session,
             context=context,
@@ -364,7 +376,7 @@ async def submit_inbound_envelope(
             action_type=ACTION_DOMAIN_PROJECTION_UPSERT,
             action_result=action_result,
             confidence=1.0,
-            target={
+            target={} if action_result.get("operation") == "skipped" else {
                 "domain_id": projection.domain_id,
                 "object_key": projection.object_key,
                 "record_id": action_result.get("record_id"),
@@ -540,6 +552,9 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
     }
     if kind == SUBMISSION_ENVELOPE_KIND:
         normalized.update(_normalize_submission_fields(data, normalized["payload"]))
+        # Validate the complete handoff before creating an event or issuing its id.
+        # The exact same builder supplies the handling run, with no truncation.
+        _submission_prompt(normalized=normalized)
     if normalized["idempotency_key"] and len(str(normalized["idempotency_key"])) > 160:
         raise InboundValidationError("idempotency_key must be 160 characters or fewer")
     return normalized
@@ -594,6 +609,7 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
     correlation = data.get("correlation", payload.get("correlation", {}))
     response = data.get("response", payload.get("response", {}))
     parts = data.get("parts", payload.get("parts", []))
+    metadata = data.get("metadata", payload.get("metadata", {}))
     if source is None:
         source = {}
     if constraints is None:
@@ -604,6 +620,8 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
         response = {}
     if parts is None:
         parts = []
+    if metadata is None:
+        metadata = {}
     if not isinstance(source, dict):
         raise InboundValidationError("source must be an object")
     if not isinstance(constraints, dict):
@@ -614,8 +632,19 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
         raise InboundValidationError("response must be an object")
     if not isinstance(parts, list):
         raise InboundValidationError("parts must be an array")
+    if not isinstance(metadata, dict):
+        raise InboundValidationError("metadata must be an object")
     if not message:
         raise InboundValidationError("submission envelope requires message")
+    model = metadata.get("model") or metadata.get("model_name")
+    if model and (
+        not isinstance(model, str)
+        or not (
+            canonical_catalog_model_id(model)
+            or coerce_openai_api_key_model(model)
+        )
+    ):
+        raise InboundValidationError("Submission metadata model must be a supported catalog model.")
     return {
         "message": message,
         "source": dict(source),
@@ -623,6 +652,7 @@ def _normalize_submission_fields(data: Mapping[str, Any], payload: Mapping[str, 
         "correlation": dict(correlation),
         "response": dict(response),
         "parts": list(parts),
+        **({"metadata": dict(metadata)} if metadata else {}),
     }
 
 
@@ -759,18 +789,151 @@ async def _projection_for_policy(
     return (await session.scalars(stmt)).first()
 
 
-async def _apply_domain_projection(
+async def _projections_for_policy(
+    session: AsyncSession,
+    policy: InboundSourcePolicyRow,
+) -> list[InboundDomainProjectionRow]:
+    stmt = (
+        select(InboundDomainProjectionRow)
+        .where(
+            InboundDomainProjectionRow.policy_id == str(policy.id),
+            InboundDomainProjectionRow.enabled.is_(True),
+        )
+        .order_by(InboundDomainProjectionRow.created_at.asc(), InboundDomainProjectionRow.id.asc())
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def _apply_domain_projections(
     session: AsyncSession,
     *,
     context: InboundHandlerContext,
     event: InboundEventRow,
     envelope: Mapping[str, Any],
-    projection: InboundDomainProjectionRow,
+    policy: InboundSourcePolicyRow,
+    projections: Sequence[InboundDomainProjectionRow],
     clock: Callable[[], str],
 ) -> dict[str, Any]:
-    if projection.upsert_mode not in VALID_PROJECTION_UPSERT_MODES:
-        raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
+    outcomes = []
+    targets = []
+    errors = []
+    for projection in projections:
+        outcome = {
+            "projection_id": str(projection.id),
+            "domain_id": projection.domain_id,
+            "object_key": projection.object_key,
+        }
+        try:
+            # A failed flush must roll back only this projection's writes and keys.
+            async with session.begin_nested():
+                result = await _apply_domain_projection(
+                    session,
+                    context=context,
+                    event=event,
+                    envelope=envelope,
+                    projection=projection,
+                    clock=clock,
+                )
+        except Exception as exc:
+            validation_error = isinstance(exc, (DomainError, DomainNotFound, InboundValidationError))
+            status = projection.validation_failure_status if validation_error else STATUS_FAILED
+            if status not in VALID_PROJECTION_FAILURE_STATUSES:
+                status = STATUS_REVIEW_REQUIRED
+            error = f"Projection {outcome['projection_id']} (domain {outcome['domain_id']}): {exc}"
+            outcome.update(
+                status=status,
+                reason="validation_error" if validation_error else "processing_failed",
+                error=error,
+            )
+            errors.append(error)
+        else:
+            if result.get("operation") == "skipped":
+                outcome["reason"] = result["reason"]
+            else:
+                targets.append({**outcome, "record_id": result.get("record_id")})
+            outcome.update(status=STATUS_PROCESSED, result=result)
+        outcomes.append(outcome)
 
+    # A request for review takes priority so any configured triage still runs.
+    status = next(
+        (
+            candidate
+            for candidate in (STATUS_REVIEW_REQUIRED, STATUS_FAILED, STATUS_QUARANTINED)
+            if any(outcome["status"] == candidate for outcome in outcomes)
+        ),
+        STATUS_PROCESSED,
+    )
+    action_result = {"projections": outcomes}
+    error = "; ".join(errors) or None
+    reasoning_summary = error or "Configured Domain Projections handled this signal deterministically."
+    if errors:
+        action_result["reason"] = "projection_failed"
+    if status == STATUS_REVIEW_REQUIRED:
+        return await _complete_event_with_illo_triage(
+            session,
+            event,
+            context=context,
+            normalized=envelope,
+            policy=policy,
+            status=status,
+            action_type=ACTION_ILO_REQUIRED,
+            action_result=action_result,
+            confidence=None,
+            error=error,
+            reasoning_summary=reasoning_summary,
+        )
+    return await _complete_event(
+        session,
+        event,
+        policy=policy,
+        status=status,
+        action_type=ACTION_DOMAIN_PROJECTION_UPSERT,
+        action_result=action_result,
+        confidence=None if errors else 1.0,
+        error=error,
+        target={"projections": targets},
+        tool_use={"type": ACTION_DOMAIN_PROJECTION_UPSERT},
+        reasoning_summary=reasoning_summary,
+        reusable_pattern_candidate={"origin": envelope["origin"], "policy_id": str(policy.id)},
+    )
+
+
+def validate_projection_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate the optional projection condition through the mapping owner."""
+    result = dict(metadata or {})
+    condition = result.get("when")
+    if condition is not None:
+        try:
+            validate_mapping_expression(
+                "projection.metadata.when", {"if": condition, "then": True, "else": False},
+            )
+        except MappingExpressionError as exc:
+            raise InboundValidationError(str(exc)) from exc
+    return result
+
+
+def projection_applies(
+    *, envelope: Mapping[str, Any], projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
+) -> bool:
+    condition = validate_projection_metadata(projection.metadata_).get("when")
+    if condition is None:
+        return True
+
+    return evaluate_mapping_expression(
+        {"if": condition, "then": True, "else": False}, _path_root(envelope),
+        resolve_path=_extract_path, clock=clock, missing=_MISSING,
+    )
+
+
+def domain_projection_values(
+    *,
+    envelope: Mapping[str, Any],
+    projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
+    freshness_fields: set[str] | None = None,
+) -> tuple[str, dict[str, Any], str | None]:
+    """Render one projection's identity and values without writing records."""
     root = _path_root(envelope)
     try:
         value = render_path_template(
@@ -784,23 +947,58 @@ async def _apply_domain_projection(
 
     data = {projection.external_id_field: external_id}
     for field_key, source_path in dict(projection.field_mapping or {}).items():
+        observed_freshness = False
+
+        def resolve_path(source: Any, path: str) -> Any:
+            nonlocal observed_freshness
+            if path.removeprefix("envelope.") in {"hints.source_updated_at", "payload.issue.updated_at", "payload.pull_request.updated_at"}:
+                observed_freshness = True
+            return _extract_path(source, path)
+
+        def observation_clock() -> str:
+            nonlocal observed_freshness
+            observed_freshness = True
+            return clock()
+
         if isinstance(source_path, Mapping):
             try:
                 value = evaluate_mapping_expression(
-                    source_path, root, resolve_path=_extract_path, clock=clock,
+                    source_path, root, resolve_path=resolve_path, clock=observation_clock, missing=_MISSING,
                 )
             except MappingExpressionError as exc:
                 raise InboundValidationError(str(exc)) from exc
         else:
-            value = _extract_path(root, str(source_path))
+            value = resolve_path(root, str(source_path))
         if value is _MISSING:
             continue
         data[str(field_key)] = value
+        if observed_freshness and freshness_fields is not None:
+            freshness_fields.add(str(field_key))
 
     title = None
     if projection.title_path:
         title_value = _extract_path(root, projection.title_path)
         title = _string_value(title_value) if title_value is not _MISSING else None
+
+    return external_id, data, title
+
+
+async def _apply_domain_projection(
+    session: AsyncSession,
+    *,
+    context: InboundHandlerContext,
+    event: InboundEventRow,
+    envelope: Mapping[str, Any],
+    projection: InboundDomainProjectionRow,
+    clock: Callable[[], str],
+) -> dict[str, Any]:
+    if not projection_applies(envelope=envelope, projection=projection, clock=clock):
+        return {"operation": "skipped", "reason": "condition_not_matched"}
+    if projection.upsert_mode not in VALID_PROJECTION_UPSERT_MODES:
+        raise InboundValidationError("projection upsert_mode must be upsert, create_only, or update_only")
+    external_id, data, title = domain_projection_values(
+        envelope=envelope, projection=projection, clock=clock,
+    )
 
     domain_service = AsyncDomainService(session)
     projection_key = await _get_projection_key(session, projection, external_id=external_id)
@@ -1393,13 +1591,17 @@ async def _queue_illo_submission(
             payload={
                 "message": message,
                 "workspace_ref": {"source": "inbound", "mode": "headless_submission"},
+                # Caller metadata is data, not launch authority. Work intake owns
+                # model-policy parsing; do not merge this into launch metadata.
+                "submission_metadata": dict(normalized.get("metadata") or {}),
                 "metadata": {
                     "execution_profile": "fast",
                     "origin": normalized.get("origin"),
                     # Route required-introspection detection off the operator's actual
                     # request rather than any surrounding coordination text (issue #249).
                     # The run message now leads with the raw operator message and origin/
-                    # source/constraints live in metadata, but keep this tag as the
+                    # source/constraints live in metadata (with file references also
+                    # shown in the prompt), but keep this tag as the
                     # authoritative human-message signal for introspection routing.
                     "human_message": normalized.get("message"),
                     "inbound_event": _inbound_event_metadata(context, event, normalized, None),
@@ -1411,6 +1613,7 @@ async def _queue_illo_submission(
                         "response": dict(normalized.get("response") or {}),
                         "part_count": len(list(normalized.get("parts") or [])),
                         "preservation": preservation,
+                        "metadata": dict(normalized.get("metadata") or {}),
                     },
                 },
             },
@@ -1439,18 +1642,26 @@ async def _queue_illo_submission(
 def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
     """Build the run message with the operator's raw request as the primary content.
 
-    Origin, source, constraints, and correlation are NOT embedded as authoritative
-    prompt text (that "Source metadata:" envelope is what tripped issue #249). They
-    are carried as structured run metadata in the ``submission`` payload instead.
+    Origin, source, constraints, and correlation stay in structured run metadata
+    (the "Source metadata:" envelope tripped issue #249). Only source.files_touched
+    is also rendered as submitter-supplied artifact references. An oversized
+    handoff is rejected rather than shortened.
     """
 
     preservation = submission_preservation_contract(normalized)
     lines = [str(normalized.get("message") or normalized.get("summary") or "")]
     parts = list(normalized.get("parts") or [])
     if parts:
-        lines.extend(["", f"Context parts: {len(parts)}", _json_preview(parts, limit=MAX_TRIAGE_PAYLOAD_CHARS)])
-    lines.extend(submission_preservation_prompt_lines(preservation))
-    lines.extend(
+        lines.extend([
+            "",
+            f"Context parts: {len(parts)}",
+            json.dumps(parts, ensure_ascii=False, sort_keys=True, indent=2, default=str),
+        ])
+    file_lines = submission_file_reference_prompt_lines(normalized.get("source") or {})
+    closing_lines = file_lines + submission_preservation_prompt_lines(
+        preservation, has_file_references=bool(file_lines)
+    )
+    closing_lines.extend(
         [
             "",
             "Use Illo's memory, team preferences, and available tools to decide the appropriate outcome. "
@@ -1458,7 +1669,13 @@ def _submission_prompt(*, normalized: Mapping[str, Any]) -> str:
             "Record a clear final answer describing what you decided and what happened.",
         ]
     )
-    return _truncate("\n".join(lines), MAX_TRIAGE_MESSAGE_CHARS)
+    lines.extend(closing_lines)
+    prompt = "\n".join(lines)
+    if len(prompt) > MAX_TRIAGE_MESSAGE_CHARS:
+        raise SubmissionSizeError(
+            field="assembled_prompt", received=len(prompt), limit=MAX_TRIAGE_MESSAGE_CHARS,
+        )
+    return prompt
 
 
 def _submission_target(handling: Mapping[str, Any], *, event: InboundEventRow) -> dict[str, Any]:
@@ -1638,7 +1855,20 @@ def _result_from_replay(
     # "Materially identical" means the complete normalized envelope matches.
     # Ingress context is excluded because it is transport metadata stored outside
     # the envelope; normalization does not inject timestamps or other volatile data.
-    stored_envelope = event.normalized_payload or event.envelope or {}
+    stored_envelope = dict(event.normalized_payload or event.envelope or {})
+    if stored_envelope.get("kind") == SUBMISSION_ENVELOPE_KIND and "metadata" not in stored_envelope:
+        ingress = dict(event.ingress_context or {})
+        if ingress.get("surface") == "mcp_personal_tool":
+            # Older MCP submissions stored caller metadata only in provenance.
+            # Compare that recorded data in today's envelope shape so an
+            # unchanged retry still matches, without rewriting the old event.
+            metadata = dict(ingress.get("metadata") or {})
+            metadata.pop("mcp_tool", None)
+            if metadata:
+                stored_envelope["metadata"] = metadata
+                stored_envelope["payload"] = {
+                    **dict(stored_envelope.get("payload") or {}), "metadata": metadata,
+                }
     submitted_digest = stable_digest(submitted_envelope)
     stored_digest = stable_digest(stored_envelope)
     replay_body_matches = submitted_digest == stored_digest
@@ -1714,10 +1944,7 @@ def validate_projection_field_mapping(
     for field_key, expr in field_mapping.items():
         field_path = f"field_mapping.{field_key}"
         if isinstance(expr, Mapping):
-            if len(expr) != 1 or not set(expr).issubset({"const", "path", "now"}):
-                raise InboundValidationError(
-                    f"{field_path} mapping expression must use exactly one of const, path, or now"
-                )
+            _validate_projection_expression_vocabulary(field_path, expr)
             try:
                 validate_mapping_expression(field_path, expr)
             except MappingExpressionError as exc:
@@ -1728,6 +1955,21 @@ def validate_projection_field_mapping(
         else:
             raise InboundValidationError(f"{field_path} must be a string path or mapping expression")
     return result
+
+
+def _validate_projection_expression_vocabulary(field_path: str, expr: Mapping[str, Any]) -> None:
+    """Restrict conditional branches to the same projection vocabulary."""
+    if "if" in expr:
+        if not set(expr).issubset({"if", "then", "else"}):
+            raise InboundValidationError(f"{field_path} conditional mapping must use if, then, and else")
+        for branch in ("then", "else"):
+            value = expr.get(branch)
+            if isinstance(value, Mapping):
+                _validate_projection_expression_vocabulary(f"{field_path}.{branch}", value)
+    elif len(expr) != 1 or not set(expr).issubset({"const", "path", "now"}):
+        raise InboundValidationError(
+            f"{field_path} mapping expression must use exactly one of const, path, or now"
+        )
 
 
 def _extract_path(root: Mapping[str, Any], path: str) -> Any:

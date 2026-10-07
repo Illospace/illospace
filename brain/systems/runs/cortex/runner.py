@@ -1165,6 +1165,16 @@ async def _nudge_stale_queued_runs_if_due_async(*, force: bool = False) -> bool:
         return False
 
     try:
+        from brain.systems.runs.chantier_continuation import recover_auth_blocked_continuations
+        from brain.systems.vault.codex_health import retry_pending_codex_credential_alerts
+
+        async with _unit_of_work_factory()() as uow:
+            await retry_pending_codex_credential_alerts(uow.session)
+            await recover_auth_blocked_continuations(uow.session)
+    except Exception:
+        logger.exception("agent_run_blocked_continuation_recovery_failed")
+
+    try:
         snapshot = await _queued_backlog_snapshot_async()
     except Exception:
         logger.exception("agent_run_queued_watchdog_snapshot_failed")
@@ -1284,7 +1294,7 @@ async def _mark_run_failed_after_runner_error_async(
                 run_requires_durable_preservation,
             )
 
-            category = failure_category_for_error(error)
+            category = failure_category_for_error(error, exception_type=exception_type)
             requires_durable_preservation = run_requires_durable_preservation(
                 row.metadata_
             )

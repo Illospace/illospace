@@ -481,6 +481,66 @@ async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatc
     publisher.assert_called_once_with("status_change", payload)
 
 
+def test_publish_immediate_loop_shutdown_handles_cancellation(monkeypatch, caplog):
+    from brain.platform import events
+
+    errors = []
+
+    async def slow_record(*_args):
+        await asyncio.sleep(3600)
+
+    async def one_shot():
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, context: errors.append(context))
+        events.publish("status_change", {"idea_id": "idea-1"})
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(events, "record_cortex_event_async", slow_record)
+    monkeypatch.setattr(events, "_publisher", None)
+    asyncio.run(one_shot())
+    assert errors == []
+    assert "cortex_event_write_cancelled" in caplog.text
+    assert not events._pending_event_writes
+
+
+@pytest.mark.asyncio
+async def test_flush_event_writes_waits_for_owned_writes_only(monkeypatch):
+    from brain.platform import events
+
+    persisted = []
+
+    async def delayed_record(event_type, payload):
+        await asyncio.sleep(0.01)
+        persisted.append((event_type, payload))
+
+    monkeypatch.setattr(events, "record_cortex_event_async", delayed_record)
+    monkeypatch.setattr(events, "_publisher", None)
+    unrelated = asyncio.create_task(asyncio.sleep(3600))
+    try:
+        events.publish("status_change", {"idea_id": "idea-1"})
+        await events.flush_event_writes()
+        assert persisted == [("status_change", {"idea_id": "idea-1"})]
+        assert not unrelated.done()
+        assert not events._pending_event_writes
+    finally:
+        unrelated.cancel()
+        await asyncio.gather(unrelated, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_flush_event_writes_reports_failure_without_callback_error(monkeypatch, caplog):
+    from brain.platform import events
+
+    async def failed_record(*_args):
+        raise RuntimeError("event storage unavailable")
+
+    monkeypatch.setattr(events, "record_cortex_event_async", failed_record)
+    monkeypatch.setattr(events, "_publisher", None)
+    events.publish("status_change", {"idea_id": "idea-1"})
+    await events.flush_event_writes()
+    assert "cortex_event_write_failed" in caplog.text
+    assert not events._pending_event_writes
+
+
 @pytest.mark.asyncio
 async def test_run_replay_query_scopes_human_principal_to_authenticated_org():
     session = MagicMock()

@@ -54,7 +54,11 @@ from brain.systems.knowledge.connectors.github import (
     _draft_for_issue,
     _github_authority,
 )
-from brain.systems.knowledge.connectors.memory import MemoryConnector
+from brain.systems.knowledge.connectors.memory import (
+    MemoryConnector,
+    MemoryIndexExclusionReason,
+    memory_index_exclusion_reason,
+)
 from brain.systems.knowledge.search import (
     get_knowledge_items,
     reciprocal_rank_fusion,
@@ -313,7 +317,7 @@ def embedding_runtime(monkeypatch):
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch, healthy_provider_auth):
     del sqlite_postgres_ddl_patch
     SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "VARCHAR(36)"
     SQLiteTypeCompiler.visit_VECTOR = lambda self, type_, **kw: "TEXT"
@@ -1071,6 +1075,58 @@ async def test_memory_connector_propagates_archived_and_superseded_state(
     assert mirrored["memory_node:32"].extra["truth_status"] == "superseded"
 
 
+@pytest.mark.parametrize(
+    ("visibility", "node_kind", "archived", "truth_status", "has_superseding_edge"),
+    [
+        ("team", "content", False, "active", False),
+        ("org", "content", False, "active", False),
+        ("private", "content", False, "active", False),
+        ("team", "tag", False, "active", False),
+        ("org", "summary", False, "active", False),
+        ("team", "content", True, "active", False),
+        ("team", "content", False, "superseded", False),
+        ("team", "content", False, "active", True),
+        ("private", "tag", True, "superseded", True),
+    ],
+)
+async def test_memory_connector_and_classifier_share_live_eligibility(
+    session, visibility, node_kind, archived, truth_status, has_superseding_edge
+):
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    node = _memory_node(31, at, visibility=visibility, node_kind=node_kind)
+    node.archived_at = at if archived else None
+    node.truth_status = truth_status
+    session.add_all([node, _memory_node(32, at)])
+    await session.flush()
+    if has_superseding_edge:
+        session.add(MemoryEdgeNode(
+            source_node_id=31, target_node_id=32, edge_kind="superseded_by",
+            org_id=_ORG_ID, visibility="org", created_by="test",
+        ))
+        await session.flush()
+
+    connector = MemoryConnector()
+    immediate = await connector.draft_for_node(session, node_id=node.id)
+    sweep = await connector.enumerate_changed(session, {})
+    sweep_draft = next(
+        (draft for draft in sweep.drafts if draft.source_ref == "memory_node:31"),
+        None,
+    )
+    node_reason = memory_index_exclusion_reason(
+        node, superseded_by=32 if has_superseding_edge else None,
+    )
+    missing_mirror_reason = memory_index_exclusion_reason(
+        node, superseded_by=32 if has_superseding_edge else None, has_mirror=False,
+    )
+
+    for draft in (immediate, sweep_draft):
+        mirrored_live = draft is not None and draft.archived_at is None
+        assert mirrored_live == (node_reason is None)
+        assert mirrored_live == (
+            missing_mirror_reason == MemoryIndexExclusionReason.NOT_YET_INDEXED
+        )
+
+
 async def test_memory_connector_scrubs_a_mirror_when_visibility_becomes_private(
     session,
     embedding_runtime,
@@ -1303,6 +1359,7 @@ async def test_knowledge_get_uses_exact_refs_and_search_visibility_and_shape(
         "memory_node:4882", "memory_node:4883", "memory_node:4884",
         "memory_node:488", "memory_node:9999",
     ]
+    assert result["not_indexed"] == []
     assert set(search_rows) == {"memory_node:4881", "memory_node:4885"}
     for row in result["results"]:
         search_row = search_rows[row["source_ref"]]
@@ -1316,6 +1373,173 @@ async def test_knowledge_get_uses_exact_refs_and_search_visibility_and_shape(
         }
 
 
+@pytest.mark.parametrize(
+    ("visibility", "node_kind", "archived", "superseded", "archived_mirror", "reason"),
+    [
+        ("private", "content", False, False, False, "private_visibility"),
+        ("team", "tag", False, False, False, "not_a_content_node"),
+        ("team", "content", False, False, True, "archived_or_superseded"),
+        ("team", "content", False, True, False, "archived_or_superseded"),
+        ("team", "content", True, False, False, "archived_or_superseded"),
+        ("team", "content", False, False, False, "not_yet_indexed"),
+        ("org", "content", False, False, False, "not_yet_indexed"),
+        ("private", "tag", True, True, False, "archived_or_superseded"),
+        ("private", "tag", False, False, False, "not_a_content_node"),
+        ("private", "content", False, False, True, "private_visibility"),
+        ("team", "tag", False, False, True, "not_a_content_node"),
+    ],
+)
+async def test_knowledge_get_classifies_readable_memory_without_content(
+    session, visibility, node_kind, archived, superseded, archived_mirror, reason
+):
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    user_id = "22222222-2222-4222-8222-222222222222"
+    node = _memory_node(
+        5549, at, user_id=user_id, visibility=visibility, node_kind=node_kind,
+        title="Secret node label", text="Secret node text",
+    )
+    node.archived_at = at if archived else None
+    node.truth_status = "superseded" if superseded else "active"
+    session.add(node)
+    if archived_mirror:
+        session.add(KnowledgeItem(
+            source="memory", kind="memory", source_ref="memory_node:5549",
+            title="Secret mirror label", summary="Secret mirror summary",
+            raw_text="Secret mirror text", search_text="Secret mirror text",
+            content_digest="archived-mirror", extra={"org_id": _ORG_ID},
+            archived_at=at,
+        ))
+    await session.flush()
+
+    result = await get_knowledge_items(
+        session, ["memory_node:5549"], org_id=_ORG_ID, user_id=user_id
+    )
+
+    assert result["source_refs"] == ["memory_node:5549"]
+    assert result["results"] == []
+    assert result["missing"] == []
+    assert len(result["not_indexed"]) == 1
+    entry = result["not_indexed"][0]
+    assert entry["source_ref"] == "memory_node:5549"
+    assert entry["reason"] == reason
+    assert set(entry) == {"source_ref", "reason", "detail"}
+    assert isinstance(entry["detail"], str) and entry["detail"].endswith(".")
+    assert "Secret" not in json.dumps(entry)
+
+
+async def test_knowledge_get_classifies_active_node_with_superseding_edge(session):
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    node = _memory_node(5549, at, visibility="team")
+    node.truth_status = "active"
+    session.add_all([node, _memory_node(5550, at)])
+    await session.flush()
+    session.add(MemoryEdgeNode(
+        source_node_id=5549, target_node_id=5550, edge_kind="superseded_by",
+        org_id=_ORG_ID, visibility="org", created_by="test",
+    ))
+    await session.flush()
+
+    result = await get_knowledge_items(session, ["memory_node:5549"], org_id=_ORG_ID)
+
+    assert result == {
+        "source_refs": ["memory_node:5549"],
+        "results": [],
+        "missing": [],
+        "not_indexed": [{
+            "source_ref": "memory_node:5549",
+            "reason": "archived_or_superseded",
+            "detail": "The memory node or its shared index entry is archived or superseded.",
+        }],
+    }
+
+
+@pytest.mark.parametrize(
+    ("org_id", "owner_id", "visibility"),
+    [
+        (_ORG_ID, "33333333-3333-4333-8333-333333333333", "private"),
+        ("44444444-4444-4444-8444-444444444444", "22222222-2222-4222-8222-222222222222", "private"),
+        ("44444444-4444-4444-8444-444444444444", None, "team"),
+        ("44444444-4444-4444-8444-444444444444", None, "org"),
+        (None, "22222222-2222-4222-8222-222222222222", "private"),
+        (None, None, "team"),
+    ],
+)
+async def test_knowledge_get_hides_unreadable_memory_existence(
+    session, org_id, owner_id, visibility
+):
+    node = _memory_node(
+        5549, datetime(2026, 10, 1, tzinfo=timezone.utc),
+        org_id=org_id, user_id=owner_id, visibility=visibility,
+    )
+    session.add(node)
+    await session.flush()
+    kwargs = {"org_id": _ORG_ID, "user_id": "22222222-2222-4222-8222-222222222222"}
+
+    hidden = await get_knowledge_items(session, ["memory_node:5549"], **kwargs)
+
+    assert hidden["missing"] == ["memory_node:5549"]
+    assert hidden["not_indexed"] == []
+    await session.delete(node)
+    await session.flush()
+    absent = await get_knowledge_items(session, ["memory_node:5549"], **kwargs)
+    assert json.dumps(hidden) == json.dumps(absent)
+
+
+@pytest.mark.parametrize("owner_id", [None, "22222222-2222-4222-8222-222222222222"])
+async def test_knowledge_get_without_user_id_hides_private_memory(session, owner_id):
+    session.add(_memory_node(
+        5549, datetime(2026, 10, 1, tzinfo=timezone.utc),
+        user_id=owner_id, visibility="private",
+    ))
+    await session.flush()
+
+    result = await get_knowledge_items(session, ["memory_node:5549"], org_id=_ORG_ID)
+
+    assert result["missing"] == ["memory_node:5549"]
+    assert result["not_indexed"] == []
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "memory_node:abc", "memory_node:-1", "thread:5", "memory_node:0",
+        "memory_node:+1", "memory_node:01", "memory_node:١", "memory_node:1\n",
+        "memory_node:2147483648", "memory_node:" + "9" * 5000,
+    ],
+    ids=["text", "negative", "other-kind", "zero", "plus", "leading-zero", "unicode", "newline", "overflow", "huge"],
+)
+async def test_knowledge_get_invalid_memory_refs_do_not_query_nodes(ref):
+    session = SimpleNamespace(
+        scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
+        execute=AsyncMock(side_effect=AssertionError("Invalid refs must not query memory")),
+    )
+
+    result = await get_knowledge_items(session, [ref], org_id=_ORG_ID, user_id="user-1")
+
+    assert result["missing"] == [ref]
+    assert result["not_indexed"] == []
+    session.execute.assert_not_awaited()
+
+
+async def test_knowledge_get_partitions_refs_in_request_order(session):
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    session.add_all([
+        _memory_node(5549, at, visibility="team"),
+        _memory_node(5550, at, visibility="team", node_kind="tag"),
+    ])
+    await session.flush()
+    refs = ["memory_node:5550", "memory_node:9999", "memory_node:5549", "memory_node:5550"]
+
+    result = await get_knowledge_items(session, refs, org_id=_ORG_ID)
+
+    assert result["source_refs"] == refs[:3]
+    assert result["results"] == []
+    assert result["missing"] == ["memory_node:9999"]
+    assert [entry["source_ref"] for entry in result["not_indexed"]] == [
+        "memory_node:5550", "memory_node:5549",
+    ]
+
+
 async def test_agent_mcp_exposes_and_dispatches_knowledge_get():
     from brain.app.api.routers import agent_mcp
 
@@ -1323,6 +1547,8 @@ async def test_agent_mcp_exposes_and_dispatches_knowledge_get():
     assert description.index("knowledge.search") < description.index("workspace.search")
     assert description.index("knowledge.get") < description.index("workspace.search")
     assert "memory_node:<id>" in description
+    assert "not_indexed with a reason" in description
+    assert "missing means no readable node exists" in description
     assert "workspace.search covers Project Contexts, ideas, and threads" in description
 
     session = _McpAsyncSession()
@@ -1330,6 +1556,7 @@ async def test_agent_mcp_exposes_and_dispatches_knowledge_get():
         "source_refs": ["memory_node:4881"],
         "results": [{"source_ref": "memory_node:4881"}],
         "missing": [],
+        "not_indexed": [],
     }
     with patch(
         "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
@@ -1353,10 +1580,12 @@ async def test_agent_mcp_exposes_and_dispatches_knowledge_get():
     catalog = json.loads(catalog_response.json()["result"]["content"][0]["text"])
     capabilities = {entry["name"]: entry for entry in catalog["capabilities"]}
     assert capabilities["knowledge.get"]["arguments"] == {"source_ref": "string"}
+    assert "not_indexed with a reason" in capabilities["knowledge.get"]["description"]
+    assert "missing means no readable node exists" in capabilities["knowledge.get"]["description"]
     assert "knowledge.search" in capabilities["workspace.search"]["description"]
     assert get_response.status_code == 200
     assert json.loads(get_response.json()["result"]["content"][0]["text"]) == expected
-    lookup.assert_awaited_once_with(session, ["memory_node:4881"], org_id="org-1")
+    lookup.assert_awaited_once_with(session, ["memory_node:4881"], org_id="org-1", user_id="user-1")
 
 
 @pytest.mark.parametrize("arguments", [{}, {"source_ref": None}, {"source_ref": ""}, {"source_ref": "  "}])

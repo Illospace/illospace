@@ -35,7 +35,7 @@ THIRD_SURFACE_TARGET_KIND = "inbound_submission"
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch, healthy_provider_auth):
     return await async_sqlite_session_factory(
         [
             Org.__table__,

@@ -34,6 +34,21 @@ def test_expression_dependencies_preserve_missing_values_and_read_clock_lazily()
 
 
 @pytest.mark.parametrize("condition, expected", [
+    ({"path": "absent", "exists": False}, True),
+    ({"path": "absent", "exists": True}, False),
+    ({"path": "absent"}, False),
+])
+def test_condition_sentinel_is_absent_while_unselected_value_sentinel_is_preserved(condition, expected):
+    missing = object()
+    result = evaluate_mapping_expression(
+        {"if": condition, "then": {"path": "absent"}, "else": "other"}, {},
+        resolve_path=lambda source, path: source.get(path, missing),
+        clock=lambda: "unused", missing=missing,
+    )
+    assert result is missing if expected else result == "other"
+
+
+@pytest.mark.parametrize("condition, expected", [
     ({"field": "status", "exists": True}, True),
     ({"path": "absent", "exists": False}, True),
     ({"path": "status", "equals": "open"}, True),

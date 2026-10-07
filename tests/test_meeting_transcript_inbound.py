@@ -21,7 +21,7 @@ SLACK_CONNECTION_ID = "44444444-4444-4444-8444-444444444444"
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch, healthy_provider_auth):
     return await async_sqlite_session_factory(
         [
             Org.__table__,

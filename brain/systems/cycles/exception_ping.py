@@ -276,11 +276,15 @@ def exception_ping_ledger_snapshot(value: Any) -> dict[str, Any]:
 def cycle_exception_ping_context(metadata: Any) -> dict[str, Any] | None:
     metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
     cycle_run_id = metadata.get("cycle_run_id")
+    if not isinstance(cycle_run_id, (int, str)) or isinstance(cycle_run_id, bool):
+        return None
     if cycle_run_id in (None, ""):
         return None
     try:
         cycle_run_id = int(cycle_run_id)
     except (TypeError, ValueError):
+        return None
+    if cycle_run_id <= 0:
         return None
     launch_envelope = metadata.get("launch_envelope")
     launch_envelope = (

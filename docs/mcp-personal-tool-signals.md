@@ -78,6 +78,21 @@ Thread, put it in `correlation`. If the user wants Illo to do something, use
 `illo_act` with explicit intent instead of smuggling routing commands into
 `illo_submit`.
 
+The submission preserves `metadata` in the inbound event. Its model selection
+uses the [work intake model-policy parser](../brain/systems/runs/work_intake.py)
+and runtime admission rules. Other metadata stays submission data and cannot
+grant Cycle or launch authority. A replay with changed metadata is a different
+body, even when its message is unchanged.
+
+An accepted submission reaches the handling run whole. The assembled prompt,
+including the message, parts, file references and Illo guidance, must fit the
+[submission prompt budget](../brain/systems/inbound/service.py). File references
+must fit the [reference contract](../brain/systems/inbound/preservation.py).
+An input that would lose content is rejected before an event id is issued.
+The MCP tool error carries a structured size diagnostic without echoing the
+input. A caller can shorten the context or submit separate complete parts
+with separate idempotency keys.
+
 ## Hook Guidance
 
 Automatic hooks should call `illo_submit` only when meaningful progress has

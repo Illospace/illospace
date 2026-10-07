@@ -404,12 +404,17 @@ async def async_apply_cycle_terminal_failure_guard(
     error_text: str | None,
     latch_store: CycleAlertLatchStore,
     now: datetime | None = None,
+    credential_alert_owned: bool = False,
 ) -> FailureGuardEvaluation | None:
     """Claim and apply one canonical terminal cycle outcome exactly once."""
     policy = CYCLE_TERMINAL_POLICIES[status]
     now = ensure_utc(now)
     observation_store = CycleFailureObservationStore(session=session)
     if not await observation_store.claim_observation(cycle_run_id, now):
+        return None
+    if status in {"auth_blocked", "failed"} and credential_alert_owned:
+        # The connection owns this alert across every Cycle and direct run.
+        # Counting it here would create one extra alert per scheduled consumer.
         return None
     if isinstance(policy, IgnoreCycleTerminalPolicy):
         return None

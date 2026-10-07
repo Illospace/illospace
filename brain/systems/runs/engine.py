@@ -551,7 +551,7 @@ class AsyncAgentRunEngine:
                 )
 
                 category = coerce_failure_category(
-                    failure_category or failure_category_for_error(error)
+                    failure_category or failure_category_for_error(error, exception_type=exception_type)
                 )
                 requires_durable_preservation = run_requires_durable_preservation(
                     row.metadata_

@@ -43,7 +43,7 @@ def test_slack_connector_runs_in_the_shared_knowledge_sync_pipeline():
 
 
 @pytest.fixture
-async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch):
+async def session(async_sqlite_session_factory, sqlite_postgres_ddl_patch, healthy_provider_auth):
     del sqlite_postgres_ddl_patch
     SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "VARCHAR(36)"
     return await async_sqlite_session_factory(

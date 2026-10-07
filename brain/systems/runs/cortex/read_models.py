@@ -166,6 +166,24 @@ def public_failed_run_artifact(
     return projected
 
 
+def serialize_public_run_artifact(
+    artifact: AgentRunArtifactRow,
+    failure: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return public_failed_run_artifact({
+        "id": artifact.id,
+        "run_id": artifact.run_id,
+        "root_run_id": artifact.root_run_id,
+        "artifact_type": artifact.artifact_type,
+        "title": artifact.title,
+        "payload": artifact.payload or {},
+        "text": artifact.text,
+        "uri": artifact.uri,
+        "visibility": artifact.visibility,
+        "created_at": _iso(artifact.created_at),
+    }, failure)
+
+
 def run_id_from_public_message_metadata(metadata: Any) -> int | None:
     if not isinstance(metadata, dict):
         return None
@@ -539,6 +557,7 @@ __all__ = [
     "run_stream_payload",
     "serialize_active_runs_async",
     "serialize_recent_runs_async",
+    "serialize_public_run_artifact",
     "serialize_run_debug_async",
     "serialize_run_history_async",
     "tenant_safe_queue_status",

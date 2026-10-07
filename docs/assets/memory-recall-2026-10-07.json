@@ -1,0 +1,390 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-10-07",
+  "question_set_sha256": "5bf72103e33b6b6535b944c84e1d79af2d8ffa1ca5655b8399a3ace058aeddff",
+  "question_count": 16,
+  "question_sources": {
+    "github": 8,
+    "slack": 4,
+    "memory": 4
+  },
+  "untested_sources": [
+    "documents",
+    "domain_records",
+    "private_owner_memory"
+  ],
+  "decision": "retain_memory",
+  "comparison_limit": "Engines have different source eligibility. Mixed totals are coverage observations, not a same-corpus ranking comparison.",
+  "engines": {
+    "knowledge": {
+      "result_type": "valid",
+      "configuration": {
+        "effective_search_limit": 50,
+        "k_values": [
+          3,
+          10
+        ],
+        "requested_search_limit": 50
+      },
+      "corpus_fingerprint": {
+        "fingerprint": "566f4a8a9d18bc6ef0d2beabe6591bd4e184921b2c6ca295213ed3a8e8f5f294",
+        "newest_ingested_at": "2026-10-07T15:44:23.972315+00:00",
+        "newest_source_updated_at": "2026-10-07T15:44:23.015153+00:00",
+        "source_counts": {
+          "domain_records": 8002,
+          "github": 5424,
+          "memory": 1654,
+          "skills": 55,
+          "slack": 7386
+        },
+        "total_item_count": 22521
+      },
+      "summary": {
+        "hits_at_k": {
+          "10": 13,
+          "3": 12
+        },
+        "mean_reciprocal_rank": 0.62462911,
+        "mean_reciprocal_rank_cutoff": 50,
+        "missed": 0,
+        "recall_at_k": {
+          "10": 0.8125,
+          "3": 0.75
+        },
+        "semantic_degraded_cases": 0,
+        "total": 16
+      },
+      "semantic_available": true,
+      "semantic_degraded_reason": null,
+      "cases": [
+        {
+          "case": 1,
+          "source": "github",
+          "best_evidence_rank": 47,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 2,
+          "source": "github",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 3,
+          "source": "github",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 4,
+          "source": "github",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 5,
+          "source": "github",
+          "best_evidence_rank": 2,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 6,
+          "source": "github",
+          "best_evidence_rank": 4,
+          "hits_at_k": {
+            "10": true,
+            "3": false
+          }
+        },
+        {
+          "case": 7,
+          "source": "github",
+          "best_evidence_rank": 2,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 8,
+          "source": "github",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 9,
+          "source": "slack",
+          "best_evidence_rank": 49,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 10,
+          "source": "slack",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 11,
+          "source": "slack",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 12,
+          "source": "slack",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 13,
+          "source": "memory",
+          "best_evidence_rank": 3,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 14,
+          "source": "memory",
+          "best_evidence_rank": 28,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 15,
+          "source": "memory",
+          "best_evidence_rank": 3,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 16,
+          "source": "memory",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        }
+      ]
+    },
+    "memory": {
+      "result_type": "valid",
+      "configuration": {
+        "effective_search_limit": 50,
+        "k_values": [
+          3,
+          10
+        ],
+        "requested_search_limit": 50
+      },
+      "corpus_fingerprint": {
+        "fingerprint": "13de1ee19eeec5e79029bac03f281e6a5752d927ace0371379b7aecd000e7820",
+        "newest_ingested_at": "2026-10-07T15:44:23.015153+00:00",
+        "newest_source_updated_at": "2026-10-07T15:44:23.015153+00:00",
+        "source_counts": {
+          "memory": 1654
+        },
+        "total_item_count": 1654
+      },
+      "summary": {
+        "hits_at_k": {
+          "10": 2,
+          "3": 2
+        },
+        "mean_reciprocal_rank": 0.13090861,
+        "mean_reciprocal_rank_cutoff": 50,
+        "missed": 12,
+        "recall_at_k": {
+          "10": 0.125,
+          "3": 0.125
+        },
+        "semantic_degraded_cases": 0,
+        "total": 16
+      },
+      "semantic_available": true,
+      "semantic_degraded_reason": null,
+      "cases": [
+        {
+          "case": 1,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 2,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 3,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 4,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 5,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 6,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 7,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 8,
+          "source": "github",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 9,
+          "source": "slack",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 10,
+          "source": "slack",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 11,
+          "source": "slack",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 12,
+          "source": "slack",
+          "best_evidence_rank": null,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 13,
+          "source": "memory",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        },
+        {
+          "case": 14,
+          "source": "memory",
+          "best_evidence_rank": 17,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 15,
+          "source": "memory",
+          "best_evidence_rank": 28,
+          "hits_at_k": {
+            "10": false,
+            "3": false
+          }
+        },
+        {
+          "case": 16,
+          "source": "memory",
+          "best_evidence_rank": 1,
+          "hits_at_k": {
+            "10": true,
+            "3": true
+          }
+        }
+      ]
+    }
+  }
+}

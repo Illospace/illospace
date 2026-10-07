@@ -98,6 +98,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },
+    "tests/test_codex_credential_health_migration.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
     "tests/test_cycle_execution_policy_migration.py": {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
@@ -110,6 +114,10 @@ LEGACY_SYNC_TEST_HARNESSES = {
         "sync_session_method_call",
     },
     "tests/test_pr_tracker_schema_migration.py": {
+        "sqlalchemy_create_engine",
+        "sync_session_method_call",
+    },
+    "tests/test_reflex_missing_record_rule_migration.py": {
         "sqlalchemy_create_engine",
         "sync_session_method_call",
     },

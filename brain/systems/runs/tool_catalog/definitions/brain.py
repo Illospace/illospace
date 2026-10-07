@@ -330,7 +330,12 @@ BRAIN_TOOLS = [
     },
     {
         "name": "memory_ingest_source",
-        "description": "Ingest source-backed reconstructive memory and create cue/tag/content graph nodes.",
+        "description": (
+            "Ingest source-backed reconstructive memory and create cue/tag/content graph nodes. "
+            "When content_text_stored is false, the memory with this first sentence already existed, "
+            "the new text was recorded as a new assertion and source on it, and knowledge.get returns "
+            "the OLDER text; start the content with a different first sentence to store it as its own memory."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -343,6 +348,11 @@ BRAIN_TOOLS = [
                     "type": "string",
                     "enum": ["private", "team", "org"],
                     "default": "private",
+                    "description": (
+                        "A private node is readable only by its owner through memory recall and is not returned by "
+                        "knowledge.get or knowledge.search. Use team or org when the submitter expects to read the handle back. "
+                        "The content ref states its visibility and whether the shared index can serve it; knowledge.get checks that it does."
+                    ),
                 },
                 "confidence": {"type": "number", "description": "Extraction confidence", "default": 0.5},
             },
@@ -816,7 +826,8 @@ BRAIN_TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "Return only this Cycle's latest completed-run timestamp using one bounded query."
+                        "Return started_at and completed_at for this Cycle's latest run with status "
+                        "completed; skipped and blocked runs do not count."
                     ),
                 },
                 "cursor": {

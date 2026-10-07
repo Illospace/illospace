@@ -12,7 +12,12 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
 from brain.systems.runs.failure_diagnostic import read_run_failure_diagnostic
-from brain.systems.runs.failures import public_agent_start_retry_failure
+from brain.systems.runs.failures import (
+    failure_category_for_error,
+    public_agent_start_retry_failure,
+    public_run_failure,
+)
+from brain.systems.runs.status import TERMINAL_RUN_STATUSES, coerce_run_status
 
 
 class InboundSubmissionResultState(str, Enum):
@@ -44,11 +49,139 @@ def _result_handling(action_result: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _select_result_handling(action_result: Any) -> tuple[dict[str, Any], str | None]:
+    """Select the event-owned current block and its path, including legacy runs."""
+    action_result = _as_dict(action_result)
+    handling = _result_handling(action_result)
+    if handling:
+        return handling, "handling" if isinstance(action_result.get("handling"), dict) else None
+    triage = action_result.get("triage")
+    return (triage, "triage") if isinstance(triage, dict) else ({}, None)
+
+
+def _without_equal_value(value: Any, path: tuple[str, ...], published: Any) -> Any:
+    """Copy only a known path, removing its value if an equal copy is published."""
+    if published is None or published == {} or not isinstance(value, dict) or path[0] not in value:
+        return value
+    key, *rest = path
+    if rest:
+        return {**value, key: _without_equal_value(value[key], tuple(rest), published)}
+    if value[key] == published:
+        return {name: item for name, item in value.items() if name != key}
+    return value
+
+
+# None marks the selected handling or triage block in these known paths.
+_RESULT_DUPLICATE_PATHS = (
+    (("event", "action_result", None, "final_answer"), "final_answer"),
+    (("event", "action_result", None, "result", "final_answer"), "final_answer"),
+    (("event", "action_result", None, "attribution"), "attribution"),
+    (("event", "action_result", None, "evidence_contract"), "evidence_contract"),
+    (("latest_receipt", "outcome", None, "final_answer"), "final_answer"),
+    (("latest_receipt", "outcome", None, "result", "final_answer"), "final_answer"),
+    (("latest_receipt", "outcome", None, "attribution"), "attribution"),
+    (("latest_receipt", "outcome", None, "evidence_contract"), "evidence_contract"),
+    (("latest_receipt", "tool_use", "attribution"), "attribution"),
+    (("latest_receipt", "tool_use", "evidence_contract"), "evidence_contract"),
+)
+
+
+def _without_result_duplicates(
+    value: dict[str, Any], source: str | None, published: dict[str, Any]
+) -> dict[str, Any]:
+    for path, key in _RESULT_DUPLICATE_PATHS:
+        if None in path and source is None:
+            continue
+        if key != "final_answer" and not isinstance(published[key], dict):
+            continue
+        selected_path = tuple(source if part is None else part for part in path)
+        value = _without_equal_value(value, selected_path, published[key])
+    return value
+
+
 def _run_id(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _rejected_admission_without_run(handling_status: Any, run_id: Any, run_status: Any) -> bool:
+    return handling_status == "run_admission_failed" and run_id is None and run_status is None
+
+
+def project_inbound_submission_result(
+    payload: dict[str, Any], *, compact: bool = False
+) -> dict[str, Any]:
+    """Publish current result fields once at known paths; retain distinct history.
+
+    Unknown shapes and unequal nested values are preserved. Compact polling includes
+    terminal status, any terminal answer, and the existing public failure summary.
+    """
+    event = _as_dict(payload.get("event"))
+    handling, source = _select_result_handling(event.get("action_result"))
+    result = _as_dict(handling.get("result"))
+    attribution = handling.get("attribution", payload.get("attribution", {}))
+    evidence_contract = payload.get("evidence_contract")
+    final_answer = handling.get("final_answer", result.get("final_answer", payload.get("final_answer")))
+    summary = {
+        "event_id": payload.get("event_id"),
+        "run_id": payload.get("run_id"),
+        "run_status": payload.get("run_status"),
+        "handling_status": payload.get("handling_status"),
+        "evidence_status": payload.get("evidence_status"),
+        "completed_at": handling.get("completed_at", payload.get("completed_at")),
+        "reconciled_at": handling.get("reconciled_at", payload.get("reconciled_at")),
+        "mutated_target_refs": _as_dict(evidence_contract).get(
+            "mutated_target_refs", _as_dict(attribution).get("mutated_target_refs", [])
+        ),
+        "attribution": attribution,
+    }
+    if compact:
+        if isinstance(attribution, dict):
+            summary["attribution"] = {"tags": attribution.get("tags", [])}
+        summary["terminal"] = (
+            coerce_run_status(summary["run_status"]) in TERMINAL_RUN_STATUSES
+            or _rejected_admission_without_run(
+                summary["handling_status"], summary["run_id"], summary["run_status"],
+            )
+        )
+        if summary["terminal"]:
+            if final_answer is not None:
+                summary["final_answer"] = final_answer
+            failure = payload.get("failure")
+            if isinstance(failure, dict):
+                summary["failure"] = {
+                    key: failure[key] for key in ("status", "category", "message") if key in failure
+                }
+            elif failure is not None:
+                summary["failure"] = failure
+        return summary
+
+    projected = {**payload, **summary, "final_answer": final_answer, "evidence_contract": evidence_contract}
+    projected = _without_result_duplicates(projected, source, projected)
+    latest_receipt = payload.get("latest_receipt")
+    receipts = payload.get("receipts")
+    if (
+        isinstance(receipts, list) and receipts
+        and _as_dict(latest_receipt).get("id") is not None
+        and _as_dict(receipts[0]).get("id") == latest_receipt["id"]
+    ):
+        # Omit a fully duplicated receipt; retain any distinct same-id data.
+        projected["receipts"] = (
+            receipts[1:] if receipts[0] == latest_receipt
+            else [
+                _without_result_duplicates(
+                    {"latest_receipt": receipts[0]}, source, projected
+                )["latest_receipt"],
+                *receipts[1:],
+            ]
+        )
+    return projected
 
 
 async def read_inbound_submission_result(
@@ -97,8 +230,8 @@ async def read_inbound_submission_result(
     action_result = dict(event.action_result or {})
     handling = _result_handling(action_result)
     current_run_id = _run_id(handling.get("run_id"))
-    if current_run_id is not None and current_run_id != selected_run_id:
-        current_run = await session.get(AgentRunRow, current_run_id)
+    if current_run_id != selected_run_id:
+        current_run = await session.get(AgentRunRow, current_run_id) if current_run_id is not None else None
         current_run_status = (
             getattr(current_run, "status", None) if current_run is not None else None
         )
@@ -131,6 +264,10 @@ async def read_inbound_submission_result(
         ),
         None,
     )
+    if failure is None and _rejected_admission_without_run(
+        handling.get("status"), handling.get("run_id"), handling.get("run_status") or current_run_status,
+    ):
+        failure = public_run_failure("failed", failure_category_for_error(handling.get("error")))
     if current_run is not None:
         diagnostic = await read_run_failure_diagnostic(session, run=current_run)
         if diagnostic is not None and failure is None and diagnostic.retry_scheduled:
@@ -166,5 +303,6 @@ async def read_inbound_submission_result(
 __all__ = [
     "InboundSubmissionResult",
     "InboundSubmissionResultState",
+    "project_inbound_submission_result",
     "read_inbound_submission_result",
 ]

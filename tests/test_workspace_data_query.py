@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
+from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
@@ -699,7 +701,7 @@ async def test_read_cycles_pages_to_complete_history_and_watermark_is_one_bounde
             revision_id=None,
             created_at=completed_at,
             scheduled_for=completed_at,
-            started_at=completed_at,
+            started_at=completed_at - timedelta(seconds=30),
             completed_at=completed_at,
             status="completed",
             error=None,
@@ -786,9 +788,89 @@ async def test_read_cycles_pages_to_complete_history_and_watermark_is_one_bounde
     statement = watermark_session.statements[0]
     assert int(statement._limit_clause.value) == 1
     assert "cycle_runs.completed_at IS NOT NULL" in str(statement)
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert "cycle_runs.status = %(status_1)s" in str(compiled)
+    assert compiled.params["status_1"] == "completed"
     assert watermark["last_completed_run"]["completed_at"] == runs[0][0].completed_at.isoformat()
+    assert watermark["last_completed_run"]["started_at"] == runs[0][0].started_at.isoformat()
+    assert watermark["answering_guidance"] == [
+        "Use started_at as the lower bound for 'what changed since my last run': "
+        "work that arrived while that run was executing was not seen by it."
+    ]
     assert watermark["evidence_health"] == {"status": "ok", "completeness": "complete"}
     assert "truncated" not in watermark
+
+
+@pytest.mark.parametrize("include_completed", [True, False])
+async def test_read_cycles_last_completed_run_ignores_non_completed_rows(
+    monkeypatch,
+    async_sqlite_session_factory,
+    sqlite_postgres_ddl_patch,
+    include_completed,
+):
+    from brain.platform.db.models.cycle import Cycle, CycleRun
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import workspace_data
+
+    session = await async_sqlite_session_factory([Cycle.__table__, CycleRun.__table__])
+    _patch_uow(monkeypatch, session)
+    cycle = Cycle(
+        id=8,
+        user_id=str(uuid4()),
+        name="GitHub Reflex",
+        prompt="Review new GitHub activity.",
+        schedule_expr="*/15 * * * *",
+        timezone="UTC",
+    )
+    # SQLite returns naive datetimes; use distinct start and completion times.
+    completed_at = datetime(2026, 10, 1, 21, 18, 57)
+    started_at = datetime(2026, 10, 1, 21, 15, 12)
+    session.add(cycle)
+    if include_completed:
+        session.add(CycleRun(
+            id=1,
+            cycle_id=cycle.id,
+            scheduled_for=started_at,
+            started_at=started_at,
+            completed_at=completed_at,
+            status="completed",
+            prompt_snapshot=cycle.prompt,
+        ))
+    for run_id, status in enumerate(
+        ["skipped", "auth_blocked", "failed", "quota_blocked", "degraded"], start=2
+    ):
+        timestamp = completed_at + timedelta(minutes=15 * run_id)
+        session.add(CycleRun(
+            id=run_id,
+            cycle_id=cycle.id,
+            scheduled_for=timestamp,
+            started_at=timestamp if status in {"failed", "degraded"} else None,
+            completed_at=timestamp,
+            status=status,
+            skip_reason="previous_run_active" if status == "skipped" else None,
+            prompt_snapshot=cycle.prompt,
+        ))
+    await session.flush()
+
+    with bind_agent_context({"user_id": cycle.user_id}):
+        payload = json.loads(await workspace_data._handle_read_cycles(
+            cycle_id=cycle.id,
+            last_completed_run=True,
+        ))
+
+    if include_completed:
+        assert payload["last_completed_run"] == {
+            "cycle_id": cycle.id,
+            "cycle_name": cycle.name,
+            "cycle_run_id": 1,
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "status": "completed",
+            "run_id": None,
+        }
+    else:
+        assert payload["last_completed_run"] is None
+    assert payload["evidence_health"] == {"status": "ok", "completeness": "complete"}
 
 
 async def test_domain_tracker_and_event_feed_page_to_evidence_health_ok(monkeypatch):

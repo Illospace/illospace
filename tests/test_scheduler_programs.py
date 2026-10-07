@@ -29,9 +29,6 @@ _PINNED_PROJECTION_HASHES = {
     "uwear_aws_health_scan": (
         "10d9a7cb36fa4e7b93d7bb2a76b73228d893420220f13e93a17a85f2f23d87ee"
     ),
-    "uwear_staging_promotion_pr": (
-        "073a6f20f32cf4d6e4db66f7f3e4a151c095728ee199ce29a0e2dcfe12d71e6b"
-    ),
     "illo_external_heartbeat": (
         "5c2f2eede89b1fd4cc5cd067116eb62a02444e0152106325ee133fad9f2bee3b"
     ),

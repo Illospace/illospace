@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _publisher: Callable[[str, dict[str, Any]], None] | None = None
 _idea_org_cache: dict[str, str | None] = {}
 _run_org_cache: dict[int, str | None] = {}
+_pending_event_writes: set[asyncio.Task] = set()
 
 
 def set_publisher(fn: Callable[[str, dict[str, Any]], None]) -> None:
@@ -282,14 +283,29 @@ def _log_async_event_write_failure(
     event_type: str,
     task: asyncio.Task,
 ) -> None:
+    _pending_event_writes.discard(task)
     try:
         task.result()
+    except asyncio.CancelledError:
+        logger.warning("cortex_event_write_cancelled event_type=%s", event_type)
     except Exception as exc:
         logger.warning(
             "cortex_event_write_failed event_type=%s error=%s",
             event_type,
             exc,
         )
+
+
+async def flush_event_writes() -> None:
+    """Drain owned event writes before closing a one-shot process or service loop.
+
+    Failed and cancelled writes remain visible in the event logger. This does
+    not wait for unrelated tasks or claim that a failed write was persisted.
+    """
+    loop = asyncio.get_running_loop()
+    while pending := tuple(task for task in _pending_event_writes if task.get_loop() is loop):
+        await asyncio.gather(*pending, return_exceptions=True)
+        _pending_event_writes.difference_update(pending)
 
 
 def cortex_event_to_message(
@@ -367,6 +383,7 @@ def publish(event_type: str, data: dict[str, Any]) -> None:
         loop = _active_async_loop()
         if loop is not None:
             task = loop.create_task(record_cortex_event_async(event_type, data))
+            _pending_event_writes.add(task)
             task.add_done_callback(
                 lambda done_task, event_type=event_type: _log_async_event_write_failure(
                     event_type,

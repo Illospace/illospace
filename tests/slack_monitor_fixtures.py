@@ -104,8 +104,7 @@ def patch_slack_connector(monkeypatch):
 
     monkeypatch.setattr(connector_module, "SlackWebClient", _FakeClient)
     monkeypatch.setattr(
-        connector_module,
-        "submit_inbound_envelope",
+        "brain.systems.inbound.service.submit_inbound_envelope",
         _fake_submit,
     )
     return connector_module, reactions, submitted

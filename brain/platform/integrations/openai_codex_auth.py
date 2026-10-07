@@ -41,6 +41,26 @@ _DEFAULT_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 _DEFAULT_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
+class CodexCredentialExpiredError(RuntimeError):
+    """A credential needs human re-authentication, rather than another retry."""
+
+    error_code = "credential_expired"
+
+    def __init__(self, *, alert_owned: bool = False) -> None:
+        self.alert_owned = alert_owned
+        super().__init__(
+            "credential_expired: OpenAI Codex / ChatGPT credentials expired or were revoked. "
+            "Sign in again in Illo Settings."
+        )
+
+
+class CodexConnectionExpiredError(CodexCredentialExpiredError):
+    """Expiry whose durable personal connection owns the repair alert."""
+
+    def __init__(self) -> None:
+        super().__init__(alert_owned=True)
+
+
 @dataclass
 class OpenAICodexCredential:
     """Codex/OpenAI auth state normalized into a small, portable record."""
@@ -272,7 +292,25 @@ def refresh_codex_access_token(
         timeout=timeout,
     )
     if response.status_code != 200:
-        raise RuntimeError(f"Token refresh failed ({response.status_code}): {response.text[:200]}")
+        try:
+            error_payload = response.json()
+        except (ValueError, TypeError):
+            error_payload = {}
+        error = error_payload.get("error") if isinstance(error_payload, dict) else None
+        code = error.get("code") if isinstance(error, dict) else error
+        if response.status_code in {401, 403} or (
+            response.status_code == 400
+            and code in {
+                "invalid_grant", "invalid_token", "refresh_token_reused",
+                "refresh_token_invalidated", "refresh_token_expired",
+            }
+        ):
+            raise CodexCredentialExpiredError()
+        if response.status_code == 429:
+            raise RuntimeError("upstream_provider_error: rate_limit_error")
+        # OAuth bodies can contain credentials or request identifiers. Status
+        # alone distinguishes a transient refresh failure from re-authentication.
+        raise RuntimeError(f"Token refresh failed ({response.status_code})")
 
     data = response.json()
     if not isinstance(data, dict):

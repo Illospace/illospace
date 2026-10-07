@@ -8,6 +8,8 @@ from sqlalchemy import and_, false, func, or_, true
 
 VISIBLE_SHARED_MEMORY = ("team", "org")
 VALID_MEMORY_VISIBILITIES = ("private", "team", "org")
+# Audience breadth used by content-node reuse and widening; independent of tuple order.
+MEMORY_VISIBILITY_RANK = {"private": 0, "team": 1, "org": 2}
 
 
 @dataclass(frozen=True)

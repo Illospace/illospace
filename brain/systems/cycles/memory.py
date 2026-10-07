@@ -336,6 +336,7 @@ async def _apply_cycle_terminal_guards(
     now,
 ) -> None:
     latch_store = CycleAlertLatchStore(session=session, cycle_id=cycle.id)
+    auth_preflight = json_dict(json_dict(run.context_snapshot).get("auth_preflight"))
     evaluation = await async_apply_cycle_terminal_failure_guard(
         session,
         cycle,
@@ -344,6 +345,10 @@ async def _apply_cycle_terminal_guards(
         error_text=error,
         latch_store=latch_store,
         now=now,
+        credential_alert_owned=(
+            auth_preflight.get("credential_alert_owned") is True
+            or json_dict(run.context_snapshot).get("credential_alert_owned") is True
+        ),
     )
     if evaluation is not None:
         context_snapshot = dict(run.context_snapshot or {})

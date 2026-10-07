@@ -366,7 +366,18 @@ async def async_main() -> int:
     try:
         result = await run_heartbeat()
     except Exception as exc:  # noqa: BLE001 - scheduler needs a settled failure
-        logger.error("External heartbeat failed: %s", exc)
+        from brain.systems.runs.presentation import public_tool_error_diagnostic
+
+        diagnostic = public_tool_error_diagnostic(type(exc).__name__, str(exc))
+        failure = {
+            "job": "illo_external_heartbeat",
+            "ok": False,
+            "status": "failed",
+            "exception_type": diagnostic.get("error_class", "HeartbeatError"),
+            "error": diagnostic.get("error_message", "External heartbeat failed"),
+        }
+        print(json.dumps(failure, sort_keys=True))
+        logger.error("External heartbeat failed: %s", failure["error"])
         return 1
     print(json.dumps(result, sort_keys=True))
     return (

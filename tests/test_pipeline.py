@@ -20,7 +20,7 @@ from brain.platform.db.models.agent_run import (
 
 
 @pytest.fixture
-async def session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
+async def session_factory(healthy_provider_auth) -> AsyncIterator[Callable[[], AsyncSession]]:
     pytest.importorskip("aiosqlite")
     _patch_sqlite_for_agent_run_tables()
     engine = create_async_engine("sqlite+aiosqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)

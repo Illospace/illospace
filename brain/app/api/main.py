@@ -338,6 +338,12 @@ async def lifespan(app):
                         )
             except Exception as e:
                 logger.warning("run_worker_stop_failed", error=str(e), mode="inline")
+        from brain.platform.events import flush_event_writes
+
+        try:
+            await asyncio.wait_for(flush_event_writes(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("cortex_event_shutdown_drain_timeout")
 
 
 app = FastAPI(

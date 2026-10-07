@@ -140,6 +140,9 @@ class UserCodexConnection(Base, CreatedAtMixin):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE"), default=True
     )
+    credential_error_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    credential_error_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    credential_alerted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     total_tokens_used: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0

@@ -1443,6 +1443,7 @@ async def _query_last_completed_cycle_run(
             .join(Cycle, Cycle.id == CycleRun.cycle_id)
             .where(
                 CycleRun.cycle_id == cycle_id,
+                CycleRun.status == "completed",
                 CycleRun.completed_at.is_not(None),
             )
             .order_by(CycleRun.completed_at.desc(), CycleRun.id.desc())
@@ -1461,6 +1462,7 @@ async def _query_last_completed_cycle_run(
             "cycle_id": int(cycle.id),
             "cycle_name": cycle.name,
             "cycle_run_id": int(run.id),
+            "started_at": _serialize_dt(run.started_at),
             "completed_at": _serialize_dt(run.completed_at),
             "status": run.status,
             "run_id": int(run.run_id) if run.run_id is not None else None,
@@ -1469,6 +1471,10 @@ async def _query_last_completed_cycle_run(
         "view": "cycle_last_completed_run",
         "cycle_id": cycle_id,
         "last_completed_run": watermark,
+        "answering_guidance": [
+            "Use started_at as the lower bound for 'what changed since my last run': "
+            "work that arrived while that run was executing was not seen by it."
+        ],
         "evidence_health": {"status": "ok", "completeness": "complete"},
     }
 

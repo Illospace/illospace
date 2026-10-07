@@ -611,6 +611,7 @@ async def test_room_messages_notify_other_team_members(
 async def test_mentions_create_notifications_and_illo_routes_room_run(
     chat_db_session: AsyncSession,
     request_as: Callable[..., object],
+    healthy_provider_auth,
 ):
     room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
     posted = await request_as(
@@ -671,6 +672,7 @@ async def test_dm_illo_mention_does_not_route_run(
 async def test_thread_illo_mention_routes_thread_target(
     chat_db_session: AsyncSession,
     request_as: Callable[..., object],
+    healthy_provider_auth,
 ):
     room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
     root = (

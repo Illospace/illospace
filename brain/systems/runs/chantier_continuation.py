@@ -6,16 +6,22 @@ Opted-in non-chantier fan-outs fall back to their parent run's own thread.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import String, and_, cast, exists, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
+    AgentRunEventRow,
     AgentRunRow,
 )
+from brain.platform.db.models.cycle import CycleRun
+from brain.systems.cycles.common import cycle_run_launch_context
+from brain.systems.cycles.exception_ping import cycle_exception_ping_context
 from brain.systems.runs.domain import ArtifactType
 from brain.systems.runs.evidence_health import (
     WorkerEvidenceReceipt,
@@ -36,8 +42,26 @@ CONTINUATION_QUEUED_EVENT = "run.chantier_continuation_queued"
 CONTINUATION_SOURCE = "chantier_continuation"
 GENERIC_CONTINUATION_QUEUED_EVENT = "run.worker_continuation_queued"
 GENERIC_CONTINUATION_SOURCE = "worker_continuation"
+CONTINUATION_AUTH_BLOCKED_EVENT = "run.continuation_auth_blocked"
+CONTINUATION_RECOVERY_FAILED_EVENT = "run.continuation_recovery_failed"
 _MAX_CHILD_OUTPUT_CHARS = 6_000
 _MAX_OUTPUTS_CHARS = 24_000
+logger = logging.getLogger(__name__)
+
+
+class ContinuationAdmissionError(RuntimeError):
+    """A failed admission with a bounded permanent-target classification."""
+
+    def __init__(self, message: str, *, reason: str | None):
+        super().__init__(message)
+        reason = str(reason or "")
+        self.invalid_target = (
+            reason.startswith(("Idea ", "Thread ")) and reason.endswith(" not found")
+        ) or reason in {
+            "Agent run continuation requires thread_id",
+            "Agent run continuation requires target_ref",
+            "Work intake target requires idea_id for Cortex run admission",
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +161,7 @@ async def queue_chantier_continuation_for_terminal_run(
                     fanout_run_id=anchor.id,
                     worker_ids=[int(worker.id) for worker in workers],
                     evidence_health=evidence_health,
+                    cycle_context=await _inherited_cycle_context(session, scope.source_run),
                 ),
             },
             policy={
@@ -147,9 +172,15 @@ async def queue_chantier_continuation_for_terminal_run(
         ),
     )
     if not admission.ok or admission.run_id is None:
-        raise RuntimeError(
+        if await _record_blocked_continuation(
+            store, anchor, admission.skipped_reason,
+            owner_user_id=scope.source_run.user_id or anchor.user_id,
+        ):
+            return None
+        raise ContinuationAdmissionError(
             "Chantier continuation admission failed for fan-out "
-            f"{anchor.id}: {admission.skipped_reason or 'missing run id'}"
+            f"{anchor.id}: {admission.skipped_reason or 'missing run id'}",
+            reason=admission.skipped_reason,
         )
 
     await store.append_event(
@@ -211,6 +242,7 @@ async def _queue_generic_continuation(
                     anchor,
                     worker_ids=[int(worker.id) for worker in workers],
                     evidence_health=evidence_health,
+                    cycle_context=await _inherited_cycle_context(session, anchor),
                 ),
             },
             policy={
@@ -221,9 +253,14 @@ async def _queue_generic_continuation(
         ),
     )
     if not admission.ok or admission.run_id is None:
-        raise RuntimeError(
+        if await _record_blocked_continuation(
+            store, anchor, admission.skipped_reason, owner_user_id=anchor.user_id,
+        ):
+            return None
+        raise ContinuationAdmissionError(
             "Worker continuation admission failed for fan-out "
-            f"{anchor.id}: {admission.skipped_reason or 'missing run id'}"
+            f"{anchor.id}: {admission.skipped_reason or 'missing run id'}",
+            reason=admission.skipped_reason,
         )
 
     await store.append_event(
@@ -240,6 +277,100 @@ async def _queue_generic_continuation(
         )
     )
     return int(admission.run_id)
+
+
+async def _record_blocked_continuation(
+    store: AsyncAgentRunStore, anchor: AgentRunRow, reason: str | None,
+    *, owner_user_id: str | None,
+) -> bool:
+    if not str(reason or "").startswith(("credential_expired:", "provider_credential_unavailable:")):
+        return False
+    # Authentication blocks new work. It must never roll back the terminal
+    # worker outcome that made this continuation eligible.
+    if not await store.has_event_type(anchor.id, CONTINUATION_AUTH_BLOCKED_EVENT):
+        await store.append_event(run_event(
+            anchor.id, CONTINUATION_AUTH_BLOCKED_EVENT,
+            {"reason": reason, "owner_user_id": owner_user_id},
+            root_run_id=anchor.root_run_id or anchor.id, producer="run_completion_hook",
+        ))
+    return True
+
+
+async def recover_auth_blocked_continuations(
+    session: AsyncSession, *, user_id: str | None = None, limit: int = 10,
+) -> int:
+    """Consume durable blocked fan-outs after sign-in or provider recovery."""
+    from brain.platform.db.models.org import UserCodexConnection
+
+    queued = exists().where(
+        AgentRunEventRow.run_id == AgentRunRow.id,
+        AgentRunEventRow.event_type.in_((
+            CONTINUATION_QUEUED_EVENT, GENERIC_CONTINUATION_QUEUED_EVENT,
+            CONTINUATION_RECOVERY_FAILED_EVENT,
+        )),
+    ).correlate(AgentRunRow)
+    # A Chantier continuation may use its original scope owner, while a later
+    # fan-out belongs to another user. Preserve the effective actor at blocking.
+    owner = AgentRunEventRow.payload["owner_user_id"].as_string()
+    expired = exists().where(
+        func.replace(cast(UserCodexConnection.user_id, String), "-", "")
+        == func.replace(owner, "-", ""),
+        UserCodexConnection.is_active.is_(True),
+        UserCodexConnection.credential_error_code == "credential_expired",
+    ).correlate(AgentRunEventRow)
+    reason = AgentRunEventRow.payload["reason"].as_string()
+    statement = (
+        select(AgentRunRow.id)
+        .join(AgentRunEventRow, AgentRunEventRow.run_id == AgentRunRow.id)
+        .where(
+            AgentRunEventRow.event_type == CONTINUATION_AUTH_BLOCKED_EVENT,
+            not_(queued),
+            not_(and_(
+                reason.like("%provider=openai%"),
+                reason.like("%credential=OpenAI Codex / ChatGPT%"), expired,
+            )),
+        )
+        .order_by(AgentRunRow.updated_at.asc(), AgentRunRow.id.asc())
+        .limit(limit)
+    )
+    if user_id is not None:
+        statement = statement.where(owner == user_id)
+    recovered = 0
+    for anchor_id in (await session.scalars(statement)).all():
+        continuation_id = None
+        try:
+            # One invalid target must not roll back already recovered fan-outs.
+            async with session.begin_nested():
+                continuation_id = await queue_worker_continuation_for_terminal_run(
+                    session, terminal_run_id=int(anchor_id),
+                )
+        except ContinuationAdmissionError as exc:
+            if exc.invalid_target:
+                await AsyncAgentRunStore(session).append_event(run_event(
+                    int(anchor_id), CONTINUATION_RECOVERY_FAILED_EVENT,
+                    {"reason": "continuation_target_unavailable"}, producer="run_completion_hook",
+                ))
+            else:
+                logger.warning("continuation_recovery_retry anchor_id=%s exception_class=%s",
+                               anchor_id, type(exc).__name__)
+        except Exception as exc:
+            # Unexpected transient failures retain their blocked event for the
+            # next bounded pass, without keeping later anchors behind them.
+            logger.warning(
+                "continuation_recovery_retry anchor_id=%s exception_class=%s",
+                anchor_id, type(exc).__name__,
+            )
+        if continuation_id is not None:
+            recovered += 1
+        else:
+            # Move a temporarily unavailable lane behind other pending fan-outs.
+            # Known expired personal credentials are excluded before probing.
+            from brain.kernel.common.time import utcnow
+
+            anchor = await session.get(AgentRunRow, int(anchor_id))
+            if anchor is not None:
+                anchor.updated_at = utcnow()
+    return recovered
 
 
 async def _fanout_anchor_id(
@@ -391,6 +522,44 @@ def _continuation_target(
     return target
 
 
+async def _inherited_cycle_context(session: AsyncSession, source_run: AgentRunRow) -> dict[str, Any]:
+    """Carry launch authority only from the persisted occurrence's own lineage."""
+    source_metadata = source_run.metadata_ if isinstance(source_run.metadata_, dict) else {}
+    context = cycle_exception_ping_context(source_metadata)
+    if context is None:
+        return {}
+    occurrence = await session.get(CycleRun, context["cycle_run_id"])
+    if occurrence is None or not occurrence.run_id:
+        return {}
+    launch_context = cycle_run_launch_context(occurrence)
+    if launch_context.get("run_kind") != context["run_kind"]:
+        return {}
+    current = source_run
+    visited: set[int] = set()
+    while current is not None and int(current.id) not in visited and len(visited) < 64:
+        visited.add(int(current.id))
+        if (current.org_id, current.user_id, current.thread_id) != (
+            source_run.org_id, source_run.user_id, source_run.thread_id
+        ):
+            return {}
+        if int(current.id) == int(occurrence.run_id):
+            original = current.metadata_ if isinstance(current.metadata_, dict) else {}
+            original_context = cycle_exception_ping_context(original)
+            if original_context != context:
+                return {}
+            return {
+                "cycle_run_id": context["cycle_run_id"],
+                **{key: deepcopy(original[key]) for key in ("launch_envelope", "launch_context") if key in original},
+            }
+        metadata = current.metadata_ if isinstance(current.metadata_, dict) else {}
+        continuation = metadata.get("worker_continuation") or metadata.get("chantier_continuation")
+        parent_id = continuation.get("anchor_run_id") if isinstance(continuation, dict) else current.parent_run_id
+        if isinstance(parent_id, bool) or not isinstance(parent_id, int) or parent_id <= 0:
+            return {}
+        current = await session.get(AgentRunRow, parent_id)
+    return {}
+
+
 def _continuation_metadata(
     source_run: AgentRunRow,
     *,
@@ -398,9 +567,11 @@ def _continuation_metadata(
     fanout_run_id: int,
     worker_ids: list[int],
     evidence_health: dict[str, Any],
+    cycle_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_metadata = source_run.metadata_ if isinstance(source_run.metadata_, dict) else {}
     metadata: dict[str, Any] = {
+        **(cycle_context or {}),
         "execution_profile": source_run.profile,
         "evidence_health": dict(evidence_health),
         "chantier_continuation": {
@@ -443,9 +614,11 @@ def _generic_continuation_metadata(
     *,
     worker_ids: list[int],
     evidence_health: dict[str, Any],
+    cycle_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_metadata = anchor.metadata_ if isinstance(anchor.metadata_, dict) else {}
     metadata: dict[str, Any] = {
+        **(cycle_context or {}),
         "execution_profile": anchor.profile,
         "evidence_health": dict(evidence_health),
         "worker_continuation": {

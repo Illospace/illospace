@@ -231,10 +231,15 @@ async def test_terminal_cycle_failures_post_one_named_alert_without_prompt_coope
     ]
 
 
+@pytest.mark.parametrize("error_code,alert_owned", [
+    (None, False), ("credential_expired", False), ("credential_expired", True),
+])
 async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
     async_sqlite_session_factory,
     sqlite_postgres_ddl_patch,
     monkeypatch,
+    error_code,
+    alert_owned,
 ):
     session = await async_sqlite_session_factory(FAILURE_GUARD_TABLES)
     cycle = Cycle(
@@ -252,6 +257,9 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
         scheduled_for=datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc),
         status="running",
         prompt_snapshot=cycle.prompt,
+        context_snapshot={"auth_preflight": {
+            "error_code": error_code, "credential_alert_owned": alert_owned,
+        }},
     )
     session.add_all([cycle, blocked_run])
     await session.flush()
@@ -284,6 +292,11 @@ async def test_auth_blocked_alerts_with_reconnect_action_then_completion_resets(
         status="auth_blocked",
         error=blocked_error,
     )
+    if alert_owned:
+        assert calls == []
+        assert await _cycle_trigger_states(session, cycle.id) == {}
+        assert await _cycle_latches(session, cycle.id) == {}
+        return
     first_count = (
         await _cycle_trigger_states(session, cycle.id)
     )["consecutive"].trigger_state["count"]

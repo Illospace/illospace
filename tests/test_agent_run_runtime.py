@@ -273,7 +273,7 @@ def _runtime(recipe: str = "fast", *, message: str = "Read the README", store=No
     )
 
 
-async def test_run_admission_marks_idea_working_without_worker_details(monkeypatch):
+async def test_run_admission_marks_idea_working_without_worker_details(monkeypatch, healthy_provider_auth):
     from brain.platform.db.models.idea import Idea, IdeaStateLog
     from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
@@ -388,7 +388,7 @@ async def test_run_admission_rejects_uncredentialed_anthropic_before_creation(mo
     assert create_calls == []
 
 
-async def test_run_admission_preserves_protected_idea_statuses(monkeypatch):
+async def test_run_admission_preserves_protected_idea_statuses(monkeypatch, healthy_provider_auth):
     from brain.platform.db.models.idea import Idea
     from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
