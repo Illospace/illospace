@@ -42,8 +42,8 @@ logger = logging.getLogger("agent")
 
 _RESOLVED_STATUSES = {"resolved", "blocked_on_user"}
 _CUSTOMER_BUG_FILING_POLICY_REFERENCE = (
-    "brain/systems/skills/builtin_skill_bundles/uwear-engineering-triage/"
-    "references/creating-work-items.md#customer-bug-filing-policy"
+    "the workspace triage skill's creating-work-items playbook "
+    "(customer-bug filing policy)"
 )
 _PRODUCT_SURFACE_TERMS = (
     "settings",
