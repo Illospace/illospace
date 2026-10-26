@@ -7,11 +7,13 @@ GITHUB_TOOLS = [
     {
         "name": "read_github_source",
         "description": (
-            "Read bounded GitHub repository data: metadata, issues, pull requests, exact issue/PR counts, "
+            "Read bounded GitHub repository data: metadata, issues, issue comments and timelines, "
+            "pull requests, exact issue/PR counts, "
             "CI checks, or source files and trees at an explicit git ref. Source grep is a bounded literal "
             "search that returns path:line citations and pagination when more files remain. Use this as a "
             "generic source reader before writing findings into Domains, Cycles, Slack updates, or inbound "
-            "projections. This tool is read-only and accepts owner/name, GitHub URL, or git remote repo values."
+            "projections. This tool is read-only and accepts owner/name, GitHub URL, or git remote repo values. "
+            "Throttling errors return rate_limited and reset_at or retry_after_seconds when GitHub supplies them."
         ),
         "input_schema": {
             "type": "object",
@@ -21,6 +23,8 @@ GITHUB_TOOLS = [
                     "enum": [
                         "get_repo",
                         "get_issue",
+                        "list_issue_comments",
+                        "issue_timeline",
                         "list_issues",
                         "list_pull_requests",
                         "get_pull_request",
@@ -36,6 +40,10 @@ GITHUB_TOOLS = [
                         "returns assignment_provenance: none means no assignee, unknown means provenance could "
                         "not be determined, human means a human assignment, and automation_at_filing means the "
                         "filing actor assigned it within seconds of creation, so it is not a human assignment. "
+                        "list_issue_comments reads bounded comment bodies oldest first, with optional since; "
+                        "issue_timeline reads compact events oldest first without comment bodies (use "
+                        "list_issue_comments for those). Both use limit and cursor; follow next_page while "
+                        "evidence_health.completeness is more_available. "
                         "Issue comments return authorship: automation means the body starts with the AI triage "
                         "provenance banner, and unknown means authorship could not be determined; unknown does "
                         "not mean human. "
@@ -63,7 +71,7 @@ GITHUB_TOOLS = [
                 "assignee": {"type": "string", "description": "Optional GitHub issue assignee login."},
                 "creator": {"type": "string", "description": "Optional GitHub issue creator login."},
                 "mentioned": {"type": "string", "description": "Optional GitHub issue mentioned-user login."},
-                "since": {"type": "string", "description": "Optional ISO timestamp lower bound for updated issues."},
+                "since": {"type": "string", "description": "Optional ISO timestamp lower bound for updated issues or issue comments."},
                 "include_pull_requests": {
                     "type": "boolean",
                     "default": False,
@@ -79,7 +87,18 @@ GITHUB_TOOLS = [
                 "issue_number": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Issue number required by get_issue.",
+                    "description": "Issue number required by get_issue, list_issue_comments, or issue_timeline.",
+                },
+                "body_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20_000,
+                    "default": 1000,
+                    "description": (
+                        "Maximum body characters for get_issue, subject to the tool output budget. "
+                        "The default compacts whitespace; values above 1000 preserve line breaks. "
+                        "Check body_total_chars and body_truncated for completeness."
+                    ),
                 },
                 "number": {
                     "type": "integer",
@@ -137,7 +156,9 @@ GITHUB_TOOLS = [
                 "cursor": {
                     "type": "string",
                     "description": (
-                        "Opaque next_page token returned by an issue, pull-request, tree, or grep listing."
+                        "Opaque next_page token returned by an issue, comment, timeline, pull-request, "
+                        "tree, or grep listing. "
+                        "Keep the same repo, issue_number, and since when resuming an issue thread."
                     ),
                 },
                 "token_secret_key": {

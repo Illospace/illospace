@@ -270,3 +270,43 @@ async def test_issue_timeline_or_none_only_swallows_github_connector_errors():
                 _assigned_issue(),
                 token=None,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_limit", [1, 2, 1000, 1001])
+@pytest.mark.parametrize("raw_body", ["", " \n ", " a\n b\t", " a\n b\t" * 400])
+async def test_issue_body_metadata_matches_selected_representation(body_limit, raw_body):
+    issue = {"number": 42, "body": raw_body}
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=issue),
+    ):
+        payload = (await async_get_issue("acme/widgets", 42, body_limit=body_limit))["issue"]
+    selected = raw_body if body_limit > 1000 else " ".join(raw_body.split())
+    if body_limit < 3 or body_limit > 1000 or len(selected) <= body_limit:
+        expected_body = selected[:body_limit] or None
+    else:
+        expected_body = selected[:body_limit - 3].rstrip() + "..."
+    assert payload["body"] == expected_body
+    assert payload["body_total_chars"] == len(selected)
+    assert payload["body_truncated"] == (len(selected) > body_limit)
+    assert payload == _issue_payload(issue, body_limit=body_limit, source_repo="acme/widgets")
+    if body_limit <= 1000:
+        assert payload == _issue_payload(issue, body_limit=body_limit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_limit", [1000, 1001])
+async def test_issue_metadata_budget_remains_limited_to_expanded_reads(body_limit):
+    issue = {"number": 42, "body": "Evidence", "title": "x" * 18_000}
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=issue),
+    ):
+        if body_limit > 1000:
+            with pytest.raises(GitHubConnectorError) as raised:
+                await async_get_issue("acme/widgets", 42, body_limit=body_limit)
+            assert raised.value.status_code == 413
+        else:
+            payload = await async_get_issue("acme/widgets", 42, body_limit=body_limit)
+            assert payload["issue"]["body"] == "Evidence"

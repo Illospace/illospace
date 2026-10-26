@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from brain.contracts.github import parse_github_repo_slug
+from brain.contracts.github import GitHubConnectorError, parse_github_repo_slug
 from brain.systems.cortex.project_context.github import async_compare_commits
 
 
@@ -23,6 +23,7 @@ class AncestryObservation:
     status: str | None = None
     error_category: str | None = None
     status_code: int | None = None
+    rate_limit_error: GitHubConnectorError | None = None
 
     @property
     def failed(self) -> bool:
@@ -50,6 +51,7 @@ def ancestry_failure(
         is_ancestor=None,
         error_category=category,
         status_code=status_code,
+        rate_limit_error=exc if isinstance(exc, GitHubConnectorError) and exc.rate_limited else None,
     )
 
 

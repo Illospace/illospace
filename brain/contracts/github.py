@@ -1,7 +1,7 @@
 """Import-safe GitHub integration contracts shared across layers."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 
@@ -45,9 +45,26 @@ def github_issue_comment_ref(repo_slug: str, issue_number: int, comment_id: int)
 class GitHubConnectorError(Exception):
     status_code: int
     message: str
+    # Kept out of repr: sync payloads surface repr(error), and its shape is a contract.
+    rate_limited: bool = field(default=False, repr=False)
+    reset_at: str | None = field(default=None, repr=False)
+    retry_after_seconds: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         super().__init__(self.message)
+
+    def as_payload(self) -> dict[str, str | int | bool]:
+        payload: dict[str, str | int | bool] = {
+            "error": self.message,
+            "status_code": self.status_code,
+        }
+        if self.rate_limited:
+            payload["rate_limited"] = True
+            if self.reset_at is not None:
+                payload["reset_at"] = self.reset_at
+            if self.retry_after_seconds is not None:
+                payload["retry_after_seconds"] = self.retry_after_seconds
+        return payload
 
 
 def parse_github_repo_slug(value: str) -> str | None:

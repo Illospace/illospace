@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Generic, TypeVar
 
+from brain.contracts.github import GitHubConnectorError
 from brain.systems.deploy_state_github import (
     AncestryObservation,
     ancestry_failure,
@@ -40,6 +41,10 @@ class DeployStateObservation:
     def failures(self) -> tuple[AncestryObservation, ...]:
         return tuple(item for item in self.comparisons if item.failed)
 
+    @property
+    def rate_limit_error(self) -> GitHubConnectorError | None:
+        return next((item.rate_limit_error for item in self.comparisons if item.rate_limit_error), None)
+
     def failure_payloads(self) -> list[dict[str, str | int]]:
         payloads: list[dict[str, str | int]] = []
         for failure in self.failures:
@@ -51,6 +56,8 @@ class DeployStateObservation:
                 payload["status_code"] = failure.status_code
             if failure.status is not None:
                 payload["status"] = failure.status
+            if failure.rate_limit_error is not None:
+                payload.update(failure.rate_limit_error.as_payload())
             payloads.append(payload)
         return payloads
 
@@ -208,7 +215,7 @@ async def observe_deploy_state(
             in_main=main.is_ancestor,
             comparisons=tuple(comparisons),
         )
-        if last.state is not None:
+        if last.state is not None or last.rate_limit_error is not None:
             return last
     return last
 
