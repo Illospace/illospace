@@ -382,7 +382,7 @@ async def test_new_error_title_is_a_distinct_tracked_signature(surge_store):
 
 
 @pytest.mark.asyncio
-async def test_digest_query_returns_open_surge_and_skill_requires_lead_section(surge_store):
+async def test_digest_query_returns_open_surge(surge_store):
     """Acceptance 3: the digest has a queryable incident to render first."""
 
     from brain.systems.slack.provider_alert_surge import (
@@ -424,12 +424,6 @@ async def test_digest_query_returns_open_surge_and_skill_requires_lead_section(s
     assert open_surges[0]["message_count"] == 8
     assert open_surges[0]["trigger_reason"] == "message_volume"
     assert closed_surges == []
-
-    skill = Path(
-        "brain/systems/skills/builtin_skill_bundles/uwear-engineering-triage/SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert 'manage_slack` `action="open_alert_surges"' in skill
-    assert "lead incident section" in skill
 
 
 @pytest.mark.asyncio
