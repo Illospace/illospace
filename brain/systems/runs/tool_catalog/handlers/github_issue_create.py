@@ -12,9 +12,8 @@ CREATE_ISSUE_AUTH_STATUSES = frozenset({401, 403, 404})
 
 def _connector_failure(exc: GitHubConnectorError, repo: str, key_name: str | None) -> dict[str, Any]:
     return {
-        "error": exc.message,
-        "status_code": exc.status_code,
-        "no_write_token": exc.status_code in CREATE_ISSUE_AUTH_STATUSES,
+        **exc.as_payload(),
+        "no_write_token": not exc.rate_limited and exc.status_code in CREATE_ISSUE_AUTH_STATUSES,
         "repo": repo,
         "token_key_name": key_name,
     }

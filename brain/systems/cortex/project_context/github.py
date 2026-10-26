@@ -331,6 +331,8 @@ def _compact_body(value: Any, *, limit: int = 1000) -> str | None:
         return None
     if len(text) <= limit:
         return text
+    if limit < 3:
+        return text[:max(limit, 0)]
     return text[: max(limit - 3, 0)].rstrip() + "..."
 
 
@@ -416,10 +418,40 @@ def _issue_payload(
     *,
     body_limit: int = 1000,
     assignment_timeline: list[Any] | None = None,
+    source_repo: str | None = None,
 ) -> dict[str, Any]:
+    metadata = _issue_metadata(issue, assignment_timeline=assignment_timeline)
     raw_body = str(issue.get("body") or "")
-    compact_body = _compact_body(raw_body, limit=body_limit)
-    normalized_body_chars = len(" ".join(raw_body.split()))
+    # Only exact source reads opt into raw, budgeted bodies above the legacy cap.
+    expanded = source_repo is not None and body_limit > 1000
+    selected_body = raw_body if expanded else " ".join(raw_body.split())
+    if expanded:
+        budget = _source_variable_output_budget({
+            "repo": source_repo,
+            "issue": {
+                **metadata,
+                "body": None,
+                "body_total_chars": len(selected_body),
+                "body_truncated": True,
+            },
+        })
+        body, _ = _truncate_for_json_string_budget(selected_body[:body_limit], budget)
+    else:
+        body = _compact_body(selected_body, limit=body_limit)
+    payload = {
+        **metadata,
+        "body": body or None,
+        "body_total_chars": len(selected_body),
+        "body_truncated": len(selected_body) > len(body or ""),
+    }
+    if expanded:
+        _bounded_source_payload({"repo": source_repo, "issue": payload})
+    return payload
+
+
+def _issue_metadata(
+    issue: dict[str, Any], *, assignment_timeline: list[Any] | None = None,
+) -> dict[str, Any]:
     pull_request = issue.get("pull_request") if isinstance(issue.get("pull_request"), dict) else {}
     return {
         "type": "pull_request" if issue.get("pull_request") else "issue",
@@ -441,9 +473,6 @@ def _issue_payload(
         "created_at": issue.get("created_at"),
         "updated_at": issue.get("updated_at"),
         "closed_at": issue.get("closed_at"),
-        "body": compact_body,
-        "body_total_chars": normalized_body_chars,
-        "body_truncated": normalized_body_chars > len(compact_body or ""),
         "merged_at": pull_request.get("merged_at"),
     }
 
@@ -516,6 +545,32 @@ def _issue_comment_payload(comment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _issue_reference_payload(issue: dict[str, Any]) -> dict[str, Any]:
+    repository = issue.get("repository")
+    repository = repository if isinstance(repository, dict) else {}
+    repository_url = issue.get("repository_url")
+    repo = repository.get("full_name") or issue.get("repo")
+    if not repo and isinstance(repository_url, str) and "/repos/" in repository_url:
+        repo = repository_url.split("/repos/", 1)[1]
+    reference = {
+        "repo": repo,
+        "number": issue.get("number"),
+        "type": "pull_request" if (
+            isinstance(issue.get("pull_request"), dict) or issue.get("type") == "pull_request"
+        ) else "issue",
+        "state": issue.get("state"),
+        "html_url": issue.get("html_url"),
+    }
+    if "id" in issue:
+        reference["id"] = issue["id"]
+    for key, value in reference.items():
+        if isinstance(value, str):
+            reference[key] = value[:512]
+        elif not isinstance(value, int) or isinstance(value, bool):
+            reference[key] = None
+    return reference
+
+
 def _issue_timeline_event_payload(event: dict[str, Any]) -> dict[str, Any]:
     event_type = event.get("event")
     actor = event.get("actor") or {}
@@ -538,19 +593,10 @@ def _issue_timeline_event_payload(event: dict[str, Any]) -> dict[str, Any]:
     elif event_type == "cross-referenced":
         issue = (event.get("source") or {}).get("issue") or {}
         pull_request = issue.get("pull_request")
-        repository = issue.get("repository") or {}
-        repository_url = str(issue.get("repository_url") or "")
-        source = {
-            "type": "pull_request" if isinstance(pull_request, dict) else "issue",
-            "repo": repository.get("full_name") or (
-                repository_url.split("/repos/", 1)[1] if "/repos/" in repository_url else None
-            ),
-            "number": issue.get("number"),
-            "state": issue.get("state"),
-            "html_url": issue.get("html_url"),
-        }
+        source = _issue_reference_payload(issue)
         if isinstance(pull_request, dict):
-            source["merged_at"] = pull_request.get("merged_at")
+            merged_at = pull_request.get("merged_at")
+            source["merged_at"] = merged_at[:64] if isinstance(merged_at, str) else None
         payload["source"] = source
     elif event_type == "referenced":
         payload.update({key: event.get(key) for key in ("commit_id", "commit_url")})
@@ -559,12 +605,24 @@ def _issue_timeline_event_payload(event: dict[str, Any]) -> dict[str, Any]:
         payload["authorship"] = _comment_authorship(str(event.get("body") or ""))
     elif event_type in {"marked_as_duplicate", "unmarked_as_duplicate", "connected", "disconnected"}:
         # REST does not always include the linked issue. Keep identifiers when supplied.
-        payload.update({
-            key: value
-            for key, value in event.items()
-            if key.endswith(("_id", "_url"))
-            or key in {"url", "source", "subject", "canonical", "duplicate", "duplicate_of", "issue"}
-        })
+        for key in (
+            "node_id", "url", "commit_id", "commit_url", "issue_id", "issue_url",
+            "subject_id", "subject_url", "canonical_id", "canonical_url",
+            "duplicate_id", "duplicate_url", "duplicate_of_id", "duplicate_of_url",
+            "source_id", "source_url",
+        ):
+            value = event.get(key)
+            if isinstance(value, str):
+                payload[key] = value[:512]
+            elif isinstance(value, int) and not isinstance(value, bool):
+                payload[key] = value
+        for key in ("source", "subject", "canonical", "duplicate", "duplicate_of", "issue"):
+            reference = event.get(key)
+            if isinstance(reference, dict):
+                nested_issue = reference.get("issue")
+                payload[key] = _issue_reference_payload(
+                    nested_issue if isinstance(nested_issue, dict) else reference
+                )
     return payload
 
 
@@ -1746,23 +1804,9 @@ async def async_get_issue(
             )
     body_limit = max(1, min(int(body_limit), 20_000))
     payload = _issue_payload(
-        issue_data, body_limit=body_limit, assignment_timeline=assignment_timeline
+        issue_data, body_limit=body_limit, assignment_timeline=assignment_timeline,
+        source_repo=slug,
     )
-    if body_limit < 3:
-        body = " ".join(str(issue_data.get("body") or "").split())
-        payload["body"] = body[:body_limit] or None
-        payload["body_truncated"] = len(body) > body_limit
-    if body_limit > 1000:
-        raw_body = str(issue_data.get("body") or "")
-        payload["body"] = None
-        payload["body_total_chars"] = len(raw_body)
-        payload["body_truncated"] = True
-        body, _ = _truncate_for_json_string_budget(
-            raw_body[:body_limit], _source_variable_output_budget({"repo": slug, "issue": payload})
-        )
-        payload["body"] = body or None
-        payload["body_truncated"] = len(body) < len(raw_body)
-        return _bounded_source_payload({"repo": slug, "issue": payload})
     return {"repo": slug, "issue": payload}
 
 
@@ -2636,8 +2680,7 @@ def _issue_update_field_result(
     if failed is not None:
         result["failed"] = failed
     if error is not None:
-        result["status_code"] = error.status_code
-        result["error"] = error.message
+        result.update(error.as_payload())
     return result
 
 
@@ -2788,7 +2831,10 @@ async def async_update_repo_issue(
                 else:
                     removed.append(label)
             if removal_errors:
-                first_error = removal_errors[0][1]
+                first_error = next(
+                    (error for _, error in removal_errors if error.rate_limited),
+                    removal_errors[0][1],
+                )
                 failed_labels = [label for label, _error in removal_errors]
                 field_result = _issue_update_field_result(
                     status="partial" if removed else "failed",
@@ -2801,8 +2847,7 @@ async def async_update_repo_issue(
                     field_result["errors"] = [
                         {
                             "label": label,
-                            "status_code": error.status_code,
-                            "error": error.message,
+                            **error.as_payload(),
                         }
                         for label, error in removal_errors
                     ]

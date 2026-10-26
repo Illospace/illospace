@@ -1912,10 +1912,10 @@ async def test_issue_thread_output_budget_resumes_at_first_dropped_item(action, 
         {"user": {"login": "writer", "id": None, "html_url": None}, "authorship": "automation"}),
     ("commented", {"body": "Reviewed", "user": {"login": "writer"}},
         {"user": {"login": "writer", "id": None, "html_url": None}, "authorship": "unknown"}),
-    ("marked_as_duplicate", {"canonical": {"number": 50}, "commit_id": "abc"}, {"canonical": {"number": 50}, "commit_id": "abc"}),
-    ("unmarked_as_duplicate", {"duplicate_of": {"number": 50}}, {"duplicate_of": {"number": 50}}),
-    ("connected", {"subject": {"number": 51}, "commit_url": "commit-url"}, {"subject": {"number": 51}, "commit_url": "commit-url"}),
-    ("disconnected", {"source": {"number": 51}, "node_id": "node"}, {"source": {"number": 51}, "node_id": "node"}),
+    ("marked_as_duplicate", {"canonical": {"number": 50}, "commit_id": "abc"}, {"canonical": {"repo": None, "number": 50, "type": "issue", "state": None, "html_url": None}, "commit_id": "abc"}),
+    ("unmarked_as_duplicate", {"duplicate_of": {"number": 50}}, {"duplicate_of": {"repo": None, "number": 50, "type": "issue", "state": None, "html_url": None}}),
+    ("connected", {"subject": {"number": 51}, "commit_url": "commit-url"}, {"subject": {"repo": None, "number": 51, "type": "issue", "state": None, "html_url": None}, "commit_url": "commit-url"}),
+    ("disconnected", {"source": {"number": 51}, "node_id": "node"}, {"source": {"repo": None, "number": 51, "type": "issue", "state": None, "html_url": None}, "node_id": "node"}),
     ("future_event", {"body": "Do not copy", "extra": "ignored"}, {}),
 ])
 async def test_issue_timeline_compacts_event_fields(event_type, details, expected):
@@ -1995,7 +1995,7 @@ async def test_issue_thread_cursor_is_bound_to_issue_action_and_since():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body_limit", [None, 1000, 1100, 4000])
+@pytest.mark.parametrize("body_limit", [None, 1000, 1001, 1100, 4000])
 async def test_get_issue_body_limit_keeps_default_compaction_and_preserves_expanded_lines(body_limit):
     raw_body = "Header\n\n```python\n    raise ValueError('evidence')\n```\n" * 30
     with patch(
@@ -2117,3 +2117,79 @@ async def test_get_issue_body_limit_smaller_than_ellipsis_is_still_bounded(body_
     assert payload["body"] == "a b"[:body_limit]
     assert payload["body_total_chars"] == 3
     assert payload["body_truncated"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["list_issue_comments", "issue_timeline"])
+@pytest.mark.parametrize("candidate_count", [1, 2])
+async def test_missing_issue_thread_does_not_reject_repo_token(action, candidate_count):
+    candidates = [
+        {"token": f"token-{i}", "source": f"source-{i}", "key_name": None}
+        for i in range(candidate_count)
+    ]
+    reader = AsyncMock(side_effect=[
+        *[GitHubConnectorError(404, "Issue not found") for _ in candidates],
+        {"repo": {"full_name": "acme/widgets"}},
+    ])
+    with bind_agent_context({"user_id": "u", "org_id": "o"}), patch(
+        "brain.systems.runs.tool_catalog.handlers.github._github_token_candidates",
+        new=AsyncMock(return_value=candidates),
+    ), patch("brain.systems.runs.tool_catalog.handlers.github._read_with_token", reader):
+        missing = json.loads(await _handle_read_github_source(
+            action=action, repo="acme/widgets", issue_number=999,
+        ))
+        valid = json.loads(await _handle_read_github_source(action="get_repo", repo="acme/widgets"))
+
+    assert missing["status_code"] == 404
+    assert valid["repo"]["full_name"] == "acme/widgets"
+    assert [call.kwargs["token"] for call in reader.await_args_list] == [
+        *[candidate["token"] for candidate in candidates], "token-0",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", [
+    "marked_as_duplicate", "unmarked_as_duplicate", "connected", "disconnected",
+])
+async def test_linked_timeline_references_drop_nested_bodies_and_page_advances(event_type):
+    reference = {
+        "repository": {"full_name": "other/repo", "body": "hidden" * 3000},
+        "number": 51, "id": 123, "state": "open",
+        "html_url": "https://github.com/other/repo/pull/51",
+        "pull_request": {"body": "hidden" * 3000},
+        "body": "hidden" * 3000, "unrelated": {"body": "hidden" * 3000},
+    }
+    expected = {
+        "repo": "other/repo", "number": 51, "id": 123, "state": "open",
+        "html_url": reference["html_url"], "type": "pull_request",
+    }
+    keys = ("subject", "canonical", "duplicate", "duplicate_of", "issue")
+    event = {
+        "id": 1, "event": event_type, "commit_id": "abc", "subject_id": 123,
+        "unknown_id": "hidden", "unknown_url": "hidden",
+        "source_url": {"body": "hidden" * 3000},
+        "source": {"issue": reference, "body": "hidden" * 3000},
+        **{key: reference for key in keys},
+    }
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=[event, {"id": 2, "event": "closed"}]),
+    ):
+        first = json.loads(await _handle_read_github_source(
+            action="issue_timeline", repo="acme/widgets", issue_number=42, limit=1,
+        ))
+        second = json.loads(await _handle_read_github_source(
+            action="issue_timeline", repo="acme/widgets", issue_number=42, limit=1,
+            cursor=first["next_page"],
+        ))
+
+    projected = first["events"][0]
+    for key in (*keys, "source"):
+        assert projected[key] == expected
+    assert projected["commit_id"] == "abc"
+    assert projected["subject_id"] == 123
+    assert "hidden" not in json.dumps(first)
+    assert "source_url" not in projected
+    assert len(json.dumps(first)) < 12_000
+    assert second["events"][0]["id"] == 2
+    assert second["next_page"] is None
