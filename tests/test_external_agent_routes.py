@@ -1,18 +1,32 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.main import app
+from brain.app.api.routers import agent_mcp
+from brain.platform.db.models.cycle import (
+    Cycle,
+    CycleBehaviorChangeAudit,
+    CycleGuidance,
+    CycleOutputTarget,
+    CycleRevision,
+)
+from brain.platform.db.models.org import User
+from brain.platform.db.models.skill import Skill
+from brain.platform.db.models.skill_bundle import SkillInstallation
 from brain.systems.external_agents import service as external_agents
 
 
@@ -1107,6 +1121,165 @@ async def test_hosted_mcp_cycle_manage_create_commits_and_publishes_change():
     assert payload["cycle"]["id"] == 12
     assert order == ["commit", "publish:create:12"]
     create_cycle.assert_awaited_once()
+
+
+@pytest.fixture
+async def cycle_skill_workspace(
+    async_sqlite_session_factory, sqlite_postgres_ddl_patch, monkeypatch,
+):
+    session = await async_sqlite_session_factory([
+        User.__table__,
+        Skill.__table__,
+        SkillInstallation.__table__,
+        Cycle.__table__,
+        CycleRevision.__table__,
+        CycleGuidance.__table__,
+        CycleOutputTarget.__table__,
+        CycleBehaviorChangeAudit.__table__,
+    ])
+    principal = replace(_principal(), org_id=str(uuid4()), owner_user_id=str(uuid4()))
+    for skill_id in range(1, 6):
+        session.add(Skill(
+            id=skill_id,
+            name=f"routine-{skill_id}",
+            procedure="Review open tickets and report progress.",
+            bundle_version_id=skill_id,
+            archived=skill_id == 4,
+        ))
+        session.add(SkillInstallation(
+            bundle_id=skill_id,
+            bundle_version_id=skill_id,
+            skill_id=skill_id,
+            org_id=str(uuid4()) if skill_id == 5 else principal.org_id,
+            user_id=str(uuid4()) if skill_id == 3 else principal.owner_user_id,
+            installed_digest=f"sha256:{skill_id}",
+        ))
+    await session.commit()
+    monkeypatch.setattr(
+        "brain.systems.cycles.behavior_policy.publish_cycle_change_strict", MagicMock(),
+    )
+    monkeypatch.setattr(agent_mcp, "publish_cycle_change_safe", MagicMock())
+    return session, principal
+
+
+async def test_cycle_manage_catalog_documents_skill_ids():
+    payload = await agent_mcp._tool_act(_AsyncSession(), _principal(), {"capability": "capabilities"})
+    capability = next(item for item in payload["capabilities"] if item["name"] == "cycle.manage")
+    assert capability["arguments"]["skill_ids"] == "integer[]"
+
+
+@pytest.mark.parametrize("skill_arguments", [{"skill_ids": [1, 2]}, {}, {"skill_ids": []}])
+async def test_hosted_mcp_cycle_manage_skill_only_create(cycle_skill_workspace, skill_arguments):
+    session, principal = cycle_skill_workspace
+    with patch.object(agent_mcp.external_agents, "authenticate_bridge_token", return_value=principal):
+        response = await _request(
+            "POST", "/api/mcp", session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0", "id": 14, "method": "tools/call",
+                "params": {
+                    "name": "illo_act",
+                    "arguments": {
+                        "capability": "cycle.manage",
+                        "arguments": {
+                            "action": "create", "name": "Ticket follow-up",
+                            "schedule_expr": "0 9 * * *", **skill_arguments,
+                        },
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    if not skill_arguments.get("skill_ids"):
+        assert result["isError"] is True
+        assert result["content"][0]["text"] == "prompt is required when skill_ids is empty"
+        assert await session.scalar(select(func.count()).select_from(Cycle)) == 0
+        return
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["cycle"]["skill_ids"] == [1, 2]
+    session.expunge_all()
+    cycle = await session.get(Cycle, payload["cycle"]["id"])
+    assert cycle.skill_ids == [1, 2]
+    assert cycle.prompt == ""
+    for arguments in ({"cycle_id": cycle.id}, {}):
+        inspected = await agent_mcp._read_cycles_inspect(session, principal, arguments)
+        serialized = inspected["cycle"] if arguments else inspected["cycles"][0]
+        assert serialized["skill_ids"] == [1, 2]
+
+
+@pytest.mark.parametrize("clear_value", [[], None])
+async def test_cycle_manage_update_keeps_replaces_and_clears_skills(cycle_skill_workspace, clear_value):
+    session, principal = cycle_skill_workspace
+    created = await agent_mcp._act_manage_cycle(session, principal, {
+        "action": "create", "name": "Ticket follow-up", "prompt": "Review tickets.",
+        "schedule_expr": "0 9 * * *", "skill_ids": [1],
+    })
+    cycle_id = created["cycle"]["id"]
+    for arguments, expected in (
+        ({"name": "Renamed follow-up"}, [1]),
+        ({"skill_ids": [2]}, [2]),
+        ({"skill_ids": clear_value}, []),
+    ):
+        payload = await agent_mcp._act_manage_cycle(session, principal, {
+            "action": "update", "cycle_id": cycle_id, **arguments,
+        })
+        assert payload["cycle"]["skill_ids"] == expected
+        await session.commit()
+        session.expunge_all()
+        assert (await session.get(Cycle, cycle_id)).skill_ids == expected
+
+
+async def test_cycle_manage_cannot_clear_skills_without_prompt(cycle_skill_workspace):
+    session, principal = cycle_skill_workspace
+    created = await agent_mcp._act_manage_cycle(session, principal, {
+        "action": "create", "name": "Ticket follow-up",
+        "schedule_expr": "0 9 * * *", "skill_ids": [1],
+    })
+    cycle_id = created["cycle"]["id"]
+    await session.commit()
+    with pytest.raises(ValueError, match="prompt is required when skill_ids is empty"):
+        await agent_mcp._act_manage_cycle(session, principal, {
+            "action": "update", "cycle_id": cycle_id, "skill_ids": [],
+        })
+    await session.commit()
+    session.expunge_all()
+    assert (await session.get(Cycle, cycle_id)).skill_ids == [1]
+    assert await session.scalar(select(func.count()).select_from(CycleRevision)) == 1
+    assert await session.scalar(select(func.count()).select_from(CycleBehaviorChangeAudit)) == 0
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("invalid_ids", [[3], [4], [5], [999], [3, 4, 5, 999]])
+async def test_cycle_manage_rejects_unavailable_skills_without_writes(
+    cycle_skill_workspace, action, invalid_ids,
+):
+    session, principal = cycle_skill_workspace
+    arguments = {
+        "action": action, "name": "Ticket follow-up", "prompt": "Review tickets.",
+        "schedule_expr": "0 9 * * *", "skill_ids": [1, *invalid_ids],
+    }
+    if action == "update":
+        created = await agent_mcp._act_manage_cycle(session, principal, {
+            **arguments, "action": "create", "skill_ids": [2],
+        })
+        arguments["cycle_id"] = created["cycle"]["id"]
+        arguments["name"] = "Must not be written"
+    await session.commit()
+    with pytest.raises(ValueError) as error:
+        await agent_mcp._act_manage_cycle(session, principal, arguments)
+    assert str(error.value) == f"cycle.manage skill_ids are not visible or are archived: {invalid_ids}"
+    await session.commit()
+    session.expunge_all()
+    expected_count = 1 if action == "update" else 0
+    for model in (Cycle, CycleRevision, CycleOutputTarget):
+        assert await session.scalar(select(func.count()).select_from(model)) == expected_count
+    assert await session.scalar(select(func.count()).select_from(CycleBehaviorChangeAudit)) == 0
+    if action == "update":
+        cycle = await session.get(Cycle, arguments["cycle_id"])
+        assert cycle.skill_ids == [2]
+        assert cycle.name == "Ticket follow-up"
 
 
 async def test_hosted_mcp_cycle_manage_run_propagates_external_trigger_provenance():

@@ -26,6 +26,19 @@ Cycles are database-backed recurring jobs owned by the Illo scheduler.
 
 ## Operational Notes
 
+- External agents can attach skills through `illo_act` with capability
+  `cycle.manage` and `skill_ids` (`integer[]`, unique positive IDs). Create
+  requires a non-empty prompt or at least one skill. On update, omitting
+  `skill_ids` keeps the current IDs, a list replaces them, and `[]` clears them.
+  Clearing is rejected if the Cycle would have neither a prompt nor skills.
+  The existing command contract also treats `null` as an empty list.
+- For external create/update requests, each supplied skill must be visible to
+  the principal's org and user and must not be archived. Invalid IDs are named
+  in the error before any Cycle write. REST and internal `manage_cycle`
+  behavior is unchanged.
+- Mutation responses and `cycles.inspect` include `skill_ids` through the
+  shared Cycle serializer.
+
 - Run one scheduler daemon per deployment.
 - Keep scheduler configuration in exported environment variables or an external
   environment file such as `~/.config/illo-brain/production.env`.

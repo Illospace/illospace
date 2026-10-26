@@ -28,6 +28,7 @@ from brain.app.mentions import classify_mention_intent
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
+from brain.platform.db.repositories.skills import SkillRepository
 from brain.systems.cortex.thread_links import thread_id_from_reference
 from brain.systems.cortex.project_context.search import search_project_contexts
 from brain.systems.cycles.access import CycleActor, cycle_scope_conditions, target_idea_scope_conditions
@@ -54,6 +55,7 @@ from brain.systems.cycles.serializers import (
     serialize_cycle_run,
 )
 from brain.systems.cycles.service import async_run_cycle_now
+from brain.systems.cycles.skill_refs import validate_cycle_skill_ids
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound.errors import SubmissionSizeError
@@ -705,12 +707,13 @@ ACT_CAPABILITIES: dict[str, dict[str, Any]] = {
         },
     },
     "cycle.manage": {
-        "description": "Create, update, delete, run, or adjust reusable Illo Cycles as the user's external-agent delegate.",
+        "description": "Create, update, delete, run, or adjust reusable Illo Cycles as the user's external-agent delegate. Skills must be visible and not archived. A prompt is required when skill_ids is empty. On update, omit skill_ids to keep them, supply a list to replace them, or [] to clear them.",
         "arguments": {
             "action": "create | update | delete | run | add_guidance | add_output_target | remove_output_target",
             "cycle_id": "integer",
             "name": "string",
             "prompt": "string",
+            "skill_ids": "integer[]",
             "schedule_expr": "string",
             "run_at": "string",
             "timezone": "string",
@@ -807,6 +810,27 @@ async def _validate_cycle_target_idea(
     stmt = select(Idea.id).where(*target_idea_scope_conditions(idea_id, _cycle_actor(principal)))
     if (await db.execute(stmt)).first() is None:
         raise ValueError("target_idea_id must belong to the current workspace")
+
+
+async def _validate_cycle_skills(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    value: object,
+) -> list[int]:
+    skill_ids = validate_cycle_skill_ids(value)
+    repository = SkillRepository(db)
+    invalid_ids = []
+    for skill_id in skill_ids:
+        skill = await repository.a_get_visible(
+            org_id=str(principal.org_id or ""),
+            user_id=principal.owner_user_id,
+            skill_id=skill_id,
+        )
+        if skill is None or skill.archived:
+            invalid_ids.append(skill_id)
+    if invalid_ids:
+        raise ValueError(f"cycle.manage skill_ids are not visible or are archived: {invalid_ids}")
+    return skill_ids
 
 
 def _serialize_run_event(
@@ -1177,11 +1201,13 @@ async def _act_manage_cycle(
     if action == "create":
         target_idea_id = _clean_optional_string(arguments.get("target_idea_id"))
         await _validate_cycle_target_idea(db, principal, target_idea_id)
+        skill_ids = await _validate_cycle_skills(db, principal, arguments.get("skill_ids"))
         cycle = await command_create_cycle(
             db,
             actor=actor,
             name=_required_capability_string(arguments, "name", capability="cycle.manage"),
-            prompt=_required_capability_string(arguments, "prompt", capability="cycle.manage"),
+            prompt=_clean_optional_string(arguments.get("prompt")),
+            skill_ids=skill_ids,
             timezone_name=_clean_optional_string(arguments.get("timezone")) or "UTC",
             schedule_expr=_clean_optional_string(arguments.get("schedule_expr")),
             run_at=arguments.get("run_at"),
@@ -1214,6 +1240,9 @@ async def _act_manage_cycle(
         )
         if execution_policy_key is not UNSET_CYCLE_FIELD:
             execution_policy_key = _clean_optional_string(execution_policy_key)
+        skill_ids = arguments.get("skill_ids", UNSET_CYCLE_FIELD)
+        if skill_ids is not UNSET_CYCLE_FIELD:
+            skill_ids = await _validate_cycle_skills(db, principal, skill_ids)
         cycle = await command_update_cycle(
             db,
             cycle,
@@ -1227,6 +1256,7 @@ async def _act_manage_cycle(
             model_override=arguments.get("model_override", UNSET_CYCLE_FIELD),
             thinking_override=arguments.get("thinking_override", UNSET_CYCLE_FIELD),
             execution_policy_key=execution_policy_key,
+            skill_ids=skill_ids,
             target_idea_id=target_idea_id,
             guidance=_clean_optional_string(arguments.get("guidance")),
             rationale=rationale,
