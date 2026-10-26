@@ -402,6 +402,8 @@ async def _read_with_token(
             include_pull_requests=bool(include_pull_requests),
             limit=_limit(limit),
             cursor=cursor,
+            body_limit=body_limit,
+            output_budget=True,
         )
     if action in {"get_issue", "issue"}:
         return await async_get_issue(
@@ -559,10 +561,11 @@ async def _handle_read_github_source(
     else:
         clean_issue_number = None
     clean_body_limit = 1000
-    if clean_action in {"get_issue", "issue"}:
+    if clean_action in {"get_issue", "issue", "list_issues", "issues"}:
         clean_body_limit = _positive_int(body_limit)
         if clean_body_limit is None:
-            return json.dumps({"error": "get_issue body_limit must be a positive integer"})
+            action_name = "get_issue" if clean_action in {"get_issue", "issue"} else "list_issues"
+            return json.dumps({"error": f"{action_name} body_limit must be a positive integer"})
         clean_body_limit = min(clean_body_limit, 20_000)
     if clean_action in {"pull_request", "get_pull_request", "pr"}:
         try:

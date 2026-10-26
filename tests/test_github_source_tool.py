@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from brain.kernel.common.pagination import decode_page_token
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
     _issue_payload,
@@ -71,6 +72,145 @@ async def test_read_github_source_handler_lists_issues_with_canonical_repo_and_b
     assert list_issues.await_args.kwargs["assignee"] == "redawear"
     assert list_issues.await_args.kwargs["limit"] == 100
     assert list_issues.await_args.kwargs["token"] is None
+    assert list_issues.await_args.kwargs["body_limit"] == 1000
+    assert list_issues.await_args.kwargs["output_budget"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["list_issues", "issues"])
+@pytest.mark.parametrize("body_limit,expected", [(1, 1), (50, 50), (30_000, 20_000)])
+async def test_list_issues_handler_passes_and_clamps_body_limit(action, body_limit, expected):
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_repo_issues",
+        new=AsyncMock(return_value={"issues": []}),
+    ) as list_issues:
+        await _handle_read_github_source(action=action, repo="acme/widgets", body_limit=body_limit)
+
+    assert list_issues.await_args.kwargs["body_limit"] == expected
+    assert list_issues.await_args.kwargs["output_budget"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["list_issues", "issues"])
+@pytest.mark.parametrize("body_limit", [0, -1, True, "invalid", None])
+async def test_list_issues_handler_rejects_invalid_body_limit(action, body_limit):
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.github.async_list_repo_issues",
+        new=AsyncMock(),
+    ) as list_issues:
+        result = await _handle_read_github_source(action=action, repo="acme/widgets", body_limit=body_limit)
+
+    assert json.loads(result) == {"error": "list_issues body_limit must be a positive integer"}
+    list_issues.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_limit", [1, 50, 1001])
+async def test_list_issues_compacts_and_bounds_bodies(body_limit):
+    raw_bodies = ["\n  a b\t" * 1000, "\n z  ", "\n \t"]
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=[{"id": index, "body": body} for index, body in enumerate(raw_bodies)]),
+    ):
+        payload = json.loads(await _handle_read_github_source(
+            action="list_issues", repo="acme/widgets", body_limit=body_limit,
+        ))
+
+    for issue, raw_body in zip(payload["issues"], raw_bodies, strict=True):
+        normalized = " ".join(raw_body.split())
+        expected = normalized
+        if len(normalized) > body_limit:
+            expected = normalized[:body_limit] if body_limit < 3 else normalized[:body_limit - 3].rstrip() + "..."
+        assert issue["body"] == (expected or None)
+        assert len(issue["body"] or "") <= body_limit
+        assert issue["body_total_chars"] == len(normalized)
+        assert issue["body_truncated"] == (len(normalized) > body_limit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_pull_requests", [False, True])
+async def test_list_issues_output_budget_crosses_github_page_boundary(include_pull_requests):
+    items = [{"id": index, "body": "body " * 400} for index in range(103)]
+    for item in items[::2]:
+        item["pull_request"] = {"url": "https://api.github.com/repos/acme/widgets/pulls/1"}
+
+    async def fake_request(client, method, path, *, token=None, params=None):
+        return {1: items[:100], 2: items[100:]}[params["page"]]
+
+    seen = []
+    positions = []
+    cursor = None
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(side_effect=fake_request),
+    ) as request:
+        for _ in range(len(items)):
+            result = await _handle_read_github_source(
+                action="list_issues", repo="acme/widgets", body_limit=20_000, limit=100,
+                cursor=cursor, include_pull_requests=include_pull_requests,
+            )
+            assert len(result) < 18_000
+            payload = json.loads(result)
+            assert 0 < len(payload["issues"]) < 100
+            if not include_pull_requests:
+                assert all(item["type"] == "issue" for item in payload["issues"])
+            seen.extend(item["id"] for item in payload["issues"])
+            cursor = payload["next_page"]
+            if cursor is None:
+                break
+            position = decode_page_token(cursor, kind="github_issues:acme/widgets")
+            positions.append(position)
+            if position["page"] == 1:
+                assert position["index"] == len(seen)
+        else:
+            pytest.fail("Issue pages did not cross the GitHub page boundary")
+
+    assert seen == [item["id"] for item in items if include_pull_requests or "pull_request" not in item]
+    assert any(position["page"] == 1 and position["index"] > 0 for position in positions)
+    assert {"page": 2, "index": 0} in positions
+    assert request.await_args.kwargs["params"]["page"] == 2
+    assert payload["truncated"] is False
+    assert payload["evidence_health"]["completeness"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_list_issues_output_budget_returns_error_when_one_item_cannot_fit():
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=[{"id": 1, "body": "x" * 20_000}]),
+    ) as request:
+        result = await _handle_read_github_source(
+            action="list_issues", repo="acme/widgets", body_limit=20_000, limit=100,
+        )
+
+    assert len(result) < 18_000
+    assert json.loads(result) == {
+        "error": "A GitHub issue cannot fit within the tool output budget. Lower body_limit.",
+        "status_code": 413,
+        "attempted_token_sources": ["public"],
+    }
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_pull_requests", [False, True])
+async def test_list_issues_default_path_preserves_large_pages_and_bodies(include_pull_requests):
+    raw_body = "body " * 15_000
+    items = [{"id": index, "body": raw_body} for index in range(100)]
+    with patch(
+        "brain.systems.cortex.project_context.github._async_request",
+        new=AsyncMock(return_value=items),
+    ):
+        payload = await async_list_repo_issues(
+            "acme/widgets", limit=100, body_limit=65536, include_pull_requests=include_pull_requests,
+        )
+
+    assert len(json.dumps(payload)) > 18_000
+    assert len(payload["issues"]) == 100
+    assert payload["issues"] == [_issue_payload(item, body_limit=65536) for item in items]
+    assert len(payload["issues"][0]["body"]) > 65_000
+    assert set(payload) == {"repo", "state", "issues", "included_pull_requests", "truncated", "next_page", "evidence_health"}
+    assert decode_page_token(payload["next_page"], kind="github_issues:acme/widgets") == {"page": 2, "index": 0}
 
 
 @pytest.mark.asyncio
@@ -1863,8 +2003,12 @@ async def test_issue_thread_paging_is_bounded_and_resumes_on_next_github_page(ac
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action,item_key", [("list_issue_comments", "comments"), ("issue_timeline", "events")])
-async def test_issue_thread_output_budget_resumes_at_first_dropped_item(action, item_key):
+@pytest.mark.parametrize("action,item_key,extra_args", [
+    ("list_issue_comments", "comments", {"issue_number": 42}),
+    ("issue_timeline", "events", {"issue_number": 42}),
+    ("list_issues", "issues", {"body_limit": 20_000}),
+])
+async def test_issue_thread_output_budget_resumes_at_first_dropped_item(action, item_key, extra_args):
     items = [
         {"id": index, "body": "\\\n" * 3000, "event": "renamed", "rename": {"from": "x" * 3000, "to": "y" * 3000}}
         for index in range(7)
@@ -1877,7 +2021,7 @@ async def test_issue_thread_output_budget_resumes_at_first_dropped_item(action, 
     ) as request:
         for call_number in range(len(items)):
             result = await _handle_read_github_source(
-                action=action, repo="acme/widgets", issue_number=42, limit=100, cursor=cursor,
+                action=action, repo="acme/widgets", limit=100, cursor=cursor, **extra_args,
             )
             assert len(result) < 18_000
             payload = json.loads(result)
@@ -1893,6 +2037,7 @@ async def test_issue_thread_output_budget_resumes_at_first_dropped_item(action, 
 
     assert seen == list(range(7))
     assert request.await_count == call_number + 1
+    assert request.await_count > 1
     assert payload["truncated"] is False
     assert payload["evidence_health"]["completeness"] == "complete"
 

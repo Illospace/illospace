@@ -95,8 +95,10 @@ GITHUB_TOOLS = [
                     "maximum": 20_000,
                     "default": 1000,
                     "description": (
-                        "Maximum body characters for get_issue, subject to the tool output budget. "
-                        "The default compacts whitespace; values above 1000 preserve line breaks. "
+                        "Maximum body characters for get_issue and list_issues, subject to the tool output budget. "
+                        "get_issue compacts whitespace by default; values above 1000 preserve line breaks. "
+                        "list_issues always compacts whitespace to body_limit characters; use a small value "
+                        "such as 1 for metadata-only rows. "
                         "Check body_total_chars and body_truncated for completeness."
                     ),
                 },
@@ -151,7 +153,11 @@ GITHUB_TOOLS = [
                     "minimum": 1,
                     "maximum": 100,
                     "default": 30,
-                    "description": "Maximum items to return, 1-100; grep applies a stricter cap of 50 matches.",
+                    "description": (
+                        "Maximum items to return, 1-100; grep applies a stricter cap of 50 matches. "
+                        "list_issues pages end at the tool output budget and can contain fewer than limit rows; "
+                        "continue with next_page as cursor."
+                    ),
                 },
                 "cursor": {
                     "type": "string",

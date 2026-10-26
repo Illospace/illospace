@@ -273,6 +273,70 @@ def _bounded_source_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _source_page_position(
+    *, page: int, next_index: int, item_count: int, full_page: bool,
+) -> dict[str, int] | None:
+    """Resume at the next item or the next full GitHub page."""
+
+    if next_index < item_count:
+        return {"page": page, "index": next_index}
+    if full_page:
+        return {"page": page + 1, "index": 0}
+    return None
+
+
+def _source_page_payload(
+    base: dict[str, Any],
+    item_key: str,
+    items: list[dict[str, Any]],
+    *,
+    page_kind: str,
+    next_position: dict[str, int] | None,
+) -> dict[str, Any]:
+    """Build a source page with its continuation and evidence health."""
+
+    return {
+        **base,
+        item_key: items,
+        "truncated": next_position is not None,
+        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
+        "evidence_health": {"status": "ok", "completeness": "more_available" if next_position else "complete"},
+    }
+
+
+def _bounded_source_page(
+    base: dict[str, Any],
+    item_key: str,
+    candidates: list[dict[str, Any]],
+    *,
+    page_kind: str,
+    page: int,
+    page_index: int,
+    item_count: int,
+    full_page: bool,
+    overflow_message: str,
+) -> dict[str, Any]:
+    """Fit compact candidates and resume at the first item not returned."""
+
+    worst_case = _source_page_payload(
+        base, item_key, [], page_kind=page_kind,
+        next_position={"page": page + 1, "index": GITHUB_ITEM_LIMIT - 1},
+    )
+    selected = _bounded_json_items(
+        candidates,
+        limit=len(candidates),
+        budget_chars=_source_variable_output_budget(worst_case),
+    )
+    if not selected and page_index < item_count:
+        raise GitHubConnectorError(status_code=413, message=overflow_message)
+    next_position = _source_page_position(
+        page=page, next_index=page_index + len(selected), item_count=item_count, full_page=full_page,
+    )
+    return _bounded_source_payload(
+        _source_page_payload(base, item_key, selected, page_kind=page_kind, next_position=next_position)
+    )
+
+
 def _request(client: httpx.Client, method: str, path: str, *, token: str | None = None, params: dict[str, Any] | None = None) -> Any:
     try:
         response = client.request(method, f"{GITHUB_API_BASE}{path}", headers=_headers(token), params=params)
@@ -661,41 +725,17 @@ async def _async_issue_thread_page(
     items = data if isinstance(data, list) else []
     item_key = "comments" if resource == "comments" else "events"
     compact = _issue_comment_payload if resource == "comments" else _issue_timeline_event_payload
-    output_probe = {
-        "repo": slug,
-        "issue_number": issue_number,
-        item_key: [],
-        "truncated": True,
-        "next_page": encode_page_token(page_kind, {"page": page + 1, "index": GITHUB_ITEM_LIMIT - 1}),
-        "evidence_health": {"status": "ok", "completeness": "more_available"},
-    }
-    selected = _bounded_json_items(
+    return _bounded_source_page(
+        {"repo": slug, "issue_number": issue_number},
+        item_key,
         [compact(item) for item in items[page_index : page_index + max_items]],
-        limit=max_items,
-        budget_chars=_source_variable_output_budget(output_probe),
+        page_kind=page_kind,
+        page=page,
+        page_index=page_index,
+        item_count=len(items),
+        full_page=len(items) == GITHUB_ITEM_LIMIT,
+        overflow_message="A GitHub issue thread item cannot fit within the tool output budget.",
     )
-    if not selected and page_index < len(items):
-        raise GitHubConnectorError(
-            status_code=413,
-            message="A GitHub issue thread item cannot fit within the tool output budget.",
-        )
-    next_index = page_index + len(selected)
-    next_position = None
-    if next_index < len(items):
-        next_position = {"page": page, "index": next_index}
-    elif len(items) == GITHUB_ITEM_LIMIT:
-        next_position = {"page": page + 1, "index": 0}
-    return _bounded_source_payload({
-        "repo": slug,
-        "issue_number": issue_number,
-        item_key: selected,
-        "truncated": next_position is not None,
-        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
-        "evidence_health": {
-            "status": "ok",
-            "completeness": "more_available" if next_position else "complete",
-        },
-    })
 
 
 async def async_list_issue_comments(
@@ -1563,6 +1603,7 @@ async def async_list_repo_issues(
     limit: int = 30,
     cursor: str | None = None,
     body_limit: int = 1000,
+    output_budget: bool = False,
 ) -> dict[str, Any]:
     owner, repo = slug.split("/", 1)
     max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
@@ -1601,31 +1642,30 @@ async def async_list_repo_issues(
             params=params,
         )
     raw_items = data if isinstance(data, list) else []
-    items = raw_items
-    if not include_pull_requests:
-        items = [item for item in items if not (isinstance(item, dict) and item.get("pull_request"))]
-    selected = items[page_index : page_index + max_items]
-    next_position = None
-    if page_index + max_items < len(items):
-        next_position = {"page": page, "index": page_index + max_items}
-    elif len(raw_items) == GITHUB_ITEM_LIMIT:
-        next_position = {"page": page + 1, "index": 0}
-    return {
-        "repo": slug,
-        "state": params["state"],
-        "issues": [
-            _issue_payload(item, body_limit=body_limit)
-            for item in selected
-            if isinstance(item, dict)
-        ],
-        "included_pull_requests": include_pull_requests,
-        "truncated": next_position is not None,
-        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
-        "evidence_health": {
-            "status": "ok",
-            "completeness": "more_available" if next_position else "complete",
-        },
-    }
+    items = [
+        item
+        for item in raw_items
+        if isinstance(item, dict) and (include_pull_requests or not item.get("pull_request"))
+    ]
+    base = {"repo": slug, "state": params["state"], "included_pull_requests": include_pull_requests}
+    full_page = len(raw_items) == GITHUB_ITEM_LIMIT
+    candidates = [_issue_payload(item, body_limit=body_limit) for item in items[page_index : page_index + max_items]]
+    if output_budget:
+        return _bounded_source_page(
+            base,
+            "issues",
+            candidates,
+            page_kind=page_kind,
+            page=page,
+            page_index=page_index,
+            item_count=len(items),
+            full_page=full_page,
+            overflow_message="A GitHub issue cannot fit within the tool output budget. Lower body_limit.",
+        )
+    next_position = _source_page_position(
+        page=page, next_index=page_index + len(candidates), item_count=len(items), full_page=full_page,
+    )
+    return _source_page_payload(base, "issues", candidates, page_kind=page_kind, next_position=next_position)
 
 
 async def async_list_repo_pull_requests(
@@ -1670,22 +1710,17 @@ async def async_list_repo_pull_requests(
         )
     items = data if isinstance(data, list) else []
     selected = items[page_index : page_index + max_items]
-    next_position = None
-    if page_index + max_items < len(items):
-        next_position = {"page": page, "index": page_index + max_items}
-    elif len(items) == GITHUB_ITEM_LIMIT:
-        next_position = {"page": page + 1, "index": 0}
-    return {
-        "repo": slug,
-        "state": params["state"],
-        "pull_requests": [_pull_request_payload(item) for item in selected if isinstance(item, dict)],
-        "truncated": next_position is not None,
-        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
-        "evidence_health": {
-            "status": "ok",
-            "completeness": "more_available" if next_position else "complete",
-        },
-    }
+    next_position = _source_page_position(
+        page=page, next_index=page_index + len(selected), item_count=len(items),
+        full_page=len(items) == GITHUB_ITEM_LIMIT,
+    )
+    return _source_page_payload(
+        {"repo": slug, "state": params["state"]},
+        "pull_requests",
+        [_pull_request_payload(item) for item in selected if isinstance(item, dict)],
+        page_kind=page_kind,
+        next_position=next_position,
+    )
 
 
 async def async_get_pull_request(
