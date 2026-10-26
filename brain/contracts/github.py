@@ -45,6 +45,9 @@ def github_issue_comment_ref(repo_slug: str, issue_number: int, comment_id: int)
 class GitHubConnectorError(Exception):
     status_code: int
     message: str
+    rate_limited: bool = False
+    reset_at: str | None = None
+    retry_after_seconds: int | None = None
 
     def __post_init__(self) -> None:
         super().__init__(self.message)

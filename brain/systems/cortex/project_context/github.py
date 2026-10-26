@@ -146,15 +146,39 @@ def _github_error(response: httpx.Response) -> GitHubConnectorError:
         if validation_messages:
             raw_message = f"{raw_message}: {'; '.join(validation_messages)}"
     lowered = raw_message.lower()
+    rate_limited = response.status_code in {403, 429} and (
+        response.headers.get("x-ratelimit-remaining") == "0"
+        or "retry-after" in response.headers
+        or "rate limit" in lowered
+    )
+    reset_at = None
+    retry_after_seconds = None
+    if rate_limited:
+        try:
+            reset_at = datetime.fromtimestamp(
+                int(response.headers["x-ratelimit-reset"]), tz=timezone.utc
+            ).isoformat()
+        except (KeyError, ValueError, OverflowError, OSError):
+            pass
+        try:
+            retry_after_seconds = max(0, int(response.headers["retry-after"]))
+        except (KeyError, ValueError):
+            pass
     if response.status_code == 401 and "bad credentials" in lowered:
         message = "GitHub rejected this Vault token. Choose another token or save a fresh personal access token."
-    elif response.status_code == 403:
+    elif response.status_code == 403 and not rate_limited:
         message = f"{raw_message}. Check that the token can list and read repositories."
     elif response.status_code == 404:
         message = "Repository not found or not visible to this token."
     else:
         message = raw_message
-    return GitHubConnectorError(status_code=response.status_code, message=message)
+    return GitHubConnectorError(
+        status_code=response.status_code,
+        message=message,
+        rate_limited=rate_limited,
+        reset_at=reset_at,
+        retry_after_seconds=retry_after_seconds,
+    )
 
 
 def _source_path(value: str) -> str:
@@ -461,7 +485,9 @@ async def _async_issue_timeline_or_none(
         return None
     try:
         return await _async_issue_timeline(client, slug, issue_number, token=token)
-    except GitHubConnectorError:
+    except GitHubConnectorError as exc:
+        if exc.rate_limited:
+            raise
         logger.warning(
             "Could not read assignment timeline for %s#%s.",
             slug,
@@ -488,6 +514,157 @@ def _issue_comment_payload(comment: dict[str, Any]) -> dict[str, Any]:
         "created_at": comment.get("created_at"),
         "updated_at": comment.get("updated_at"),
     }
+
+
+def _issue_timeline_event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    event_type = event.get("event")
+    actor = event.get("actor") or {}
+    payload = {
+        "event": event_type,
+        "actor": actor.get("login"),
+        "created_at": event.get("created_at"),
+    }
+    if "id" in event:
+        payload["id"] = event["id"]
+    if event_type in {"assigned", "unassigned"}:
+        payload["assignee"] = (event.get("assignee") or {}).get("login")
+    elif event_type in {"labeled", "unlabeled"}:
+        payload["label"] = (event.get("label") or {}).get("name")
+    elif event_type in {"closed", "reopened"}:
+        payload.update({key: event.get(key) for key in ("state_reason", "commit_id")})
+    elif event_type == "renamed":
+        rename = event.get("rename") or {}
+        payload.update({key: rename.get(key) for key in ("from", "to")})
+    elif event_type == "cross-referenced":
+        issue = (event.get("source") or {}).get("issue") or {}
+        pull_request = issue.get("pull_request")
+        repository = issue.get("repository") or {}
+        repository_url = str(issue.get("repository_url") or "")
+        source = {
+            "type": "pull_request" if isinstance(pull_request, dict) else "issue",
+            "repo": repository.get("full_name") or (
+                repository_url.split("/repos/", 1)[1] if "/repos/" in repository_url else None
+            ),
+            "number": issue.get("number"),
+            "state": issue.get("state"),
+            "html_url": issue.get("html_url"),
+        }
+        if isinstance(pull_request, dict):
+            source["merged_at"] = pull_request.get("merged_at")
+        payload["source"] = source
+    elif event_type == "referenced":
+        payload.update({key: event.get(key) for key in ("commit_id", "commit_url")})
+    elif event_type == "commented":
+        payload["user"] = _user_payload(event.get("user"))
+        payload["authorship"] = _comment_authorship(str(event.get("body") or ""))
+    elif event_type in {"marked_as_duplicate", "unmarked_as_duplicate", "connected", "disconnected"}:
+        # REST does not always include the linked issue. Keep identifiers when supplied.
+        payload.update({
+            key: value
+            for key, value in event.items()
+            if key.endswith(("_id", "_url"))
+            or key in {"url", "source", "subject", "canonical", "duplicate", "duplicate_of", "issue"}
+        })
+    return payload
+
+
+async def _async_issue_thread_page(
+    slug: str,
+    issue_number: int,
+    *,
+    resource: str,
+    token: str | None,
+    since: str | None,
+    limit: int,
+    cursor: str | None,
+) -> dict[str, Any]:
+    max_items = max(1, min(int(limit or 30), GITHUB_ITEM_LIMIT))
+    since_fingerprint = hashlib.sha256((since or "").encode("utf-8")).hexdigest()[:20]
+    page_kind = f"github_issue_{resource}:{slug}:{issue_number}:{since_fingerprint}"
+    position = decode_page_token(cursor, kind=page_kind)
+    try:
+        page = int(position.get("page", 1))
+        page_index = int(position.get("index", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise InvalidPageToken("Invalid pagination cursor") from exc
+    if page < 1 or page_index < 0 or page_index >= GITHUB_ITEM_LIMIT:
+        raise InvalidPageToken("Invalid pagination cursor")
+    params: dict[str, Any] = {"per_page": GITHUB_ITEM_LIMIT, "page": page}
+    if since:
+        params["since"] = since
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        data = await _async_request(
+            client,
+            "GET",
+            f"/repos/{slug}/issues/{issue_number}/{resource}",
+            token=token,
+            params=params,
+        )
+    items = data if isinstance(data, list) else []
+    item_key = "comments" if resource == "comments" else "events"
+    compact = _issue_comment_payload if resource == "comments" else _issue_timeline_event_payload
+    output_probe = {
+        "repo": slug,
+        "issue_number": issue_number,
+        item_key: [],
+        "truncated": True,
+        "next_page": encode_page_token(page_kind, {"page": page + 1, "index": GITHUB_ITEM_LIMIT - 1}),
+        "evidence_health": {"status": "ok", "completeness": "more_available"},
+    }
+    selected = _bounded_json_items(
+        [compact(item) for item in items[page_index : page_index + max_items]],
+        limit=max_items,
+        budget_chars=_source_variable_output_budget(output_probe),
+    )
+    if not selected and page_index < len(items):
+        raise GitHubConnectorError(
+            status_code=413,
+            message="A GitHub issue thread item cannot fit within the tool output budget.",
+        )
+    next_index = page_index + len(selected)
+    next_position = None
+    if next_index < len(items):
+        next_position = {"page": page, "index": next_index}
+    elif len(items) == GITHUB_ITEM_LIMIT:
+        next_position = {"page": page + 1, "index": 0}
+    return _bounded_source_payload({
+        "repo": slug,
+        "issue_number": issue_number,
+        item_key: selected,
+        "truncated": next_position is not None,
+        "next_page": encode_page_token(page_kind, next_position) if next_position else None,
+        "evidence_health": {
+            "status": "ok",
+            "completeness": "more_available" if next_position else "complete",
+        },
+    })
+
+
+async def async_list_issue_comments(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+    since: str | None = None,
+    limit: int = 30,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    return await _async_issue_thread_page(
+        slug, issue_number, resource="comments", token=token, since=since, limit=limit, cursor=cursor
+    )
+
+
+async def async_get_issue_timeline(
+    slug: str,
+    issue_number: int,
+    *,
+    token: str | None = None,
+    limit: int = 30,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    return await _async_issue_thread_page(
+        slug, issue_number, resource="timeline", token=token, since=None, limit=limit, cursor=cursor
+    )
 
 
 def _pull_request_payload(pr: dict[str, Any]) -> dict[str, Any]:
@@ -1547,6 +1724,7 @@ async def async_get_issue(
     *,
     token: str | None = None,
     include_assignment_provenance: bool = False,
+    body_limit: int = 1000,
 ) -> dict[str, Any]:
     """Read ONE issue by exact number — no listing window, no recency limit."""
     owner, repo = slug.split("/", 1)
@@ -1566,10 +1744,25 @@ async def async_get_issue(
                 issue_data,
                 token=token,
             )
-    payload = _issue_payload(issue_data, assignment_timeline=assignment_timeline)
-    payload["body_total_chars"] = (
-        len(" ".join(str((issue or {}).get("body") or "").split())) if isinstance(issue, dict) else 0
+    body_limit = max(1, min(int(body_limit), 20_000))
+    payload = _issue_payload(
+        issue_data, body_limit=body_limit, assignment_timeline=assignment_timeline
     )
+    if body_limit < 3:
+        body = " ".join(str(issue_data.get("body") or "").split())
+        payload["body"] = body[:body_limit] or None
+        payload["body_truncated"] = len(body) > body_limit
+    if body_limit > 1000:
+        raw_body = str(issue_data.get("body") or "")
+        payload["body"] = None
+        payload["body_total_chars"] = len(raw_body)
+        payload["body_truncated"] = True
+        body, _ = _truncate_for_json_string_budget(
+            raw_body[:body_limit], _source_variable_output_budget({"repo": slug, "issue": payload})
+        )
+        payload["body"] = body or None
+        payload["body_truncated"] = len(body) < len(raw_body)
+        return _bounded_source_payload({"repo": slug, "issue": payload})
     return {"repo": slug, "issue": payload}
 
 
