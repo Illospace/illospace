@@ -348,7 +348,6 @@ GITHUB_TOOLS = [
                 },
                 "labels_set": {
                     "type": "array",
-                    "minItems": 1,
                     "items": {"type": "string"},
                     "description": (
                         "Replace all issue labels with this list. Empty values mean no change and "
@@ -370,12 +369,10 @@ GITHUB_TOOLS = [
                 },
                 "title": {
                     "type": "string",
-                    "minLength": 1,
                     "description": "Replacement issue title. Empty values mean no change and are listed in ignored_empty_fields.",
                 },
                 "body": {
                     "type": "string",
-                    "minLength": 1,
                     "description": (
                         "Replacement Markdown body. Empty values mean no change and are listed in "
                         "ignored_empty_fields. Use clear_body: true to clear the body."

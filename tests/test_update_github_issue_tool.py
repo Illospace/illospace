@@ -72,9 +72,10 @@ def test_update_github_issue_is_registered_with_all_supported_fields():
     assert "omit a field to leave it unchanged" in definition["description"]
     assert "rejected, not applied" in definition["description"]
     assert "ignored_empty_fields" in definition["description"]
-    assert properties["body"]["minLength"] == 1
-    assert properties["title"]["minLength"] == 1
-    assert properties["labels_set"]["minItems"] == 1
+    # Empty values are accepted as "no change", so the schema must not forbid them.
+    assert "minLength" not in properties["body"]
+    assert "minLength" not in properties["title"]
+    assert "minItems" not in properties["labels_set"]
 
     registration = get_tool_registration("update_github_issue")
     assert registration is not None
