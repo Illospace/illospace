@@ -1101,11 +1101,26 @@ async def _handle_update_github_issue(
     if clean_issue_number is None:
         return json.dumps({"error": "update_github_issue requires a positive issue_number"})
 
-    clean_assignees_add = _string_list(assignees_add)
-    clean_assignees_remove = _string_list(assignees_remove)
-    clean_labels_add = _string_list(labels_add)
-    clean_labels_remove = _string_list(labels_remove)
-    clean_labels_set = _string_list(labels_set) if labels_set is not None else None
+    ignored_empty_fields: list[str] = []
+
+    def _normalize_optional_field(field_name: str, value: Any, *, list_value: bool = False) -> Any:
+        if value is None:
+            return None
+        if list_value:
+            value = _string_list(value)
+        if value == [] or (isinstance(value, str) and not value.strip()):
+            ignored_empty_fields.append(field_name)
+            return None
+        return value
+
+    clean_assignees_add = _normalize_optional_field("assignees_add", assignees_add, list_value=True)
+    clean_assignees_remove = _normalize_optional_field("assignees_remove", assignees_remove, list_value=True)
+    clean_labels_add = _normalize_optional_field("labels_add", labels_add, list_value=True)
+    clean_labels_remove = _normalize_optional_field("labels_remove", labels_remove, list_value=True)
+    clean_labels_set = _normalize_optional_field("labels_set", labels_set, list_value=True)
+    state = _normalize_optional_field("state", state)
+    title = _normalize_optional_field("title", title)
+    body = _normalize_optional_field("body", body)
     for field_name, value in (("clear_body", clear_body), ("clear_labels", clear_labels)):
         if not isinstance(value, bool):
             return json.dumps({
@@ -1117,27 +1132,11 @@ async def _handle_update_github_issue(
             "error": "update_github_issue clear_body cannot be combined with body; omit body",
             "status_code": 422,
         })
-    if clear_labels and any(value is not None for value in (labels_set, labels_add, labels_remove)):
+    if clear_labels and any(value is not None for value in (clean_labels_set, clean_labels_add, clean_labels_remove)):
         return json.dumps({
             "error": (
                 "update_github_issue clear_labels cannot be combined with labels_set, "
                 "labels_add or labels_remove; omit those fields"
-            ),
-            "status_code": 422,
-        })
-    if body is not None and not str(body).strip():
-        return json.dumps({
-            "error": (
-                "update_github_issue body must be non-empty; omit body to leave it unchanged, "
-                "or omit body and use clear_body: true to clear it"
-            ),
-            "status_code": 422,
-        })
-    if clean_labels_set == []:
-        return json.dumps({
-            "error": (
-                "update_github_issue labels_set must be non-empty; omit labels_set to leave it "
-                "unchanged, or omit labels_set and use clear_labels: true to clear all labels"
             ),
             "status_code": 422,
         })
@@ -1161,11 +1160,6 @@ async def _handle_update_github_issue(
                 "status_code": 422,
             })
     clean_title = str(title).strip() if title is not None else None
-    if title is not None and not clean_title:
-        return json.dumps({
-            "error": "update_github_issue title must be non-empty when provided",
-            "status_code": 422,
-        })
     clean_body = "" if clear_body else (str(body) if body is not None else None)
     if clean_labels_set is not None and (clean_labels_add or clean_labels_remove):
         return json.dumps({
@@ -1257,6 +1251,8 @@ async def _handle_update_github_issue(
         )
         if updated_issue_number is not None:
             payload["mutated_target_refs"] = [github_issue_ref(repo_slug, updated_issue_number)]
+        if ignored_empty_fields:
+            payload["ignored_empty_fields"] = ignored_empty_fields
         return json.dumps(payload, default=str)
 
     if last_error is not None:

@@ -71,6 +71,11 @@ def test_update_github_issue_is_registered_with_all_supported_fields():
     assert "Only repo and issue_number are required" in definition["description"]
     assert "omit a field to leave it unchanged" in definition["description"]
     assert "rejected, not applied" in definition["description"]
+    assert "ignored_empty_fields" in definition["description"]
+    # Empty values are accepted as "no change", so the schema must not forbid them.
+    assert "minLength" not in properties["body"]
+    assert "minLength" not in properties["title"]
+    assert "minItems" not in properties["labels_set"]
 
     registration = get_tool_registration("update_github_issue")
     assert registration is not None
@@ -297,6 +302,7 @@ async def test_handler_assignee_only_update_leaves_title_body_and_labels_untouch
     assert payload["status"] == "applied"
     assert payload["issue"]["title"] == "Updated title"
     assert payload["issue"]["body"] == "Updated body"
+    assert "ignored_empty_fields" not in payload
     assert [label["name"] for label in payload["issue"]["labels"]] == ["existing-label"]
     assert [(call.args[1], call.args[2]) for call in github_request.await_args_list] == [
         ("POST", "/repos/Illospace/illospace/issues/369/assignees"),
@@ -328,17 +334,12 @@ async def test_handler_rejects_placeholder_text_without_writing(field_name, valu
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fields", [
-    {"body": ""},
-    {"body": " \n\t"},
-    {"labels_set": []},
-    {"labels_set": [" "]},
-    {"labels_set": ""},
-    {"body": "", "labels_set": []},
     {"clear_body": "true"},
     {"clear_labels": 1},
+    {"clear_body": 1},
+    {"clear_labels": "true"},
     {"clear_body": True, "body": "replacement"},
-    {"clear_body": True, "body": ""},
-    {"clear_labels": True, "labels_set": []},
+    {"clear_labels": True, "labels_set": ["bug"]},
     {"clear_labels": True, "labels_add": ["bug"]},
     {"clear_labels": True, "labels_remove": ["bug"]},
 ])
@@ -353,6 +354,156 @@ async def test_handler_rejects_ambiguous_clears_before_any_write(fields):
 
     assert payload["status_code"] == 422
     assert "omit" in payload["error"] or "must be a boolean" in payload["error"]
+    candidates.assert_not_awaited()
+    update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("fields", "ignored"), [
+    ({"body": ""}, ["body"]),
+    ({"body": " \n\t"}, ["body"]),
+    ({"body": None}, []),
+    ({"title": ""}, ["title"]),
+    ({"title": " \n\t"}, ["title"]),
+    ({"state": ""}, ["state"]),
+    ({"state": " \n\t"}, ["state"]),
+    ({"labels_set": []}, ["labels_set"]),
+    ({"labels_set": [" "]}, ["labels_set"]),
+    ({"labels_set": [" ", "\n\t"]}, ["labels_set"]),
+    ({"labels_set": ""}, ["labels_set"]),
+    ({"labels_set": None}, []),
+    ({"body": "", "labels_set": []}, ["labels_set", "body"]),
+    ({"clear_body": True, "body": ""}, ["body"]),
+    ({"clear_body": True, "body": " \n\t"}, ["body"]),
+    ({"clear_labels": True, "labels_set": []}, ["labels_set"]),
+    ({"clear_labels": True, "labels_set": [" "], "labels_add": [], "labels_remove": [" "]},
+     ["labels_add", "labels_remove", "labels_set"]),
+    ({"labels_add": [], "labels_remove": [], "assignees_remove": []},
+     ["assignees_remove", "labels_add", "labels_remove"]),
+])
+async def test_handler_ignores_empty_fields_and_applies_assignee(fields, ignored):
+    issue = _updated_issue(labels=["bug", "production"])
+    before = deepcopy(issue)
+
+    async def request(_client, method, path, **kwargs):
+        data = kwargs.get("json") or {}
+        if method == "GET":
+            return deepcopy(issue)
+        if method == "POST" and path.endswith("/assignees"):
+            issue["assignees"] = [{"login": login} for login in data["assignees"]]
+        elif method == "PATCH":
+            issue.update(data)
+        elif method == "PUT" and path.endswith("/labels"):
+            issue["labels"] = [{"name": label} for label in data["labels"]]
+        else:
+            pytest.fail(f"Unexpected GitHub operation: {method} {path}")
+        return deepcopy(issue)
+
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock(return_value=[{
+        "token": "installation-token", "source": "project_binding:GITHUB_TOKEN",
+    }])), patch(f"{_C}._async_request", new=AsyncMock(side_effect=request)) as github_request:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace", issue_number=369,
+            assignees_add=["new-owner"], **fields,
+        ))
+
+    expected = deepcopy(before)
+    expected["assignees"] = [{"login": "new-owner"}]
+    applied = {"assignees_add": ["new-owner"]}
+    writes = [{"assignees": ["new-owner"]}]
+    if fields.get("clear_labels"):
+        expected["labels"] = []
+        applied["labels_set"] = []
+        writes.append({"labels": []})
+    if fields.get("clear_body"):
+        expected["body"] = ""
+        applied["body"] = ""
+        writes.append({"body": ""})
+    assert payload["ok"] is True
+    assert payload["status"] == "applied"
+    assert payload["applied"] == applied
+    for field in ("title", "state"):
+        assert payload["issue"][field] == expected[field]
+    assert payload["issue"]["body"] == (expected["body"] or None)
+    assert [label["name"] for label in payload["issue"]["labels"]] == [
+        label["name"] for label in expected["labels"]
+    ]
+    assert [user["login"] for user in payload["issue"]["assignees"]] == ["new-owner"]
+    assert issue == expected
+    assert payload.get("ignored_empty_fields", []) == ignored
+    assert bool(ignored) == ("ignored_empty_fields" in payload)
+    assert [call.kwargs["json"] for call in github_request.await_args_list
+            if call.args[1] != "GET"] == writes
+
+
+@pytest.mark.asyncio
+async def test_handler_run_34585_synthesized_empty_fields_preserve_body_and_labels():
+    issue = _updated_issue(labels=["bug", "production"])
+    issue["state"] = "open"
+    before = deepcopy(issue)
+
+    async def request(_client, method, path, **kwargs):
+        if method == "GET":
+            return deepcopy(issue)
+        data = kwargs["json"]
+        if method == "POST" and path.endswith("/assignees"):
+            issue["assignees"] = [{"login": login} for login in data["assignees"]]
+        elif method == "PATCH":
+            issue.update(data)
+        else:
+            pytest.fail(f"Unexpected GitHub operation: {method} {path}")
+        return deepcopy(issue)
+
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock(return_value=[{
+        "token": "installation-token", "source": "project_binding:GITHUB_TOKEN",
+    }])), patch(f"{_C}._async_request", new=AsyncMock(side_effect=request)) as github_request:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace", issue_number=369,
+            body="", labels_set=[], labels_add=[], labels_remove=[], assignees_remove=[],
+            clear_body=False, clear_labels=False, state="open", title=issue["title"],
+            assignees_add=["axel-havard"],
+        ))
+
+    expected = {**before, "assignees": [{"login": "axel-havard"}]}
+    assert payload["ok"] is True
+    assert payload["status"] == "applied"
+    assert payload["applied"] == {
+        "assignees_add": ["axel-havard"], "state": "open", "title": before["title"],
+    }
+    for field in ("title", "body", "state", "labels"):
+        assert issue[field] == before[field]
+    assert payload["issue"]["body"] == before["body"]
+    assert [label["name"] for label in payload["issue"]["labels"]] == ["bug", "production"]
+    assert [user["login"] for user in payload["issue"]["assignees"]] == ["axel-havard"]
+    assert issue == expected
+    assert payload["ignored_empty_fields"] == [
+        "assignees_remove", "labels_add", "labels_remove", "labels_set", "body",
+    ]
+    assert [(call.args[1], call.kwargs.get("json")) for call in github_request.await_args_list] == [
+        ("POST", {"assignees": ["axel-havard"]}),
+        ("PATCH", {"state": "open"}),
+        ("PATCH", {"title": before["title"]}),
+        ("GET", None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fields", [
+    {}, {"body": None}, {"body": ""}, {"body": " \n\t"}, {"title": " "},
+    {"state": ""}, {"labels_set": None}, {"labels_set": []}, {"labels_set": ""},
+    {"labels_set": [" "]}, {"assignees_add": [], "assignees_remove": []},
+    {"body": "", "labels_set": [], "labels_add": [], "labels_remove": []},
+])
+async def test_handler_rejects_update_with_only_empty_fields_before_any_write(fields):
+    with patch(f"{_H}._github_token_candidates", new=AsyncMock()) as candidates, patch(
+        f"{_H}.async_update_repo_issue", new=AsyncMock(),
+    ) as update:
+        payload = json.loads(await _handle_update_github_issue(
+            repo="Illospace/illospace", issue_number=369, **fields,
+        ))
+
+    assert payload["status_code"] == 422
+    assert payload["error"] == "update_github_issue requires at least one field to update"
     candidates.assert_not_awaited()
     update.assert_not_awaited()
 
