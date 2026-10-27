@@ -310,8 +310,9 @@ GITHUB_TOOLS = [
             "as total success. This uses the same project-bound GitHub App write identity as issue "
             "creation; the resulting GitHub issues webhook keeps configured mirrored ticket records "
             "in sync. labels_set replaces every label and is mutually exclusive with labels_add and "
-            "labels_remove. Empty body or labels_set values are rejected; omit them to preserve "
-            "existing content. Use clear_body or clear_labels only for an intentional clear."
+            "labels_remove. Empty values for optional update fields mean no change and are listed "
+            "in ignored_empty_fields. The body or full label list is only cleared with clear_body "
+            "or clear_labels."
         ),
         "input_schema": {
             "type": "object",
@@ -347,10 +348,11 @@ GITHUB_TOOLS = [
                 },
                 "labels_set": {
                     "type": "array",
+                    "minItems": 1,
                     "items": {"type": "string"},
                     "description": (
-                        "Replace all issue labels with this non-empty list. To clear all labels, "
-                        "omit labels_set and use clear_labels: true. "
+                        "Replace all issue labels with this list. Empty values mean no change and "
+                        "are listed in ignored_empty_fields. Use clear_labels: true to clear all labels. "
                         "Do not combine with labels_add or labels_remove."
                     ),
                 },
@@ -368,13 +370,15 @@ GITHUB_TOOLS = [
                 },
                 "title": {
                     "type": "string",
-                    "description": "Replacement issue title. Must be non-empty when provided.",
+                    "minLength": 1,
+                    "description": "Replacement issue title. Empty values mean no change and are listed in ignored_empty_fields.",
                 },
                 "body": {
                     "type": "string",
+                    "minLength": 1,
                     "description": (
-                        "Non-empty replacement Markdown body. To clear the body, omit body and "
-                        "use clear_body: true."
+                        "Replacement Markdown body. Empty values mean no change and are listed in "
+                        "ignored_empty_fields. Use clear_body: true to clear the body."
                     ),
                 },
                 "clear_body": {
