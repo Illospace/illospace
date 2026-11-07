@@ -1,4 +1,4 @@
-import type { ExternalMcpConfig, ExternalMcpServer, ExternalMcpTestResult } from '../../routes/system/types';
+import type { ExternalMcpConfig, ExternalMcpServer, ExternalMcpTestResult } from '$lib/types/externalMcp';
 import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } from '$lib/types/runtimeSettings';
 import type { StreamItem } from '$lib/types/cortex';
 import type { RuntimeStatusSnapshot } from '$lib/types/runtimeStatus';

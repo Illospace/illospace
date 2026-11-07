@@ -6,7 +6,7 @@
     ConstellationPill, ConstellationTextarea, ConstellationTextInput,
   } from '$lib/components/constellation';
   import RuntimeSelect from './RuntimeSelect.svelte';
-  import type { ExternalMcpConfig, ExternalMcpServer, ExternalMcpTestResult } from './types';
+  import type { ExternalMcpConfig, ExternalMcpServer, ExternalMcpTestResult } from '$lib/types/externalMcp';
   import './runtime-card.css';
 
   let { canManageSettings }: { canManageSettings: boolean } = $props();
@@ -104,7 +104,7 @@
               oninput={(event) => { value.config[field.key] = event.currentTarget.value; }}
             />
             {#if field.key === 'name'}
-              <p>Lowercase letters, numbers, and _. Tools appear as mcp__&lt;name&gt;__&lt;tool&gt;.</p>
+              <p class="runtime-field-hint">Lowercase letters, numbers, and _. Tools appear as mcp__&lt;name&gt;__&lt;tool&gt;.</p>
             {/if}
           </div>
         {/if}
@@ -127,7 +127,7 @@
         <span id={`mcp-${value.id ?? 'new'}-allowed-label`}>Allowed tools</span>
         <ConstellationTextarea aria-labelledby={`mcp-${value.id ?? 'new'}-allowed-label`}
           bind:value={value.allowedText} disabled={!canManageSettings || busy} mono />
-        <p>One tool name per line. An empty list allows no tools.</p>
+        <p class="runtime-field-hint">One tool name per line. An empty list allows no tools.</p>
       </div>
       <RuntimeSelect id={`mcp-${value.id ?? 'new'}-enabled`} label="Enabled"
         value={String(value.config.enabled)} options={[{ key: 'true', label: 'Enabled' }, { key: 'false', label: 'Disabled' }]}
@@ -137,7 +137,7 @@
       <ConstellationNotice title={`Missing vault key: ${key}`} tone="warning" compact />
     {/each}
     {#if canManageSettings}
-      <div class="runtime-section-heading">
+      <div class="runtime-card-actions">
         <ConstellationButton size="sm" disabled={busy} onclick={() => save(value)}>Save</ConstellationButton>
         <ConstellationButton variant="quiet" size="sm" disabled={busy} onclick={() => { draft = null; void load(); }}>Cancel</ConstellationButton>
         {#if value.id !== undefined}
@@ -149,10 +149,11 @@
     {#if result}
       {#if result.ok}
         <ConstellationNotice title={`Connected. ${result.tools.length} tools found, ${result.tools.filter(tool => tool.allowed).length} allowed.`} tone="success" compact />
-        <ul>
-          {#each result.tools as tool}
-            <li>{tool.name} <ConstellationPill variant={tool.allowed ? 'success' : 'muted'}>{tool.allowed ? 'Allowed' : 'Not allowed'}</ConstellationPill>
-              <p>{tool.description}</p>
+        <ul class="runtime-item-list">
+          {#each result.tools as tool (tool.name)}
+            <li>
+              <div>{tool.name} <ConstellationPill variant={tool.allowed ? 'success' : 'muted'}>{tool.allowed ? 'Allowed' : 'Not allowed'}</ConstellationPill></div>
+              {#if tool.description}<p class="runtime-field-hint">{tool.description}</p>{/if}
             </li>
           {/each}
         </ul>

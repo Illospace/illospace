@@ -24,7 +24,7 @@ _PRIVATE_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7",
 ))
 _BLOCKED_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
-    "169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128",
+    "0.0.0.0/8", "::/128", "169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128",
 ))
 
 

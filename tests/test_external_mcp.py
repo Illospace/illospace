@@ -115,6 +115,16 @@ async def test_external_mcp_down_and_missing_secret(configured_mcp):
     assert statuses[0]["available"] is False
     assert statuses[0]["reason"] == "unavailable"
     configured_mcp.server.url = configured_mcp.peer.url
+    token_requests = configured_mcp.peer.token_requests
+    # The failure is remembered for a short time: the next run does not connect again.
+    _, _, statuses = await surface()
+    assert statuses[0]["reason"] == "unavailable"
+    assert configured_mcp.peer.token_requests == token_requests
+    # A configuration change (new updated_at) connects again at once.
+    configured_mcp.server.updated_at += timedelta(seconds=1)
+    _, handlers, statuses = await surface()
+    assert statuses[0]["available"] is True and NAME in handlers
+    configured_mcp.server.updated_at += timedelta(seconds=1)
     configured_mcp.values.clear()
     tokens.TOKEN_CACHE.invalidate(configured_mcp.server)
     _, _, statuses = await surface()
@@ -189,7 +199,8 @@ async def test_external_mcp_invalid_names(name):
 
 
 @pytest.mark.parametrize("url", ["http://169.254.169.254/mcp", "https://169.254.1.1/mcp", "http://[fe80::1]/mcp",
-                                 "https://[fd00:ec2::254]/mcp", "https://metadata.google.internal/mcp", "https://[::ffff:169.254.1.1]/mcp"])
+                                 "https://[fd00:ec2::254]/mcp", "https://metadata.google.internal/mcp", "https://[::ffff:169.254.1.1]/mcp",
+                                 "https://0.0.0.0/mcp", "https://[::]/mcp"])
 async def test_external_mcp_metadata_always_rejected(monkeypatch, url):
     monkeypatch.setenv("ILLO_EXTERNAL_MCP_ALLOW_PRIVATE_HTTP", "1")
     with pytest.raises(ValueError, match="Metadata"):

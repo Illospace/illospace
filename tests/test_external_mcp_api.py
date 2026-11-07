@@ -134,6 +134,7 @@ async def test_external_mcp_real_vault_service_credentials(db_session, org_admin
     monkeypatch.setattr(runtime, "UnitOfWork", unit_of_work_for_session)
     monkeypatch.setattr(tokens, "TOKEN_CACHE", tokens.TokenCache())
     runtime._TOOL_CACHE.clear()
+    runtime._FAILURE_CACHE.clear()
     for key, value in [("client_id", CLIENT_ID), ("client_secret", CLIENT_SECRET)]:
         await vault.set_secret(key, value, org_admin["id"], org_id=org_admin["org_id"], agent_access_level="ask")
     server = await save_server(db_session, org_id=org_admin["org_id"], actor_user_id=org_admin["id"], values={

@@ -124,6 +124,7 @@ def configured_mcp(monkeypatch, mcp_server):
     monkeypatch.setattr(tokens, "read_runtime_secret", secret)
     monkeypatch.setattr(tokens, "TOKEN_CACHE", tokens.TokenCache())
     runtime._TOOL_CACHE.clear()
+    runtime._FAILURE_CACHE.clear()
     monkeypatch.setattr(runtime, "load_servers", AsyncMock(return_value=[server]))
     monkeypatch.setattr(runtime, "load_server", AsyncMock(side_effect=lambda *a: server))
     audit = AsyncMock()

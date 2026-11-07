@@ -1,6 +1,6 @@
 # Outside MCP servers
 
-An admin connects an MCP server in **Settings → MCP servers**.
+An admin connects an MCP server in the **MCP servers** section of the **System** page (`/system`, "AI Runtime" in the navigation).
 The connection belongs to the organization. All runs use the same configuration.
 Illo supports Streamable HTTP with MCP revision `2025-06-18`.
 Resources, prompts, and human OAuth sign-in are not supported.
@@ -83,6 +83,8 @@ The timeout defaults to 30 seconds. The allowed range is 1–120 seconds.
 Discovery runs concurrently with a limit of 10 seconds per server.
 Illo caches each remote tool list for 180 seconds.
 A server that fails discovery does not stop the run.
+Illo remembers the failure for 60 seconds, so later runs do not wait for the same server again.
+**Test connection** always connects again.
 It appears as unavailable in the capability self-model.
 
 HTTPS is the default. Redirects are not followed.
