@@ -23,6 +23,8 @@ BROAD_DESTRUCTIVE_SQL_PATTERNS = (
     r"\bREASSIGN\s+OWNED\b",
 )
 REVIEWED_DESTRUCTIVE_MIGRATIONS = {
+    # Downgrade removes only the MCP configuration and audit tables introduced here.
+    "0070_external_mcp_servers.py",
     # Downgrade removes only the provider-alert filing claims introduced here.
     "0066_provider_alert_filing_claims.py",
     "0003_schema_simplification.py",

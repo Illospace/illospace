@@ -13,6 +13,7 @@ Start here when you want to understand, run, or extend Illo Brain.
   evidence before an `[Illo-QA]` issue is completed.
 - [Project Workspaces](project-workspaces.md) - Project root, thread draft, base, conflict, and publish semantics.
 - [Workspace Tool Installer](workspace-tools.md) - opt-in persisted tool bundles for team-specific skill dependencies.
+- [Outside MCP Servers](external-mcp-servers.md) - organization connections, vault credentials, and allowed tools.
 - [Security Model](security-model.md) - secrets, tool execution, browser sessions, and data boundaries.
 - [Reconstructive Memory Rewrite](reconstructive-memory-rewrite.md) - no-legacy proposal for replacing passive memory retrieval with active evidence reconstruction.
 - [Personal Agent Connections MVP](personal-agent-connections-mvp.md) - implementation plan for connecting Illo with Hermes and OpenClaw.

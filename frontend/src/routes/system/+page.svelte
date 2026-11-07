@@ -27,6 +27,7 @@
   import ProviderConnections from './ProviderConnections.svelte';
   import RuntimeStatusPanel from './RuntimeStatusPanel.svelte';
   import VoiceCard from './VoiceCard.svelte';
+  import ExternalMcpCard from './ExternalMcpCard.svelte';
   import type {
     EmbedderKey,
     MemoryCheck,
@@ -1023,6 +1024,8 @@
           {canManageSettings}
           onUpdateVoice={updateVoiceDraft}
         />
+
+        <ExternalMcpCard {canManageSettings} />
       </div>
     </div>
 

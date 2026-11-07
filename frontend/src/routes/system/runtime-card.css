@@ -1,0 +1,71 @@
+.runtime-section {
+    display: grid;
+    gap: 18px;
+    min-width: 0;
+    padding: 22px 0;
+  }
+
+  .runtime-section-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    min-width: 0;
+  }
+
+  .runtime-section-heading div {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .runtime-section-heading h2 {
+    margin: 0;
+    color: var(--constellation-color-text-primary);
+    font-family: var(--constellation-font-sans);
+    font-size: 18px;
+    font-weight: 560;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+
+  .runtime-section-heading p {
+    margin: 0;
+    color: var(--constellation-color-text-secondary);
+    font-size: var(--constellation-type-body-sm);
+    line-height: 1.45;
+  }
+
+  .runtime-stack,
+  .runtime-flow-grid {
+    display: grid;
+    gap: 14px;
+    min-width: 0;
+  }
+
+  .runtime-static-field {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+    color: var(--constellation-text-muted);
+  }
+
+  .runtime-static-field span {
+    min-width: 0;
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .runtime-static-field div {
+    display: flex;
+    min-height: 42px;
+    align-items: center;
+    border: 1px solid var(--constellation-control-input-border);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--constellation-control-input-background) 72%, transparent);
+    color: var(--constellation-text-primary);
+    padding: 0 12px;
+  }

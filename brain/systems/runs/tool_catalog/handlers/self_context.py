@@ -154,6 +154,10 @@ def _handle_read_self_context(
             "When source_inspection.can_read_source is true, inspect local docs or code before claiming Illospace-specific setup paths.",
         ],
     }
+    from brain.systems.runs.capabilities import external_mcp_capability_manifests
+    manifests = external_mcp_capability_manifests(getattr(_agent_context, "execution_metadata", None))
+    if manifests:
+        payload["external_mcp"] = [manifest.to_payload(detail_level="tools") for manifest in manifests]
     if include_paths:
         env_project_root = os.environ.get("ILLO_PROJECT_ROOT")
         payload["installation"] = {

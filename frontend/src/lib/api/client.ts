@@ -1,3 +1,4 @@
+import type { ExternalMcpConfig, ExternalMcpServer, ExternalMcpTestResult } from '../../routes/system/types';
 import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } from '$lib/types/runtimeSettings';
 import type { StreamItem } from '$lib/types/cortex';
 import type { RuntimeStatusSnapshot } from '$lib/types/runtimeStatus';
@@ -1128,6 +1129,11 @@ export interface ProjectDraftStateResponse {
 }
 
 export const api = {
+  externalMcpServers: () => fetchJson<ExternalMcpServer[]>('/api/external-mcp/servers/'),
+  createExternalMcpServer: (config: ExternalMcpConfig) => fetchJson<ExternalMcpServer>('/api/external-mcp/servers/', { method: 'POST', body: JSON.stringify(config) }),
+  updateExternalMcpServer: (id: number, config: ExternalMcpConfig) => fetchJson<ExternalMcpServer>(`/api/external-mcp/servers/${id}`, { method: 'PATCH', body: JSON.stringify(config) }),
+  deleteExternalMcpServer: (id: number) => fetchJson<{ ok: boolean }>(`/api/external-mcp/servers/${id}`, { method: 'DELETE' }),
+  testExternalMcpServer: (id: number) => fetchJson<ExternalMcpTestResult>(`/api/external-mcp/servers/${id}/test`, { method: 'POST', timeoutMs: 15_000 }),
   // Auth
   getMe: () => fetchJson<any>('/api/me'),
   login: (email: string, password: string) =>

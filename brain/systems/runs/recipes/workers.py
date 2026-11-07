@@ -25,6 +25,7 @@ from brain.systems.runs.recipes.shared import (
     default_run_model,
     default_run_thinking,
     project_runtime_workspace_from_ref,
+    merge_external_mcp_surface,
 )
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
@@ -138,11 +139,14 @@ class WorkerRecipe(BaseRunRecipe):
 
         tool_records: list[ToolRecord] = []
         executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
-        handlers = wrap_tool_handlers(
-            build_tool_handlers(
+        agent_tools, raw_handlers, external_metadata = await merge_external_mcp_surface(
+            runtime, build_agent_tools("worker"), build_tool_handlers(
                 workspace_root=workspace_root,
                 allowed_workspaces=project_workspace.allowed_workspaces,
             ),
+        )
+        handlers = wrap_tool_handlers(
+            raw_handlers,
             executor=executor,
             run_id=runtime.run.id,
             root_run_id=runtime.run.root_run_id,
@@ -189,7 +193,7 @@ class WorkerRecipe(BaseRunRecipe):
             session_id=f"agent-run-{runtime.run.id}-worker",
             model=str(model),
             thinking=str(thinking),
-            tools=build_agent_tools("worker"),
+            tools=agent_tools,
             tool_handlers=handlers,
             persist_session=True,
             workspace_root=workspace_root,
@@ -205,6 +209,7 @@ class WorkerRecipe(BaseRunRecipe):
             brain_context_preloaded=bool(prompt_context or runtime.request.target_ref or runtime.request.workspace_ref),
             skip_harvest=True,
             metadata={
+                **external_metadata,
                 "profile": str(runtime.request.normalized_profile.value),
                 "recipe": self.name,
                 "execution_provenance": runtime.request.metadata,

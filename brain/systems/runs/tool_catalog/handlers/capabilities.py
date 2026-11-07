@@ -8,6 +8,7 @@ from typing import Any
 from brain.systems.runs.capabilities import (
     builtin_capability_manifests,
     custom_capability_manifests,
+    external_mcp_capability_manifests,
     filter_capability_manifests,
     load_setup_guide,
     merge_capability_manifests,
@@ -80,6 +81,7 @@ def _handle_read_capabilities(
     registered_tools = _registered_registry_tool_names()
     manifests = merge_capability_manifests([
         *registry_capability_manifests(available_tool_names=available_tools),
+        *external_mcp_capability_manifests(*_context_containers()),
         *normalize_capability_manifests(
             [
                 *builtin_capability_manifests(),
