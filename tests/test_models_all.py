@@ -5,6 +5,8 @@ from brain.platform.db.models import *  # noqa
 
 
 EXPECTED_TABLES = {
+    "tool_policies",
+    "tool_policy_change_audits",
     "action_manifests",
     "agent_api_calls",
     "agent_run_artifacts",

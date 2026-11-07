@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from brain.systems.runs.tool_catalog.handlers.common import *
+from brain.systems.runs.tool_policy import apply_loaded_skill_policy
 
 
 _SKILL_UPDATE_FIELDS = (
@@ -454,6 +455,7 @@ async def _handle_manage_skill(
 
             if normalized == "get":
                 skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                await apply_loaded_skill_policy(skill.name, _agent_context)
                 return json.dumps(
                     {"ok": True, "action": normalized, "skill": _skill_payload(skill)},
                     default=str,
@@ -461,6 +463,8 @@ async def _handle_manage_skill(
 
             if normalized in {"update", "edit"}:
                 skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                original_name = skill.name
+                await apply_loaded_skill_policy(original_name, _agent_context)
                 raw_fields = {
                     "name": name,
                     "description": description,
@@ -483,6 +487,8 @@ async def _handle_manage_skill(
                     )
                 _validate_skill_runtime(updates)
                 updated = await skills.a_update_full(skill.id, **updates)
+                if updated.name != original_name:
+                    await apply_loaded_skill_policy(updated.name, _agent_context)
                 return json.dumps(
                     {"ok": True, "action": normalized, "skill": _skill_payload(updated)},
                     default=str,
@@ -503,6 +509,7 @@ async def _handle_manage_skill(
 
             if normalized == "convert_to_bundle":
                 skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                await apply_loaded_skill_policy(skill.name, _agent_context)
                 service = AsyncSkillBundleIOService(skills, bundles)
                 converted = await service.ensure_skill_bundle(
                     skill.id,
@@ -536,6 +543,7 @@ async def _handle_manage_skill(
 
             if normalized == "get_asset":
                 skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                await apply_loaded_skill_policy(skill.name, _agent_context)
                 safe_path = _safe_skill_asset_path(path)
                 service = AsyncSkillBundleIOService(skills, bundles)
                 _, version, _, asset_rows = await service._load_package_rows(skill)

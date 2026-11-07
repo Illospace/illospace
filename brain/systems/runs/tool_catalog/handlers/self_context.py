@@ -11,7 +11,12 @@ from typing import Any
 from brain.platform.async_io import run_subprocess_sync
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 from brain.systems.runs.tool_catalog.registry import all_tool_registrations
-from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
+from brain.systems.runs.tool_policy import (
+    POLICY_GUIDANCE,
+    current_policy_metadata,
+    disabled_tool_names_from_metadata,
+    policy_unavailable_tools,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -86,19 +91,21 @@ def _docs_payload() -> list[dict[str, Any]]:
 
 
 def _disabled_tools() -> set[str]:
-    metadata = getattr(_agent_context, "execution_metadata", None)
+    metadata = current_policy_metadata(_agent_context)
     return disabled_tool_names_from_metadata(metadata)
 
 
 def _source_inspection_payload() -> dict[str, Any]:
     registrations = all_tool_registrations()
     disabled = _disabled_tools()
+    details = policy_unavailable_tools(current_policy_metadata(_agent_context))
     tools: dict[str, dict[str, Any]] = {}
     for name in _SOURCE_INSPECTION_TOOLS:
         registration = registrations.get(name)
         tools[name] = {
             "registered": registration is not None,
             "available_after_policy": registration is not None and name not in disabled,
+            **({"reason": details[name]["reason"], "guidance": POLICY_GUIDANCE} if name in details else {}),
             "permission": registration.permission.value if registration is not None else None,
             "side_effect_class": registration.side_effect_class.value if registration is not None else None,
         }
@@ -114,7 +121,7 @@ def _source_inspection_payload() -> dict[str, Any]:
 
 
 def _runtime_scope_payload() -> dict[str, Any]:
-    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    execution_metadata = current_policy_metadata(_agent_context)
     metadata = execution_metadata if isinstance(execution_metadata, dict) else {}
     return {
         "workspace_bound": bool(getattr(_agent_context, "org_id", None) or metadata.get("org_id")),
@@ -147,8 +154,10 @@ def _handle_read_self_context(
         },
         "runtime_scope": _runtime_scope_payload(),
         "source_inspection": _source_inspection_payload(),
+        "unavailable_tools": policy_unavailable_tools(current_policy_metadata(_agent_context)),
         "project_version": _project_version(),
         "answering_guidance": [
+            POLICY_GUIDANCE,
             "Use read_self_context for Illo/Illospace identity, source-root, install, and source-inspection facts.",
             "Use read_capabilities for what Illo can inspect, do, guide, or set up in the current run.",
             "When source_inspection.can_read_source is true, inspect local docs or code before claiming Illospace-specific setup paths.",

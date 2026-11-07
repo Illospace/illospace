@@ -20,7 +20,11 @@ from brain.systems.runs.recipes.shared import (
     project_runtime_workspace_from_ref,
 )
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
-from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
+from brain.systems.runs.tool_policy import (
+    disabled_tool_names_from_metadata,
+    policy_skill_names,
+    resolve_effective_tool_policy,
+)
 from brain.systems.personality import (
     agent_contract_prompt_section,
     person_context_prompt_section,
@@ -155,6 +159,11 @@ class FastRecipe(BaseRunRecipe):
     name = "fast"
 
     async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+        await resolve_effective_tool_policy(
+            runtime.request.org_id,
+            policy_skill_names(runtime.request.metadata, runtime.request.message),
+            runtime.request.metadata,
+        )
         context = runtime.context_loader.load(
             thread_id=runtime.request.thread_id,
             message=runtime.request.message,
@@ -240,6 +249,7 @@ class FastRecipe(BaseRunRecipe):
             brain_context_preloaded=bool(prompt_context),
             skip_harvest=True,
             metadata={
+                "tool_policy": runtime.request.metadata.get("tool_policy"),
                 "profile": "fast",
                 "recipe": self.name,
                 "org_id": runtime.request.org_id or runtime.request.metadata.get("org_id"),
