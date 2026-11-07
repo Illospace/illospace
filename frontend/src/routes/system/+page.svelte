@@ -27,6 +27,8 @@
   import ProviderConnections from './ProviderConnections.svelte';
   import RuntimeStatusPanel from './RuntimeStatusPanel.svelte';
   import VoiceCard from './VoiceCard.svelte';
+  import ToolPolicyCard from './ToolPolicyCard.svelte';
+  import type { ToolPolicy } from '$lib/types/toolPolicy';
   import type {
     EmbedderKey,
     MemoryCheck,
@@ -55,6 +57,12 @@
 
   const VAULT_SESSION_STORAGE_PREFIX = 'illo:vault:unlock:v1';
   const VAULT_SESSION_EXPIRY_SKEW_MS = 5000;
+
+  let toolPolicy = $state<ToolPolicy | null>(null);
+  let disabledTools = $state<string[]>([]);
+  let toolPolicyLoading = $state(true);
+  let toolPolicySaving = $state(false);
+  let toolPolicyError = $state('');
 
   let settings = $state<RuntimeSettings | null>(null);
   let loading = $state(true);
@@ -192,6 +200,35 @@
     };
   }
 
+  async function loadToolPolicy() {
+    toolPolicyLoading = true;
+    toolPolicyError = '';
+    try {
+      toolPolicy = await api.organizationToolPolicy();
+      disabledTools = [...toolPolicy.disabled_tools];
+    } catch (error) {
+      toolPolicyError = errorNotice('Tool policy failed to load.', error, 'Try again.').detail || '';
+    } finally {
+      toolPolicyLoading = false;
+    }
+  }
+
+  async function saveToolPolicy() {
+    if (!toolPolicy || !canManageSettings) return;
+    toolPolicySaving = true;
+    toolPolicyError = '';
+    notice = null;
+    try {
+      toolPolicy = await api.updateOrganizationToolPolicy({ disabled_tools: disabledTools, expected_version: toolPolicy.version });
+      disabledTools = [...toolPolicy.disabled_tools];
+      notice = { tone: 'success', title: 'Tool policy saved.' };
+    } catch (error) {
+      toolPolicyError = errorNotice('Tool policy was not saved.', error, 'Reload the policy and try again.').detail || '';
+    } finally {
+      toolPolicySaving = false;
+    }
+  }
+
   async function loadSettings() {
     loading = true;
     loadError = '';
@@ -223,7 +260,7 @@
   }
 
   async function refreshSystem() {
-    await Promise.all([loadSettings(), loadRuntimeStatus()]);
+    await Promise.all([loadSettings(), loadRuntimeStatus(), loadToolPolicy()]);
   }
 
   function normalizeCodexSignInCallbackMode(value: unknown): CodexSignInCallbackMode {
@@ -994,6 +1031,18 @@
           {canManageSettings}
           onUpdateModel={updateModel}
           onUpdateThinking={updateThinking}
+        />
+
+        <ToolPolicyCard
+          policy={toolPolicy}
+          {disabledTools}
+          {canManageSettings}
+          loading={toolPolicyLoading}
+          saving={toolPolicySaving}
+          error={toolPolicyError}
+          onRetry={loadToolPolicy}
+          onChange={(names) => (disabledTools = names)}
+          onSave={saveToolPolicy}
         />
       </div>
 

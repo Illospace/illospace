@@ -294,3 +294,15 @@ def unit_of_work_for_session(db_session):
             return False
 
     return _SessionUnitOfWork
+
+
+@pytest.fixture(autouse=True)
+def empty_saved_tool_policies_for_unit_tests(request, monkeypatch):
+    """Keep unit runtimes independent of Postgres; policy tests inject rows."""
+    if request.node.get_closest_marker("requires_db") is not None:
+        return
+
+    async def empty_policies(_org_id, _skill_names):
+        return []
+
+    monkeypatch.setattr("brain.systems.runs.tool_policy_store.load_tool_policies", empty_policies)

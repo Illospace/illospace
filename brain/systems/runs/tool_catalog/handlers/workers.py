@@ -38,7 +38,7 @@ from brain.systems.runs.execution_context import _agent_context
 from brain.systems.runs.headless_worker_identity import build_headless_worker_thread_id
 from brain.systems.runs.routing_metadata import effective_routing_snapshot
 from brain.systems.runs.store import AsyncAgentRunStore
-from brain.systems.runs.tool_policy import normalize_tool_policy
+from brain.systems.runs.tool_policy import current_policy_metadata, merge_tool_policies, normalize_tool_policy
 
 
 logger = logging.getLogger(__name__)
@@ -516,8 +516,12 @@ async def _handle_spawn_worker(
     )
     child_message = str(message or objective_text).strip()
     step_key = _step_key(role_text, objective_text, idempotency_key)
-    merged_tool_policy = _merge_tool_policy(tool_policy, headless=bool(headless))
-    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    execution_metadata = current_policy_metadata(_agent_context)
+    merged_tool_policy = merge_tool_policies(
+        execution_metadata.get("tool_policy"),
+        (metadata or {}).get("tool_policy") if isinstance(metadata, Mapping) else None,
+        _merge_tool_policy(tool_policy, headless=bool(headless)),
+    )
     inherited_metadata = dict(execution_metadata or {}) if isinstance(execution_metadata, Mapping) else {}
 
     worker_metadata = {

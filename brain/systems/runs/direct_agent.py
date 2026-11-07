@@ -133,7 +133,11 @@ from brain.systems.runs.direct_loop.run_budget_notice import (
     record_budget_notice_sent,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
-from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
+from brain.systems.runs.tool_policy import (
+    disabled_tool_names_from_metadata,
+    policy_skill_names,
+    resolve_effective_tool_policy,
+)
 from brain.systems import sessions as _session_store
 from brain.systems.context.window_policy import (
     ContextCompactionOutcome,
@@ -1353,6 +1357,7 @@ async def run_agent_async(
         tools = BRAIN_TOOLS
     if tool_handlers is None:
         tool_handlers = _get_tool_handlers(workspace_root=workspace_root)
+    await resolve_effective_tool_policy(effective_org_id, policy_skill_names(metadata, message), metadata)
     tools, tool_handlers = _apply_tool_policy(tools, tool_handlers, metadata)
 
     state = AgentLoopState(
@@ -1360,7 +1365,7 @@ async def run_agent_async(
             brain=brain_context_preloaded,
             skills=brain_context_preloaded,
         ),
-        loop_control=RunControlPolicy(session_id=session_id),
+        loop_control=RunControlPolicy(session_id=session_id, policy_metadata=metadata),
         operation_type=operation_type,
         metadata=metadata,
     )
@@ -1443,6 +1448,8 @@ async def run_agent_async(
             if key == "execution_provenance":
                 continue
             execution_metadata.setdefault(key, value)
+        execution_metadata["tool_policy"] = metadata["tool_policy"]
+        state.loop_control.policy_metadata = execution_metadata
         if effective_org_id:
             execution_metadata["org_id"] = effective_org_id
         if effective_user_id:

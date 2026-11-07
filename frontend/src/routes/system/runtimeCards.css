@@ -1,0 +1,81 @@
+.runtime-card.runtime-section {
+  display: grid;
+  gap: var(--constellation-runtime-section-gap);
+  min-width: 0;
+  padding: var(--constellation-runtime-section-padding) 0;
+  border-bottom: 1px solid var(--constellation-surface-panel-separator);
+}
+
+.runtime-card .runtime-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--constellation-runtime-section-gap);
+  min-width: 0;
+}
+
+.runtime-card .runtime-section-heading div {
+  display: grid;
+  gap: var(--constellation-runtime-heading-gap);
+  min-width: 0;
+}
+
+.runtime-card .runtime-section-heading h2,
+.runtime-card .model-copy h3 {
+  margin: 0;
+  color: var(--constellation-color-text-primary);
+  font-family: var(--constellation-font-sans);
+  font-weight: 560;
+  letter-spacing: 0;
+}
+
+.runtime-card .runtime-section-heading h2 {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.runtime-card .runtime-section-heading p,
+.runtime-card .model-copy p {
+  margin: 0;
+  color: var(--constellation-color-text-secondary);
+  font-size: var(--constellation-type-body-sm);
+  line-height: 1.45;
+}
+
+.runtime-card .model-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 360px);
+  align-items: center;
+  gap: var(--constellation-runtime-row-gap);
+  min-width: 0;
+  padding: var(--sp-3) 0 0;
+  border-top: 1px solid var(--constellation-surface-panel-separator);
+}
+
+.runtime-card .model-copy {
+  display: grid;
+  gap: var(--constellation-runtime-copy-gap);
+  min-width: 0;
+}
+
+.runtime-card .model-copy h3 {
+  font-family: var(--constellation-font-mono);
+  font-size: var(--constellation-type-meta);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* Identifier labels (tool names) keep their exact case: admins type them back. */
+.runtime-card .model-copy h3.runtime-card-identifier {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+@media (max-width: 760px) {
+  .runtime-card .model-row {
+    grid-template-columns: 1fr;
+    gap: var(--constellation-runtime-compact-row-gap);
+  }
+}

@@ -41,6 +41,7 @@ class CapabilityManifest:
     tools: tuple[str, ...] = ()
     unavailable_tools: tuple[str, ...] = ()
     tool_details: tuple[Mapping[str, Any], ...] = ()
+    unavailable_tool_details: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     status_check: Mapping[str, Any] | None = None
     setup: Mapping[str, Any] = field(default_factory=dict)
     availability: str = "available"
@@ -60,6 +61,9 @@ class CapabilityManifest:
         }
         if self.unavailable_tools:
             payload["unavailable_tools"] = list(self.unavailable_tools)
+
+        if self.unavailable_tool_details:
+            payload["unavailable_tool_details"] = dict(self.unavailable_tool_details)
 
         setup = _setup_payload(self.setup, detail_level=detail)
         if setup:
@@ -692,9 +696,67 @@ def load_setup_guide(manifest: CapabilityManifest) -> dict[str, Any] | None:
     }
 
 
+def apply_capability_tool_policy(
+    manifests: Iterable[CapabilityManifest], metadata: Any
+) -> list[CapabilityManifest]:
+    """Explain policy disablement at every capability detail level."""
+    from brain.systems.runs.tool_policy import policy_unavailable_tools
+
+    disabled = policy_unavailable_tools(metadata)
+    result = []
+    covered = set()
+    for manifest in manifests:
+        affected = (
+            set(manifest.tools) | set(manifest.unavailable_tools)
+        ) & disabled.keys()
+        covered |= affected
+        tools = tuple(name for name in manifest.tools if name not in disabled)
+        unavailable = tuple(
+            dict.fromkeys((*manifest.unavailable_tools, *sorted(affected)))
+        )
+        result.append(
+            replace(
+                manifest,
+                tools=tools,
+                unavailable_tools=unavailable,
+                unavailable_tool_details={
+                    **manifest.unavailable_tool_details,
+                    **{name: disabled[name] for name in sorted(affected)},
+                },
+                availability=(
+                    _availability_for(tools, unavailable)
+                    if affected
+                    else manifest.availability
+                ),
+                tool_details=tuple(
+                    detail
+                    for detail in manifest.tool_details
+                    if detail.get("name") not in disabled
+                ),
+            )
+        )
+    remaining = disabled.keys() - covered
+    if remaining:
+        result.append(
+            CapabilityManifest(
+                key="tool_policy",
+                name="Tool policy",
+                category="agent_runtime",
+                summary="These tools are unavailable under the current tool policy.",
+                unavailable_tools=tuple(sorted(remaining)),
+                availability="unavailable",
+                unavailable_tool_details={
+                    name: disabled[name] for name in sorted(remaining)
+                },
+            )
+        )
+    return result
+
+
 __all__ = [
     "CapabilityManifest",
     "CAPABILITY_COVERAGE_EXEMPT_TOOLS",
+    "apply_capability_tool_policy",
     "builtin_capability_manifests",
     "custom_capability_manifests",
     "filter_capability_manifests",
