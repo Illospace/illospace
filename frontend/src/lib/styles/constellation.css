@@ -11,6 +11,13 @@
   --constellation-type-astre-hero: 58px;
   --constellation-type-astre-standard: 44px;
 
+  --constellation-runtime-section-gap: 18px;
+  --constellation-runtime-section-padding: 22px;
+  --constellation-runtime-heading-gap: 7px;
+  --constellation-runtime-row-gap: clamp(16px, 2vw, 28px);
+  --constellation-runtime-copy-gap: 5px;
+  --constellation-runtime-compact-row-gap: 10px;
+
   --constellation-radius-panel: 16px;
   --constellation-radius-pill: 999px;
   --constellation-shape-alpha: 42% 58% 54% 46% / 47% 43% 57% 53%;

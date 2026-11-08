@@ -1,14 +1,14 @@
 """Add organization MCP servers and metadata-only audit history.
 
-Revision ID: 0070_external_mcp_servers
-Revises: 0069_codex_credential_health
+Revision ID: 0071_external_mcp_servers
+Revises: 0070_tool_policies
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as pg
 
-revision = "0070_external_mcp_servers"
-down_revision = "0069_codex_credential_health"
+revision = "0071_external_mcp_servers"
+down_revision = "0070_tool_policies"
 branch_labels = None
 depends_on = None
 

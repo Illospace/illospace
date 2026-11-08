@@ -37,3 +37,4 @@ from brain.platform.db.models.workspace_tool import *  # noqa
 from brain.platform.db.models.provider_alert import *  # noqa
 from brain.platform.db.models.open_ask import *  # noqa
 from brain.platform.db.models.external_mcp import *  # noqa
+from brain.platform.db.models.tool_policy import *  # noqa

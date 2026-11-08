@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from brain.systems.runs.tool_policy import (
+    apply_loaded_skill_policy,
+    current_policy_metadata,
+    guard_tool_handler,
+    tool_policy_error,
+)
+
 from brain.systems.runs.tool_catalog.handlers.browser import (
     _handle_browser,
     _handle_browser_back,
@@ -331,6 +338,14 @@ def _get_tool_handlers(
     _read_host_capacity._illo_run_on_event_loop = True
     _manage_workspace_reclamation._illo_run_on_event_loop = True
 
+    async def _skill_view_with_policy(name: str, **kwargs):
+        await apply_loaded_skill_policy(name, _agent_context)
+        return await async_tool_skill_view(name=name, **kwargs)
+
+    async def _skill_asset_with_policy(name: str, **kwargs):
+        await apply_loaded_skill_policy(name, _agent_context)
+        return await async_tool_skill_asset(name=name, **kwargs)
+
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
         "brain_recall": _wrap_brain_recall(async_tool_brain_recall),
@@ -341,8 +356,8 @@ def _get_tool_handlers(
         "memory_ingest_source": _wrap_memory_ingest_source(async_tool_memory_ingest_source),
         "brain_guardrails": async_tool_brain_guardrails,
         "brain_skills": _wrap_tool_evidence("brain_skills", async_tool_brain_skills),
-        "skill_view": _wrap_tool_evidence("skill_view", async_tool_skill_view),
-        "skill_asset": async_tool_skill_asset,
+        "skill_view": _wrap_tool_evidence("skill_view", _skill_view_with_policy),
+        "skill_asset": _skill_asset_with_policy,
         "brain_encode": _wrap_brain_encode(async_tool_brain_encode),
         "brain_vault": _run_on_event_loop_adapter(
             lambda key, reason=None: tool_brain_vault(
@@ -579,6 +594,10 @@ def _get_tool_handlers(
         summary_handler = handlers.get("summarize_file_for_task")
         if not callable(summary_handler):
             return result
+
+        error = tool_policy_error("summarize_file_for_task", current_policy_metadata(_agent_context))
+        if error:
+            return {"error": error}
 
         task_hint = (reader_policy.get("task_hint") or "").strip()
         focus = reader_policy.get("focus")
@@ -878,6 +897,9 @@ def _get_tool_handlers(
             tool_name = str(op.get("tool_name") or "").strip()
             if not tool_name:
                 return {"error": f"operations[{idx}].tool_name is required"}
+            error = tool_policy_error(tool_name, current_policy_metadata(_agent_context))
+            if error:
+                return {"error": error}
             if tool_name not in _PARALLEL_BATCH_SAFE_TOOL_NAMES:
                 allowed = ", ".join(sorted(_PARALLEL_BATCH_SAFE_TOOL_NAMES))
                 return {
@@ -945,6 +967,8 @@ def _get_tool_handlers(
         if tool_name in _ACTION_MANIFEST_TOOL_NAMES:
             handlers[tool_name] = _wrap_action_manifest_audit(tool_name, handlers[tool_name])
 
+    for tool_name, handler in tuple(handlers.items()):
+        handlers[tool_name] = guard_tool_handler(tool_name, handler, _agent_context)
     return handlers
 
 

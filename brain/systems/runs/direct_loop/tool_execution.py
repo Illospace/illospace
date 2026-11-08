@@ -38,6 +38,9 @@ from brain.systems.runs.tool_outcomes import (
     ToolOutcome,
 )
 
+from brain.systems.runs.tool_policy import current_policy_metadata, tool_policy_error
+
+
 logger = logging.getLogger("agent")
 _background_tool_tasks: set[asyncio.Task[ResolvedToolCall]] = set()
 
@@ -371,6 +374,9 @@ async def _async_resolve_tool_call_once(
 ) -> ResolvedToolCall:
     """Execute one tool request and normalize success/error handling."""
     try:
+        error = tool_policy_error(request.tool_name, current_policy_metadata(threadlocal_context or agent_context))
+        if error:
+            return _failed_tool_result(request, RuntimeError(error))
         if not getattr(request.handler, "_illo_marks_side_effect_start", False):
             mark_side_effect_started()
         result = await async_invoke_tool_handler(
@@ -475,6 +481,9 @@ def _resolve_tool_call_sync(
 ) -> ResolvedToolCall:
     """Execute one tool request and normalize success/error handling."""
     try:
+        error = tool_policy_error(request.tool_name, current_policy_metadata(threadlocal_context or agent_context))
+        if error:
+            return _failed_tool_result(request, RuntimeError(error))
         result = invoke_tool_handler(
             request.handler,
             request.tool_input,
@@ -715,6 +724,10 @@ def execute_tool_calls(
         )
 
     def skip_disabled_tool(tool_name: str, block_id: str) -> bool:
+        error = tool_policy_error(tool_name, loop_control.policy_metadata)
+        if error:
+            tool_results.append({"type": "tool_result", "tool_use_id": block_id, "content": error, "is_error": True})
+            return True
         disablement = loop_control.disabled_tools.get(tool_name)
         if disablement is None:
             return False
@@ -874,6 +887,10 @@ async def async_execute_tool_calls(
         )
 
     def skip_disabled_tool(tool_name: str, block_id: str) -> bool:
+        error = tool_policy_error(tool_name, loop_control.policy_metadata)
+        if error:
+            tool_results.append({"type": "tool_result", "tool_use_id": block_id, "content": error, "is_error": True})
+            return True
         disablement = loop_control.disabled_tools.get(tool_name)
         if disablement is None:
             return False

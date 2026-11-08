@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from brain.systems.runs.capabilities import (
+    apply_capability_tool_policy,
     builtin_capability_manifests,
     custom_capability_manifests,
     external_mcp_capability_manifests,
@@ -15,7 +16,11 @@ from brain.systems.runs.capabilities import (
     normalize_capability_manifests,
     registry_capability_manifests,
 )
-from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
+from brain.systems.runs.tool_policy import (
+    POLICY_GUIDANCE,
+    current_policy_metadata,
+    disabled_tool_names_from_metadata,
+)
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context
 
 
@@ -28,7 +33,7 @@ def _context_containers() -> list[dict[str, Any]]:
         value = getattr(_agent_context, attr, None)
         if isinstance(value, dict):
             containers.append(value)
-    metadata = getattr(_agent_context, "execution_metadata", None)
+    metadata = current_policy_metadata(_agent_context)
     if isinstance(metadata, dict):
         containers.append(metadata)
         for key in ("target_ref", "workspace_ref"):
@@ -39,7 +44,7 @@ def _context_containers() -> list[dict[str, Any]]:
 
 
 def _available_registry_tool_names() -> set[str] | None:
-    metadata = getattr(_agent_context, "execution_metadata", None)
+    metadata = current_policy_metadata(_agent_context)
     disabled = disabled_tool_names_from_metadata(metadata)
     if not disabled:
         return None
@@ -91,6 +96,7 @@ def _handle_read_capabilities(
             registered_tool_names=registered_tools,
         ),
     ])
+    manifests = apply_capability_tool_policy(manifests, current_policy_metadata(_agent_context))
     matches = filter_capability_manifests(
         manifests,
         query=query,
@@ -115,6 +121,7 @@ def _handle_read_capabilities(
             for manifest in matches
         ],
         "answering_guidance": [
+            POLICY_GUIDANCE,
             "Use capability manifests and tool schemas as the authority for what Illo can inspect, do, or guide.",
             "Use summary results as a capability index; single matches include setup/status fields when they exist.",
             "Setup guides are optional extra documentation; when no setup guide is returned, use the capability setup/status fields.",

@@ -14,13 +14,13 @@ from sqlalchemy import text
 
 def test_external_mcp_migration_graph_has_one_head():
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert scripts.get_heads() == ["0070_external_mcp_servers"]
-    assert scripts.get_revision("0070_external_mcp_servers").down_revision == "0069_codex_credential_health"
+    assert scripts.get_heads() == ["0071_external_mcp_servers"]
+    assert scripts.get_revision("0071_external_mcp_servers").down_revision == "0070_tool_policies"
 
 
 @pytest.mark.requires_db
 async def test_external_mcp_migration_upgrade_existing_database(db_session, monkeypatch):
-    migration = importlib.import_module("brain.platform.db.alembic.versions.0070_external_mcp_servers")
+    migration = importlib.import_module("brain.platform.db.alembic.versions.0071_external_mcp_servers")
     schema = "mcp_test_" + uuid.uuid4().hex
     # Use the async test session for DDL, as the shared test fixtures do.
     await db_session.execute(text(f'CREATE SCHEMA "{schema}"'))

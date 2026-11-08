@@ -26,11 +26,20 @@ from brain.platform.integrations.llm import _resolve_key_from_env, resolve_llm_c
 from brain.platform.integrations.providers import LLMRequest, _merge_streamed_output_into_response, get_provider
 from brain.systems.runs.direct_agent import (
     AgentResult,
+    _apply_tool_policy,
     _agent_context,
 )
 from brain.systems.runs.execution_context import snapshot_agent_context
 from brain.systems.runs.direct_loop.telemetry import async_record_api_call as _async_record_api_call
-from brain.systems.runs.direct_loop.tool_execution import async_invoke_tool_handler
+from brain.systems.runs.direct_loop.loop_control import RunControlPolicy
+from brain.systems.runs.direct_loop.tool_execution import async_invoke_tool_handler, run_tool_awaitable
+from brain.systems.runs.tool_policy import (
+    current_policy_metadata,
+    policy_org_id,
+    policy_skill_names,
+    resolve_effective_tool_policy,
+    tool_policy_error,
+)
 from brain.platform.providers.model_policy import (
     DEFAULT_PROVIDER_MODELS,
     PROVIDER_MODEL_OPTIONS,
@@ -839,6 +848,9 @@ def _make_async_tool_wrapper(
             if value is not _OMITTED_TOOL_ARGUMENT
         }
         try:
+            error = tool_policy_error(tool_name, current_policy_metadata(threadlocal_context))
+            if error:
+                return json.dumps({"error": error})
             result = await async_invoke_tool_handler(
                 handler,
                 kwargs,
@@ -994,9 +1006,21 @@ def invoke_predict_rlm_agent(
             f"({model}, {metadata.get('latency_ms')}ms)"
         )
 
+    metadata = dict(getattr(spec, "metadata", None) or {})
+    effective_org_id = policy_org_id(org_id or getattr(spec, "org_id", None), metadata)
+    run_tool_awaitable(resolve_effective_tool_policy(
+        effective_org_id,
+        policy_skill_names(metadata, spec.message),
+        metadata,
+    ))
+    definitions, handlers = _apply_tool_policy(spec.tools or [], spec.tool_handlers, metadata)
+    threadlocal_context["execution_metadata"] = metadata
+    threadlocal_context["loop_control"] = RunControlPolicy(policy_metadata=metadata)
+    if effective_org_id:
+        threadlocal_context["org_id"] = effective_org_id
     tools = build_predict_rlm_tools(
-        tool_definitions=spec.tools or [],
-        tool_handlers=spec.tool_handlers,
+        tool_definitions=definitions,
+        tool_handlers=handlers,
         on_tool_call=_track_tool_call,
         run_id=spec.run_id,
         idea_id=spec.idea_id,

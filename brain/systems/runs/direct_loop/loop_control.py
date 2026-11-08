@@ -130,7 +130,9 @@ class RunControlPolicy:
         unchanged_result_threshold: int = 4,
         exact_repeat_threshold: int = 5,
         session_id: str = "unknown",
+        policy_metadata: dict | None = None,
     ) -> None:
+        self.policy_metadata = policy_metadata if policy_metadata is not None else {}
         self.tool_failures = ToolFailurePolicy(
             failure_threshold=(
                 tool_failure_threshold()

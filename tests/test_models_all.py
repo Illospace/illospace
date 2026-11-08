@@ -7,6 +7,8 @@ from brain.platform.db.models import *  # noqa
 EXPECTED_TABLES = {
     "external_mcp_servers",
     "external_mcp_audit_events",
+    "tool_policies",
+    "tool_policy_change_audits",
     "action_manifests",
     "agent_api_calls",
     "agent_run_artifacts",

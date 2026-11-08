@@ -406,6 +406,7 @@ from brain.app.api.routers import link_previews, launch_handoffs
 from brain.app.api.routers.cycles import router as cycles_router
 from brain.app.api.routers.chat import router as chat_router
 from brain.app.api.routers.notifications import router as notifications_router
+from brain.app.api.routers.tool_policies import router as tool_policies_router
 from brain.systems.runtime_settings.router import router as runtime_settings_router
 
 app.include_router(ws_router)
@@ -418,6 +419,7 @@ app.include_router(skills.router)
 app.include_router(vault.router)
 app.include_router(system.router)
 app.include_router(runtime_settings_router)
+app.include_router(tool_policies_router)
 app.include_router(onboarding.router)
 app.include_router(agent_connections.router)
 app.include_router(agent_bridge.router)

@@ -141,3 +141,23 @@ runtime contract. Personalized context belongs in `AGENT_CONTEXT_DIR`, Illo's
 editable personality lives at `AGENT_SOUL_PATH` (default
 `.illo/agent-context/SOUL.md`), and generated guardian checklists belong at
 `AGENT_CHECKLIST_PATH`.
+
+## Tool policy
+
+A workspace admin can turn off tools in **System → Tool policy**. The saved
+organization policy applies to interactive runs, schedules, Cycles, inbound
+messages, and workers. An empty policy keeps the current tool list.
+
+The final disabled list is the union of the organization policy, all applicable
+skill policies, and the run policy. A worker inherits this full list. A skill
+loaded during a run can add disabled tools. No run or worker request can remove
+a disabled name. The capability list explains the policy and asks the agent to
+state the limit and offer to file a ticket. The agent must not seek a workaround.
+
+Authenticated workspace members can read `GET /api/tool-policies/organization`
+and `GET /api/tool-policies/skills/{skill_name}`. Only human owners and admins
+can use `PUT` on these paths. Send `disabled_tools` and `expected_version`
+(initially `0`). A stale version returns `409`. Each write records the actor,
+time, version, and lists before and after the change. Append `/history` to
+read this history. Skill policies apply only in the admin's organization.
+Unknown tool names are saved with a warning and apply if the tool connects later.

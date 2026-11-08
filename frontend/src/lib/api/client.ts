@@ -1,4 +1,5 @@
 import type { ExternalMcpConfig, ExternalMcpServer, ExternalMcpTestResult } from '$lib/types/externalMcp';
+import type { ToolPolicy } from '$lib/types/toolPolicy';
 import type { RuntimeSettings, RuntimeVoiceSession, RuntimeVoiceTranscript } from '$lib/types/runtimeSettings';
 import type { StreamItem } from '$lib/types/cortex';
 import type { RuntimeStatusSnapshot } from '$lib/types/runtimeStatus';
@@ -1963,6 +1964,10 @@ export const api = {
     fetchJson<any>(`/api/agent-connections/${connectionId}/tokens/${tokenId}`, { method: 'DELETE' }),
   markAgentConnectionTested: (connectionId: string) =>
     fetchJson<any>(`/api/agent-connections/${connectionId}/test`, { method: 'POST' }),
+
+  organizationToolPolicy: () => fetchJson<ToolPolicy>('/api/tool-policies/organization'),
+  updateOrganizationToolPolicy: (data: { disabled_tools: string[]; expected_version: number }) =>
+    fetchJson<ToolPolicy>('/api/tool-policies/organization', { method: 'PUT', body: JSON.stringify(data) }),
 
   // System
   systemInfo: () => fetchJson<any>('/api/system'),

@@ -93,19 +93,18 @@ To use HTTP on a private network, set `ILLO_EXTERNAL_MCP_ALLOW_PRIVATE_HTTP=1` o
 HTTP then requires a private or loopback host. All resolved addresses must qualify.
 Illo checks the URL policy at save time and again before each connection.
 
-## Disable a tool for a run
+## Disable one remote tool
 
-Set the remote tool name in the existing run metadata:
+Remote tools use the normal tool policy. Add the full name, for example
+`mcp__reports__get_report`, to one of these lists:
 
-```json
-{
-  "tool_policy": {
-    "disabled_tools": ["mcp__reports__get_report"]
-  }
-}
-```
+- The organization policy in **System → Tool policy**.
+- A skill policy.
+- The `tool_policy.disabled_tools` list in the run metadata.
 
-The tool disappears from the model's tools and the callable handlers.
-Workers inherit this policy. Organization and skill tool policy are separate work.
+Illo applies the union of these lists. The tool disappears from the model's
+tools and the callable handlers, and workers inherit the list. The tool policy
+accepts a name before the server connects. See
+[Configuration → Tool policy](configuration.md#tool-policy).
 To stop all future uses of a connection, disable or delete the server.
 Existing handlers also check the current server and allowed list before each call.
