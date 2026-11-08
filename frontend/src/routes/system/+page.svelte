@@ -27,6 +27,7 @@
   import ProviderConnections from './ProviderConnections.svelte';
   import RuntimeStatusPanel from './RuntimeStatusPanel.svelte';
   import VoiceCard from './VoiceCard.svelte';
+  import ExternalMcpCard from './ExternalMcpCard.svelte';
   import ToolPolicyCard from './ToolPolicyCard.svelte';
   import type { ToolPolicy } from '$lib/types/toolPolicy';
   import type {
@@ -1072,6 +1073,8 @@
           {canManageSettings}
           onUpdateVoice={updateVoiceDraft}
         />
+
+        <ExternalMcpCard {canManageSettings} />
       </div>
     </div>
 

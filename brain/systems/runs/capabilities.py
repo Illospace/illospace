@@ -166,6 +166,26 @@ def _manifest_from_mapping(value: Mapping[str, Any], *, default_key: str | None 
     )
 
 
+def external_mcp_capability_manifests(*containers: Mapping[str, Any] | None) -> list[CapabilityManifest]:
+    """Use the run's discovery status. Never reconnect for the self model."""
+    manifests = []
+    seen = set()
+    for container in containers:
+        statuses = container.get("external_mcp_status", []) if isinstance(container, Mapping) else []
+        for status in statuses if isinstance(statuses, list) else []:
+            if not isinstance(status, Mapping) or not status.get("name") or status["name"] in seen:
+                continue
+            seen.add(status["name"])
+            name = str(status["name"])
+            manifests.append(CapabilityManifest(
+                key=f"external_mcp:{name}", name=name, category="external_mcp",
+                summary=(f"Outside MCP server {name}." + (f" Status: {status['reason']}." if status.get("reason") else "")),
+                tools=tuple(status.get("tool_names") or ()), unavailable_tools=tuple(status.get("disabled_tools") or ()),
+                availability="available" if status.get("available") else "unavailable", source="external_mcp",
+            ))
+    return manifests
+
+
 def custom_capability_manifests(*containers: Mapping[str, Any] | None) -> list[CapabilityManifest]:
     manifests: list[CapabilityManifest] = []
     for container in containers:

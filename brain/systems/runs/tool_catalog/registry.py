@@ -1073,7 +1073,15 @@ def all_tool_registrations() -> dict[str, ToolRegistration]:
 def get_tool_registration(name: str) -> ToolRegistration | None:
     """Return a tool registration by name."""
     _ensure_dynamic_registrations()
-    return _REGISTRY.get(name)
+    registration = _REGISTRY.get(name)
+    if registration is None and re.fullmatch(r"mcp__[a-z0-9_]{1,32}__[a-zA-Z0-9_-]+", name) and len(name) <= 64:
+        return ToolRegistration(
+            name=name, schema={"type": "object", "properties": {}}, toolset="external_mcp",
+            permission="external_call", risk_class="high", side_effect_class="external_call",
+            reversibility="variable", parallel_safety="serial", action_manifest=True,
+            expected_effect="call an admin-allowed tool on an outside MCP server",
+        )
+    return registration
 
 
 def side_effect_class_for_tool(name: str) -> ToolSideEffectClass:
@@ -1333,7 +1341,7 @@ def action_policy_for_tool(
             policy["deny_reason"] = deny_reason
         return policy
     _ensure_dynamic_registrations()
-    registration = _REGISTRY.get(tool_name)
+    registration = get_tool_registration(tool_name)
     if registration is not None:
         return registration.to_action_policy()
     if tool_name == "manage_cron_job":

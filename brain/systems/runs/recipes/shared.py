@@ -220,3 +220,25 @@ __all__ = [
     "default_run_thinking",
     "project_runtime_workspace_from_ref",
 ]
+
+
+async def merge_external_mcp_surface(runtime, tools: list[dict], handlers: dict) -> tuple[list[dict], dict, dict]:
+    """Merge external tools before either recipe applies the run policy or wraps handlers."""
+    from brain.systems.external_mcp.runtime import external_mcp_tool_surface
+    from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
+
+    remote_tools, remote_handlers, statuses = await external_mcp_tool_surface(
+        org_id=runtime.request.org_id, run_id=runtime.run.id, actor_user_id=runtime.request.user_id,
+        existing_names={str(tool.get("name")) for tool in tools} | set(handlers),
+    )
+    if remote_tools:
+        tools = [*tools, *remote_tools]
+        handlers = {**handlers, **remote_handlers}
+    disabled = disabled_tool_names_from_metadata(runtime.request.metadata)
+    if disabled:
+        tools = [tool for tool in tools if tool.get("name") not in disabled]
+        handlers = {name: handler for name, handler in handlers.items() if name not in disabled}
+        for status in statuses:
+            status["disabled_tools"] = [name for name in status["tool_names"] if name in disabled]
+            status["tool_names"] = [name for name in status["tool_names"] if name not in disabled]
+    return tools, handlers, {"external_mcp_status": statuses} if statuses else {}

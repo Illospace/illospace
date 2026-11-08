@@ -18,6 +18,7 @@ from brain.systems.runs.recipes.shared import (
     default_run_model,
     default_run_thinking,
     project_runtime_workspace_from_ref,
+    merge_external_mcp_surface,
 )
 from brain.systems.runs.recipes.surface_guidance import response_surface_guidance
 from brain.systems.runs.tool_policy import (
@@ -115,6 +116,7 @@ def fast_agent_tools_for_request(
     metadata: dict | None = None,
     target_ref: dict | None = None,
     thread_id: str = "",
+    tools: list[dict] | None = None,
 ) -> list[dict]:
     """Return the exact Fast model-visible tool surface for a request shape."""
 
@@ -131,13 +133,14 @@ def fast_agent_tools_for_request(
         hidden.add(_THREAD_DISCUSSION_REPLY_TOOL)
     return [
         tool
-        for tool in build_agent_tools("coordinator")
+        for tool in (tools if tools is not None else build_agent_tools("coordinator"))
         if str(tool.get("name") or "") not in hidden
     ]
 
 
-def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
+def _agent_tools_for_runtime(runtime: RunRuntime, tools: list[dict] | None = None) -> list[dict]:
     return fast_agent_tools_for_request(
+        tools=tools,
         metadata=getattr(runtime.request, "metadata", None),
         target_ref=getattr(runtime.request, "target_ref", None),
         thread_id=str(getattr(runtime.request, "thread_id", "") or ""),
@@ -201,6 +204,10 @@ class FastRecipe(BaseRunRecipe):
             workspace_root=workspace_root,
             allowed_workspaces=project_workspace.allowed_workspaces,
         )
+        agent_tools, raw_tool_handlers, external_metadata = await merge_external_mcp_surface(
+            runtime, build_agent_tools("coordinator"), raw_tool_handlers,
+        )
+        agent_tools = _agent_tools_for_runtime(runtime, tools=agent_tools)
         if disabled_tools:
             raw_tool_handlers = {
                 name: handler for name, handler in raw_tool_handlers.items() if name not in disabled_tools
@@ -232,7 +239,7 @@ class FastRecipe(BaseRunRecipe):
             session_id=f"agent-run-{runtime.run.id}",
             model=str(model),
             thinking=str(thinking),
-            tools=_agent_tools_for_runtime(runtime),
+            tools=agent_tools,
             tool_handlers=tool_handlers,
             persist_session=True,
             workspace_root=workspace_root,
@@ -249,6 +256,7 @@ class FastRecipe(BaseRunRecipe):
             brain_context_preloaded=bool(prompt_context),
             skip_harvest=True,
             metadata={
+                **external_metadata,
                 "tool_policy": runtime.request.metadata.get("tool_policy"),
                 "profile": "fast",
                 "recipe": self.name,
