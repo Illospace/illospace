@@ -36,9 +36,12 @@ async def report(ctx, args: dict) -> dict:
 
 
 async def report_one(ctx, args: dict) -> dict:
+    if args["source"] == "github":
+        raise ValueError("Only the GitHub poller can report GitHub lanes")
     await mcp.lock_lane_ref(ctx.conn, args["source"], args["external_id"])
     previous = await mcp.lane_by_ref(ctx.conn, args["source"], args["external_id"], lock=True)
-    check_visible(ctx, previous)
+    if previous and previous["owner_person_id"] != ctx.token["person_id"]:
+        raise ValueError("The lane belongs to another person")
     values = {key: value for key, value in args.items() if key not in {"owner", "event"}}
     # An omitted field keeps the stored snapshot, including its private visibility.
     base = (
@@ -76,7 +79,12 @@ async def report_one(ctx, args: dict) -> dict:
             lane["id"],
             "state" if changed else "report",
             args.get("event") or f"The lane state is {lane['state']}.",
-            {"previous_state": previous["state"] if previous else None, "state": lane["state"]},
+            {
+                "previous_state": previous["state"] if previous else None,
+                "state": lane["state"],
+                "token_id": ctx.token["id"],
+                "token_label": ctx.token["label"],
+            },
         )
     if lane["end_summary"] and lane["state"] in {"done", "failed"}:
         await items.upsert(

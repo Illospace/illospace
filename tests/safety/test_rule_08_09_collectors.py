@@ -77,4 +77,5 @@ def test_rule_09_illo_gets_no_machine_credential_or_tool_output(collector_case):
         "links",
         "repo",
         "machine",
+        "visibility",
     }

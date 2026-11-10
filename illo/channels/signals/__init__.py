@@ -25,6 +25,10 @@ async def submit(ctx, args: dict) -> dict:
     if duplicate:
         row = await mcp.signal_by_key(ctx.conn, args["source"], args["dedupe_key"])
     else:
+        await ctx.conn.execute(
+            "UPDATE signals SET token_id=%s WHERE id=%s", (ctx.token["id"], row["id"])
+        )
+        await mcp.check_hourly_limit(ctx.conn, ctx.token["id"])
         ctx.events.append(event(row))
     return {"signal_id": row["id"], "duplicate": duplicate}
 

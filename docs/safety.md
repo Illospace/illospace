@@ -14,6 +14,10 @@ Each call of the brain goes through the tool server, `illo/tools/registry.py`. T
 
 Each call writes one row in `audit`.
 
+Argument digests use HMAC with the encrypted `audit_digest_key` secret. Without `ILLO_VAULT_KEY`, the digest is `unavailable`. `tests/safety/test_review_s25_audit_hmac.py` checks both paths.
+
+Each token permits 20 open asks per owner, 60 new signals per hour, and 60 requests per hour. Saves and retries do not count. Run limits and concurrent requests have tests in `tests/safety/test_review_s14_call_caps.py`.
+
 ## 1. One principal for each run
 
 **Rule.** Each run has one principal. The gateway sets it. The model cannot change it.
@@ -24,6 +28,8 @@ Each call writes one row in `audit`.
 
 **Tests.** `tests/safety/test_rule_01_principal.py`, `tests/test_gateway.py`.
 
+Agent tokens can update only their person's lanes and cannot report GitHub lanes. `tests/safety/test_review_s05_lane_owner.py` checks these limits.
+
 ## 2. A personal connector works only for its owner
 
 Private Slack channels have no shared index or channel runs. Thread reads need live membership and set `personal_read`. The migration deletes old Slack search snapshots. Test: `tests/safety/test_review_s19_private_slack.py`.
@@ -32,7 +38,9 @@ Private Slack channels have no shared index or channel runs. Thread reads need l
 
 **Bad case.** Ben asks "what is in Ada's mail about Globex?". Without the rule, Illo could read Ada's mailbox for Ben.
 
-**Code.** The `scope` check in `illo/tools/checks.py` denies a personal tool unless the run is an untainted run of a person, in a DM or from that person's agent. A personal tool loads its grant from the person of the run, never from its arguments.
+**Code.** Personal tools permit only untainted person DM runs. A personal tool loads its grant from the person of the run, never from its arguments.
+
+New MCP tokens default to `collector`; `agent` also permits submissions and knowledge reads. `tests/safety/test_review_s12_token_scopes.py` checks token scopes and personal tool grants.
 
 **Tests.** `tests/test_tools.py` (`test_personal_tool_needs_person_and_untainted_run`). The personal tools and their test in `tests/safety/` are in progress.
 
@@ -128,7 +136,7 @@ Email requires one aligned DMARC pass from the selected receiving server.
 
 **Bad case.** An attacker takes over Illo. With SSH keys for each machine, the attacker also takes over each machine.
 
-**Code.** The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential. The collectors in `collectors/` call out to Illo with an MCP token, and they open no inbound port. They send lane facts, not tool output. `work_start`, which files the GitHub ticket, is in progress.
+**Code.** The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential. The collectors in `collectors/` call out to Illo with an MCP token, and they open no inbound port. Their private reports can include prompts and assistant text. `share = "team"` permits team reports; `tests/safety/test_review_s17_collector_privacy.py` checks visibility and credential filters.
 
 **Tests.** `tests/safety/test_rule_08_09_collectors.py`, `tests/collectors/`.
 

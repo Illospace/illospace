@@ -39,6 +39,8 @@ async def create(ctx, args: dict) -> dict:
     existing = await mcp.existing_ask(ctx.conn, ctx.token["id"], args["source_ref"])
     if existing:
         return answer(existing)
+    person = await owner(ctx, args["owner"])
+    await mcp.check_open_ask_limit(ctx.conn, ctx.token["id"], person["id"])
     lane = None
     if args["lane"]:
         ref = args["lane"]
@@ -46,6 +48,8 @@ async def create(ctx, args: dict) -> dict:
         lane = await mcp.lane_by_ref(ctx.conn, **ref)
         check_visible(ctx, lane)
         if not lane:
+            if ref["source"] == "github":
+                raise ValueError("Only the GitHub poller can create GitHub lanes")
             lane = await lanes.upsert(
                 ctx.conn,
                 **ref,
@@ -53,7 +57,6 @@ async def create(ctx, args: dict) -> dict:
                 owner_person_id=ctx.token["person_id"],
                 machine=ctx.token["label"],
             )
-    person = await owner(ctx, args["owner"])
     row = await asks.create(
         ctx.conn,
         owner_person_id=person["id"],

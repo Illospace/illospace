@@ -61,7 +61,7 @@ async def test_concurrent_ask_and_lane_reports_are_idempotent(app, http):
     agent = await AgentClient.create(app, http)
     created = await asyncio.gather(*(agent.call("ask_create", ASK) for _ in range(4)))
     assert len({r["ask_id"] for r in created}) == 1
-    other = await AgentClient.create(app, http, person="ben")
+    other = await AgentClient.create(app, http, label="acme-desktop")
     lane = {"source": "t3", "external_id": "acme-2", "state": "working"}
     results = await asyncio.gather(agent.call("lane_report", lane), other.call("lane_report", lane))
     assert results[0] == results[1]

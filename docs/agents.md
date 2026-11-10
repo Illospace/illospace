@@ -9,13 +9,18 @@ Create the token on the Illo host:
 ```sh
 mkdir -p ~/.config/illo
 umask 077
-illo token create --person ada --label acme-laptop > ~/.config/illo/token
+illo token create --person ada --label acme-laptop --scope agent > ~/.config/illo/token
 chmod 600 ~/.config/illo/token
 ```
 
 Keep the token outside every git checkout. Transfer it to the agent machine through your team's secret store.
 Send it as `Authorization: Bearer <token>`. The server also accepts `X-Illo-Bridge-Token: <token>`.
 An unknown token, a revoked token, or an inactive person gets HTTP 401.
+
+New tokens default to `--scope collector`. This scope permits lane reports, lane searches, asks, and signals.
+Use `--scope agent` for a session client that also needs `illo_submit`, `illo_read`, and `illo_get_result`.
+The migration gives existing tokens the `agent` scope. Revoke them and create collector tokens where needed.
+Agent requests cannot use personal mail, calendar, or Drive tools. Use a person DM for those reads.
 
 Test the connection:
 

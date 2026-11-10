@@ -33,7 +33,7 @@ async def test_people_lookups(conn, ada):
 
 
 async def test_token_lifecycle(conn, ada):
-    raw = await tokens.create(conn, ada["id"], "test machine", ["lanes:read"])
+    raw = await tokens.create(conn, ada["id"], "test machine", ["collector"])
     stored = await one(conn, "SELECT * FROM tokens")
     assert stored["token_hash"] == tokens.digest(raw)
     assert raw not in str(stored)
@@ -65,7 +65,8 @@ async def test_expire_run_token(conn, run):
     assert await runs.verify_token(conn, token) is None
 
 
-async def test_audit_redacts_values(conn, run):
+async def test_audit_redacts_values(conn, run, monkeypatch):
+    monkeypatch.setenv("ILLO_VAULT_KEY", Fernet.generate_key().decode())
     await audit.write(
         conn,
         run_id=run["id"],

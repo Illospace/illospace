@@ -15,7 +15,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def lane_from_hook(source: str, payload: dict, repo: str | None = None) -> dict | None:
+def lane_from_hook(
+    source: str, payload: dict, repo: str | None = None, *, share: str = "private"
+) -> dict | None:
     from collectors.common import clean
 
     folder = Path(payload.get("cwd") or ".").name or "Agent session"
@@ -58,6 +60,7 @@ def lane_from_hook(source: str, payload: dict, repo: str | None = None) -> dict 
         "repo": repo,
         "machine": socket.gethostname(),
         "links": [],
+        "visibility": "team" if share == "team" else "private",
     }
 
 
@@ -104,7 +107,9 @@ def worker(source: str, payload: dict, config_path: Path) -> None:
             # A removed notify program must not prevent this bundle's report.
             pass
     token = read_token(Path(config["token_file"]))
-    lane = lane_from_hook(source, payload, repository(payload.get("cwd") or "."))
+    lane = lane_from_hook(
+        source, payload, repository(payload.get("cwd") or "."), share=config.get("share", "private")
+    )
     if lane:
         for key in ("title", "summary"):
             lane[key] = clean(lane[key], 500 if key == "summary" else 200, (token,))
@@ -123,6 +128,7 @@ def worker(source: str, payload: dict, config_path: Path) -> None:
             ):
                 lane["title"] = clean(payload.get("prompt"), 200, (token,)) or lane["title"]
                 entry["prompt_title"] = True
+            lane["title"] = clean(lane["title"], 200, (token,))
             MCPClient(config["mcp_url"], token).call("lane_report", lane)
             state[key] = {
                 "title": lane["title"],

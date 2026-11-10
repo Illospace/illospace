@@ -134,6 +134,7 @@ async def submit(ctx, args: dict) -> dict:
         result = receipt(row["event_id"], saved=True, refs=refs, handle=item["source_ref"])
         result["completed_at"] = item["source_at"].isoformat()
     else:
+        await ledger.check_hourly_limit(ctx.conn, ctx.token["id"], submission=True)
         result = receipt(row["event_id"])
         # Dispatch only after the endpoint commits the receipt and its audit row.
         ctx.events.append(

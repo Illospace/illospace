@@ -5,6 +5,33 @@ from psycopg.types.json import Jsonb
 from illo.db import all_rows, one
 
 
+async def check_open_ask_limit(conn, token_id: int, owner_id: int) -> None:
+    """The MCP endpoint holds the token row lock through this check and insert."""
+    row = await one(
+        conn,
+        """SELECT count(*) AS n FROM asks WHERE requester_token_id=%s
+        AND owner_person_id=%s AND state='open'""",
+        (token_id, owner_id),
+    )
+    if row["n"] >= 20:
+        raise ValueError("The token has reached its limit of 20 open asks for this owner")
+
+
+async def check_hourly_limit(conn, token_id: int, *, submission: bool = False) -> None:
+    """Count the new row too. A refusal rolls it back with the tool transaction."""
+    query = (
+        """SELECT count(*) AS n FROM submissions WHERE token_id=%s
+        AND desired_outcome <> 'preserve_knowledge' AND created_at > now()-interval '1 hour'"""
+        if submission
+        else """SELECT count(*) AS n FROM signals WHERE token_id=%s
+        AND created_at > now()-interval '1 hour'"""
+    )
+    row = await one(conn, query, (token_id,))
+    if row["n"] > 60:
+        kind = "requests" if submission else "signals"
+        raise ValueError(f"The token has reached its limit of 60 {kind} per hour")
+
+
 async def submission(conn, event_id: str, person_id: int) -> dict | None:
     return await one(
         conn,

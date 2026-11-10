@@ -5,6 +5,7 @@ t3_token_file = "~/.config/illo/t3-token"
 machine = "acme-laptop"
 poll_seconds = 30
 state_file = "~/.local/state/illo/t3.json"
+share = "private"  # Use "team" only for sessions that the team may read.
 # owner = "sam"  # Omit this key to use the owner of the Illo token.
 # data_path = "~/.t3"  # Optional read-only SQLite fallback.
 # environment_id = "acme-environment"  # Optional cross-device thread links.
