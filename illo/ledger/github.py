@@ -86,6 +86,9 @@ async def sync_item(conn: Connection, repo: str, item: dict, label_map: dict[str
             f"State: {state}",
             {"from": old["state"] if old else None, "to": state},
         )
+    if old and owner and old["owner_person_id"] != owner["id"]:
+        # The status message shows the last event. A new owner replaces an older owner note.
+        await lanes.add_event(conn, row["id"], "owner", f"Owner: {owner['key']}")
     # Resolve links even when the pull request arrived before its issue.
     await conn.execute(
         """UPDATE lanes l SET links=(SELECT jsonb_agg(

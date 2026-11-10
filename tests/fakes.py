@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 
+from illo.connectors.github_client import GitHubError
 from illo.gateway.replies import error_text
 
 
@@ -86,6 +87,7 @@ class FakeGitHubClient:
     pulls: list[dict] = field(default_factory=list)
     repositories: dict[str, dict] = field(default_factory=dict)
     files: dict[tuple, dict] = field(default_factory=dict)
+    assignment_error: GitHubError | None = None
 
     def _items(self, repo, items):
         return [i for i in items if i.get("repo", repo).lower() == repo.lower()]
@@ -131,6 +133,8 @@ class FakeGitHubClient:
             "state": "open",
             "assignees": [],
             "comments_data": [],
+            # The app account creates the ticket. It is not a person of the workspace.
+            "user": {"login": "example-app[bot]"},
         }
         issue["html_url"] = f"https://github.com/{repo}/issues/{number}"
         self.calls.append({"method": "create_issue", **issue})
@@ -141,6 +145,13 @@ class FakeGitHubClient:
         self.calls.append(
             {"method": "assign_issue", "repo": repo, "number": number, "assignees": assignees}
         )
+        if self.assignment_error:
+            # A server error can arrive after GitHub did the assignment.
+            if self.assignment_error.status >= 500:
+                for issue in self._items(repo, self.issues):
+                    if issue["number"] == number:
+                        issue["assignees"] = [{"login": login} for login in assignees]
+            raise self.assignment_error
         for issue in self._items(repo, self.issues):
             if issue["number"] == number:
                 issue["assignees"] = [{"login": login} for login in assignees]

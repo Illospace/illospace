@@ -15,8 +15,10 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 
 class GitHubError(RuntimeError):
-    def __init__(self, status: int):
+    def __init__(self, status: int, *, rate_limited: bool = False):
         self.status = status
+        # GitHub uses status 403 for a rate limit and for a refusal. This flag tells them apart.
+        self.rate_limited = rate_limited
         super().__init__(f"GitHub returned status {status}")
 
 
@@ -125,7 +127,7 @@ class GitHubClient:
                 if self.report:
                     await self.report(False, "GitHub rate limit reached")
                 if attempt == 3:
-                    raise GitHubError(response.status_code)
+                    raise GitHubError(response.status_code, rate_limited=True)
                 delay = float(response.headers.get("retry-after", "0"))
                 if not delay:
                     delay = max(
