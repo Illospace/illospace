@@ -43,8 +43,8 @@ class GitHubClient:
         self.report = report
         self.sleep = sleep
         self.clock = clock
-        self._installation_token = None
-        self._expires = 0
+        self._installation_tokens: dict[str, tuple[str, float]] = {}
+        self._owner_installations: dict[str, tuple[str | None, float]] = {}
         # Seconds that the local clock is ahead of GitHub. A wrong host clock makes an
         # app sign-in fail, because GitHub checks the times inside the signed token.
         self._skew = 0.0
@@ -75,29 +75,77 @@ class GitHubClient:
         skew = self.clock() - server
         self._skew = skew if abs(skew) > 30 else 0.0
 
-    async def _auth(self) -> str:
+    async def _app_request(self, method: str, path: str) -> Any:
+        try:
+            return await self._request(method, path, bearer=self._jwt())
+        except GitHubError as exc:
+            # The refused answer carried the time of GitHub. Sign again with that time.
+            if exc.status != 401 or not self._skew:
+                raise
+            return await self._request(method, path, bearer=self._jwt())
+
+    async def _installation_for(self, path: str) -> str:
+        default = str(self.installation_id)
+        parts = path.split("/", 4)
+        if len(parts) < 4 or parts[1] != "repos" or not parts[2] or not parts[3]:
+            return default
+        owner = parts[2].casefold()
+        repo = f"{owner}/{parts[3].casefold()}"
+        # A found installation counts for the owner. A missing one counts for one repository
+        # only, because an installation can cover a part of the repositories of an owner.
+        for key in (owner, repo):
+            cached = self._owner_installations.get(key)
+            if cached and cached[1] > self.clock():
+                return cached[0] or default
+        try:
+            result = await self._app_request("GET", f"/repos/{parts[2]}/{parts[3]}/installation")
+        except GitHubError as exc:
+            if exc.status == 404:
+                self._owner_installations[repo] = (None, self.clock() + 600)
+                # A missing installation is a normal answer, not a GitHub fault.
+                if self.report:
+                    await self.report(True, "")
+            return default
+        except httpx.HTTPError:
+            return default
+        installation = str(result["id"])
+        self._owner_installations[owner] = (installation, self.clock() + 3600)
+        return installation
+
+    async def _installation_auth(self, installation: str) -> str:
+        cached = self._installation_tokens.get(installation)
+        if cached and cached[1] > self.clock() + 60:
+            return cached[0]
+        result = await self._app_request("POST", f"/app/installations/{installation}/access_tokens")
+        expires = datetime.fromisoformat(result["expires_at"].replace("Z", "+00:00")).timestamp()
+        self._installation_tokens[installation] = (result["token"], expires)
+        return result["token"]
+
+    async def _auth(self, path: str = "") -> str:
         if self.token:
             return self.token
         async with self._auth_lock:
-            if self._installation_token and self._expires > self.clock() + 60:
-                return self._installation_token
-            path = f"/app/installations/{self.installation_id}/access_tokens"
+            # This lock covers discovery and tokens. JWT calls do not take the lock again.
+            installation = await self._installation_for(path)
             try:
-                result = await self._request("POST", path, bearer=self._jwt())
+                return await self._installation_auth(installation)
             except GitHubError as exc:
-                # The refused answer carried the time of GitHub. Sign again with that time.
-                if exc.status != 401 or not self._skew:
+                # 404: the installation was removed. 403: it is suspended.
+                if exc.status not in {403, 404} or exc.rate_limited:
                     raise
-                result = await self._request("POST", path, bearer=self._jwt())
-            self._installation_token = result["token"]
-            self._expires = datetime.fromisoformat(
-                result["expires_at"].replace("Z", "+00:00")
-            ).timestamp()
-            return self._installation_token
+                self._installation_tokens.pop(installation, None)
+                self._owner_installations = {
+                    owner: cached
+                    for owner, cached in self._owner_installations.items()
+                    if cached[0] != installation
+                }
+                if installation == str(self.installation_id):
+                    raise
+                return await self._installation_auth(str(self.installation_id))
 
     async def _request(self, method: str, path: str, *, bearer: str | None = None, **kwargs) -> Any:
         for attempt in range(4):
-            auth = bearer or await self._auth()
+            auth = bearer or await self._auth(path)
             headers = {
                 "Authorization": f"Bearer {auth}",
                 "Accept": "application/vnd.github+json",
@@ -141,7 +189,12 @@ class GitHubClient:
                 continue
             if response.status_code >= 400:
                 if response.status_code == 401 and not bearer and not self.token and attempt == 0:
-                    self._expires = 0
+                    async with self._auth_lock:
+                        self._installation_tokens = {
+                            installation: cached
+                            for installation, cached in self._installation_tokens.items()
+                            if cached[0] != auth
+                        }
                     continue
                 if self.report:
                     await self.report(False, f"GitHub returned status {response.status_code}")

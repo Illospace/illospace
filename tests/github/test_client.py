@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from datetime import UTC, datetime
+from email.utils import format_datetime
 
 import httpx
 import pytest
@@ -26,6 +27,8 @@ async def test_app_token_cache_refresh_and_jwt_signature():
 
     def handle(request):
         requests.append(request)
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
         if request.url.path.endswith("/access_tokens"):
             mints.append(request)
             jwt = request.headers["authorization"].split()[1]
@@ -237,8 +240,6 @@ async def test_file_write_initializes_missing_branch_without_copying_code():
 
 async def test_app_sign_in_survives_a_wrong_host_clock():
     """GitHub refuses a token signed with a clock that is minutes ahead. Learn its time."""
-    from email.utils import format_datetime
-
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
@@ -248,6 +249,8 @@ async def test_app_sign_in_survives_a_wrong_host_clock():
     mints = []
 
     def handle(request):
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 456})
         if request.url.path.endswith("/access_tokens"):
             payload = request.headers["authorization"].split()[1].split(".")[1]
             claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
@@ -294,3 +297,279 @@ async def test_pull_read_survives_a_missing_status_permission():
         client = GitHubClient(token="example", http=http)
         pull = await client.get_pull(REPO, 7)
     assert pull["status"] == {} and pull["checks"][0]["conclusion"] == "success"
+
+
+@pytest.fixture(scope="module")
+def app_key():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    ).decode()
+
+
+class AppAPI:
+    def __init__(self):
+        self.now = 1_800_000_000.0
+        self.discoveries = []
+        self.mints = []
+        self.calls = []
+        self.installations = {"acme-example": 456, "other-example": 789}
+        self.discovery_errors = {}
+        self.token_errors = {}
+        self.call_errors = []
+
+    async def handle(self, request):
+        # Yield so concurrent callers can reach the auth lock before this call returns.
+        await asyncio.sleep(0)
+        path = request.url.path
+        if path.startswith("/repos/") and path.endswith("/installation"):
+            self.discoveries.append(request)
+            owner = path.split("/")[2].casefold()
+            error = self.discovery_errors.get(owner)
+            if isinstance(error, Exception):
+                raise error
+            if error:
+                return error
+            return httpx.Response(200, json={"id": self.installations[owner]})
+        if path.endswith("/access_tokens"):
+            self.mints.append(request)
+            installation = path.split("/")[3]
+            if installation in self.token_errors:
+                return httpx.Response(self.token_errors[installation])
+            return httpx.Response(
+                201,
+                json={
+                    "token": f"installation-{installation}-{len(self.mints)}",
+                    "expires_at": datetime.fromtimestamp(self.now + 3600, UTC).isoformat(),
+                },
+            )
+        self.calls.append(request)
+        if self.call_errors:
+            return httpx.Response(self.call_errors.pop(0))
+        return httpx.Response(200, json={"items": []})
+
+
+@pytest.fixture
+async def github_app(app_key):
+    api = AppAPI()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api.handle)) as http:
+        client = GitHubClient(
+            app_id="123",
+            private_key=app_key,
+            installation_id="456",
+            http=http,
+            clock=lambda: api.now,
+        )
+        yield client, api
+
+
+async def test_app_selects_owner_installation_and_reuses_warm_tokens(github_app):
+    client, api = github_app
+    await client.assign_issue(REPO, 1, ["acme-ada-example"])
+    await client.assign_issue("other-example/tool", 2, ["acme-ada-example"])
+    assert [r.headers["authorization"] for r in api.calls] == [
+        "Bearer installation-456-1",
+        "Bearer installation-789-2",
+    ]
+    assert len(api.discoveries) == 2 and len(api.mints) == 2
+    for request in api.discoveries + api.mints:
+        assert request.headers["authorization"].count(".") == 2
+
+    await client.assign_issue("ACME-EXAMPLE/another", 3, [])
+    await client.assign_issue("OTHER-EXAMPLE/tool", 4, [])
+    assert len(api.discoveries) == 2 and len(api.mints) == 2
+    assert [r.headers["authorization"] for r in api.calls[2:]] == [
+        "Bearer installation-456-1",
+        "Bearer installation-789-2",
+    ]
+
+
+async def test_missing_owner_installation_expires_after_ten_minutes(github_app):
+    client, api = github_app
+    api.discovery_errors["other-example"] = httpx.Response(404)
+    await client.assign_issue("other-example/tool", 1, [])
+    api.now += 599
+    await client.assign_issue("OTHER-EXAMPLE/Tool", 2, [])
+    assert len(api.discoveries) == 1 and len(api.mints) == 1
+    assert all(r.headers["authorization"] == "Bearer installation-456-1" for r in api.calls)
+
+    del api.discovery_errors["other-example"]
+    api.now += 1
+    await client.assign_issue("other-example/tool", 3, [])
+    assert len(api.discoveries) == 2
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-789-2"
+
+
+async def test_a_missing_repository_does_not_hide_the_installation_of_its_owner(github_app):
+    client, api = github_app
+    # The installation covers "tool" only. A request for "another" comes first.
+    api.discovery_errors["other-example"] = httpx.Response(404)
+    await client.get_repository("other-example/another")
+    del api.discovery_errors["other-example"]
+    await client.assign_issue("other-example/tool", 1, [])
+    assert len(api.discoveries) == 2
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-789-2"
+
+
+async def test_a_missing_installation_does_not_report_a_fault(app_key):
+    api = AppAPI()
+    api.discovery_errors["other-example"] = httpx.Response(404)
+    reports = []
+
+    async def report(ok, detail):
+        reports.append(ok)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(api.handle)) as http:
+        client = GitHubClient(
+            app_id="123",
+            private_key=app_key,
+            installation_id="456",
+            http=http,
+            clock=lambda: api.now,
+            report=report,
+        )
+        await client.get_repository("other-example/tool")
+    # The 404 answer is a fault for one moment. The client corrects the sensor at once.
+    assert reports[:2] == [False, True] and all(reports[1:])
+
+
+@pytest.mark.parametrize("status", [403, 404])
+async def test_suspended_or_removed_installation_uses_default(github_app, status):
+    client, api = github_app
+    api.token_errors["789"] = status
+    await client.assign_issue("other-example/tool", 1, [])
+    assert api.calls[-1].headers["authorization"].startswith("Bearer installation-456-")
+
+
+async def test_owner_installation_expires_after_one_hour(github_app):
+    client, api = github_app
+    await client.get_repository("other-example/tool")
+    api.now += 3599
+    await client.get_repository("other-example/tool")
+    assert len(api.discoveries) == 1
+    api.installations["other-example"] = 890
+    api.now += 1
+    await client.get_repository("other-example/tool")
+    assert len(api.discoveries) == 2
+    assert api.calls[-1].headers["authorization"].startswith("Bearer installation-890-")
+
+
+@pytest.mark.parametrize("failure", [500, 429, "timeout"])
+async def test_discovery_failure_uses_default_without_caching(github_app, failure):
+    client, api = github_app
+    sleeps = []
+
+    async def no_wait(seconds):
+        sleeps.append(seconds)
+
+    client.sleep = no_wait
+    api.discovery_errors["other-example"] = (
+        httpx.ReadTimeout("Example timeout")
+        if failure == "timeout"
+        else httpx.Response(failure, headers={"retry-after": "1"})
+    )
+    await client.assign_issue("other-example/tool", 1, [])
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-456-1"
+    assert len(api.discoveries) == (4 if failure == 429 else 1)
+    assert sleeps == ([1, 1, 1] if failure == 429 else [])
+
+    del api.discovery_errors["other-example"]
+    await client.assign_issue("other-example/tool", 2, [])
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-789-2"
+
+
+async def test_removed_installation_drops_cache_and_uses_default(github_app):
+    client, api = github_app
+    await client.assign_issue("other-example/tool", 1, [])
+    api.now += 3540
+    api.token_errors["789"] = 404
+    await client.assign_issue("other-example/tool", 2, [])
+    assert len(api.discoveries) == 1
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-456-3"
+    assert "789" not in client._installation_tokens
+    assert "other-example" not in client._owner_installations
+
+    api.discovery_errors["other-example"] = httpx.Response(404)
+    await client.assign_issue("other-example/tool", 3, [])
+    assert len(api.discoveries) == 2 and len(api.mints) == 3
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-456-3"
+
+
+@pytest.mark.parametrize("path", ["/search/issues", "/app/example", "/installation/repositories"])
+async def test_other_paths_use_default_installation(github_app, path):
+    client, api = github_app
+    await client.assign_issue("other-example/tool", 1, [])
+    if path == "/search/issues":
+        await client.search_issues("example", repo="other-example/tool")
+    else:
+        await client._request("GET", path)
+    assert len(api.discoveries) == 1
+    assert api.calls[-1].url.path == path
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-456-2"
+
+
+async def test_personal_token_skips_app_discovery(github_app):
+    client, api = github_app
+    client.token = "example-personal-token"
+    client.private_key = None
+    await client.assign_issue("other-example/tool", 1, [])
+    await client.search_issues("example", repo=REPO)
+    assert not api.discoveries and not api.mints
+    assert all(r.headers["authorization"] == "Bearer example-personal-token" for r in api.calls)
+
+
+async def test_cold_owner_concurrency_discovers_and_mints_once(github_app):
+    client, api = github_app
+    await asyncio.wait_for(
+        asyncio.gather(*(client.assign_issue("other-example/tool", n, []) for n in range(10))),
+        timeout=5,
+    )
+    assert len(api.discoveries) == 1 and len(api.mints) == 1 and len(api.calls) == 10
+    assert all(r.headers["authorization"] == "Bearer installation-789-1" for r in api.calls)
+
+
+async def test_refused_repo_token_refreshes_only_its_installation(github_app):
+    client, api = github_app
+    await client.get_repository(REPO)
+    await client.get_repository("other-example/tool")
+    api.call_errors.append(401)
+    await client.get_repository("other-example/tool")
+    await client.get_repository(REPO)
+    assert len(api.discoveries) == 2 and len(api.mints) == 3
+    assert api.calls[-2].headers["authorization"] == "Bearer installation-789-3"
+    assert api.calls[-1].headers["authorization"] == "Bearer installation-456-1"
+
+
+async def test_discovery_sign_in_survives_a_wrong_host_clock(app_key):
+    local, real = 1_800_000_270.0, 1_800_000_000.0
+    date = format_datetime(datetime.fromtimestamp(real, UTC), usegmt=True)
+    discoveries = []
+
+    def handle(request):
+        if request.url.path.endswith("/installation"):
+            payload = request.headers["authorization"].split()[1].split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
+            discoveries.append(claims)
+            if claims["iat"] > real or claims["exp"] > real + 600:
+                return httpx.Response(401, headers={"date": date})
+            return httpx.Response(200, json={"id": 789}, headers={"date": date})
+        if request.url.path.endswith("/access_tokens"):
+            assert request.url.path == "/app/installations/789/access_tokens"
+            return httpx.Response(
+                201,
+                json={
+                    "token": "example-installation-token",
+                    "expires_at": datetime.fromtimestamp(real + 3600, UTC).isoformat(),
+                },
+            )
+        assert request.headers["authorization"] == "Bearer example-installation-token"
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = GitHubClient(
+            app_id="123", private_key=app_key, installation_id="456", http=http, clock=lambda: local
+        )
+        await client.assign_issue("other-example/tool", 1, [])
+    assert len(discoveries) == 2
+    assert discoveries[0]["iat"] > real
+    assert discoveries[1]["iat"] <= real < discoveries[1]["exp"] <= real + 600
