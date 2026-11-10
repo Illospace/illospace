@@ -61,18 +61,15 @@ async def test_rule_06_only_typed_dm_text_can_form_command(app, fake_brain, type
     assert "connect my ChatGPT" in fake_brain.requests[-1].user_message
 
 
-async def test_rule_06_typed_command_still_works_with_extra_blocks(app, fake_brain, monkeypatch):
-    from illo.connectors import chatgpt_oauth
-
-    async def issue(ctx, person_id, event):
-        assert event.text == "connect my ChatGPT"
-        return "https://example.com/sign-in"
-
-    monkeypatch.setattr(chatgpt_oauth, "issue", issue)
+async def test_rule_06_typed_command_still_works_with_extra_blocks(chatgpt_app, fake_brain):
+    app, backend = chatgpt_app
+    backend.device = True
     intake = SlackIntake(app.state.ctx, "U_ACME_ILLO")
     result = await intake.receive(payload("D_ACME_ADA", "connect my ChatGPT", "Extra block text"))
     assert result["decision"] == "claimed"
-    assert "https://example.com/sign-in" in result["text"]
+    assert "https://auth.openai.com/codex/device" in result["text"]
+    assert "ABCD-EFGH" in result["text"]
+    assert len(backend.requests) == 1
     assert not fake_brain.requests
 
 
