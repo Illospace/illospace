@@ -89,9 +89,15 @@ def authenticated(message, sender: str, authserv_id: str | None) -> bool:
     """
     if not sender or "@" not in sender:
         return False
-    for header in message.get_all("Authentication-Results", []):
+    for name, header in message.raw_items():
+        if name.lower() != "authentication-results":
+            continue
+        # RFC 8601 results use raw ASCII syntax, never RFC 2047 decoding.
+        header = re.sub(r"\r?\n[ \t]+", " ", header)
+        if "=?" in header or "\r" in header or "\n" in header:
+            return False
         try:
-            sections = auth_results(str(header))
+            sections = auth_results(header)
         except ValueError:
             return False
         if authserv_id and sections[0] != [authserv_id.lower()]:
