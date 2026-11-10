@@ -18,6 +18,33 @@ def _error(request_id, code: int, message: str):
     )
 
 
+def initialize_result(params: dict, name: str) -> dict:
+    """Both MCP endpoints use the same stateless protocol negotiation."""
+    version = params.get("protocolVersion", PROTOCOL_VERSION)
+    if not isinstance(version, str) or version not in {
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+    }:
+        version = PROTOCOL_VERSION
+    return {
+        "protocolVersion": version,
+        "capabilities": {"tools": {"listChanged": False}},
+        "serverInfo": {"name": name, "version": "0.1.0"},
+    }
+
+
+def tool_result(value: dict, *, is_error: bool = False) -> dict:
+    """Keep the JSON text envelope equal across both MCP endpoints."""
+    value = jsonable_encoder(value)
+    return {
+        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
+        "structuredContent": value,
+        "isError": is_error,
+    }
+
+
 async def endpoint(request: Request):
     """A bearer token determines both the tool list and the handler context."""
     ctx = request.app.state.ctx
@@ -48,14 +75,7 @@ async def endpoint(request: Request):
             if method == "notifications/initialized":
                 return Response(status_code=202)
             if method == "initialize":
-                version = params.get("protocolVersion", PROTOCOL_VERSION)
-                if version not in {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}:
-                    version = PROTOCOL_VERSION
-                result = {
-                    "protocolVersion": version,
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "illo-brain-tools", "version": "0.1.0"},
-                }
+                result = initialize_result(params, "illo-brain-tools")
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
@@ -98,11 +118,7 @@ async def endpoint(request: Request):
                         (count + 1, run["id"]),
                     )
                     called = await ctx.registry.call(ToolContext(conn, run, ctx), name, args)
-                result = {
-                    "content": [{"type": "text", "text": json.dumps(jsonable_encoder(called))}],
-                    "structuredContent": jsonable_encoder(called),
-                    "isError": called["decision"] == "deny",
-                }
+                result = tool_result(called, is_error=called["decision"] == "deny")
             else:
                 return _error(request_id, -32601, "Method not found")
             return JSONResponse(
