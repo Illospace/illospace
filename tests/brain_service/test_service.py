@@ -130,12 +130,26 @@ async def test_redact_output_and_do_not_emit_exception(run_request):
     assert "private provider details" not in response.text
 
 
-def alive(pid):
-    path = Path(f"/proc/{pid}/stat")
+def stat(pid):
     try:
-        return path.read_text().split()[2] != "Z"
+        # The fields after the command name: state, ppid, pgrp, ...
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
     except (FileNotFoundError, ProcessLookupError):
-        return False
+        return None
+
+
+def alive(pid):
+    fields = stat(pid)
+    return fields is not None and fields[0] not in ("Z", "X")
+
+
+async def dead_within(pid, seconds):
+    # SIGKILL is asynchronous. run_worker reaps only the group leader, and the
+    # kernel can run a dying grandchild later on a loaded host (issue #958).
+    deadline = asyncio.get_running_loop().time() + seconds
+    while alive(pid) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    return not alive(pid)
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -145,7 +159,9 @@ async def test_process_tree_killed_and_directory_removed(
     monkeypatch.setenv("ILLO_BRAIN_TMPDIR", str(tmp_path))
     code = (
         "import subprocess,time,json,os; "
-        "p=subprocess.Popen(['sleep','30']); "
+        "open('scratch','w').write('x'); "
+        # The child must not hold stdout: asyncio's wait() also waits for that pipe.
+        "p=subprocess.Popen(['sleep','30'],stdout=subprocess.DEVNULL); "
         "print(json.dumps({'type':'started','parent':os.getpid(),'child':p.pid}),flush=True); "
         "time.sleep(30)"
     )
@@ -162,6 +178,10 @@ async def test_process_tree_killed_and_directory_removed(
     task = asyncio.create_task(consume())
     await asyncio.wait_for(ready.wait(), 5)
     assert alive(pids["parent"]) and alive(pids["child"])
+    # The child is in the run's process group, and the run folder holds a file.
+    assert int(stat(pids["child"])[2]) == pids["parent"]
+    [folder] = tmp_path.iterdir()
+    assert (folder / "scratch").exists()
     if cancel:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -170,12 +190,9 @@ async def test_process_tree_killed_and_directory_removed(
         with pytest.raises(TimeoutError):
             async with asyncio.timeout(0.05):
                 await task
-    for _ in range(50):
-        if not alive(pids["child"]):
-            break
-        await asyncio.sleep(0.01)
     assert not alive(pids["parent"])
-    assert not alive(pids["child"])
+    # Without the kill, the child sleeps 30 seconds, so a missed kill still fails.
+    assert await dead_within(pids["child"], 10)
     assert list(tmp_path.iterdir()) == []
 
 
