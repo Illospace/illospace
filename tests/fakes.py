@@ -21,7 +21,9 @@ class FakeSlackClient:
 
     async def chat_postMessage(self, **kwargs):
         result = await self._record("chat_postMessage", **kwargs)
-        self.messages[result["ts"]] = kwargs
+        self.messages[result["ts"]] = {
+            **kwargs, "ts": result["ts"], "user": "U_ACME_ILLO", "bot_id": "B_ILLO",
+        }
         return result
 
     async def chat_update(self, **kwargs):

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from illo.app import AppContext
 
 from illo.channels.slack.formatting import chunks
+from illo.db import one
 from illo.ledger import kv
 
 ERROR = "I could not finish this. The error is logged. Please try again."
@@ -67,6 +68,16 @@ class SlackAdapter:
     async def deliver_final(self, event: InboundEvent, text: str) -> None:
         client, channel = self.ctx.slack_client, event.payload["channel_id"]
         ts = self.working.get(event.external_id)
+        async with self.ctx.pool.connection() as conn:
+            row = await one(
+                conn, "SELECT tainted FROM events WHERE channel='slack' AND external_id=%s",
+                (event.external_id,),
+            )
+            tainted = bool(row and row["tainted"])
+            if tainted and (event.reply_to or ts):
+                await kv.set(
+                    conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
+                )
         parts = chunks(text)
         try:
             if ts:
@@ -80,6 +91,11 @@ class SlackAdapter:
                     unfurl_media=False,
                 )
                 ts = sent["ts"]
+                if tainted:
+                    async with self.ctx.pool.connection() as conn:
+                        await kv.set(
+                            conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
+                        )
             for part in parts[1:]:
                 await client.chat_postMessage(
                     channel=channel,
