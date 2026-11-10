@@ -43,6 +43,7 @@ services:
     restart: unless-stopped
     mem_limit: ${ILLO_MEMORY:-768m}
     cpus: ${ILLO_CPUS:-1.0}
+    init: true
     pids_limit: ${ILLO_PIDS:-128}
   brain:
     image: ${ILLO_IMAGE_PREFIX:-illo}/brain:${ILLO_REVISION:-local}
@@ -70,6 +71,7 @@ services:
     restart: unless-stopped
     mem_limit: ${ILLO_BRAIN_MEMORY:-1g}
     cpus: ${ILLO_BRAIN_CPUS:-1.0}
+    init: true
     pids_limit: ${ILLO_BRAIN_PIDS:-128}
 networks:
   db:

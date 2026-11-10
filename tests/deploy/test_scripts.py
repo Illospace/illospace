@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-FAKE_DOCKER = r'''#!/usr/bin/env python3
+FAKE_DOCKER = r"""#!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_STATE"])
@@ -46,7 +46,7 @@ if operation == "exec" and "psql" in args:
     print(os.getenv("FAKE_TABLES", "0"))
 if operation == "exec" and "pg_restore" in args:
     (state / "restored").write_bytes(sys.stdin.buffer.read())
-'''
+"""
 
 
 def git(root, *args):
@@ -78,14 +78,19 @@ def install(tmp_path):
     git(root, "add", ".")
     git(root, "commit", "-m", "initial")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("ILLO_", "GIT_", "XDG_"))}
-    env.update({
-        "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "ILLO_ENV_FILE": str(home / ".config/illo/env"),
-        "ILLO_WORKSPACE_DIR": str(home / "workspace"),
-        "ILLO_STATE_DIR": str(home / "state"),
-        "ILLO_BACKUP_DIR": str(home / "backups"),
-        "ILLO_HEALTH_ATTEMPTS": "1", "ILLO_HEALTH_INTERVAL": "0", "FAKE_STATE": str(state),
-    })
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "ILLO_ENV_FILE": str(home / ".config/illo/env"),
+            "ILLO_WORKSPACE_DIR": str(home / "workspace"),
+            "ILLO_STATE_DIR": str(home / "state"),
+            "ILLO_BACKUP_DIR": str(home / "backups"),
+            "ILLO_HEALTH_ATTEMPTS": "1",
+            "ILLO_HEALTH_INTERVAL": "0",
+            "FAKE_STATE": str(state),
+        }
+    )
     return root, env, state
 
 
@@ -93,7 +98,11 @@ def run(install, script, *args, **overrides):
     root, env, _ = install
     return subprocess.run(
         [str(root / "deploy" / script), *map(str, args)],
-        cwd=root, env=env | overrides, text=True, capture_output=True, check=False,
+        cwd=root,
+        env=env | overrides,
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
 
@@ -120,8 +129,10 @@ def remote_commit(install, *, layout_change=False):
     if layout_change:
         compose = writer / "deploy/compose.yaml"
         compose.write_text(
-            compose.read_text().replace("brainnet", "newbrainnet")
-            .replace("[db]", "[newdb]").replace("[db,", "[newdb,")
+            compose.read_text()
+            .replace("brainnet", "newbrainnet")
+            .replace("[db]", "[newdb]")
+            .replace("[db,", "[newdb,")
             .replace("  db:", "  newdb:")
         )
     git(writer, "add", ".")
@@ -146,7 +157,9 @@ def test_install_twice_keeps_existing_files_and_does_not_print_secrets(install):
     for line in original.decode().splitlines():
         if line.startswith(("POSTGRES_PASSWORD=", "ILLO_VAULT_KEY=", "ILLO_BRAIN_SECRET=")):
             value = line.split("=", 1)[1].strip("'")
-            assert value and value not in first.stdout + first.stderr + second.stdout + second.stderr
+            assert (
+                value and value not in first.stdout + first.stderr + second.stdout + second.stderr
+            )
     assert sum("build" in c["args"] for c in calls(install)) == 1
 
 
@@ -201,8 +214,12 @@ def test_watch_releases_lock_so_backups_can_run(install):
     target = remote_commit(install)
     root, env, _ = install
     process = subprocess.Popen(
-        [str(root / "deploy/update.sh"), "--watch", "10"], cwd=root, env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        [str(root / "deploy/update.sh"), "--watch", "10"],
+        cwd=root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     state = Path(env["ILLO_STATE_DIR"])
     acquired = False
@@ -312,6 +329,14 @@ def test_layout_change_applies_project_and_rolls_back_saved_layout(install, fail
         assert rollback["args"][rollback["args"].index("-f") + 1] == str(saved)
         assert f"rollback {old} ok" in (state / "update.log").read_text()
     else:
-        assert (state / "revisions" / target / "deploy/compose.yaml").read_text() == project[0]["layout"]
+        assert (state / "revisions" / target / "deploy/compose.yaml").read_text() == project[0][
+            "layout"
+        ]
     assert (state / "revisions" / old / "deploy/compose.yaml").read_text() == old_layout
     assert not any("down" in c["args"] or "volume" in c["args"] for c in update_calls)
+
+
+def test_compose_reaps_orphan_processes():
+    services = yaml.safe_load((ROOT / "deploy/compose.yaml").read_text())["services"]
+    assert services["brain"]["init"] is True
+    assert services["illo"]["init"] is True
