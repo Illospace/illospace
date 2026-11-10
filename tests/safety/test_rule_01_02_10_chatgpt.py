@@ -128,10 +128,7 @@ async def test_rule_02_disconnect_invalidates_pending_signin(subscription_app):
     event = InboundEvent(channel="slack", external_id="a", kind="dm")
     async with ctx.pool.connection() as conn:
         person = await one(conn, "SELECT id FROM people WHERE key='ada'")
-    link = await chatgpt_oauth.issue(ctx, person["id"], event)
-    from urllib.parse import parse_qs, urlsplit
-
-    state = parse_qs(urlsplit(link).query)["state"][0]
+    state = await chatgpt_oauth.issue(ctx, person["id"], event)
     async with ctx.pool.connection() as conn:
         await grants.disconnect(conn, person["id"])
     async with ctx.pool.connection() as conn:

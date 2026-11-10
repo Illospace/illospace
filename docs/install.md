@@ -81,6 +81,8 @@ Direct Compose commands must pass the same file with `--env-file`.
    To use each person's ChatGPT subscription, set `brain.runtime: openai_responses` and `brain.auth: chatgpt` in `illo.yaml`.
    Keep `ILLO_VAULT_KEY` in the main app's environment, outside the checkout.
    Each member sends `connect my ChatGPT` in their own Slack DM with Illo.
+   The DM gives a device code. ChatGPT sign-in needs no public Illo address.
+   Send `connect my ChatGPT with a link` to use the OpenAI link and paste the final local address.
    Set `brain.team_credential` to an active person key, or omit it to use `default_owner`.
    `brain.api_key_fallback` defaults to `false`. Set it to `true` only to allow the brain's API key as a fallback.
    The brain needs no sign-in file, refresh token, or host mount.

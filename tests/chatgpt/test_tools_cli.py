@@ -16,7 +16,7 @@ async def test_model_cannot_change_signin(chatgpt_app, replay, fake_brain, slack
     await save_grant(app.state.ctx)
     fake_brain.script = [{"name": name, "arguments": {}}]
     await replay(payload={"channel_id": "D_ADA"}, reply_to="thread-a")
-    assert not [c for c in slack_client.calls if "/oauth/chatgpt/start?" in c.get("text", "")]
+    assert not [c for c in slack_client.calls if "https://auth.openai.com/" in c.get("text", "")]
     async with app.state.ctx.pool.connection() as conn:
         assert await one(conn, "SELECT 1 FROM connector_grants WHERE connector_key='chatgpt'")
         assert not await one(conn, "SELECT 1 FROM connector_oauth_states")

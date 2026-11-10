@@ -11,12 +11,20 @@ The model sign-in below has a separate, per-run credential path.
 Each member can use their own ChatGPT subscription with `brain.auth: chatgpt` and `brain.runtime: openai_responses`.
 Set `ILLO_VAULT_KEY` in the main app. No connector YAML file or host sign-in file is needed.
 
+ChatGPT sign-in needs no public Illo address or inbound HTTP request.
+`ILLO_PUBLIC_URL` can stay at the internal address that the brain uses.
+
 1. Send `connect my ChatGPT` in your own Slack DM with Illo.
-2. Open the one-time link within 10 minutes.
-3. For device sign-in, open the OpenAI address on the page. Sign in and enter the displayed code there.
-4. If device sign-in is off, open the paste-flow link on that page.
-5. After browser sign-in, the local callback address can fail to load. This is expected.
-6. Paste that full address into the same DM and thread. Send only that address.
+2. Open `https://auth.openai.com/codex/device` and sign in to your own ChatGPT account.
+3. Enter the one-time code from the DM. It expires 10 minutes after your request.
+4. Illo sends you a DM after sign-in.
+
+If ChatGPT refuses the code, turn on device-code sign-in in the ChatGPT security settings.
+You can also send `connect my ChatGPT with a link` in the DM.
+Illo then sends the OpenAI sign-in link directly. This command cancels your previous sign-in attempt.
+Illo also uses this link flow if it cannot get a device code.
+Open the link within 10 minutes. The final local callback address can fail to load. This is expected.
+Paste that full address into the same DM and thread. Send only that address.
 
 Illo sends `http://127.0.0.1:1455/auth/callback`, as the checked Codex source does.
 A pasted callback may use `127.0.0.1` or `localhost`. Illo accepts Slack link wrappers and escaped ampersands.
@@ -34,7 +42,7 @@ Enable device sign-in in your ChatGPT security settings, or ask your workspace a
 Only enter a device code if you asked Illo to connect your own account.
 Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
 Only these exact DM commands can change the sign-in. The model can only check its status.
-Disconnect attempts OpenAI token revocation before it deletes the grant and cancels pending links.
+Disconnect attempts OpenAI token revocation before it deletes the grant and cancels pending sign-in attempts.
 A provider error does not block local deletion.
 If revocation fails, an old database backup plus the vault key can still hold a usable token.
 Use the ChatGPT account security settings to revoke it in that case.
