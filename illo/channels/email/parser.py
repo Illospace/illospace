@@ -31,7 +31,11 @@ class EmailText(PageText):
 
 def aligned(domain: str, from_domain: str) -> bool:
     """Use exact alignment. Do not guess a registrable domain without a suffix list."""
-    return domain.lower().rstrip(".") == from_domain.lower().rstrip(".")
+    return (
+        domain.isascii()
+        and from_domain.isascii()
+        and domain.lower().rstrip(".") == from_domain.lower().rstrip(".")
+    )
 
 
 def auth_results(header: str) -> list[list[str]]:
@@ -126,6 +130,8 @@ def clean_header(value: str, limit: int = 998) -> str:
 
 
 def mailbox(value: str) -> str:
+    if not value.isascii():
+        raise ValueError("Use an ASCII email address")
     clean_header(value, 320)
     addresses = getaddresses([value])
     if len(addresses) != 1 or not addresses[0][1] or "@" not in addresses[0][1]:
@@ -142,8 +148,16 @@ def parse_message(
     if len(raw) > max_bytes:
         raise ValueError("The email is too large")
     message = BytesParser(policy=policy.default).parsebytes(raw)
-    addresses = getaddresses(message.get_all("From", []))
-    sender = addresses[0][1].lower() if len(addresses) == 1 and not message.defects else ""
+    from_headers = message.get_all("From", [])
+    addresses = getaddresses(from_headers)
+    sender = (
+        addresses[0][1]
+        if len(from_headers) == 1
+        and not from_headers[0].defects
+        and len(addresses) == 1
+        and not message.defects
+        else ""
+    )
     try:
         sender = mailbox(sender)
     except ValueError:

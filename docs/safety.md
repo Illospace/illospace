@@ -118,6 +118,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `resolve` in `illo/gateway/principal.py` returns no authority for an unknown DM sender. `Gateway.receive` in `illo/gateway/dispatch.py` stops there, before any claim, direct action, or run.
 - In a configured channel, a human sender who is not in `people.yaml` starts no run. A Slack Connect user from another workspace counts as unknown, even with a mapped id.
 - Email needs an explicit trusted receiver or `topmost`; a blank setting disables email.
+- A non-ASCII sender address or a defective From header gives no email authority.
 - An email sender needs one aligned DMARC pass from the trusted receiving server (`authenticated` in `illo/channels/email/parser.py`). Any other sender is an outsider. `unknown_sender` in `illo/channels/email/__init__.py` takes an outsider's email before a run.
 
 **Tests.** `tests/safety/test_rule_07_unknown_dm.py`, `tests/safety/test_rule_07_slack_intake.py`, `tests/safety/test_rule_07_email.py`, `tests/safety/test_review_s02_slack_sender.py`, `tests/safety/test_review_s09_rule_07_email_auth.py`, `tests/test_gateway.py`.
