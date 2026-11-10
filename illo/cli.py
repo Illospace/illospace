@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import getpass
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -35,6 +36,10 @@ def parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    mcp = commands.add_parser("mcp").add_subparsers(dest="action", required=True)
+    check = mcp.add_parser("check")
+    check.add_argument("--url", required=True)
+    check.add_argument("--token-file", type=Path, required=True)
     token = commands.add_parser("token").add_subparsers(dest="action", required=True)
     create = token.add_parser("create")
     create.add_argument("--person", required=True)
@@ -95,6 +100,10 @@ async def execute(args, config: Config) -> int:
         from illo.channels.slack.cli import execute as slack_execute
 
         return await slack_execute(args.action, config)
+    if args.command == "mcp":
+        from illo.channels.mcp.check import check
+
+        return await check(args.url, args.token_file)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "reload":

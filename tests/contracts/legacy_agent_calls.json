@@ -1,0 +1,19 @@
+{
+  "legacy_source": "origin/legacy:brain/app/api/routers/agent_mcp.py",
+  "submit": {
+    "message": "Acme uses cobalt fixtures for the release checks.",
+    "desired_outcome": "preserve_knowledge",
+    "idempotency_key": "acme-session-preserve-1",
+    "source_tool": "codex",
+    "origin": "codex.memory",
+    "repo": "Acme/widget",
+    "session_id": "acme-session",
+    "task_title": "Cobalt release checks",
+    "parts": [{"type": "text", "text": "Run the checks before a release."}]
+  },
+  "submit_fields": ["status", "event_id", "submission_id", "result_id", "operation", "message", "handling", "handling_status", "run_id", "idempotent_replay", "error", "ilo_outcome", "evidence_status", "mutated_target_refs"],
+  "result_fields": ["event_id", "submission_id", "result_id", "status", "handling_status", "run_id", "run_status", "evidence_status", "requires_durable_evidence", "mutated_target_refs", "completed_at", "reconciled_at", "terminal", "final_answer", "failure", "attribution"],
+  "search_fields": ["query", "sources", "kinds", "semantic_available", "semantic_degraded_reason", "requested_limit", "effective_limit", "results"],
+  "hit_fields": ["id", "source", "kind", "source_ref", "title", "summary", "source_created_at", "source_updated_at", "scores"],
+  "forbidden_targets": ["idea_id", "thread_id", "target_id", "target", "project_id", "pin_id", "teammate_user_ids", "trigger_illo"]
+}
