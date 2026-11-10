@@ -181,3 +181,55 @@ async def test_long_answer_conversion_and_progress_throttle(
     posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
     assert len(posts) == 3
     assert all(c["thread_ts"] == "1" for c in posts[1:])
+
+
+async def test_thread_context_reads_latest_page(intake, message, fake_brain, slack_client):
+    pages = []
+
+    async def replies(**kwargs):
+        pages.append(kwargs.get("cursor"))
+        if not kwargs.get("cursor"):
+            return {
+                "messages": [
+                    {"ts": str(i), "user": "U_ACME_ADA", "text": f"Older {i}"} for i in range(25)
+                ],
+                "response_metadata": {"next_cursor": "last-page"},
+            }
+        return {"messages": [{"ts": "26", "user": "U_ACME_BEN", "text": "Latest context"}]}
+
+    slack_client.conversations_replies = replies
+    await intake.receive(message(thread_ts="1699999999.000001"))
+    assert pages == [None, "last-page"]
+    assert "Ben: Latest context" in fake_brain.requests[-1].user_message
+    assert "Older 0\n" not in fake_brain.requests[-1].user_message
+
+
+async def test_inline_video_transcript_and_duplicate(
+    intake, message, fake_brain, slack_client, app
+):
+    payload = message(
+        text="",
+        files=[
+            {
+                "id": "F_ACME",
+                "mimetype": "video/mp4",
+                "transcription": {"status": "complete", "text": "Video request"},
+            }
+        ],
+    )
+    await asyncio.gather(intake.receive(payload), intake.receive(payload))
+    assert len(fake_brain.requests) == 1
+    assert fake_brain.requests[0].user_message == "Video request"
+    assert not [c for c in slack_client.calls if c["method"] == "files_info"]
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT payload FROM events")
+        assert row["payload"]["text"] == "Video request"
+
+
+async def test_own_bot_without_user_is_ignored(intake, message, fake_brain):
+    intake.bot_identity = "B_ACME_ILLO"
+    assert (
+        await intake.receive(message(user=None, subtype="bot_message", bot_id="B_ACME_ILLO"))
+        is None
+    )
+    assert not fake_brain.requests
