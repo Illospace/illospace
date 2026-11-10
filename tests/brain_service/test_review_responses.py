@@ -187,3 +187,19 @@ async def test_n5_conflicting_answer_text_fails_closed(run_request):
 
     with pytest.raises(RunError, match="conflicting output items"):
         await collect(subscription(run_request), respond)
+
+
+async def test_reasoning_can_differ_between_the_done_event_and_the_final_event(run_request):
+    """Live fault: the provider encoded a reasoning item again in the final event."""
+    answer = message()
+
+    def respond(wire):
+        return stream(
+            {"type": "response.output_item.done", "output_index": 0,
+             "item": {"type": "reasoning", "encrypted_content": "first-encoding"}},
+            {"type": "response.output_item.done", "output_index": 1, "item": answer},
+            complete([{"type": "reasoning", "encrypted_content": "second-encoding"}, answer]),
+        )
+
+    events, session = await collect(subscription(run_request), respond)
+    assert events[-1]["text"] == "Ready." and not session.calls
