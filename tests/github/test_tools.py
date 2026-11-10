@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from illo.connectors.github_client import GitHubError
 from illo.db import all_rows, one
 from illo.ledger import claims
 from illo.sources.github import perform_draft, poll
@@ -125,31 +126,85 @@ async def test_work_one_message_then_edit(app, rpc, rpc_token, github_client, sl
     )
 
 
-async def test_work_keeps_the_ticket_when_github_refuses_the_assignment(
-    app, rpc, rpc_token, github_client, slack_client
-):
-    _, token = rpc_token
-    ctx = app.state.ctx
-    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
-    github_client.refuse_assignment = True
+async def approved_start(ctx, rpc, token):
     assert (await call(rpc, token, "work_start", {**CREATE, "assignee": "ada"}))[
         "decision"
     ] == "draft"
     async with ctx.pool.connection() as conn:
         await conn.execute("UPDATE drafts SET state='approved'")
         draft = await one(conn, "SELECT * FROM drafts")
-    result = await perform_draft(ctx, draft)
-    assert result["created"] and result["lane_id"] and result["assigned"] is False
-    posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
+    return await perform_draft(ctx, draft)
+
+
+def texts(slack_client, method):
+    return [c["text"] for c in slack_client.calls if c["method"] == method]
+
+
+@pytest.mark.parametrize(
+    "error,assigned,note",
+    [
+        (GitHubError(403), False, "GitHub refused the assignment. The ticket has no owner."),
+        (GitHubError(404), False, "GitHub refused the assignment. The ticket has no owner."),
+        (
+            GitHubError(403, rate_limited=True),
+            None,
+            "The ticket was created. Illo could not confirm the assignment.",
+        ),
+        (GitHubError(422), None, "The ticket was created. Illo could not confirm the assignment."),
+    ],
+)
+async def test_work_keeps_the_ticket_when_the_assignment_fails(
+    app, rpc, rpc_token, github_client, slack_client, error, assigned, note
+):
+    _, token = rpc_token
+    ctx = app.state.ctx
+    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
+    github_client.assignment_error = error
+    result = await approved_start(ctx, rpc, token)
+    assert result["created"] and result["lane_id"]
+    assert result["assigned"] is assigned and result["note"] == note
+    posts = texts(slack_client, "chat_postMessage")
     assert len(posts) == 1
-    assert posts[0]["text"].startswith("Open · Stable failure · https://github.com/")
-    assert posts[0]["text"].endswith("GitHub refused the assignment. The ticket has no owner.")
-    # The note stays after a refresh, because the lane holds it as an event.
+    assert posts[0].startswith("Open · Stable failure · https://github.com/")
+    assert posts[0].endswith(note)
+    # The note stays after a poll, because the lane holds it as an event.
+    await poll(ctx)
     await refresh_statuses(ctx)
-    assert not [c for c in slack_client.calls if c["method"] == "chat_update"]
+    assert not texts(slack_client, "chat_update")
+    async with ctx.pool.connection() as conn:
+        assert (await one(conn, "SELECT * FROM lanes"))["owner_person_id"] is None
+    # A person assigns the ticket later. The next poll replaces the note.
+    login = next(c for c in github_client.calls if c["method"] == "assign_issue")["assignees"][0]
+    github_client.issues[0]["assignees"] = [{"login": login}]
+    await poll(ctx)
+    await refresh_statuses(ctx)
+    assert texts(slack_client, "chat_update") == [
+        f"Open · Stable failure · {github_client.issues[0]['html_url']}\nOwner: ada"
+    ]
+
+
+async def test_work_shows_the_owner_when_a_server_error_hid_the_assignment(
+    app, rpc, rpc_token, github_client, slack_client
+):
+    _, token = rpc_token
+    ctx = app.state.ctx
+    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
+    github_client.assignment_error = GitHubError(500)
+    result = await approved_start(ctx, rpc, token)
+    assert result["assigned"] is None
+    assert texts(slack_client, "chat_postMessage")[0].endswith(
+        "The ticket was created. Illo could not confirm the assignment."
+    )
+    # GitHub did the assignment before the error. The poll finds the owner.
+    await poll(ctx)
+    await refresh_statuses(ctx)
+    assert texts(slack_client, "chat_update")[0].endswith("Owner: ada")
     async with ctx.pool.connection() as conn:
         lane = await one(conn, "SELECT * FROM lanes")
-        assert lane["owner_person_id"] is None
+        assert (
+            lane["owner_person_id"]
+            == (await one(conn, "SELECT id FROM people WHERE key='ada'"))["id"]
+        )
 
 
 async def test_work_falls_back_to_requester_dm(app, rpc, rpc_token, slack_client):

@@ -31,6 +31,8 @@ LABELS = {
 # GitHub refuses an assignment where the Illo sign-in has no write access. A public
 # repository still accepts the ticket, so the ticket exists and has no owner.
 NOT_ASSIGNED = "GitHub refused the assignment. The ticket has no owner."
+# Another failure, for example a server error, does not show if GitHub did the assignment.
+NOT_CONFIRMED = "The ticket was created. Illo could not confirm the assignment."
 
 
 class StartArgs(CreateArgs):
@@ -67,23 +69,23 @@ async def start(ctx: ToolContext, args: dict) -> dict:
     if not result["created"]:
         return result
     issue = result["issue"]
-    assigned = None
+    note = None
     if login:
         try:
             await ctx.app.github_client.assign_issue(repo, issue["number"], [login])
-        except GitHubError:
-            # The ticket exists. Record it and say that it has no owner.
-            assigned = False
+        except GitHubError as exc:
+            # The ticket exists. Record it, and tell the person what Illo knows about the owner.
+            refused = exc.status in {403, 404} and not exc.rate_limited
+            note = NOT_ASSIGNED if refused else NOT_CONFIRMED
+            result = {**result, "assigned": False if refused else None, "note": note}
         else:
-            assigned = True
             issue["assignees"] = [{"login": login}]
     lane = await ledger.sync_item(ctx.conn, repo, issue, ctx.app.workspace.config.github.label_map)
     lane["last_event"] = f"State: {lane['state']}"
-    if assigned is False:
+    if note:
         # A lane event keeps the note in the status message after the next refresh.
-        await lanes.add_event(ctx.conn, lane["id"], "note", NOT_ASSIGNED)
-        lane["last_event"] = NOT_ASSIGNED
-        result = {**result, "assigned": False, "note": NOT_ASSIGNED}
+        await lanes.add_event(ctx.conn, lane["id"], "note", note)
+        lane["last_event"] = note
     if ctx.app.workspace.config.github.work_channel or ctx.run.get("person_id"):
         await kv.set(
             ctx.conn,
