@@ -35,18 +35,19 @@ class Hits(list[Hit]):
         self.personal_read = personal_read
 
 
-_providers: dict[str, tuple[Any, bool]] = {}
+_providers: dict[str, tuple[Any, bool, bool]] = {}
 
 
-def register_provider(name: str, fn, personal: bool = False) -> None:
+def register_provider(name: str, fn, personal: bool = False, *, tainted: bool = True) -> None:
     """Providers receive (ctx, principal, query, kinds, limit) and return ordered Hits.
 
     Personal providers resolve credentials from the authenticated principal. They must
     not accept an owner from query text. Register each name once at setup.
+    A team connector sets tainted=False unless its read tools explicitly allow tainted runs.
     """
     if name in _providers:
         raise ValueError(f"Duplicate search provider: {name}")
-    _providers[name] = (fn, personal)
+    _providers[name] = (fn, personal, tainted)
 
 
 def first_link(links) -> str | None:
@@ -222,7 +223,9 @@ async def search(
         await _lanes(conn, principal, query, kinds, limit),
     ]
     jobs = [("github", _github(ctx, query, kinds, limit), False)]
-    for name, (fn, personal) in tuple(_providers.items()):
+    for name, (fn, personal, allow_tainted) in tuple(_providers.items()):
+        if tainted and not allow_tainted:
+            continue
         if personal and (tainted or not principal.startswith("person:") or not personal_allowed):
             continue
 

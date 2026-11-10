@@ -18,6 +18,7 @@ async def test_rule_03_github_after_personal_read(
     async def personal(ctx, args):
         return {"body": "Example private data"}
 
+    app.state.ctx.registry.tools.pop("mail_search", None)
     app.state.ctx.registry.add(
         Tool("mail_search", "personal", "read", lambda a: "ledger", True, personal)
     )

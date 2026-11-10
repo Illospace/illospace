@@ -15,6 +15,7 @@ async def test_rule_06_forward_keeps_person_but_removes_personal_tools(app, fake
     async def personal(ctx, args):
         called.append(args)
 
+    ctx.registry.tools.pop("mail_search", None)
     ctx.registry.add(
         Tool(
             "mail_search",

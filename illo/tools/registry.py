@@ -53,6 +53,9 @@ class Tool:
 
     # A ledger write can expose text to the whole team, as a note does.
     team_visible: bool = False
+    # Resolve a configured remote tool before any authority check or draft.
+    resolve: Callable[[ToolContext, dict], "Tool"] | None = None
+    on_error: Callable[[ToolContext, dict], Awaitable[None]] | None = None
 
     @property
     def json_schema(self) -> dict:
@@ -130,6 +133,8 @@ class Registry:
                 reason = "The tool arguments do not match its schema"
             else:
                 try:
+                    if tool.resolve:
+                        tool = tool.resolve(ctx, validated)
                     verdict = check(ctx.run, tool, validated)
                     if verdict.outcome != "deny" and tool.preflight:
                         extra = await tool.preflight(ctx, validated)
@@ -169,6 +174,8 @@ class Registry:
                     except Exception:
                         # Keep secrets out of errors and keep the audit row after a rollback.
                         decision, reason = "deny", "The tool failed"
+                        if tool.on_error:
+                            await tool.on_error(ctx, validated)
         await audit.write(
             ctx.conn,
             run_id=ctx.run["id"],

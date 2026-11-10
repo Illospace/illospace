@@ -16,6 +16,7 @@ async def test_personal_read_is_stored_and_shared_write_is_draft(app, rpc, rpc_t
         sent.append(args)
 
     registry = app.state.ctx.registry
+    registry.tools.pop("mail_search", None)
     registry.add(Tool("mail_search", "personal", "read", lambda a: "ledger", True, read_personal))
     registry.tools["slack_post_channel"] = Tool(
         "slack_post_channel",

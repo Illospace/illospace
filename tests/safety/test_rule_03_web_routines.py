@@ -48,6 +48,7 @@ async def test_rule_03_personal_routine_shared_reply_becomes_draft(app, fake_bra
     async def personal(ctx, args):
         return "Personal data"
 
+    ctx.registry.tools.pop("mail_search", None)
     ctx.registry.add(
         Tool(
             "mail_search",

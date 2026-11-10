@@ -20,6 +20,7 @@ class Gateway:
         self.adapters: dict[str, ChannelAdapter] = {}
         self.direct_handlers = {}
         self.claims = []
+        self.payload_filters = []
 
     def register(self, channel: str, adapter: ChannelAdapter) -> None:
         """A channel's setup hook registers its delivery adapter."""
@@ -40,12 +41,18 @@ class Gateway:
         """
         self.claims.append(claim)
 
+    def register_payload_filter(self, fn) -> None:
+        """Remove sign-in secrets before the gateway stores an event."""
+        self.payload_filters.append(fn)
+
     async def receive(self, event: InboundEvent, adapter: ChannelAdapter | None = None) -> dict:
         """Commit dedupe before a run. A retry cannot start a second run."""
         ctx = self.ctx
         async with ctx.pool.connection() as conn:
             # Keep agent bearer tokens out of the inbox and the audit arguments.
             payload = {"text": event.text, "payload": event.payload, "reply_to": event.reply_to}
+            for fn in self.payload_filters:
+                payload = fn(payload)
             row = await one(
                 conn,
                 """
