@@ -1,0 +1,14 @@
+mcp_url = "https://illo.example.com/mcp"
+token_file = "~/.config/illo/token"
+t3_url = "http://127.0.0.1:3773"
+t3_token_file = "~/.config/illo/t3-token"
+machine = "acme-laptop"
+poll_seconds = 30
+state_file = "~/.local/state/illo/t3.json"
+# owner = "sam"  # Omit this key to use the owner of the Illo token.
+# data_path = "~/.t3"  # Optional read-only SQLite fallback.
+# environment_id = "acme-environment"  # Optional cross-device thread links.
+
+# Omit this table to report all projects. Use T3 project IDs as the keys.
+[projects]
+acme-project = "acme/app"

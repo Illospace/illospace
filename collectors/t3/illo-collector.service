@@ -1,0 +1,13 @@
+[Unit]
+Description=Illo collector for T3
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/illo-collectors/.venv/bin/python %h/.local/share/illo-collectors/collectors/t3/collector.py --config %h/.config/illo/collector.toml --loop
+Restart=on-failure
+RestartSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target
