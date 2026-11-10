@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import secrets
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -151,21 +152,70 @@ async def complete(
     return "Google is connected. Illo can read your mail, calendar, and drive."
 
 
-def is_callback(text: str) -> bool:
-    return "/oauth/google/callback" in text or (
-        ("http://localhost" in text or "http://127.0.0.1" in text)
-        and ("code=" in text or "state=" in text)
+def callback_address(text: str, expected_url: str) -> str | None:
+    """Accept one plain URL or Slack auto-link at the configured callback endpoint."""
+    raw = text.strip()
+    if raw.startswith("<") and raw.endswith(">"):
+        raw = raw[1:-1]
+    if not raw or any(c.isspace() or c in "<>|" for c in raw):
+        return None
+    try:
+        parsed, expected = urlsplit(raw), urlsplit(expected_url)
+        if (parsed.scheme, parsed.netloc, parsed.path) != (
+            expected.scheme,
+            expected.netloc,
+            expected.path,
+        ):
+            return None
+    except ValueError:
+        return None
+    return raw
+
+
+def redact_text(text: str, expected_url: str) -> str:
+    """Remove real callback addresses without discarding unrelated message text."""
+    return re.sub(
+        r"https?://[^\s<>|]+",
+        lambda match: (
+            "[Google sign-in address removed]"
+            if callback_address(match[0], expected_url)
+            else match[0]
+        ),
+        text,
     )
 
 
-def redact_payload(payload):
+def redact_payload(payload, expected_url: str):
     if isinstance(payload, str):
-        return "[Google sign-in address removed]" if is_callback(payload) else payload
+        return redact_text(payload, expected_url)
     if isinstance(payload, dict):
-        return {key: redact_payload(value) for key, value in payload.items()}
+        return {key: redact_payload(value, expected_url) for key, value in payload.items()}
     if isinstance(payload, list):
-        return [redact_payload(value) for value in payload]
+        return [redact_payload(value, expected_url) for value in payload]
     return payload
+
+
+def person_dm(event, authority) -> bool:
+    return (
+        event.channel == "slack"
+        and event.kind in {"dm", "message.im"}
+        and authority.profile == "person_dm"
+        and not authority.tainted
+        and authority.person_id is not None
+    )
+
+
+async def prepare_callback(ctx, event, authority):
+    # Only a matching DM callback can reach the claim with its code intact.
+    # Other messages can continue to the brain after the callback address is removed.
+    if person_dm(event, authority) and callback_address(event.text, callback_url(ctx)):
+        return None
+    return event.model_copy(
+        update={
+            "text": redact_text(event.text, callback_url(ctx)),
+            "payload": redact_payload(event.payload, callback_url(ctx)),
+        }
+    )
 
 
 class OAuthLogFilter(logging.Filter):
@@ -176,25 +226,17 @@ class OAuthLogFilter(logging.Filter):
 
 
 async def claim(ctx, event, authority) -> str | None:
-    pasted = is_callback(event.text)
+    if not person_dm(event, authority):
+        return None
+    pasted = callback_address(event.text, callback_url(ctx))
     if not pasted and event.text.strip().lower() not in {
         "connect my google",
         "disconnect my google",
     }:
         return None
-    if authority.profile != "person_dm" or authority.tainted or event.channel != "slack":
-        return "Use a DM to connect your Google account."
     try:
         if pasted:
-            raw = event.text.strip().strip("<>").split("|", 1)[0]
-            parsed = urlsplit(raw)
-            expected = urlsplit(callback_url(ctx))
-            if (parsed.scheme, parsed.netloc, parsed.path) != (
-                expected.scheme,
-                expected.netloc,
-                expected.path,
-            ):
-                raise ValueError("The redirect address is invalid")
+            parsed = urlsplit(pasted)
             params = parse_qs(parsed.query, strict_parsing=True)
             if len(params.get("state", [])) != 1 or len(params.get("code", [])) != 1:
                 raise ValueError("The redirect address is invalid")
@@ -237,7 +279,8 @@ async def setup(ctx) -> None:
 
     ctx.every(300, expire_states)
     ctx.gateway.register_claim(claim)
-    ctx.gateway.register_payload_filter(redact_payload)
+    ctx.gateway.register_preparer(prepare_callback)
+    ctx.gateway.register_payload_filter(lambda payload: redact_payload(payload, callback_url(ctx)))
     for name in ("uvicorn.access", "httpx", "httpcore"):
         logging.getLogger(name).addFilter(OAuthLogFilter())
 

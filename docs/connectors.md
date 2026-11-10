@@ -47,7 +47,9 @@ For a host without a public address, create a Desktop OAuth client.
 Use a loopback `ILLO_PUBLIC_URL`, such as `http://127.0.0.1:8000`.
 The DM then gives you the Google sign-in address directly.
 The browser can fail at the final local redirect address. This is expected.
-Paste that full address into the same person's DM with Illo.
+Paste that full address as the only text in the same person's DM with Illo.
+Illo accepts only its configured callback address. Other messages continue to the assistant.
+If a callback address appears inside other text, Illo removes it before the brain sees that text.
 Illo takes this reply before a brain run and removes the address from the event ledger.
 Illo also drops OAuth access-log records. Keep proxy access logs free of OAuth query strings.
 

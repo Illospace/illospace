@@ -37,6 +37,9 @@ Each call writes one row in `audit`.
 Google sign-in checks the account against the owner's addresses and binds the callback to the browser.
 `tests/safety/test_review_s10_rule_02_google_binding.py` checks both paths.
 
+The Google paste flow takes only one configured callback URL in an untainted person DM.
+`tests/safety/test_review_s24_google_claim.py` checks unrelated text and callback redaction.
+
 ## 3. Personal data goes only to its owner
 
 **Rule.** A run that read personal data can write only to that person. A write to another destination becomes a draft for that person.
