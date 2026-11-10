@@ -235,3 +235,31 @@ async def test_n1_every_token_endpoint_401_breaks_the_grant(chatgpt_app, replay,
         row = await grants.load(conn, person["id"])
     assert row["broken_at"] and row["next_refresh_at"] is None
     assert len(calls) == 1
+
+
+async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app, replay):
+    import httpx
+
+    app, _ = chatgpt_app
+    ctx = app.state.ctx
+    await save_grant(ctx)
+    calls = []
+
+    def unavailable(request):
+        calls.append(request)
+        return httpx.Response(503)
+
+    ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(unavailable))
+
+    class RejectBrain:
+        async def run(self, request):
+            yield BrainEvent(type="error", category="auth", code="invalid_token")
+
+    ctx.brain_client = RejectBrain()
+    result = await replay()
+    assert result["text"] == chatgpt.TEMPORARY
+    assert len(calls) == 1
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs")
+    assert row["status"] == "failed" and row["token_hash"] is None
+    assert row["error"] == "The model sign-in service is unavailable"

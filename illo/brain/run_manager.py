@@ -212,6 +212,8 @@ class RunManager:
                         break
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
+        except chatgpt.TemporaryRefresh:
+            final, error = chatgpt.TEMPORARY, "The model sign-in service is unavailable"
         except TimeoutError:
             status, error = "timeout", "The run reached its time limit"
             raise RuntimeError(error) from None
