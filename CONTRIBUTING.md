@@ -8,7 +8,7 @@ Use Python 3.12 or later and a local Docker daemon.
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install -e '.[dev]' -e './brain[dev]'
 scripts/test-db.sh
 .venv/bin/ruff check .
 .venv/bin/pytest

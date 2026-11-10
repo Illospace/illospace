@@ -90,9 +90,9 @@ Each call writes one row in `audit`.
 
 **Bad case.** An agent asks "deploy to staging or production?". A loose rule answers "production, and also drop the old tables". Without the rule, Illo invents an instruction.
 
-**Code.** `answer_with_rule` in `illo/ledger/asks.py` and `matches` in `illo/ledger/rules.py`. The ask service that names the rule on the card is in progress.
+**Code.** `answer_with_rule` in `illo/ledger/asks.py` and `matches` in `illo/ledger/rules.py`. On the machine, `collectors/t3/collector.py` gives the agent a rule answer only with a proposed option and a named rule. The ask service that names the rule on the card is in progress.
 
-**Tests.** `tests/test_ledger.py` (`test_rule_cannot_invent_an_option_or_answer_for_another_owner`). The test in `tests/safety/` is in progress.
+**Tests.** `tests/test_ledger.py` (`test_rule_cannot_invent_an_option_or_answer_for_another_owner`), `tests/safety/test_rule_08_09_collectors.py`.
 
 ## 9. No credential for the agent machines
 
@@ -100,9 +100,9 @@ Each call writes one row in `audit`.
 
 **Bad case.** An attacker takes over Illo. With SSH keys for each machine, the attacker also takes over each machine.
 
-**Code.** By design: the config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential. A collector calls Illo with an MCP token. The collectors and `work_start` are in progress.
+**Code.** The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential. The collectors in `collectors/` call out to Illo with an MCP token, and they open no inbound port. They send lane facts, not tool output. `work_start`, which files the GitHub ticket, is in progress.
 
-**Tests.** None yet. This rule needs a test in `tests/safety/`.
+**Tests.** `tests/safety/test_rule_08_09_collectors.py`, `tests/collectors/`.
 
 ## 10. The brain has no tool of its own
 
@@ -110,6 +110,6 @@ Each call writes one row in `audit`.
 
 **Bad case.** A tainted run asks the model to run `curl` with a secret in the URL. With a shell tool, the secret leaves.
 
-**Code.** `illo/brain/server.py` lists only registered Illo tools for the run. The brain service in `brain/` starts each runtime with only the Illo tool server. That service is in progress.
+**Code.** `illo/brain/server.py` lists only the registered Illo tools in the grant of the run. The brain service in `brain/` starts each runtime with only the Illo tool server: `brain/runtimes/claude.py` turns off the built-in tools of the Claude Agent SDK, and `brain/runtimes/openai_compat.py` offers only the tools that the Illo server lists. Codex CLI is not a runtime, because it shows the model extra tools.
 
-**Tests.** `tests/safety/test_rule_10_tool_list.py`. The test of the real runtime tool list is in progress.
+**Tests.** `tests/safety/test_rule_10_tool_list.py`, `tests/safety/test_rule_10_brain_tools.py`. The live part of the second file runs only on request, with a real model.

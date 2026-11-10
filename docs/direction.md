@@ -50,12 +50,9 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 ## The order of the work
 
-1. The foundation: the ledger, the gateway, the tool server, and the safety tests.
-2. The voice: the prompts and the example workspace.
-3. The Slack channel, the asks, the cards, and the digest.
-4. The MCP endpoint for agents and the collectors.
-5. The brain service and the install.
-6. GitHub, search, and the routines.
-7. Email, the web tool, and the connectors.
+1. **The foundation.** The ledger, the gateway, the tool server, and the first safety tests. It is on `next`.
+2. **The areas, in parallel.** Each area is built on its own branch and merges into `next` with its tests: the brain service, the collectors, Slack, the asks, the MCP endpoint, GitHub, search, the routines and email, the connectors, the install, and the voice.
+3. **A first team.** One team runs Illo from `next` and reports what fails.
+4. **The switch.** The branch `main` gets the new system when it can replace the old one.
 
-Each step merges into the branch `next` with its tests. The branch `main` gets the new system when it can replace the old one.
+The README lists what is on `next` today.

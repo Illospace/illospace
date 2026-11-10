@@ -89,15 +89,17 @@ Works on `next` today:
 - The ledger, the migrations, and the workspace loader.
 - The gateway: principal, dedupe, the first sign of work, run limits.
 - The tool server with its three checks and the audit. The tools for lanes, asks, people, rules, and skills.
+- The brain service: the Claude runtime, and the experimental OpenAI-compatible runtime.
+- The collectors: one for T3, and hooks for Claude Code and Codex. They need the MCP endpoint, which is in progress.
 - The voice of Illo: the base prompt, one text for each profile, and the example workspace.
-- Tests for safety rules 1, 3, 4, 6, 7, and 10.
+- Tests in `tests/safety/` for rules 1, 3, 4, 6, 7, 8, 9, and 10.
 
 In progress:
 - The Slack channel, the cards, and the digest.
 - The asks service, the rules, and the drafts.
-- The MCP endpoint for agents and the collectors.
+- The MCP endpoint for agents.
 - The GitHub tools, search, the routines, email, the web tool, and the connectors.
-- The brain service and the install scripts.
+- The install scripts. Until they merge, the install steps above describe the target.
 
 ## License and contributing
 
