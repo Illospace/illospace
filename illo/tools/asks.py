@@ -209,7 +209,7 @@ def register(registry):
                 "asks",
                 risk,
                 destination,
-                False,
+                name == "asks_digest",
                 handler,
                 name.replace("_", " "),
                 arguments,

@@ -72,7 +72,8 @@ async def get(conn: Connection, ask_id: int, *, principal: str = "team") -> dict
     return await one(
         conn,
         """
-        SELECT a.* FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.id=%s
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.id=%s
           AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=
             (SELECT id FROM people WHERE 'person:' || key=%s AND active))
     """,
@@ -87,7 +88,8 @@ async def list_open(
     return await all_rows(
         conn,
         """
-        SELECT a.* FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.state='open'
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.state='open'
           AND (%s::bigint IS NULL OR a.owner_person_id=%s)
           AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=
             (SELECT id FROM people WHERE 'person:' || key=%s AND active))

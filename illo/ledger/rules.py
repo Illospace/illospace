@@ -47,7 +47,8 @@ async def list_rules(conn: Connection, *, principal: str = "team") -> list[dict]
     return await all_rows(
         conn,
         """
-        SELECT * FROM rules WHERE removed_at IS NULL AND (scope = 'team' OR owner_person_id =
+        SELECT *,CASE WHEN scope='team' THEN 'team' ELSE 'private' END AS visibility
+        FROM rules WHERE removed_at IS NULL AND (scope = 'team' OR owner_person_id =
           (SELECT id FROM people WHERE 'person:' || key = %s AND active)) ORDER BY id
     """,
         (principal,),
