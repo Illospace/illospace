@@ -358,3 +358,18 @@ This test-only mode accepts `ANTHROPIC_AUTH_TOKEN` only with a loopback `ANTHROP
 It passes that environment credential to bare mode in memory.
 It does not read, copy, or change any host sign-in file.
 The product container uses `ANTHROPIC_API_KEY` instead.
+
+### Subscription smoke check
+
+Run `illo chatgpt smoke --person <key-or-id>` from the main app environment after sign-in.
+See [Workspace files](../docs/workspace.md#check-the-chatgpt-connection).
+The request sets `smoke: true` on the normal `/run` contract and passes per-run `provider_auth`.
+This check offers only the fixed `smoke_ping` function. It does not connect to the team MCP endpoint.
+The function reads and writes no team data. Normal runs keep their exact MCP catalog.
+The Responses loop accepts complete output from `response.output_item.done` when the terminal event omits it.
+When both forms exist, they must agree.
+
+Offline tests cover refresh, the app-to-brain wire, one function round trip, API fallback, and safe errors.
+No live subscription result is recorded yet. The deployment owner must run the check before the trial.
+Record the model, auth kind, tool result, token usage, latency, and date here after that check.
+Do not record a token, account ID, or real team data.

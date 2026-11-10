@@ -78,6 +78,36 @@ It does not repeat completed tool calls. The final answer says that the API key 
 The API key must exist in the brain's environment for this retry to work.
 Check that the provider's terms allow this use. An API key is the alternative.
 
+## Check the ChatGPT connection
+
+After sign-in, run this command in the main app environment:
+
+```sh
+illo chatgpt smoke --person ada
+```
+
+`--person` accepts an active person key or database ID.
+The command resolves that person's grant with the normal credential rules.
+The main app refreshes it when needed. It sends `provider_auth` to the brain for this check.
+The brain offers only `smoke_ping`, a test function with no team data or side effects.
+The check makes one tool call, then sends its result back to the model.
+It uses the configured model and can spend subscription usage or API credits.
+It prints the auth kind, model, tool result, token usage, and elapsed time.
+It never prints a token, account ID, prompt, or model answer.
+A failure prints the HTTP status when available and a short reason. It exits with status 1.
+With `brain.api_key_fallback: false`, a missing grant or subscription limit fails without an API retry.
+The brain service must run the same version as the main app.
+
+Example output with a fake provider:
+
+```text
+Auth kind: chatgpt
+Model: test-model
+Tool round trip: yes
+Token usage: input_tokens=4 output_tokens=2 total_tokens=6
+Latency: 0.025 s
+```
+
 ## Other files
 
 - `people.yaml`: a mapping with `people`, a list of people. Each person has `key` and `name`.

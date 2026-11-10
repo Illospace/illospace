@@ -151,6 +151,7 @@ async def conversation(
         completed = None
         for attempt in range(2):
             text_deltas = []
+            done_items = {}
             try:
                 async for chunk in response_chunks(request, tools, items, http):
                     kind = chunk.get("type")
@@ -158,6 +159,8 @@ async def conversation(
                         text_deltas.append(chunk["delta"])
                     elif kind in ("response.output_item.added", "response.output_item.done"):
                         check_item(chunk["item"], names)
+                        if kind == "response.output_item.done":
+                            done_items[chunk["output_index"]] = chunk["item"]
                     elif kind in ("error", "response.failed"):
                         failed = chunk.get("response") or {}
                         add_usage(usage, failed.get("usage") or {})
@@ -207,7 +210,10 @@ async def conversation(
         for delta in text_deltas:
             yield event("text", text=delta)
         add_usage(usage, completed.get("usage") or {})
-        output = completed.get("output") or []
+        observed = [done_items[index] for index in sorted(done_items)]
+        output = completed.get("output") or observed
+        if observed and output != observed:
+            raise RunError("runtime", "The model returned conflicting output items")
         for item in output:
             check_item(item, names)
         calls = [item for item in output if item["type"] == "function_call"]
@@ -221,7 +227,12 @@ async def conversation(
                 for part in item.get("content", [])
                 if part.get("type") in {"output_text", "refusal"}
             )
-            yield event("final", text=fallback_notice + answer, usage=usage)
+            yield event(
+                "final",
+                text=fallback_notice + answer,
+                usage=usage,
+                **({"auth_kind": request.provider_auth.kind} if request.smoke else {}),
+            )
             return
         # Replay all output, including encrypted reasoning, without a response ID.
         items.extend(output)
@@ -264,13 +275,26 @@ async def conversation(
     yield event("error", category="limit", message="The run reached its turn limit", usage=usage)
 
 
-async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:
+async def run(request: RunRequest, directory: Path, *, transport=None) -> AsyncIterator[BrainEvent]:
     auth_headers(request)
+    if request.smoke:
+        from brain.smoke import TOOLS, SmokeSession
+
+        session = SmokeSession()
+        async with httpx.AsyncClient(
+            timeout=request.timeout_s, follow_redirects=False, transport=transport
+        ) as http:
+            async for item in conversation(request, session, TOOLS, http):
+                if item["type"] == "final":
+                    item["tool_round_trip"] = session.calls == 1
+                yield item
+        return
     async with connect(request) as session:
         tools = await list_tools(session)
         async with httpx.AsyncClient(
             timeout=request.timeout_s,
             follow_redirects=False,
+            transport=transport,
         ) as http:
             async for item in conversation(request, session, tools, http):
                 yield item

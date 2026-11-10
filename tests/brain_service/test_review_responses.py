@@ -93,3 +93,20 @@ async def test_u09_refusal_has_text(run_request):
     }
     events, _ = await collect(subscription(run_request), lambda wire: stream(complete([refusal])))
     assert events[-1]["text"] == "I cannot help with that."
+
+
+async def test_u12_done_items_work_without_completed_output(run_request):
+    count = 0
+
+    def respond(wire):
+        nonlocal count
+        count += 1
+        item = call() if count == 1 else message()
+        return stream(
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            {"type": "response.completed", "response": {"status": "completed", "usage": {"total_tokens": 2}}},
+        )
+
+    events, session = await collect(subscription(run_request), respond)
+    assert len(session.calls) == 1
+    assert events[-1]["text"] == "Ready." and events[-1]["usage"]["total_tokens"] == 4

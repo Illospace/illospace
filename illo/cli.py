@@ -61,7 +61,9 @@ def parser() -> argparse.ArgumentParser:
     login.add_argument("--person")
     status = commands.add_parser("connectors").add_subparsers(dest="action", required=True)
     status.add_parser("status")
-    commands.add_parser("chatgpt").add_subparsers(dest="action", required=True).add_parser("status")
+    chatgpt = commands.add_parser("chatgpt").add_subparsers(dest="action", required=True)
+    chatgpt.add_parser("status")
+    chatgpt.add_parser("smoke").add_argument("--person", required=True)
     return result
 
 
@@ -112,6 +114,10 @@ async def execute(args, config: Config) -> int:
         from illo.channels.mcp.check import check
 
         return await check(args.url, args.token_file)
+    if args.command == "chatgpt" and args.action == "smoke":
+        from illo.connectors.chatgpt_smoke import smoke
+
+        return await smoke(config, args.person)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "reload":

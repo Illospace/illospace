@@ -48,6 +48,7 @@ class RunRequest(BaseModel):
     timeout_s: float
     provider_auth: ProviderAuth = Field(default_factory=ProviderAuth, repr=False)
     api_key_fallback: bool = False
+    smoke: bool = False
 
     def wire(self):
         data = self.model_dump()
@@ -73,13 +74,15 @@ class BrainEvent(BaseModel):
 class BrainClient:
     """Stream JSON lines. Never log the request because it contains a run token."""
 
-    def __init__(self, url: str, secret: str | None = None):
+    def __init__(self, url: str, secret: str | None = None, *, transport=None):
+        self.transport = transport
         self.url = url.rstrip("/")
         self._secret = secret if secret is not None else os.getenv("ILLO_BRAIN_SECRET", "")
 
     async def run(self, request: RunRequest) -> AsyncIterator[BrainEvent]:
         """The outer run manager also enforces the full wall-clock timeout."""
-        async with httpx.AsyncClient(timeout=request.timeout_s) as client:
+        options = {"transport": self.transport} if self.transport is not None else {}
+        async with httpx.AsyncClient(timeout=request.timeout_s, **options) as client:
             async with client.stream(
                 "POST",
                 f"{self.url}/run",
