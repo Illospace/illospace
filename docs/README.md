@@ -1,25 +1,19 @@
-# Illo Brain Docs
+# The docs
 
-Start here when you want to understand, run, or extend Illo Brain.
+Read the pages in this order.
 
-## Public Entry Points
-
-- [Architecture](architecture.md) - repo layout, runtime boundaries, and subsystem map.
-- [Configuration](configuration.md) - environment variables, secrets, and private state.
-- [Server Setup](server-setup.md) - canonical single-server team deployment runbook.
-- [Deployment](deployment.md) - deployment overview and advanced native notes.
-- [Cycles](cycles.md) - scheduler-owned recurring jobs.
-- [Illo-QA Close Criteria](qa-close-criteria.md) - required post-deploy run
-  evidence before an `[Illo-QA]` issue is completed.
-- [Project Workspaces](project-workspaces.md) - Project root, thread draft, base, conflict, and publish semantics.
-- [Workspace Tool Installer](workspace-tools.md) - opt-in persisted tool bundles for team-specific skill dependencies.
-- [Outside MCP Servers](external-mcp-servers.md) - organization connections, vault credentials, and allowed tools.
-- [Security Model](security-model.md) - secrets, tool execution, browser sessions, and data boundaries.
-- [Reconstructive Memory Rewrite](reconstructive-memory-rewrite.md) - no-legacy proposal for replacing passive memory retrieval with active evidence reconstruction.
-- [Personal Agent Connections MVP](personal-agent-connections-mvp.md) - implementation plan for connecting Illo with Hermes and OpenClaw.
-- [Universal Thread Context Ingress PRD](prd-universal-thread-context-ingress.md) - product plan for personal agents submitting context into Illo and Universal Threads.
-- [Model And Effort Routing PRD](prd-model-effort-routing.md) - effort-tier routing on one default model, cycle-override fix, and fast/deep retirement.
-- [Dependency Licensing](dependency-licensing.md) - Apache 2.0 project policy and third-party review notes.
-
-Planning notes, runtime journals, memory exports, logs, and operator notes belong
-in `.illo/` or another git-ignored private directory.
+1. [../README.md](../README.md): what Illo does, the ten safety rules, and the status.
+2. [direction.md](direction.md): who Illo is for, and what it will not be.
+3. [install.md](install.md): install Illo on one host, then update, back up, and restore it.
+4. [workspace.md](workspace.md): the files that set up one team.
+5. [safety.md](safety.md): each safety rule with its code and tests, the risks that remain, and the limits.
+6. [architecture.md](architecture.md): the contract: the words, the parts, the profiles, the tables, and the tools.
+7. [agents.md](agents.md): connect a coding agent to the MCP endpoint, with examples of each tool.
+8. [collectors.md](collectors.md): report agent work from T3, Claude Code, and Codex.
+9. [github.md](github.md): GitHub access, the poller, the heartbeat, and the write checks.
+10. [connectors.md](connectors.md): Google for a person, team MCP servers, the shared drive, and email sender checks.
+11. [search-notes.md](search-notes.md): search, the archive import, and notes.
+12. [../illo/channels/slack/README.md](../illo/channels/slack/README.md): the Slack app and channel.
+13. [../illo/channels/email/README.md](../illo/channels/email/README.md): the mailbox, routines, and public pages.
+14. [../brain/README.md](../brain/README.md): the brain service and its runtimes.
+15. [builders.md](builders.md): how to add a tool, a migration, a channel, or a test.

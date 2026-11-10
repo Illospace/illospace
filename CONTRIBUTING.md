@@ -1,36 +1,46 @@
-# Contributing
+# Contribute
 
-Thanks for helping improve Illo Brain. This repo is an early open-source preview,
-so small, well-scoped PRs are much easier to review than large rewrites.
+Read [the architecture](docs/architecture.md) first. It is the contract: the words, the parts, the safety rules, the tables, and the tools. Then read [the builder guide](docs/builders.md).
 
-## Local setup
+## Run the tests
 
-```bash
-./illo setup
-./illo
+Use Python 3.12 or later and a local Docker daemon.
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]' -e './brain[dev]'
+scripts/test-db.sh
+.venv/bin/ruff check .
+.venv/bin/pytest
 ```
 
-`.env` is optional. Copy `.env.example` to `.env` only when you want local
-file-based overrides such as provider keys or custom database settings.
+`scripts/test-db.sh` starts one shared Postgres container. Each test session creates and drops its own database. The container stays up.
 
-For tests:
+A test never calls a real Slack, GitHub, mailbox, or model. Use the fakes in `tests/fakes.py`.
 
-```bash
-make test       # fast suite, excludes DB-required tests
-make test-all   # full suite with Docker PostgreSQL + pgvector
-```
+## Rules for a change
 
-## Pull request guidelines
+- **Stay in one area.** Each area has its own files, its own test folder, and its own block of migration numbers.
+- **Never edit an old migration.** Add a new file in the number block of your area.
+- **A safety rule needs a test.** Put it in `tests/safety/`, with the rule number in the file name.
+- **A new tool states its risk and its profiles.** Give the profile `tainted` or `outsider` only to a tool that is safe when hostile text drives the run.
+- **Keep examples fictional.** Use the team "Acme" and invented people. No real name, id, channel, address, or internal URL.
+- **No secret in a file, a log, a test, or a command output.**
 
-- Keep changes focused and avoid unrelated refactors.
-- Add or update tests for behavior changes.
-- Redact provider keys, user data, thread transcripts, database rows, uploads, and logs.
-- Document new environment variables in `.env.example` and user-facing behavior in `README.md` or `docs/`.
-- Run the relevant backend/frontend checks before opening a PR.
-- By contributing, you agree that your contribution is submitted under the Apache License, Version 2.0 unless you explicitly state otherwise.
+## Write for people
 
-## Runtime-private context
+This covers the docs, the comments, the CLI messages, the card text, and the messages of Illo.
 
-Personal agent context does not belong in public source control. Use
-`ILLO_PRIVATE_HOME`, `AGENT_CONTEXT_DIR`, and `AGENT_CHECKLIST_PATH` for local prompts,
-operator preferences, heartbeat notes, and generated checklists.
+- Short sentences. One idea in each sentence.
+- Active voice and the present tense.
+- The same word for the same thing. Use the words of the architecture file.
+- No filler, no metaphor, no marketing words.
+- Keep the numbers, the names, and the paths.
+
+The voice of Illo lives in `illo/brain/base_prompt.md` and `illo/brain/prompts/`. A change to that text changes the snapshots in `tests/prompts/snapshots/`. Update them with `ILLO_UPDATE_SNAPSHOTS=1 .venv/bin/pytest tests/prompts`, and read the diff.
+
+## Commits and pull requests
+
+- Use conventional commit messages, such as `feat(asks): send one reminder`.
+- Each commit message ends with a `Co-authored-by:` line. The ruleset of `main` refuses a pull request with a commit that lacks it.
+- Run Ruff and the full test suite before a pull request.

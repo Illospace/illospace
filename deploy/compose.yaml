@@ -1,0 +1,81 @@
+name: ${ILLO_PROJECT_NAME:-illo}
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: illo
+      POSTGRES_DB: illo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment file}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks: [db]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U illo -d illo']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: ${ILLO_POSTGRES_MEMORY:-512m}
+    cpus: ${ILLO_POSTGRES_CPUS:-1.0}
+  illo:
+    image: ${ILLO_IMAGE_PREFIX:-illo}/illo:${ILLO_REVISION:-local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        ILLO_REVISION: ${ILLO_REVISION:-local}
+    env_file: ${ILLO_ENV_FILE:-../.env}
+    environment:
+      ILLO_WORKSPACE_DIR: /workspace
+      ILLO_PUBLIC_URL: http://illo:8080
+      ILLO_BRAIN_URL: http://brain:8080
+      ILLO_REVISION: ${ILLO_REVISION:-local}
+      ILLO_MIGRATE_ON_START: ${ILLO_MIGRATE_ON_START:-1}
+    user: '${ILLO_UID:-10001}:${ILLO_GID:-10001}'
+    volumes:
+      - ${ILLO_WORKSPACE_DIR:?Set ILLO_WORKSPACE_DIR to an absolute host folder}:/workspace:rw
+    ports:
+      - '127.0.0.1:${ILLO_PORT:-8484}:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [db, brainnet, default]
+    restart: unless-stopped
+    mem_limit: ${ILLO_MEMORY:-768m}
+    cpus: ${ILLO_CPUS:-1.0}
+    pids_limit: ${ILLO_PIDS:-128}
+  brain:
+    image: ${ILLO_IMAGE_PREFIX:-illo}/brain:${ILLO_REVISION:-local}
+    build:
+      context: ../brain
+      dockerfile: Dockerfile
+    environment:
+      ILLO_BRAIN_SECRET: ${ILLO_BRAIN_SECRET:?Set ILLO_BRAIN_SECRET in the environment file}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ILLO_BRAIN_MODEL: ${ILLO_BRAIN_MODEL:-}
+      ILLO_BRAIN_CONCURRENCY: ${ILLO_BRAIN_CONCURRENCY:-4}
+      ILLO_BRAIN_TIMEOUT_S: ${ILLO_BRAIN_TIMEOUT_S:-120}
+      ILLO_BRAIN_EFFORT: ${ILLO_BRAIN_EFFORT:-low}
+      HOME: /tmp
+    user: '10001:10001'
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [brainnet, default]
+    restart: unless-stopped
+    mem_limit: ${ILLO_BRAIN_MEMORY:-1g}
+    cpus: ${ILLO_BRAIN_CPUS:-1.0}
+    pids_limit: ${ILLO_BRAIN_PIDS:-128}
+networks:
+  db:
+    internal: true
+  brainnet:
+    internal: true
+  default: {}
+volumes:
+  postgres: {}

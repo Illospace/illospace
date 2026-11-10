@@ -1,0 +1,33 @@
+team_name: Acme
+timezone: Europe/Paris
+default_owner: ada
+slack:
+  channels:
+    - name: team
+      id: C_ACME_TEAM
+      mode: listen
+      rule_files: [rules/team.md]
+    - name: alerts
+      id: C_ACME_ALERTS
+      mode: coordinator
+      rule_files: [rules/team.md, rules/alerts-coordinator.md]
+github:
+  repositories: [acme-example/engine]
+digest:
+  schedule: '0 9 * * 1-5'
+  destination: person:ada
+stale_minutes:
+  t3: 30
+  claude-code: 30
+  codex: 30
+  github: 1440
+  manual: 1440
+  email: 1440
+brain:
+  runtime: claude
+  model: default
+  max_turns: 12
+  timeout_s: 120
+run_limits:
+  max_concurrent: 4
+  max_message_chars: 20000
