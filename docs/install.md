@@ -5,7 +5,12 @@ Give the Docker user access to Docker before you start.
 Allow at least 3 GB of memory and outbound HTTPS.
 No public address is required for Slack Socket Mode.
 Docker allows outbound traffic on the default network.
-Use a host firewall or an egress proxy if you need a strict provider allowlist.
+Postgres joins only the internal `db` network with the Illo app.
+The brain joins `brainnet` with Illo. It never joins `db`.
+Illo and the brain also join the default network for outbound traffic.
+For optional hardening, put the brain behind an egress proxy with a model provider allowlist.
+Remove its default network access when you set up that proxy.
+This install does not configure an egress proxy or restrict Internet destinations.
 
 ## Install
 

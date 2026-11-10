@@ -270,5 +270,5 @@ def test_scripts_parse_and_compose_keeps_postgres_private():
     compose = yaml.safe_load((ROOT / "deploy/compose.yaml").read_text())
     postgres = compose["services"]["postgres"]
     assert "ports" not in postgres
-    assert postgres["networks"] == ["internal"]
-    assert compose["networks"]["internal"]["internal"] is True
+    assert postgres["networks"] == ["db"]
+    assert compose["networks"]["db"]["internal"] is True

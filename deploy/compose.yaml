@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment file}
     volumes:
       - postgres:/var/lib/postgresql/data
-    networks: [internal]
+    networks: [db]
     healthcheck:
       test: [CMD-SHELL, 'pg_isready -U illo -d illo']
       interval: 5s
@@ -39,7 +39,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [internal, default]
+    networks: [db, brainnet, default]
     restart: unless-stopped
     mem_limit: ${ILLO_MEMORY:-768m}
     cpus: ${ILLO_CPUS:-1.0}
@@ -66,13 +66,15 @@ services:
       - /tmp:rw,nosuid,nodev,size=256m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    networks: [internal, default]
+    networks: [brainnet, default]
     restart: unless-stopped
     mem_limit: ${ILLO_BRAIN_MEMORY:-1g}
     cpus: ${ILLO_BRAIN_CPUS:-1.0}
     pids_limit: ${ILLO_BRAIN_PIDS:-128}
 networks:
-  internal:
+  db:
+    internal: true
+  brainnet:
     internal: true
   default: {}
 volumes:

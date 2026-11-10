@@ -122,3 +122,6 @@ Email requires one aligned DMARC pass from the selected receiving server.
 **Code.** `illo/brain/server.py` lists only the registered Illo tools in the grant of the run. The brain service in `brain/` starts each runtime with only the Illo tool server: `brain/runtimes/claude.py` turns off the built-in tools of the Claude Agent SDK, and `brain/runtimes/openai_compat.py` offers only the tools that the Illo server lists. Codex CLI is not a runtime, because it shows the model extra tools.
 
 **Tests.** `tests/safety/test_rule_10_tool_list.py`, `tests/safety/test_rule_10_brain_tools.py`. The live part of the second file runs only on request, with a real model.
+
+The brain and Postgres share no network. Outbound Internet access remains available.
+`tests/safety/test_review_s20_rule_10_compose_networks.py` checks the three network memberships.
