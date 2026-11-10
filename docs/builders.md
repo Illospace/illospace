@@ -14,7 +14,7 @@ The scheduler reports each job through `sensors`. It cancels jobs at shutdown.
 3. Register a `Tool` with its name, family, risk, destination function, personal flag, handler, and arguments class.
 4. Use only `read`, `write_internal`, or `send_outside`. There is no destructive risk.
 5. Read authority from `ToolContext.run`. Use `ToolContext.principal` for ledger visibility filters.
-6. Use the existing tool names in the grant data. A new name needs an explicit grant decision.
+6. State the grant on the tool: `profiles=frozenset({"person_dm", ...})`. The profile names are `person_dm`, `team_channel`, `tainted`, `routine`, `agent_request`, and `outsider`. A tainted run uses only the profile `tainted`. Give `tainted` and `outsider` only to a tool that is safe when hostile text drives the run. A tool without `profiles` uses the default data in `illo/tools/checks.py`; do not edit that data.
 7. For personal connectors, load the grant by `ctx.run["person_id"]`. Never accept the owner from tool arguments.
 
 The registry discovers family files. A handler receives `(tool_context, arguments)`.
@@ -23,6 +23,14 @@ The HTTP boundary holds a lock on the run through the call. Calls in one run exe
 A failed handler rolls back its changes. The call still creates an audit row.
 A draft records the action without running the handler. The Slack builder adds the DM card.
 Audit rows redact all argument values. The digest covers the full arguments.
+
+## Share hooks, not files
+
+- **Slack calls.** `ctx.slack_client` is a `slack_sdk` `AsyncWebClient`, or `None`. Call its own methods (`chat_postMessage`, `chat_update`, `conversations_open`). `illo.slackapi.dm_person(ctx, person_key, text, blocks)` sends a DM to a team member.
+- **Card buttons.** `ctx.slack_actions.register(prefix, handler)` routes a click by its `action_id` prefix. The handler is `async handler(ctx, person, action)`. The Slack channel calls `ctx.slack_actions.dispatch`.
+- **Thread replies and other follow-ups.** `ctx.gateway.register_claim(claim)` with `async claim(ctx, event, authority) -> str | None`. A claim takes an event before any brain run. Use it for a typed answer to an ask, a corrected note, or a pasted sign-in address.
+- **Approved drafts.** Put `async fn(ctx, draft_row)` into `ctx.draft_performers[kind]`. The asks area calls it when the approver clicks Send.
+- **The ledger is the interface between areas.** Write a row. The area that owns the next step finds it with its own timer.
 
 ## Add a migration
 

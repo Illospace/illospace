@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from illo.db import Connection
 from illo.ledger import audit, drafts
-from illo.tools.checks import Decision, check, grant_names, scope
+from illo.tools.checks import PROFILE_NAMES, Decision, check, scope
 
 
 class Arguments(BaseModel):
@@ -45,6 +45,9 @@ class Tool:
     handler: Callable[[ToolContext, dict], Awaitable[Any]]
     description: str = ""
     arguments: type[BaseModel] = Arguments
+    # The profiles that may call this tool: person_dm, team_channel, tainted, routine,
+    # agent_request, outsider. None means: use the default data in checks.py.
+    profiles: frozenset[str] | None = None
 
     @property
     def json_schema(self) -> dict:
@@ -66,6 +69,20 @@ class Registry:
             raise ValueError(f"Duplicate tool: {tool.name}")
         if tool.risk not in {"read", "write_internal", "send_outside"}:
             raise ValueError(f"Tool risk is not allowed: {tool.name}")
+        if tool.profiles is not None and not set(tool.profiles) <= PROFILE_NAMES:
+            raise ValueError(f"Tool names an unknown profile: {tool.name}")
+        if (
+            tool.personal
+            and tool.profiles is not None
+            and tool.profiles
+            & {
+                "tainted",
+                "outsider",
+                "team_channel",
+                "routine",
+            }
+        ):
+            raise ValueError(f"A personal tool cannot be in this profile: {tool.name}")
         self.tools[tool.name] = tool
 
     def discover(self) -> None:
@@ -80,11 +97,10 @@ class Registry:
 
     def list_tools(self, run: dict) -> list[dict]:
         """Only show tools that this authenticated run can call."""
-        names = grant_names(run)
         return [
             tool.declaration()
-            for name, tool in sorted(self.tools.items())
-            if name in names and scope(run, tool).outcome == "allow"
+            for _, tool in sorted(self.tools.items())
+            if scope(run, tool).outcome == "allow"
         ]
 
     async def call(self, ctx: ToolContext, name: str, args: dict) -> dict:

@@ -49,6 +49,27 @@ class FakeSlackClient:
     async def reactions_add(self, **kwargs):
         return await self._record("reactions_add", **kwargs)
 
+    async def chat_getPermalink(self, **kwargs):
+        await self._record("chat_getPermalink", **kwargs)
+        link = f"https://acme.slack.com/archives/{kwargs['channel']}/p{kwargs['message_ts']}"
+        return {"ok": True, "permalink": link}
+
+    async def conversations_history(self, **kwargs):
+        await self._record("conversations_history", **kwargs)
+        return {"ok": True, "messages": list(self.messages.values()), "has_more": False}
+
+    async def conversations_info(self, **kwargs):
+        await self._record("conversations_info", **kwargs)
+        return {"ok": True, "channel": {"id": kwargs["channel"], "name": "example"}}
+
+    async def users_list(self, **kwargs):
+        await self._record("users_list", **kwargs)
+        return {"ok": True, "members": list(self.users.values())}
+
+    async def files_info(self, **kwargs):
+        await self._record("files_info", **kwargs)
+        return {"ok": True, "file": {"id": kwargs["file"]}}
+
 
 @dataclass
 class FakeGitHubClient:

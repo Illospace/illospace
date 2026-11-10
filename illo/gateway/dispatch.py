@@ -19,6 +19,7 @@ class Gateway:
         self.run_manager = RunManager(ctx)
         self.adapters: dict[str, ChannelAdapter] = {}
         self.direct_handlers = {}
+        self.claims = []
 
     def register(self, channel: str, adapter: ChannelAdapter) -> None:
         """A channel's setup hook registers its delivery adapter."""
@@ -27,6 +28,17 @@ class Gateway:
     def register_direct(self, channel: str, kind: str, handler) -> None:
         """Register a ledger action. The handler must check action ownership."""
         self.direct_handlers[(channel, kind)] = handler
+
+    def register_claim(self, claim) -> None:
+        """Register `async claim(ctx, event, authority) -> str | None`.
+
+        A claim runs after the principal is known and before any brain run. It lets an
+        area take an event that continues its own flow: a thread reply that answers an
+        ask, a corrected note, a pasted sign-in address. Return None to pass. Return a
+        text (or "" for no reply) to take the event: the gateway delivers that text and
+        no model sees the event. A claim must check that the sender owns the flow.
+        """
+        self.claims.append(claim)
 
     async def receive(self, event: InboundEvent, adapter: ChannelAdapter | None = None) -> dict:
         """Commit dedupe before a run. A retry cannot start a second run."""
@@ -59,6 +71,20 @@ class Gateway:
                 raise RuntimeError("The channel has no delivery adapter")
             if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
                 raise ValueError("The message is too long")
+            claimed = None
+            for claim in self.claims:
+                claimed = await claim(ctx, event, authority)
+                if claimed is not None:
+                    break
+            if claimed is not None:
+                decision, text = "claimed", claimed
+                if text:
+                    await adapter.deliver_final(event, text)
+                async with ctx.pool.connection() as conn:
+                    await conn.execute(
+                        "UPDATE events SET status='handled' WHERE id=%s", (row["id"],)
+                    )
+                return {"decision": decision, "event_id": row["id"], "text": text}
             await adapter.show_working(event)
             if decision == "direct":
                 text = await self.direct_handlers[(event.channel, event.kind)](

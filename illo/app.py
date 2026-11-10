@@ -19,6 +19,7 @@ from illo.config import Config
 from illo.db import create_pool, migrate, one
 from illo.gateway import Gateway
 from illo.routines.scheduler import Scheduler
+from illo.slackapi import ActionRouter
 from illo.tools.registry import Registry
 from illo.workspace import Workspace, fingerprint, load_workspace
 
@@ -40,6 +41,9 @@ SETUP_MODULES = (
     "illo.routines.digest",
     "illo.routines.reminders",
     "illo.routines.stale",
+    "illo.routines.heartbeat",
+    "illo.asks",
+    "illo.notes",
     "collectors",
     "collectors.t3",
     "collectors.hooks",
@@ -56,6 +60,10 @@ class AppContext:
     app: FastAPI
     slack_client: Any = None
     github_client: Any = None
+    # Card buttons: an area registers a handler for its action_id prefix.
+    slack_actions: ActionRouter = field(default_factory=ActionRouter)
+    # Approved drafts: an area registers `async fn(ctx, draft_row)` for its draft kind.
+    draft_performers: dict[str, Any] = field(default_factory=dict)
     gateway: Gateway = field(init=False)
     scheduler: Scheduler = field(init=False)
     reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

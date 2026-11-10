@@ -59,6 +59,8 @@ GRANT_PROFILES = {
     | {"asks_create", "notes_propose", "connectors_list", "connectors_call"},
 }
 
+PROFILE_NAMES = frozenset(GRANT_PROFILES) | {"outsider"}
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -66,17 +68,35 @@ class Decision:
     reason: str
 
 
-def grant_names(run: dict) -> frozenset[str]:
-    """Taint always narrows the grant, even if an earlier profile was broader."""
-    names = frozenset(GRANT_PROFILES.get("tainted" if run["tainted"] else run["profile"], ()))
+def effective_profile(run: dict) -> str:
+    """Taint and outsider status always narrow the grant, whatever the first profile was."""
     if run["principal"] == "outsider":
-        return names & {"web_read_public_page"}
-    return names
+        return "outsider"
+    return "tainted" if run["tainted"] else run["profile"]
+
+
+def grant_names(run: dict) -> frozenset[str]:
+    """The default grant by tool name. A tool with its own `profiles` does not use it."""
+    profile = effective_profile(run)
+    if profile == "outsider":
+        return frozenset({"web_read_public_page"})
+    return frozenset(GRANT_PROFILES.get(profile, ()))
+
+
+def in_grant(run: dict, tool) -> bool:
+    """A tool is in the grant when it names the profile, or when the default data names the tool.
+
+    A tool family states `profiles` on its own tools, so two builders never edit one list.
+    """
+    profiles = getattr(tool, "profiles", None)
+    if profiles is not None:
+        return effective_profile(run) in profiles
+    return tool.name in grant_names(run)
 
 
 def scope(run: dict, tool) -> Decision:
-    """Check 1: a registered tool must be named by the run grant."""
-    if tool.name not in grant_names(run):
+    """Check 1: a registered tool must be in the run grant."""
+    if not in_grant(run, tool):
         return Decision("deny", "The run grant does not include this tool")
     if tool.personal and (
         run["tainted"]

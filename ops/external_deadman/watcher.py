@@ -6,6 +6,7 @@ if Slack succeeds but the state write fails, the next watcher run reposts the
 notice. Every alarm and its recovery carry the same stable outage ID so an
 operator can recognize those deliveries as belonging to one outage.
 """
+
 from __future__ import annotations
 
 import base64
@@ -131,9 +132,7 @@ def parse_state(payload: dict[str, Any] | None) -> DeadmanState:
     return DeadmanState(
         alarmed=alarmed,
         missing_since=(
-            _parse_datetime(missing_since, field="missing_since")
-            if missing_since
-            else None
+            _parse_datetime(missing_since, field="missing_since") if missing_since else None
         ),
         outage_id=outage_id,
     )
@@ -390,7 +389,9 @@ def _post_slack(url: str, message: str) -> None:
     try:
         with urlopen(request, timeout=15) as response:
             if not 200 <= response.status < 300:
-                raise WatcherError(f"Slack returned {response.status} while posting the deadman notice")
+                raise WatcherError(
+                    f"Slack returned {response.status} while posting the deadman notice"
+                )
     except HTTPError as exc:
         raise WatcherError(f"Slack returned {exc.code} while posting the deadman notice") from None
     except (URLError, TimeoutError) as exc:

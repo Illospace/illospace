@@ -30,7 +30,6 @@ def test_profile_lists_only_registered_tools(profile):
     run = authority(profile=profile)
     names = {t["name"] for t in registry.list_tools(run)}
     assert names <= registry.tools.keys()
-    assert names <= GRANT_PROFILES[profile]
     assert "people_list" in names
 
 
