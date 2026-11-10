@@ -102,7 +102,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `Gateway.context_authority` in `illo/gateway/dispatch.py` also marks a Slack run tainted when its thread context has a bot or an unknown user (`read_context` in `illo/channels/slack/threads.py`). An unknown author shows as `Outside user (<id>)`.
 - An Illo reply taints a follow-up only when the thread has the stored `slack:thread-tainted:` marker. Normal DM follow-ups keep `person_dm`.
 - `GRANT_PROFILES["tainted"]` in `illo/tools/checks.py` is the exact tool set: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, `skills_get`. `in_grant` refuses every other tool, even one that names the profile.
-- `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server, not the model, sends the default owner one DM for each such ticket.
+- `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server sends at most one owner notice per run and six per hour. The remaining links wait for one digest at the end of the hour.
 - `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine. The minute timer deletes model claims older than 24 hours.
 - `read_page` lets a tainted run read only the first URL of the event text, once.
 - `resolve` in `illo/tools/connectors.py` gives a tainted run only a remote tool with `tainted: true` and risk `read`.
@@ -177,7 +177,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 The rules limit damage. They do not make hostile text harmless. These risks remain:
 
 - **A tainted run reads team GitHub issues.** It can search and read issues of the configured repositories, private ones too. In Slack, its final answer goes to the thread of the hostile post. So that thread can show issue text.
-- **A tainted run files tickets.** It can file up to 3 tickets in one run in a configured private repository. Each ticket has no assignee, the label `from-outside-text`, and a warning line. A public repository needs a draft, so a signal run cannot write there. Each ticket sends one DM to the default owner.
+- **A tainted run files tickets.** It can file up to 3 tickets in one run in a configured private repository. Each ticket has no assignee, the label `from-outside-text`, and a warning line. A public repository needs a draft, so a signal run cannot write there. Owner notices have the caps below.
 - **A tainted run reads one public page.** It can fetch the first URL of the event text, once. The owner of that page sees the request.
 - **A tainted run calls connector reads.** It can call a remote tool with `tainted: true`. Its arguments go to that connector's server.
 - **A tainted run takes claims.** A `model:` claim can block another model run that wants the same key.
@@ -185,7 +185,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 - **A model answer can be wrong.** A draft in a person's DM can say something false or something that a hostile text put there. The code shows the full text. The person must read each draft before they tap Send.
 - **Email trust depends on the receiving server.** The server must remove incoming `Authentication-Results` headers that claim its identity.
 - **Collector filters are not complete.** `clean` removes common credentials, including Slack app and refresh tokens, Stripe, GitLab, npm, and named AWS secrets. It cannot find all private text. Use `share = "team"` only for work that the team may read.
-- **Slack posts have no hourly cap.** Each bot post in a `coordinator` channel can start a run. `run_limits.max_concurrent` limits only the runs at the same time.
+- **Slack automation has an hourly cap.** Each channel can start at most 30 tainted runs in one hour, counted from `events`. Further events start no run and cause one sensor error per hour. `illo/channels/slack/limits.py` also caps owner notices and sends the deferred digest.
 
 ## Limits
 

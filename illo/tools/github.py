@@ -1,23 +1,21 @@
 """GitHub tools use the configured repositories and API visibility facts."""
 
 import hashlib
-import logging
 import re
 from dataclasses import replace
 
 from pydantic import Field
 
+from illo.channels.slack.limits import notify_unassigned
 from illo.connectors.github_client import GitHubError
 from illo.ledger import github as ledger
 from illo.ledger import kv, people
-from illo.slackapi import dm_person
 from illo.tools.checks import Decision, check
 from illo.tools.registry import Arguments, Tool, ToolContext
 
 # These tools use only team repositories. Outside text never grants personal access.
 PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request"})
 REPO_PATTERN = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
-log = logging.getLogger(__name__)
 OUTSIDE_LABEL = "from-outside-text"
 OUTSIDE_HEADER = (
     "> *Illo filed this from text that came from outside the team. "
@@ -167,16 +165,7 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
     )
     await kv.set(ctx.conn, signature_key, issue["number"])
     if ctx.run["tainted"] or not ctx.run.get("person_id"):
-        try:
-            source = " from outside text" if ctx.run["tainted"] else ""
-            await dm_person(
-                ctx.app, ctx.app.workspace.config.default_owner,
-                f"New ticket{source}, not assigned: {issue['html_url']}. "
-                "Assign it in GitHub, or tell me in a DM.",
-            )
-        except Exception:
-            # Keep the created issue and dedupe marker. Do not send a second DM.
-            log.error("Slack could not notify the owner about an outside-text ticket")
+        await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue["html_url"])
     return {"created": True, "issue": issue, "matches": matches}
 
 

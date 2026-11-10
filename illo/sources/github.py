@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from psycopg.types.json import Jsonb
 
+from illo.channels.slack.limits import flush_owner_notices
 from illo.connectors.github_client import GitHubClient
 from illo.ledger import github as ledger
 from illo.ledger import kv, runs, sensors
@@ -152,5 +153,9 @@ async def setup(ctx) -> None:
     async def refresh_work():
         await refresh_statuses(ctx)
 
+    async def owner_notices():
+        await flush_owner_notices(ctx)
+
+    ctx.every(60, owner_notices)
     ctx.every(15, refresh_work)
     ctx.every(ctx.workspace.config.github.poll_seconds, poll_github)

@@ -117,6 +117,8 @@ Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_
 
 `RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. The run stops at `brain.timeout_s`.
 
+Each Slack channel starts at most 30 tainted runs per hour. Owner notices have a cap of one per run and six per hour; remaining links wait for an hourly digest.
+
 ## 5. The ledger
 
 Postgres 16. Plain SQL in `illo/migrations/NNNN_<area>_<what>.sql`, applied in file order by `illo migrate`. The foundation owns `0001_init.sql`. A later change uses the number block of its area: slack 0100, mcp 0200, github 0300, search 0400, asks 0500, brain 0600, collector 0700, routines 0800, email 0900, connectors 1000, notes 1100. A migration never edits an older file.
