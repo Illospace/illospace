@@ -70,6 +70,8 @@ async def handle(ctx, person, action):
                     kind="always_allow" if ask["permission"] else "standing_answer",
                     match=match,
                     answer_option_label=option["label"],
+                    answer_option_id=option["id"],
+                    answer_option_detail=option.get("detail", ""),
                     origin="card",
                 )
                 notice = 'Rule saved. I answer this question for you from now on. Say "show my rules" to see or remove it.'

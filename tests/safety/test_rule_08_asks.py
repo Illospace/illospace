@@ -6,9 +6,9 @@ from illo.ledger import asks, people, rules
 
 
 @pytest.mark.parametrize(
-    "value,expected", [("Continue", "yes"), ("yes", "yes"), ("Run a different command", None)]
+    "value,expected", [("Continue", "yes"), ("yes", None), ("Run a different command", None)]
 )
-async def test_rule_08_only_proposed_label_or_id_and_names_rule(conn, ada, value, expected):
+async def test_rule_08_only_exact_proposed_label_and_names_rule(conn, ada, value, expected):
     ask = await asks.create(
         conn,
         owner_person_id=ada["id"],

@@ -16,16 +16,29 @@ async def create(
     scope: str = "person",
     match: dict | None = None,
     answer_option_label: str | None = None,
+    answer_option_id: str | None = None,
+    answer_option_detail: str | None = None,
     origin: str = "card",
 ) -> dict:
     """Store a rule. A question pattern uses shell-style wildcards, not regex."""
     return await one(
         conn,
         """
-        INSERT INTO rules (owner_person_id,text,kind,scope,match,answer_option_label,origin)
-        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *
+        INSERT INTO rules (owner_person_id,text,kind,scope,match,answer_option_label,
+                           answer_option_id,answer_option_detail,origin)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
     """,
-        (owner_person_id, text, kind, scope, Jsonb(match or {}), answer_option_label, origin),
+        (
+            owner_person_id,
+            text,
+            kind,
+            scope,
+            Jsonb(match or {}),
+            answer_option_label,
+            answer_option_id,
+            answer_option_detail,
+            origin,
+        ),
     )
 
 
@@ -62,6 +75,19 @@ def matches(rule: dict, ask: dict, lane: dict | None = None) -> bool:
     return True
 
 
+def matching_option(rule: dict, options: list[dict]) -> dict | None:
+    """Old rules need one exact label. Card rules also need the approved id and detail."""
+    candidates = [o for o in options if o["label"] == rule["answer_option_label"]]
+    if rule.get("answer_option_id") is not None:
+        candidates = [
+            o
+            for o in candidates
+            if o["id"] == rule["answer_option_id"]
+            and o.get("detail", "") == rule["answer_option_detail"]
+        ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 async def match_ask(conn: Connection, ask: dict) -> dict | None:
     """Find the first active rule that matches an option proposed by the agent."""
     lane = (
@@ -76,9 +102,8 @@ async def match_ask(conn: Connection, ask: dict) -> dict | None:
     )
     if not ask.get("allow_rule", True):
         return None
-    labels = {value for o in ask["options"] for value in (o["label"], o["id"])}
     return next(
-        (r for r in rows if matches(r, ask, lane) and r["answer_option_label"] in labels), None
+        (r for r in rows if matches(r, ask, lane) and matching_option(r, ask["options"])), None
     )
 
 

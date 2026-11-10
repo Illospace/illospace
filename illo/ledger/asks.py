@@ -145,14 +145,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
             and (lane["state"] in {"done", "failed"} or lane["closed_at"])
         ):
             return None
-        option = next(
-            (
-                o["id"]
-                for o in ask["options"]
-                if rule["answer_option_label"] in {o["label"], o["id"]}
-            ),
-            None,
-        )
+        option = rules.matching_option(rule, ask["options"])
         if option is None or not rules.matches(rule, ask, lane):
             return None
         owner = await one(
@@ -168,7 +161,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
               answered_at=now(),delivery_state='pending' WHERE id=%s RETURNING *
         """,
             (
-                option,
+                option["id"],
                 rule_id,
                 f'Answered by the rule "{rule["text"]}" of {owner["name"]}.',
                 ask_id,
