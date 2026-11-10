@@ -3,8 +3,9 @@
 Search uses Postgres full text. It reads items and the last 20 events of each lane.
 It merges each source's ordered results by reciprocal rank. It removes duplicate source refs.
 A small recency boost breaks close item scores. It uses no vectors.
-Private items and lanes appear only for their active owner. Tainted runs see team rows only.
-An outsider cannot use these tools.
+Private items and lanes appear only for their active owner. A private result sets `personal_read` on the run.
+Tainted and outsider runs cannot use these tools.
+Slack items come only from configured public channels.
 
 `search_all(query, kinds?, limit?)` returns compact text. The limit is 1–50; the default is 10.
 `search_get(source_ref)` returns a full item, a lane with its events, or a GitHub issue.
@@ -21,7 +22,7 @@ A source ref must name the same source object on every call.
 
 A personal provider resolves its grant from the authenticated principal.
 It never accepts an owner from the query.
-Register it with `personal=True`. Team, routine, and tainted runs skip it.
+Register it with `personal=True`. Only an untainted `person_dm` run of the owner uses it.
 Its hits set `personal_read`, even when the final limit drops those hits.
 Private ledger hits set that flag too.
 

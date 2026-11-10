@@ -29,11 +29,16 @@ Vault secrets need `ILLO_VAULT_KEY`. Use `illo secret set <name>` to store each 
 Each team uses its own mailbox account. Do not use another team's credentials.
 
 The receiving server must remove incoming authentication headers that claim its own identity.
-Illo trusts only the first `Authentication-Results` header, with the configured server name.
-It accepts DMARC pass with an aligned `header.from`.
-It also accepts aligned SPF and DKIM pass together.
-Alignment requires the exact From domain. Illo does not guess parent domains.
-Missing or failed authentication gives the sender no team authority.
+It must put its own results above any headers that the sender supplies.
+Illo trusts one `Authentication-Results` header:
+- With `ILLO_EMAIL_AUTHSERV_ID` set, the first header with that server name.
+- With the setting empty, the topmost header.
+
+That header must hold exactly one `dmarc=` result. The result must be `pass`.
+Its `header.from` must equal the From domain. Illo does not guess parent domains.
+SPF and DKIM results alone give no authority.
+Illo reads comments and quoted strings in the header correctly, so a `;` inside them starts no new result.
+Missing or failed authentication makes the sender an outsider, with no team authority.
 
 In `illo.yaml`, optional settings are:
 
@@ -44,6 +49,7 @@ email:
 ```
 
 Unknown senders get no model run and no reply.
+A forwarded email from a known sender runs as that person, with the `tainted` profile. It gets no personal connector.
 The optional notice contains the subject. It does not grant authority to the message.
 Known senders get replies only at their authenticated From address and their Slack DM.
 Illo ignores `Reply-To`. Email replies keep `In-Reply-To` and `References`.
@@ -91,8 +97,10 @@ A crash after a claim can lose that run. Illo prefers this to a duplicate action
 ## Public pages
 
 `web_read_public_page` accepts one URL from the inbound event, or that host's root page.
-It rejects a call after the run reads a personal connector.
+In a tainted run, it accepts only the first URL of the event, and only once.
+It rejects a call after the run reads personal or private data (`personal_read`).
 The tool checks every DNS answer and each redirect. It connects to a checked IP address.
+It refuses private, loopback, and translated IPv6 addresses (`64:ff9b::/96`, `64:ff9b:1::/48`, `::/96`).
 It keeps the original host for TLS verification and the HTTP Host header.
 It never uses environment proxy settings.
 

@@ -8,7 +8,7 @@ The Illo MCP server checks each tool call with the run token.
 ## Runtimes
 
 - `claude` is the default. It uses `claude-agent-sdk==0.2.180` and its bundled Claude CLI.
-- `openai_compat` is experimental. It uses a small streaming Chat Completions loop over HTTP.
+- `openai_compat` is experimental. It uses a small streaming Chat Completions loop over HTTP. Its tests use a fake model server only.
 - `echo` calls MCP `tools/list` and returns the tool names. It makes no model request.
 
 Claude uses `tools=[]` to remove built-in tools.
@@ -131,6 +131,7 @@ The SDK passes the per-run MCP bearer token in the Claude child's process argume
 The container boundary covers this exposure. Never log process arguments or collect them in telemetry.
 HTTP access logs and child stderr are off by default.
 Use TLS between hosts. Keep the service on a private network.
+In `deploy/compose.yaml`, the brain joins `brainnet` with the app and the default network for outbound traffic. It never joins the Postgres network.
 
 ## Container contract for deployment
 
