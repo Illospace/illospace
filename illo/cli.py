@@ -73,7 +73,8 @@ async def doctor(config: Config) -> int:
     """Report missing requirements without exposing credentials."""
     failed = False
     try:
-        load_workspace(config.workspace_dir)
+        workspace = load_workspace(config.workspace_dir)
+        workspace.config.brain.check_runtime(config.brain_runtime)
         print("The workspace is valid.")
     except ValueError as exc:
         print(f"The workspace needs a fix: {exc}")
