@@ -66,6 +66,8 @@ Each call writes one row in `audit`.
 
 ## 6. Outside text is data
 
+Tainted runs can fetch only the first inbound URL, once. The web tool rejects translated IPv6 ranges. Test: `tests/safety/test_review_s21_web_bounds.py`.
+
 Unknown thread authors use `Outside user (<id>)`, never their display name. Test: `tests/safety/test_review_s26_outside_names.py`.
 
 Thread context from bots or unknown users makes the run tainted, including context read by a preparer. Test: `tests/safety/test_review_s18_thread_taint.py`.

@@ -17,6 +17,9 @@ from illo.tools.registry import Arguments, Tool
 MAX_BYTES = 2 * 1024 * 1024
 MAX_TEXT = 15000
 USER_AGENT = "Illo/0.1 (public page reader)"
+TRANSLATED_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in ("64:ff9b::/96", "64:ff9b:1::/48", "::/96")
+)
 
 
 class PageText(HTMLParser):
@@ -106,7 +109,10 @@ async def resolve_public(host: str, port: int) -> list[str]:
         raise ValueError("The host has no address")
     for address in addresses:
         ip = ipaddress.ip_address(address)
-        if not ip.is_global or (isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped):
+        if not ip.is_global or (
+            isinstance(ip, ipaddress.IPv6Address)
+            and (ip.ipv4_mapped or any(ip in network for network in TRANSLATED_NETWORKS))
+        ):
             raise ValueError("The host is not public")
     return addresses
 
@@ -168,6 +174,16 @@ async def read_page(ctx, args):
     event = await one(ctx.conn, "SELECT payload FROM events WHERE id=%s", (ctx.run["event_id"],))
     if not event or not allowed_url(url, event["payload"].get("text", ""), allow_http):
         raise ValueError("The URL must come from the inbound event")
+    if ctx.run["tainted"]:
+        sources = inbound_urls(event["payload"].get("text", ""), allow_http)
+        if not sources or url != sources[0]:
+            raise ValueError("A tainted run can read only the first inbound URL")
+        previous = await one(
+            ctx.conn, "SELECT id FROM audit WHERE run_id=%s AND tool='web_read_public_page' LIMIT 1",
+            (ctx.run["id"],),
+        )
+        if previous:
+            raise ValueError("A tainted run can read a public page only once")
     return {"text": await fetch_page(url, allow_http=allow_http)}
 
 
