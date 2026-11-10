@@ -3,7 +3,7 @@
 import asyncio
 
 from illo.brain.client import RunRequest
-from illo.brain.prompts import build
+from illo.brain.prompts import build_for_run
 from illo.ledger import runs, sensors
 
 
@@ -44,14 +44,10 @@ class RunManager:
                 model=model,
             )
             token = await runs.mint_token(conn, row["id"], config.timeout_s)
+            system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
         request = RunRequest(
             run_id=row["id"],
-            system_prompt=build(
-                ctx.workspace,
-                authority.principal,
-                authority.profile,
-                event.payload.get("channel_id"),
-            ),
+            system_prompt=system_prompt,
             user_message=event.text,
             mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
             mcp_token=token,
