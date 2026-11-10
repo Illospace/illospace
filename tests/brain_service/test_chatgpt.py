@@ -46,6 +46,7 @@ async def test_chatgpt_request_and_function_round_trip(run_request, monkeypatch)
 
     events, session = await collect(request, respond)
     assert events[-1]["type"] == "final" and events[-1]["text"] == "Release ready."
+    assert events[-1]["usage"]["auth_kind"] == "chatgpt"
     assert len(session.calls) == 1
     for body, head in zip(provider.requests, headers, strict=True):
         assert head["authorization"] == "Bearer " + MARKER
@@ -122,6 +123,8 @@ async def test_limit_and_api_fallback_resume_tool_results(
     else:
         events, session = await collect(request, respond)
         assert events[-1]["text"].endswith("I used the API key for this request.\n\nReady.")
+        # The ledger shows that the API key paid for the end of this run.
+        assert events[-1]["usage"]["auth_kind"] == "api_key"
         assert len(session.calls) == 1 and len(wires) == 3
 
 

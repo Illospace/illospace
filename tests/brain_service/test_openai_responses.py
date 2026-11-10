@@ -135,6 +135,7 @@ async def test_function_loop(run_request, fake_mcp, monkeypatch, names, tool_err
         "run_id": run_request.run_id,
         "text": "Release ready.",
         "usage": {
+            "auth_kind": "api_key",
             "input_tokens": 20,
             "output_tokens": 10,
             "total_tokens": 30,
