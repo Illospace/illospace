@@ -62,7 +62,12 @@ async def card_data(conn: Connection, ask):
         conn, "SELECT * FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
     )
     row["requester"] = (
-        await one(conn, "SELECT label FROM tokens WHERE id=%s", (ask["requester_token_id"],))
+        await one(
+            conn,
+            "SELECT t.label,p.name AS person_name,p.key AS person_key "
+            "FROM tokens t JOIN people p ON p.id=t.person_id WHERE t.id=%s",
+            (ask["requester_token_id"],),
+        )
         if ask["requester_token_id"]
         else None
     )
@@ -117,8 +122,10 @@ async def decision(conn: Connection, ask):
         kind="decision",
         body=body,
         summary=f"{option} {ask['answer_text'] or ''}".strip(),
-        owner_person_id=lane.get("owner_person_id") or ask["owner_person_id"],
-        visibility=lane.get("visibility", "team"),
+        owner_person_id=(lane.get("owner_person_id") or ask["owner_person_id"])
+        if lane
+        else (ask["requester_person_id"] or ask["owner_person_id"]),
+        visibility=lane.get("visibility", "private"),
         links=lane.get("links", []),
         source_at=ask["answered_at"],
         meta={"ask_id": ask["id"], "via": ask["answered_via"], "rule_id": ask["rule_id"]},
@@ -242,13 +249,29 @@ async def drafts_to_check(conn: Connection):
 
 
 async def lock_draft(conn: Connection, draft_id):
-    return await one(conn, "SELECT * FROM drafts WHERE id=%s FOR UPDATE", (draft_id,))
+    draft = await one(conn, "SELECT * FROM drafts WHERE id=%s FOR UPDATE", (draft_id,))
+    if draft and draft["kind"] == "asks_answer":
+        args = draft["content"]["arguments"]
+        ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (args["id"],))
+        if ask and ask["owner_person_id"] == draft["approver_person_id"]:
+            option = next((o for o in ask["options"] if o["id"] == args["option"]), None)
+            draft["answer_preview"] = {
+                "question": ask["question"],
+                "option": option,
+                "text": args["text"],
+            }
+    return draft
 
 
 async def draft_owner(conn: Connection, draft):
     return await one(
         conn, "SELECT * FROM people WHERE id=%s AND active", (draft["approver_person_id"],)
     )
+
+
+async def requester_name(conn: Connection, person_id: int | None) -> str:
+    row = await one(conn, "SELECT name FROM people WHERE id=%s", (person_id,))
+    return row["name"] if row else "none"
 
 
 async def save_draft_card(conn: Connection, draft_id, sent, card_digest):

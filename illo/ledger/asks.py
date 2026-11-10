@@ -68,15 +68,17 @@ async def create(
 
 
 async def get(conn: Connection, ask_id: int, *, principal: str = "team") -> dict | None:
-    """Hide asks attached to another person's private lane."""
+    """Hide private lanes. Without a lane, only the ask's participants can read it."""
     return await one(
         conn,
         """
-        SELECT a.* FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.id=%s
-          AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=
-            (SELECT id FROM people WHERE 'person:' || key=%s AND active))
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
+        WHERE a.id=%s AND (l.visibility='team' OR l.owner_person_id=me.id
+          OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
     """,
-        (ask_id, principal),
+        (principal, ask_id),
     )
 
 
@@ -87,13 +89,16 @@ async def list_open(
     return await all_rows(
         conn,
         """
-        SELECT a.* FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.state='open'
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
+        WHERE a.state='open'
           AND (%s::bigint IS NULL OR a.owner_person_id=%s)
-          AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=
-            (SELECT id FROM people WHERE 'person:' || key=%s AND active))
+          AND (l.visibility='team' OR l.owner_person_id=me.id
+            OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
         ORDER BY a.due_at NULLS LAST,a.id
     """,
-        (owner_person_id, owner_person_id, principal),
+        (principal, owner_person_id, owner_person_id),
     )
 
 
@@ -134,6 +139,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
         )
         if not ask or not rule or not ask["allow_rule"]:
             return None
+        ask = {**ask, "requester_person_id": await rules.requester_person_id(conn, ask)}
         lane = (
             await one(conn, "SELECT * FROM lanes WHERE id=%s FOR SHARE", (ask["lane_id"],))
             if ask["lane_id"]
@@ -145,18 +151,11 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
             and (lane["state"] in {"done", "failed"} or lane["closed_at"])
         ):
             return None
-        option = next(
-            (
-                o["id"]
-                for o in ask["options"]
-                if rule["answer_option_label"] in {o["label"], o["id"]}
-            ),
-            None,
-        )
+        option = rules.matching_option(rule, ask["options"])
         if option is None or not rules.matches(rule, ask, lane):
             return None
         owner = await one(
-            conn, "SELECT name FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
+            conn, "SELECT id FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
         )
         if not owner:
             return None
@@ -164,15 +163,10 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
             conn,
             """
             UPDATE asks SET state='answered',answer_option=%s,answered_via='rule',rule_id=%s,
-              answer_text=%s,
+              answer_text=NULL,
               answered_at=now(),delivery_state='pending' WHERE id=%s RETURNING *
         """,
-            (
-                option,
-                rule_id,
-                f'Answered by the rule "{rule["text"]}" of {owner["name"]}.',
-                ask_id,
-            ),
+            (option["id"], rule_id, ask_id),
         )
         await rules.count_use(conn, rule_id)
         return row

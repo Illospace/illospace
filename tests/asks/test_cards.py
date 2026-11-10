@@ -28,7 +28,7 @@ def ask(**changes):
             ],
         },
         "lane": {"title": "Acme plan", "machine": "acme-laptop"},
-        "requester": {"label": "Acme agent"},
+        "requester": {"label": "Acme agent", "person_name": "Ada"},
         "due_at": NOW,
         **changes,
     }
@@ -45,7 +45,7 @@ def test_ask_card_exact_layout_and_recommendation_first():
     assert rows[0]["elements"][0]["style"] == "primary"
     assert rows[-1]["elements"][0]["text"]["text"] == "Always: Continue"
     assert rows[-1]["elements"][-1]["text"]["text"] == "Other…"
-    assert "From Acme agent on acme-laptop · due now" in str(blocks)
+    assert "From Acme agent of Ada on acme-laptop · due now" in str(blocks)
 
 
 def test_ask_no_rule_button_when_disabled_and_no_buttons_when_closed():

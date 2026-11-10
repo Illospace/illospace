@@ -40,7 +40,7 @@ Each call writes one row in `audit`.
 
 **Bad case.** Ada asks for a summary of her calendar. The model then posts it to the team channel. Without the rule, her private meetings are public.
 
-**Code.** The `destination` check in `illo/tools/checks.py`. `illo/ledger/drafts.py` stores the draft.
+**Code.** The `destination` check in `illo/tools/checks.py`. `illo/ledger/drafts.py` stores the draft. An ask without a lane is private to its participants; its decision item is private to the requester or owner (`tests/safety/test_review_s08_rule_03_ask_privacy.py`). Private ask and rule reads set `personal_read`; the personal digest does too (`tests/safety/test_review_s07_rule_03_private_asks.py`).
 
 **Tests.** `tests/safety/test_rule_03_personal_destination.py`, `tests/test_tools.py`.
 
@@ -60,7 +60,7 @@ Each call writes one row in `audit`.
 
 **Bad case.** Ben sees a draft card of Ada in a shared channel and clicks Approve. Without the rule, Ben sends Ada's message.
 
-**Code.** `decide` in `illo/ledger/drafts.py` changes a draft only for its approver. The draft card and its buttons are in progress.
+**Code.** `decide` in `illo/ledger/drafts.py` changes a draft only for its approver. Draft cards show bidi and zero-width format characters as visible escapes (`tests/safety/test_review_s27_rule_05_visible_draft.py`).
 
 **Tests.** `tests/test_ledger.py` (`test_draft_owner_dm_and_send_state`). The test in `tests/safety/` is in progress.
 
@@ -90,9 +90,9 @@ Each call writes one row in `audit`.
 
 **Bad case.** An agent asks "deploy to staging or production?". A loose rule answers "production, and also drop the old tables". Without the rule, Illo invents an instruction.
 
-**Code.** `answer_with_rule` in `illo/ledger/asks.py` and `matches` in `illo/ledger/rules.py`. On the machine, `collectors/t3/collector.py` gives the agent a rule answer only with a proposed option and a named rule. The ask service that names the rule on the card is in progress.
+**Code.** `answer_with_rule` in `illo/ledger/asks.py` and `matches` in `illo/ledger/rules.py`. On the machine, `collectors/t3/collector.py` gives the agent a rule answer only with a proposed option and a named rule. Ask cards show each proof link's host and the token's person (`tests/safety/test_review_s15_rule_08_card_source.py`). Card rules keep the source, repository, and requester fixed, including absent values (`tests/safety/test_review_s16_rule_08_rule_scope.py`). They match the approved option id, label, and detail. Rule answers keep `answer_text` empty and deliver the rule as `rule_text` (`tests/safety/test_review_s23_rule_08_real_pull.py`). Old rules match exactly one label (`tests/safety/test_review_s06_rule_08_exact_option.py`). A model answer through `asks_answer` always needs the owner's approval in a DM. The draft shows the question, option, and full answer.
 
-**Tests.** `tests/test_ledger.py` (`test_rule_cannot_invent_an_option_or_answer_for_another_owner`), `tests/safety/test_rule_08_09_collectors.py`.
+**Tests.** `tests/test_ledger.py` (`test_rule_cannot_invent_an_option_or_answer_for_another_owner`), `tests/safety/test_rule_08_09_collectors.py`, `tests/safety/test_review_s01_rule_08_answer_draft.py`.
 
 ## 9. No credential for the agent machines
 

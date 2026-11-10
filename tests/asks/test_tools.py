@@ -32,9 +32,9 @@ async def test_create_answer_cancel_and_digest(app, rpc, rpc_token):
     digest = await call(rpc, token, "asks_digest")
     assert "1 need you" in str(digest["result"])
     result = await call(rpc, token, "asks_answer", {"id": ask_id, "text": "Use the reviewed plan."})
-    assert result["result"]["answered"]
+    assert result["decision"] == "draft"
     result = await call(rpc, token, "asks_answer", {"id": ask_id, "option": "yes"})
-    assert not result["result"]["answered"]
+    assert result["decision"] == "draft"
     created = await call(
         rpc, token, "asks_create", {"owner": "ada", "question": "Another Acme ask?"}
     )
@@ -76,7 +76,7 @@ async def test_answer_and_cancel_cannot_change_another_person_ask(app, rpc, rpc_
         )
     answered = await call(rpc, token, "asks_answer", {"id": row["id"], "option": "yes"})
     cancelled = await call(rpc, token, "asks_cancel_mine", {"id": row["id"]})
-    assert not answered["result"]["answered"] and not cancelled["result"]["cancelled"]
+    assert answered["decision"] == "deny" and not cancelled["result"]["cancelled"]
 
 
 async def test_owner_can_list_and_remove_rule_in_dm(app, rpc, rpc_token):
@@ -117,9 +117,8 @@ async def test_rule_tool_applies_only_matching_rule(app, rpc, rpc_token):
         rpc, token, "asks_answer_with_rule", {"id": row["id"], "rule_id": rule["id"]}
     )
     assert result["result"]["answered"]
-    assert (
-        'Answered by the rule "Use the reviewed plan"' in result["result"]["answer"]["answer_text"]
-    )
+    assert result["result"]["answer"]["answer_text"] is None
+    assert result["result"]["answer"]["rule_id"] == rule["id"]
 
 
 async def test_create_rejects_unknown_owner_and_invalid_recommendation(rpc, rpc_token):

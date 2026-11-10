@@ -3,7 +3,9 @@
 import hashlib
 import html
 import json
+import unicodedata
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 EMOJI = {"decision": "🔷", "action": "🔧", "review": "👀", "reminder": "⏰"}
 
@@ -41,13 +43,14 @@ def relative(time: datetime, now: datetime) -> str:
 
 def links_text(links: list) -> str:
     result = []
-    for index, link in enumerate(links[:3]):
+    for link in links[:3]:
         url = link.get("url", "") if isinstance(link, dict) else str(link)
-        if url.startswith(("https://", "http://")):
-            label = link.get("label") if isinstance(link, dict) else None
-            result.append(
-                f"<{escape(url).replace('|', '%7C')}|{escape(label or ('Thread', 'Issue', 'Pull request')[index])}>"
-            )
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme in {"https", "http"} and parsed.hostname:
+            result.append(f"<{escape(url).replace('|', '%7C')}|{escape(parsed.hostname)}>")
     return " · ".join(result)
 
 
@@ -119,6 +122,7 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
     if requester.get("label"):
         context.append(
             f"From {escape(requester['label'])}"
+            + (f" of {escape(requester['person_name'])}" if requester.get("person_name") else "")
             + (f" on {escape(lane['machine'])}" if lane.get("machine") else "")
         )
     if ask.get("due_at"):
@@ -133,12 +137,22 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
 def draft_preview(draft: dict) -> str | None:
     """Keep the entire proposed action visible before a person can send it."""
     content = draft["content"]
+    if draft.get("kind") == "asks_answer":
+        content = draft.get("answer_preview")
+        if content is None:
+            return None
     text = (
         next(iter(content.values()))
         if len(content) == 1 and set(content) <= {"text", "body"}
         else json.dumps(content, ensure_ascii=False, default=str)
     )
-    escaped = escape(text)
+    visible = "".join(
+        (f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\U{ord(c):08x}")
+        if unicodedata.category(c) == "Cf"
+        else c
+        for c in str(text)
+    )
+    escaped = escape(visible)
     return escaped if len(escaped.replace("\n", "\n> ")) <= 120000 else None
 
 

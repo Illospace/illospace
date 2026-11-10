@@ -164,6 +164,7 @@ async def test_always_rule_has_exact_normalized_question_and_owner(app, seed):
     async with ctx.pool.connection() as conn:
         saved = (await rules.list_rules(conn, principal="person:ada"))[0]
         assert saved["origin"] == "card" and saved["answer_option_label"] == "Continue"
+        row = {**row, "requester_person_id": await rules.requester_person_id(conn, row)}
         assert rules.matches(
             saved, {**row, "question": "ALLOW the [safe]* plan?"}, {"source": "t3", "repo": None}
         )
@@ -262,7 +263,7 @@ async def test_rule_answers_before_card_and_writes_decision(app, seed, slack_cli
     await service.tick(ctx)
     answered = await read(ctx, row["id"])
     assert answered["state"] == "answered" and answered["answered_via"] == "rule"
-    assert 'rule "Use the proposed plan"' in answered["answer_text"]
+    assert answered["answer_text"] is None and answered["rule_id"]
     assert not [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
     async with ctx.pool.connection() as conn:
         assert await items.get(conn, f"ask:{row['id']}")

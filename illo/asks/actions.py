@@ -58,11 +58,10 @@ async def handle(ctx, person, action):
                 match = {
                     "ask_kind": ask["kind"],
                     "question_pattern": exact_pattern(ask["question"]),
+                    "lane_source": lane.get("source"),
+                    "repository": lane.get("repo"),
+                    "requester_person_id": await rules.requester_person_id(conn, ask),
                 }
-                if lane.get("source"):
-                    match["lane_source"] = lane["source"]
-                if lane.get("repo"):
-                    match["repository"] = lane["repo"]
                 await rules.create(
                     conn,
                     owner_person_id=person["id"],
@@ -70,9 +69,17 @@ async def handle(ctx, person, action):
                     kind="always_allow" if ask["permission"] else "standing_answer",
                     match=match,
                     answer_option_label=option["label"],
+                    answer_option_id=option["id"],
+                    answer_option_detail=option.get("detail", ""),
                     origin="card",
                 )
-                notice = 'Rule saved. I answer this question for you from now on. Say "show my rules" to see or remove it.'
+                requester = await ledger.requester_name(conn, match["requester_person_id"])
+                notice = (
+                    f"Rule saved. Scope: source: {match['lane_source'] or 'none'}; "
+                    f"repository: {match['repository'] or 'none'}; "
+                    f"requester: {requester}. "
+                    'Say "show my rules" to see or remove it.'
+                )
             await ledger.decision(conn, answered)
         else:
             return

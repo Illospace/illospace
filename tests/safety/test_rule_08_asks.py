@@ -6,9 +6,9 @@ from illo.ledger import asks, people, rules
 
 
 @pytest.mark.parametrize(
-    "value,expected", [("Continue", "yes"), ("yes", "yes"), ("Run a different command", None)]
+    "value,expected", [("Continue", "yes"), ("yes", None), ("Run a different command", None)]
 )
-async def test_rule_08_only_proposed_label_or_id_and_names_rule(conn, ada, value, expected):
+async def test_rule_08_only_exact_proposed_label_and_names_rule(conn, ada, value, expected):
     ask = await asks.create(
         conn,
         owner_person_id=ada["id"],
@@ -23,7 +23,8 @@ async def test_rule_08_only_proposed_label_or_id_and_names_rule(conn, ada, value
         assert result is None
     else:
         assert result["answer_option"] == expected and result["answered_via"] == "rule"
-        assert result["answer_text"] == 'Answered by the rule "Use the reviewed plan" of Ada.'
+        assert result["answer_text"] is None
+        assert result["rule_id"] == rule["id"]
         assert (await rules.list_rules(conn, principal="person:ada"))[0]["uses"] == 1
 
 
@@ -83,4 +84,4 @@ async def test_rule_08_agent_token_cannot_answer_with_free_instructions(app, rpc
     )
     assert result.json()["result"]["structuredContent"]["decision"] == "deny"
     async with ctx.pool.connection() as conn:
-        assert (await asks.get(conn, ask["id"]))["state"] == "open"
+        assert (await asks.get(conn, ask["id"], principal="person:ada"))["state"] == "open"
