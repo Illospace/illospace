@@ -85,9 +85,10 @@ def authenticated(message, sender: str, authserv_id: str | None) -> bool:
     """Trust one aligned DMARC pass from the selected receiving server.
 
     The receiver must strip incoming results that claim its own identity.
-    Without a configured identity, use only the topmost header.
+    The explicit value topmost trusts only the first header.
     """
-    if not sender or "@" not in sender:
+    authserv_id = (authserv_id or "").strip().lower()
+    if not authserv_id or not sender or "@" not in sender:
         return False
     for name, header in message.raw_items():
         if name.lower() != "authentication-results":
@@ -100,7 +101,7 @@ def authenticated(message, sender: str, authserv_id: str | None) -> bool:
             sections = auth_results(header)
         except ValueError:
             return False
-        if authserv_id and sections[0] != [authserv_id.lower()]:
+        if authserv_id != "topmost" and sections[0] != [authserv_id]:
             continue
         results = [part for part in sections[1:] if part[:2] == ["dmarc", "="]]
         count = sum(

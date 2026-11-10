@@ -5,7 +5,7 @@ import logging
 from illo.channels.email.parser import parse_message
 from illo.channels.email.transport import MailboxClient, password, send_email
 from illo.gateway.replies import RUN_ERROR
-from illo.ledger import people
+from illo.ledger import people, sensors
 from illo.slackapi import dm_person
 
 log = logging.getLogger(__name__)
@@ -94,6 +94,14 @@ async def setup(ctx) -> None:
     ctx.draft_performers["email"] = perform_email
     ctx.draft_performers["email_draft"] = perform_email
     if ctx.config.email_host:
+        if not (ctx.config.email_authserv_id or "").strip():
+            detail = (
+                "Email is disabled. Set ILLO_EMAIL_AUTHSERV_ID to a trusted receiver or topmost."
+            )
+            log.error(detail)
+            async with ctx.pool.connection() as conn:
+                await sensors.error(conn, "email:auth", detail)
+            return
         if not ctx.config.email_user:
             raise ValueError("Set the email user")
         # Check the credential before the first timer. Do not print its value.

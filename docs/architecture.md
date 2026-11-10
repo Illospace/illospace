@@ -243,7 +243,7 @@ A secret is never in the workspace. Boot secrets are in the environment file. Co
 
 Card types: the ask card (question, options as buttons, the recommended option first, proof, "Always allow" where a rule is possible), the draft card (Send, Do not send; the full text, with hidden characters shown as escapes), the digest ("3 need you, 14 run fine", one line for each sensor that is not healthy), the note card ("I noted: ...", Correct, Remove).
 
-**Email** (`illo/channels/email/`): the mailbox is read with IMAP on a timer, so the host needs no public address. A sender has authority only with exactly one DMARC `pass` result whose `header.from` equals the From domain, in the trusted `Authentication-Results` header. The trusted header is the first one with the server name in `ILLO_EMAIL_AUTHSERV_ID`, or the topmost header when that setting is empty. Outbound mail is always a draft card first.
+**Email** (`illo/channels/email/`): the mailbox is read with IMAP on a timer, so the host needs no public address. A sender has authority only with exactly one DMARC `pass` result whose `header.from` equals the From domain, in the trusted `Authentication-Results` header. The trusted header is the first one with the server name in `ILLO_EMAIL_AUTHSERV_ID`, or the topmost header with the explicit value `topmost`. A blank setting disables email. Outbound mail is always a draft card first.
 
 **MCP**: section 8. **Signals**: `signal_submit`.
 

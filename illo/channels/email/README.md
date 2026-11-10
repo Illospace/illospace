@@ -32,7 +32,10 @@ The receiving server must remove incoming authentication headers that claim its 
 It must put its own results above any headers that the sender supplies.
 Illo trusts one `Authentication-Results` header:
 - With `ILLO_EMAIL_AUTHSERV_ID` set, the first header with that server name.
-- With the setting empty, the topmost header.
+- With `ILLO_EMAIL_AUTHSERV_ID=topmost`, the topmost header.
+
+A blank setting disables the email timer and records a sensor error.
+Use `topmost` for providers such as Microsoft 365 only when the provider always adds its own header first.
 
 That header must hold exactly one `dmarc=` result. The result must be `pass`.
 Its `header.from` must equal the From domain. Illo does not guess parent domains.
