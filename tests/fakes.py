@@ -60,7 +60,13 @@ class FakeSlackClient:
 
     async def conversations_info(self, **kwargs):
         await self._record("conversations_info", **kwargs)
-        return {"ok": True, "channel": {"id": kwargs["channel"], "name": "example"}}
+        return {"ok": True, "channel": {
+            "id": kwargs["channel"], "name": "example", "is_private": False,
+        }}
+
+    async def conversations_members(self, **kwargs):
+        await self._record("conversations_members", **kwargs)
+        return {"ok": True, "members": ["U_ACME_ADA", "U_ACME_BEN"]}
 
     async def users_list(self, **kwargs):
         await self._record("users_list", **kwargs)

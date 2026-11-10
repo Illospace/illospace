@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from illo.gateway.principal import Authority
 
 from illo.channels.slack import actions
+from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context
@@ -81,6 +82,15 @@ class SlackIntake:
         )
         if not dm and not configured:
             return
+        if configured and not dm:
+            try:
+                private = await channel_private(self.ctx, channel)
+            except Exception:
+                private = True
+                log.error("Slack could not verify channel privacy")
+            if private:
+                await hide_index(self.ctx, channel)
+                return {"decision": "ignore"}
         thread = raw.get("thread_ts")
         outside_workspace = False
         if raw.get("user_team"):
@@ -144,6 +154,9 @@ class SlackIntake:
     async def index(self, event: InboundEvent, channel_name: str) -> None:
         client = self.ctx.slack_client
         try:
+            if await channel_private(self.ctx, event.payload["channel_id"]):
+                await hide_index(self.ctx, event.payload["channel_id"])
+                return
             link = await client.chat_getPermalink(
                 channel=event.payload["channel_id"], message_ts=event.payload["message_ts"]
             )

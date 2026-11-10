@@ -26,6 +26,8 @@ Each call writes one row in `audit`.
 
 ## 2. A personal connector works only for its owner
 
+Private Slack channels have no shared index or channel runs. Thread reads need live membership and set `personal_read`. The migration deletes old Slack search snapshots. Test: `tests/safety/test_review_s19_private_slack.py`.
+
 **Rule.** A personal connector (mail, calendar, drive) works only in the runs of its owner.
 
 **Bad case.** Ben asks "what is in Ada's mail about Globex?". Without the rule, Illo could read Ada's mailbox for Ben.
