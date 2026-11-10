@@ -114,6 +114,11 @@ class WorkspaceConfig(Model):
     git_push: bool = False
 
 
+class EmailConfig(Model):
+    unknown_senders: Literal["ignore", "notify"] = "ignore"
+    reply: Literal["slack", "email", "both"] = "both"
+
+
 class TeamConfig(Model):
     team_name: str = Field(min_length=1)
     timezone: str = "UTC"
@@ -125,6 +130,8 @@ class TeamConfig(Model):
     brain: BrainConfig = Field(default_factory=BrainConfig)
     run_limits: RunLimits = Field(default_factory=RunLimits)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+
+    email: EmailConfig = Field(default_factory=EmailConfig)
 
     _timezone = field_validator("timezone")(Person.valid_timezone.__func__)
 
@@ -153,6 +160,8 @@ class Routine(Model):
     principal: str
     body: str = ""
     path: str = ""
+    enabled: bool = True
+    skills: list[str] = Field(default_factory=list)
 
     _schedule = field_validator("schedule")(DigestConfig.valid_cron.__func__)
 
@@ -340,7 +349,15 @@ def load_workspace(root: Path | str) -> Workspace:
     ):
         for path in sorted(root.glob(pattern)):
             target.append(
-                _model(model, {**_front(path), "path": str(path.relative_to(root))}, path)
+                _model(
+                    model,
+                    {
+                        **({"name": path.stem} if model is Routine else {}),
+                        **_front(path),
+                        "path": str(path.relative_to(root)),
+                    },
+                    path,
+                )
             )
     for path in sorted(root.glob("connectors/*.yaml")):
         connectors.append(_model(Connector, _yaml(path, _read(path)), path))
@@ -379,7 +396,17 @@ def load_workspace(root: Path | str) -> Workspace:
                     f"{root / 'illo.yaml'}: slack.channels.rule_files: unknown {path}"
                 )
 
-    def check_destination(value, path):
+    def check_destination(value, path, routine=False):
+        if routine and value == "none":
+            return
+        if routine and value.startswith("dm:") and value[3:] in keys:
+            return
+        if (
+            routine
+            and value.startswith("channel:")
+            and value[8:] in {c.name for c in config.slack.channels}
+        ):
+            return
         if value.startswith("person:") and value[7:] in keys:
             return
         if value.startswith("channel:") and value[8:] in channel_ids:
@@ -392,7 +419,9 @@ def load_workspace(root: Path | str) -> Workspace:
             routine.principal.startswith("person:") and routine.principal[7:] in keys
         ):
             raise WorkspaceError(f"{root / routine.path}: principal: unknown person")
-        check_destination(routine.destination, root / routine.path)
+        check_destination(routine.destination, root / routine.path, routine=True)
+        if any(name not in {s.name for s in skills} for name in routine.skills):
+            raise WorkspaceError(f"{root / routine.path}: skills: unknown skill")
     for rule in rules:
         if any(c not in channel_ids for c in rule.channels):
             raise WorkspaceError(f"{root / rule.path}: channels: unknown channel")

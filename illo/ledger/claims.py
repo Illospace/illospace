@@ -3,7 +3,7 @@
 from illo.db import Connection, one
 
 
-async def take(conn: Connection, key: str, run_id: int, note: str = "") -> bool:
+async def take(conn: Connection, key: str, run_id: int | None, note: str = "") -> bool:
     """Only the first caller receives true."""
     return bool(
         await one(

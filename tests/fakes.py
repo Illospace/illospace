@@ -125,3 +125,23 @@ class FakeChannelAdapter:
 
     async def deliver_error(self, event):
         self.errors.append((event, RUN_ERROR))
+
+
+@dataclass
+class FakeMailboxClient:
+    messages: list[tuple[str, bytes]] = field(default_factory=list)
+    seen_uids: list[str] = field(default_factory=list)
+
+    async def unseen(self):
+        return list(self.messages)
+
+    async def seen(self, uid):
+        self.seen_uids.append(uid)
+
+
+@dataclass
+class FakeSMTPClient:
+    messages: list = field(default_factory=list)
+
+    async def send(self, message):
+        self.messages.append(message)

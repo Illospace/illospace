@@ -30,6 +30,7 @@ def parser() -> argparse.ArgumentParser:
     archive.add_argument("--dry-run", action="store_true")
     commands.add_parser("doctor")
     commands.add_parser("reload")
+    commands.add_parser("routines").add_subparsers(dest="action", required=True).add_parser("list")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -121,6 +122,14 @@ async def execute(args, config: Config) -> int:
                 await load_workspace(config.workspace_dir).sync_people(conn)
                 counts = await import_archive(conn, args.file, dry_run=args.dry_run)
             print(("Dry run. " if args.dry_run else "") + counts.text())
+
+        elif args.command == "routines":
+            from illo.routines.scheduler import list_routines
+
+            for row in await list_routines(conn, load_workspace(config.workspace_dir)):
+                print(
+                    f"{row['name']}  {row['next_run_at'] or 'not scheduled'}  {row['last_status']}"
+                )
         elif args.command == "token":
             if args.action == "create":
                 await load_workspace(config.workspace_dir).sync_people(conn)
