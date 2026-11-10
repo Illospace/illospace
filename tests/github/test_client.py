@@ -273,3 +273,24 @@ async def test_app_sign_in_survives_a_wrong_host_clock():
         await client.get_repository(REPO)
     assert len(mints) == 2
     assert mints[0]["iat"] > real and mints[1]["iat"] <= real < mints[1]["exp"] <= real + 600
+
+
+async def test_pull_read_survives_a_missing_status_permission():
+    """An app without the Commit statuses permission still reads a pull request."""
+
+    def handle(request):
+        path = request.url.path
+        if path.endswith("/status"):
+            return httpx.Response(403, json={"message": "Resource not accessible by integration"})
+        if path.endswith("/check-runs"):
+            return httpx.Response(
+                200, json={"check_runs": [{"name": "test", "conclusion": "success"}]}
+            )
+        if path.endswith("/reviews") or path.endswith("/comments"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json={"number": 7, "head": {"sha": "abc"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = GitHubClient(token="example", http=http)
+        pull = await client.get_pull(REPO, 7)
+    assert pull["status"] == {} and pull["checks"][0]["conclusion"] == "success"

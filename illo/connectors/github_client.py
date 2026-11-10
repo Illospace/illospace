@@ -149,6 +149,21 @@ class GitHubClient:
             return response.json() if response.content else {}
         raise GitHubError(503)
 
+    async def _optional(self, method: str, path: str) -> dict:
+        """Read a detail that an app may have no permission for. A refusal gives no data.
+
+        A GitHub App with the Checks permission but without the Commit statuses permission
+        gets 403 here. The check runs already carry the state that Illo needs.
+        """
+        try:
+            return await self._request(method, path)
+        except GitHubError as exc:
+            if exc.status not in (403, 404):
+                raise
+            if self.report:
+                await self.report(True, "")
+            return {}
+
     async def _pages(
         self, path: str, *, params: dict | None = None, key: str | None = None
     ) -> list[dict]:
@@ -213,7 +228,7 @@ class GitHubClient:
         item["checks"] = await self._pages(
             f"/repos/{repo}/commits/{sha}/check-runs", key="check_runs"
         )
-        item["status"] = await self._request("GET", f"/repos/{repo}/commits/{sha}/status")
+        item["status"] = await self._optional("GET", f"/repos/{repo}/commits/{sha}/status")
         item["reviews"] = await self._pages(f"/repos/{repo}/pulls/{number}/reviews")
         item["comments_data"] = await self._pages(f"/repos/{repo}/issues/{number}/comments")
         return item
