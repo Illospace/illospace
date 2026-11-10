@@ -180,6 +180,31 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Tests.** `tests/safety/test_rule_10_tool_list.py`, `tests/safety/test_rule_10_brain_tools.py`, `tests/safety/test_rule_10_web_bounds.py`, `tests/safety/test_rule10_deploy.py`, `tests/safety/test_review_s20_rule_10_compose_networks.py`. The live part of `test_rule_10_brain_tools.py` runs only on request, with a real model.
 
+## Voice privacy
+
+Illo uses only Slack's transcript by default. Audio stays in Slack.
+An owner can set `voice.transcription: openai` in `illo.yaml` to allow audio transcription.
+With this choice, Illo sends the clip audio to the configured OpenAI transcription endpoint.
+It sends the model ID and a fixed filename. It does not send the Slack user ID, thread history, or bot token.
+`OPENAI_BASE_URL` can select another HTTPS endpoint. That endpoint receives the audio and API key.
+The main app needs `OPENAI_API_KEY`. A ChatGPT subscription does not provide this API operation.
+
+Only a verified, active team member can use the fallback. The Slack file must belong to that person.
+Bot, webhook, unknown sender, outside workspace, and tainted events cannot trigger an audio download or transcription.
+Illo checks thread authors before the download. It keeps the same principal and profile as the person's typed text.
+The preparer supplies the transcript before any claim. An ask card can accept the transcript as an answer.
+
+Illo checks the duration and size from Slack's file response and the size during download.
+It downloads only from `https://files.slack.com/` and refuses redirects.
+The total request deadline and a durable per-person hourly limit bound API use.
+Temporary audio files close and disappear after success, failure, or cancellation.
+Illo logs no audio, transcript, bot token, or API key.
+The ledger records each admitted attempt and marks a transcribed event with the service and duration.
+The event text contains the transcript, as it contains typed text.
+See [workspace.md](workspace.md#voice-clips) for defaults and setup.
+
+**Tests.** `tests/safety/test_rule_06_07_voice.py` and `tests/slack/test_voice.py`.
+
 ## What a hostile text can still do
 
 The rules limit damage. They do not make hostile text harmless. These risks remain:

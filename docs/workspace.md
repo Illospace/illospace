@@ -109,6 +109,55 @@ Token usage: input_tokens=4 output_tokens=2 total_tokens=6
 Latency: 0.025 s
 ```
 
+## Voice clips
+
+The default mode uses only Slack's transcript. No audio leaves Slack.
+Slack does not transcribe clips in every workspace.
+A clip with no Slack transcript fails at once. Only `pending` or `processing` waits, for at most 15 seconds.
+
+To let Illo transcribe a clip when Slack has no transcript, add this block to `illo.yaml`:
+
+```yaml
+voice:
+  transcription: openai
+  model: gpt-4o-mini-transcribe
+  max_duration_s: 120
+  max_bytes: 10485760
+  timeout_s: 30
+  max_per_person_per_hour: 20
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `voice.transcription` | `slack` | `slack` keeps audio in Slack. `openai` allows the fallback. |
+| `voice.model` | `gpt-4o-mini-transcribe` | Model ID for the OpenAI transcription endpoint. |
+| `voice.max_duration_s` | `120` | Maximum duration in seconds. Must be positive; maximum 3600. |
+| `voice.max_bytes` | `10485760` | Maximum audio size in bytes (10 MiB). Maximum 25 MiB. |
+| `voice.timeout_s` | `30` | Total deadline for each fallback, including download and transcription. Maximum 300 seconds. |
+| `voice.max_per_person_per_hour` | `20` | Maximum fallback attempts for each person in one hour. Maximum 1000. |
+
+Set `OPENAI_API_KEY` in the main app's boot environment, outside the workspace.
+Startup and reload reject `openai` mode without the key. A failed reload keeps the last valid workspace.
+`OPENAI_BASE_URL` is optional. A blank value uses `https://api.openai.com/v1`.
+A custom base URL must use HTTPS. It selects the service that receives the audio and API key.
+Voice uses the API key even when the brain uses a ChatGPT subscription.
+It does not use or change the person's ChatGPT grant.
+
+Slack's transcript always wins. The fallback accepts only audio from a verified, active team member.
+The file must belong to that Slack user. Slack must report its duration and size within the limits.
+Bot, webhook, outside workspace, and tainted events cannot use the fallback.
+Illo also checks thread authors before it sends audio out.
+Illo gets the download URL from `files.info` for that file ID.
+It accepts only `https://files.slack.com/` and refuses redirects.
+It checks the byte limit during download. It deletes its temporary audio file after each attempt.
+The per-person limit survives restarts. Failed download or API attempts count toward the limit.
+The event records `clip_transcribed_by: openai`, `clip_transcription_count`, and total `clip_duration_ms` without audio content.
+An audit row records each admitted attempt. It contains no transcript or credentials.
+The transcript then follows the same path as the person's typed text, including answers to ask cards.
+
+Model and endpoint references: [OpenAI speech to text](https://developers.openai.com/api/docs/guides/speech-to-text)
+and [GPT-4o Mini Transcribe](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe).
+
 ## Other files
 
 - `people.yaml`: a mapping with `people`, a list of people. Each person has `key` and `name`.

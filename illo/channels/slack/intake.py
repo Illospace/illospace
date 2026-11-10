@@ -15,12 +15,15 @@ from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context
+from illo.channels.slack.voice import OpenAITranscriber
 from illo.db import one
 from illo.gateway import InboundEvent
 from illo.ledger import items, kv, people
 
 log = logging.getLogger(__name__)
-CLIP_ERROR = "I could not read this clip. Please send it as text."
+CLIP_ERROR = (
+    "I could not read your voice clip. Slack gave no transcript. Write the question as text."
+)
 
 
 class SlackIntake:
@@ -37,6 +40,7 @@ class SlackIntake:
         self.bot_identity = bot_identity
         self.team_id: str | None = None
         self.clip_timeout, self.clip_poll = clip_timeout, clip_poll
+        self.voice_transport = None
         self.adapter = SlackAdapter(ctx, self.prepare_context)
         ctx.gateway.register("slack", self.adapter)
         ctx.gateway.register_preparer(self.prepare)
@@ -195,11 +199,21 @@ class SlackIntake:
         if event.channel != "slack" or not event.payload.get("files"):
             return None
         await self.adapter.show_working(event, prepare=False)
+        voice = ctx.workspace.config.voice
+        fallback = None
+        if voice.transcription == "openai":
+            fallback = OpenAITranscriber(
+                ctx, event, authority, self.bot_id,
+                self.adapter.working.get(event.external_id), transport=self.voice_transport,
+                slack_timeout=self.clip_timeout, slack_poll=self.clip_poll,
+                team_id=self.team_id,
+            )
         clip_text = await read_clips(
             self.ctx.slack_client,
             event.payload["files"],
             self.clip_timeout,
             self.clip_poll,
+            fallback=fallback,
         )
         payload = dict(event.payload)
         if clip_text is None:
