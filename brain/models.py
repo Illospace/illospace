@@ -16,7 +16,7 @@ class RunRequest(BaseModel):
     user_message: str = Field(max_length=100_000)
     mcp_url: HttpUrl
     mcp_token: SecretStr
-    runtime: Literal["claude", "openai_compat", "echo"] = "claude"
+    runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] = "claude"
     model: str = Field(
         default_factory=lambda: os.getenv("ILLO_BRAIN_MODEL", "claude-opus-5-5"),
         min_length=1,
@@ -36,6 +36,7 @@ def event(kind: str, **fields: Any) -> BrainEvent:
 
 
 class RunError(Exception):
-    def __init__(self, category: str, message: str) -> None:
+    def __init__(self, category: str, message: str, **details: Any) -> None:
         super().__init__(message)
         self.category = category
+        self.details = details

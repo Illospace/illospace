@@ -8,9 +8,14 @@ from pathlib import Path
 import httpx
 
 from brain.models import RunError, RunRequest, event
-from brain.runtimes import claude, echo, openai_compat
+from brain.runtimes import claude, echo, openai_compat, openai_responses
 
-RUNTIMES = {"claude": claude, "openai_compat": openai_compat, "echo": echo}
+RUNTIMES = {
+    "claude": claude,
+    "openai_compat": openai_compat,
+    "openai_responses": openai_responses,
+    "echo": echo,
+}
 
 
 def error_category(error: BaseException) -> str:
@@ -21,7 +26,18 @@ def error_category(error: BaseException) -> str:
         return "auth" if "auth" in categories else "runtime"
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
         return "auth"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
     return "runtime"
+
+
+def failure_event(error: BaseException) -> dict:
+    if isinstance(error, RunError):
+        return event("error", category=error.category, message=str(error), **error.details)
+    if isinstance(error, BaseExceptionGroup):
+        failures = [failure_event(child) for child in error.exceptions]
+        return next((item for item in failures if item.get("code") is not None), failures[0])
+    return event("error", category=error_category(error), message="The brain runtime failed")
 
 
 async def main() -> None:
@@ -43,15 +59,8 @@ async def main() -> None:
                 ),
                 flush=True,
             )
-    except RunError as error:
-        print(json.dumps(event("error", category=error.category, message=str(error))), flush=True)
     except Exception as error:
-        print(
-            json.dumps(
-                event("error", category=error_category(error), message="The brain runtime failed")
-            ),
-            flush=True,
-        )
+        print(json.dumps(failure_event(error)), flush=True)
 
 
 if __name__ == "__main__":

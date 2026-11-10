@@ -48,7 +48,7 @@ Illo is one assistant for a whole team. It lives in Slack, it follows the work o
 - **It follows your coding agents on every machine.** A small collector reports each stream of work. Illo needs no access to the machine.
 - **Your team hosts the ledger.** One Postgres on your server. It stores the lanes, the asks, the saved items, and the messages of the public Slack channels that you configure. It also keeps each message to Illo and its answer. Illo searches the other sources where they live.
 - **You choose the model provider.** That provider receives the prompts and the tool results of each run. Only a local model keeps everything on your server.
-- **Any model.** The brain is a standard agent runtime behind one interface. Use the Claude Agent SDK with an Anthropic API key. An experimental runtime speaks the OpenAI-compatible API, for other providers and local models.
+- **Any model.** Use the Claude Agent SDK, OpenAI through the Responses API, or OpenAI-compatible Chat Completions for other providers and local servers. Claude Agent SDK has earlier live checks. OpenAI Responses is tested live with `gpt-6.1-sol` and `gpt-6.1-terra` at effort `low`. Chat Completions has offline tests only. See [the brain guide](brain/README.md) for measured results.
 - **Safety rules in code.** The tool server checks each action. The prompt holds no authority.
 
 ## Install in 30 minutes

@@ -68,7 +68,10 @@ class RunManager:
                     if on_event:
                         await on_event(item)
                     if item.type == "error":
-                        raise RuntimeError("The brain service reported an error")
+                        error = item.failure_reason()
+                        if item.category == "timeout":
+                            status = "timeout"
+                        raise RuntimeError(error)
                     if item.type == "final":
                         final, usage, status = item.text, item.usage, "completed"
                         break
@@ -81,7 +84,7 @@ class RunManager:
             error = "The run was cancelled"
             raise
         except Exception:
-            error = "The brain run failed"
+            error = error or "The brain run failed"
             raise
         finally:
             async with ctx.pool.connection() as conn:

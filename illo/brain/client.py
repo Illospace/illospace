@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -27,6 +28,12 @@ class BrainEvent(BaseModel):
     type: Literal["started", "text", "tool_call", "final", "error"]
     text: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
+    category: Literal["auth", "timeout", "runtime", "limit"] = "runtime"
+    code: str = "unknown"
+
+    def failure_reason(self) -> str:
+        code = self.code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.code) else "unknown"
+        return f"The brain run failed: {self.category} {code}"
 
 
 class BrainClient:

@@ -72,3 +72,40 @@ async def test_real_gateway_mcp_catalog(app, rpc_token, monkeypatch):
         events = [item async for item in BrainClient(brain_base).run(request)]
     assert events[-1].type == "final"
     assert json.loads(events[-1].text) == expected
+
+
+@pytest.mark.parametrize(
+    "category,code,expected",
+    [
+        ("runtime", "unsupported_parameter", "runtime unsupported_parameter"),
+        ("auth", "invalid_api_key", "auth invalid_api_key"),
+        ("timeout", "unknown", "timeout unknown"),
+        ("runtime", "PRIVATE PROMPT", "runtime unknown"),
+    ],
+)
+async def test_run_manager_keeps_safe_failure(app, replay, category, code, expected):
+    from illo.brain.client import BrainEvent
+
+    class FailedBrain:
+        async def run(self, request):
+            yield BrainEvent(
+                type="error", category=category, code=code, message="PRIVATE PROVIDER MESSAGE"
+            )
+
+    app.state.ctx.brain_client = FailedBrain()
+    await replay()
+    async with app.state.ctx.pool.connection() as conn:
+        row = await (await conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1")).fetchone()
+    assert row["error"] == "The brain run failed: " + expected
+    assert row["status"] == ("timeout" if category == "timeout" else "failed")
+    assert row["token_hash"] is None
+    assert "PRIVATE" not in row["error"]
+
+
+def test_responses_workspace_and_env_override(monkeypatch):
+    from illo.config import Config
+    from illo.workspace import BrainConfig
+
+    assert BrainConfig(runtime="openai_responses").runtime == "openai_responses"
+    monkeypatch.setenv("ILLO_BRAIN_RUNTIME", "openai_responses")
+    assert Config.from_env().brain_runtime == "openai_responses"
