@@ -12,3 +12,4 @@ Before opening an issue:
 - confirm the problem on the latest public commit;
 - remove provider keys, tokens, private memory content, transcripts, uploads,
   database dumps, and local hostnames from logs.
+
