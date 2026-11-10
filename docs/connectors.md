@@ -174,3 +174,14 @@ Search results include a page token when more results exist.
 The first tools return one bounded page. They do not crawl a mailbox or drive.
 The optional source hooks register mail, personal Drive, and shared Drive when the search module supports them.
 Tests use fake clients and HTTP responses. They do not call a real account.
+
+## Email sender checks
+
+Set `ILLO_EMAIL_AUTHSERV_ID` to the receiving server's identity, such as `mx.google.com`.
+Illo uses only the first `Authentication-Results` header with that identity.
+If the setting is blank, Illo uses only the topmost `Authentication-Results` header.
+The receiving server must delete incoming headers that claim its identity.
+It must put its own results above any headers that the sender supplies.
+Illo requires exactly one DMARC result: `pass`, with `header.from` equal to the From domain.
+SPF and DKIM results alone do not give a sender authority.
+A failed check treats the sender as an outsider.

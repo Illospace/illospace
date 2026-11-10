@@ -84,6 +84,9 @@ Each call writes one row in `audit`.
 
 **Tests.** `tests/safety/test_rule_07_unknown_dm.py`, `tests/test_gateway.py`.
 
+Email requires one aligned DMARC pass from the selected receiving server.
+`tests/safety/test_review_s09_rule_07_email_auth.py` checks quoted text, comments, and duplicate results.
+
 ## 8. A rule answers only with a proposed option
 
 **Rule.** Illo answers an agent alone only with one of the options that the agent proposed, and only when a rule of the owner matches. It names the rule. Free instructions come only from a person.
