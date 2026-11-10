@@ -198,3 +198,15 @@ async def test_status_and_disconnect(chatgpt_app, replay):
         "text"
     ] == "ChatGPT is disconnected from Illo."
     assert (await replay(text="ChatGPT status"))["text"] == "ChatGPT is not connected."
+
+
+async def test_s3_channel_text_keeps_literal_slack_entities(app, replay, fake_brain):
+    text = "please quote: &lt;!channel&gt; and &lt;@U999&gt; &amp; more"
+    result = await replay(
+        kind="channel", text=text, payload={"channel_id": "C_ACME_TEAM", "mentioned": True}
+    )
+    assert result["decision"] == "run"
+    assert fake_brain.requests[-1].user_message == text
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT payload FROM events WHERE id=%s", (result["event_id"],))
+    assert row["payload"]["text"] == text

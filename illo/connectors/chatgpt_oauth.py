@@ -335,8 +335,6 @@ def callback_address(text):
 
 
 def redact_payload(payload):
-    if isinstance(payload, str):
-        payload = unescape(payload)
     for expected in ("http://127.0.0.1:1455/auth/callback", "http://localhost:1455/auth/callback"):
         payload = oauth.redact_payload(payload, expected, "[ChatGPT sign-in address removed]")
     return payload
