@@ -100,14 +100,15 @@ async def test_pull_links_issue_even_if_pull_arrives_first(app, github_client):
         pull = await one(conn, "SELECT * FROM lanes WHERE external_id=%s", (f"{REPO}#2",))
         linked = await one(conn, "SELECT * FROM lanes WHERE external_id=%s", (f"{REPO}#1",))
         assert next(v for v in pull["links"] if v["kind"] == "closes")["lane_id"] == linked["id"]
-    assert any(c["method"] == "get_pull" for c in github_client.calls)
+    # The first load uses the list data only. It makes no detail call.
+    assert not any(c["method"] == "get_pull" for c in github_client.calls)
 
 
 async def test_failed_poll_keeps_cursor(app, github_client, monkeypatch):
     async def fail(*args, **kwargs):
         raise RuntimeError("unavailable")
 
-    monkeypatch.setattr(github_client, "get_issue", fail)
+    monkeypatch.setattr(github_client, "list_changed", fail)
     github_client.issues = [issue()]
     with pytest.raises(RuntimeError):
         await poll(app.state.ctx)
@@ -115,3 +116,22 @@ async def test_failed_poll_keeps_cursor(app, github_client, monkeypatch):
         assert await kv.get(conn, f"github:cursor:{REPO}") is None
         assert not await one(conn, "SELECT id FROM lanes")
         assert (await one(conn, "SELECT * FROM sensors WHERE key='github'"))["last_error_at"]
+
+
+async def test_failed_detail_read_keeps_cursor_and_finished_lanes(app, github_client, monkeypatch):
+    """A later poll reads details. A failure there keeps the old cursor, so the poll repeats."""
+    github_client.issues = [issue()]
+    await poll(app.state.ctx)
+    async with app.state.ctx.pool.connection() as conn:
+        first = await kv.get(conn, f"github:cursor:{REPO}")
+        assert first and await one(conn, "SELECT id FROM lanes")
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr(github_client, "get_issue", fail)
+    with pytest.raises(RuntimeError):
+        await poll(app.state.ctx)
+    async with app.state.ctx.pool.connection() as conn:
+        assert await kv.get(conn, f"github:cursor:{REPO}") == first
+        assert await one(conn, "SELECT id FROM lanes")

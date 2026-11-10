@@ -15,20 +15,27 @@ async def poll(ctx) -> None:
         return
     try:
         for repo in ctx.workspace.config.github.repositories:
+            key = f"github:cursor:{repo.lower()}"
             async with ctx.pool.connection() as conn:
-                await ledger.lock_repository(conn, repo.lower())
-                key = f"github:cursor:{repo.lower()}"
                 since = await kv.get(conn, key)
-                # Use the start time so changes during a long poll enter the next poll.
-                until = datetime.now(UTC).isoformat()
-                items = await ctx.github_client.list_changed(repo, since=since)
-                for item in items:
+            # Use the start time so changes during a long poll enter the next poll.
+            until = datetime.now(UTC).isoformat()
+            items = await ctx.github_client.list_changed(repo, since=since)
+            for item in items:
+                # The first load of a repository uses the list data only: one call for each
+                # 100 items. A later poll reads the details of the few items that changed.
+                if since is not None:
                     if "pull_request" in item:
                         detail = await ctx.github_client.get_pull(repo, item["number"])
                         item = {**item, **detail, "pull_request": item["pull_request"]}
                     else:
                         item = await ctx.github_client.get_issue(repo, item["number"])
+                # One short transaction for each item. A restart keeps the lanes that are done,
+                # and no database connection stays open across the GitHub calls.
+                async with ctx.pool.connection() as conn:
+                    await ledger.lock_repository(conn, repo.lower())
                     await ledger.sync_item(conn, repo, item, ctx.workspace.config.github.label_map)
+            async with ctx.pool.connection() as conn:
                 await kv.set(conn, key, until)
         await refresh_statuses(ctx)
     except Exception:
