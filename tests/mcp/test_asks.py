@@ -13,6 +13,17 @@ ASK = {
 }
 
 
+async def test_collector_can_omit_a_recommendation(app, http):
+    agent = await AgentClient.create(app, http)
+    args = {key: value for key, value in ASK.items() if key != "recommended"}
+    created = await agent.call("ask_create", args)
+    assert created["state"] == "open"
+    async with app.state.ctx.pool.connection() as conn:
+        assert (await one(conn, "SELECT recommended_option FROM asks"))[
+            "recommended_option"
+        ] is None
+
+
 async def test_ask_creation_idempotency_and_cancel(app, http):
     agent = await AgentClient.create(app, http)
     created = await agent.call("ask_create", ASK)

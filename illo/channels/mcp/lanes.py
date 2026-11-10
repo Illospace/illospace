@@ -98,8 +98,16 @@ async def report_one(ctx, args: dict) -> dict:
 async def search(ctx, args: dict) -> dict:
     if args["owner"]:
         args["owner"] = (await owner(ctx, args["owner"]))["key"]
-    stale = args["state"] == "stale"
-    if stale:
-        args["state"] = "working"
-    rows = await lanes.search(ctx.conn, principal=ctx.principal, **args)
-    return {"lanes": [row for row in rows if row["stale"]] if stale else rows}
+    limits = ctx.app.workspace.config.stale_minutes.model_dump(by_alias=True)
+    if args["state"] == "stale":
+        rows = await mcp.stale_lanes(
+            ctx.conn,
+            principal=ctx.principal,
+            query=args["query"],
+            owner=args["owner"],
+            limit=args["limit"],
+            stale_minutes=limits,
+        )
+    else:
+        rows = await lanes.search(ctx.conn, principal=ctx.principal, stale_minutes=limits, **args)
+    return {"lanes": rows}

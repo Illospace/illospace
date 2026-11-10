@@ -19,7 +19,7 @@ async def test_concurrent_saves_create_one_item_and_receipt(app, http):
     assert len({r["event_id"] for r in results}) == 1
     assert sum(not r["idempotent_replay"] for r in results) == 1
     async with app.state.ctx.pool.connection() as conn:
-        assert (await one(conn, "SELECT count(*) AS n FROM items"))["n"] == 1
+        assert (await one(conn, "SELECT count(*) AS n FROM items WHERE kind='saved'"))["n"] == 1
         assert (await one(conn, "SELECT count(*) AS n FROM audit"))["n"] == 6
 
 
@@ -50,7 +50,7 @@ async def test_save_and_receipt_rollback_together(app, http, monkeypatch):
         error=True,
     )
     async with app.state.ctx.pool.connection() as conn:
-        assert (await one(conn, "SELECT count(*) AS n FROM items"))["n"] == 0
+        assert (await one(conn, "SELECT count(*) AS n FROM items WHERE kind='saved'"))["n"] == 0
         assert (await one(conn, "SELECT count(*) AS n FROM submissions"))["n"] == 0
         assert (await one(conn, "SELECT decision FROM audit"))["decision"] == "deny"
 

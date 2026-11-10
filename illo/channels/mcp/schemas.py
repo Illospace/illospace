@@ -127,7 +127,7 @@ class AskCreate(Arguments):
     kind: Literal["decision", "action", "review", "reminder"] = "decision"
     question: str = Field(min_length=1, max_length=240)
     options: list[Option] = Field(min_length=2, max_length=5)
-    recommended: str
+    recommended: str | None = None
     proof: dict[str, Any] = Field(default_factory=dict)
     owner: str | None = None
     due_at: str | None = None
@@ -144,7 +144,9 @@ class AskCreate(Arguments):
     @model_validator(mode="after")
     def check_options(self):
         ids = [o.id for o in self.options]
-        if len(set(ids)) != len(ids) or self.recommended not in ids:
+        if len(set(ids)) != len(ids) or (
+            self.recommended is not None and self.recommended not in ids
+        ):
             raise ValueError("Use unique option IDs and a valid recommended option")
         return self
 

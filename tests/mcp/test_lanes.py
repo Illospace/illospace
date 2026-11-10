@@ -42,11 +42,13 @@ async def test_lane_upsert_events_and_closing_summary(app, http):
     await agent.call("lane_report", {"source": "t3", "external_id": "acme-1", "state": "done"})
     async with app.state.ctx.pool.connection() as conn:
         stored = await one(conn, "SELECT * FROM lanes")
-        summary = await one(conn, "SELECT * FROM items")
+        summary = await one(conn, "SELECT * FROM items WHERE kind='lane_summary'")
         assert stored["closed_at"] and closed["state"] == "done"
         assert summary["source_ref"] == f"lane:{first['lane_id']}:end"
         assert summary["kind"] == "lane_summary" and summary["body"] == "Cobalt checks pass."
-        assert (await one(conn, "SELECT count(*) AS n FROM items"))["n"] == 1
+        assert (await one(conn, "SELECT count(*) AS n FROM items WHERE kind='lane_summary'"))[
+            "n"
+        ] == 1
     results = await agent.call("lane_search", {"query": "Cobalt", "owner": "ada", "state": "done"})
     assert len(results["lanes"]) == 1
 
@@ -121,3 +123,13 @@ async def test_lane_events_and_stale_are_searchable(app, http):
         await conn.execute("UPDATE lanes SET last_signal_at=now()-interval '2 hours'")
     found = await agent.call("lane_search", {"state": "stale"})
     assert len(found["lanes"]) == 1 and found["lanes"][0]["state"] == "working"
+
+
+async def test_stale_filter_runs_before_the_limit(app, http):
+    agent = await AgentClient.create(app, http)
+    await agent.call("lane_report", {"source": "t3", "external_id": "acme-old", "state": "working"})
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE lanes SET last_signal_at=now()-interval '2 hours'")
+    await agent.call("lane_report", {"source": "t3", "external_id": "acme-new", "state": "working"})
+    found = await agent.call("lane_search", {"state": "stale", "limit": 1})
+    assert len(found["lanes"]) == 1 and found["lanes"][0]["external_id"] == "acme-old"

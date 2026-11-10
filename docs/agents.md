@@ -134,7 +134,7 @@ Collectors can report a batch and their health:
 {"lane":{"source":"t3","external_id":"acme-thread-1"},"question":"Which test target should I use?","options":[{"id":"preview","label":"Preview"},{"id":"local","label":"Local"}],"recommended":"preview","proof":{"text":"The preview has the new schema."},"source_ref":"acme-thread-1:test-target"}
 ```
 
-Use one short sentence and two to five options. The recommendation must name an option id.
+Use one short sentence and two to five options. If you give a recommendation, it must name an option id.
 The asks service sends the card. This call only writes the ledger.
 The same token and `source_ref` return the same ask.
 An automatic answer can use only an option that the agent proposed and a matching rule of the owner.

@@ -107,8 +107,13 @@ async def pending_signals(conn) -> list[dict]:
     )
 
 
-async def item_ref(conn, item_id) -> str | None:
-    row = await one(conn, "SELECT source_ref FROM items WHERE id=%s", (item_id,))
+async def item_ref(conn, item_id, *, principal) -> str | None:
+    row = await one(
+        conn,
+        """SELECT source_ref FROM items WHERE id=%s AND (visibility='team' OR
+        owner_person_id=(SELECT id FROM people WHERE 'person:'||key=%s AND active))""",
+        (item_id, principal),
+    )
     return row["source_ref"] if row else None
 
 
@@ -116,6 +121,22 @@ async def sync_lane_summary_visibility(conn, lane) -> None:
     await conn.execute(
         """UPDATE items SET visibility=%s,owner_person_id=%s WHERE source_ref=%s""",
         (lane["visibility"], lane["owner_person_id"], f"lane:{lane['id']}:end"),
+    )
+
+
+async def stale_lanes(conn, *, principal, query, owner, limit, stale_minutes) -> list[dict]:
+    """Filter before the limit, so fresh lanes cannot hide an older stale lane."""
+    return await all_rows(
+        conn,
+        """SELECT l.*,true AS stale FROM lanes l WHERE state='working'
+        AND last_signal_at < now() - COALESCE((%s::jsonb->>source)::int,30)*interval '1 minute'
+        AND (visibility='team' OR owner_person_id=
+          (SELECT id FROM people WHERE 'person:'||key=%s AND active))
+        AND (%s::text IS NULL OR owner_person_id=(SELECT id FROM people WHERE key=%s))
+        AND (concat_ws(' ',title,summary) ILIKE %s OR EXISTS
+          (SELECT 1 FROM lane_events e WHERE e.lane_id=l.id AND e.text ILIKE %s))
+        ORDER BY updated_at DESC,id DESC LIMIT %s""",
+        (Jsonb(stale_minutes), principal, owner, owner, f"%{query}%", f"%{query}%", limit),
     )
 
 

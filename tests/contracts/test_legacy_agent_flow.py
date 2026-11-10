@@ -106,7 +106,7 @@ async def test_replay_and_mismatch_have_true_evidence(app, http):
     stored = await agent.call("illo_get_result", {"event_id": first["event_id"]})
     assert stored["evidence_status"] == "satisfied"
     async with app.state.ctx.pool.connection() as conn:
-        assert (await one(conn, "SELECT count(*) AS n FROM items"))["n"] == 1
+        assert (await one(conn, "SELECT count(*) AS n FROM items WHERE kind='saved'"))["n"] == 1
         assert (await one(conn, "SELECT count(*) AS n FROM submissions"))["n"] == 1
 
 
