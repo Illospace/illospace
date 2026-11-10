@@ -57,13 +57,28 @@ async def test_rule_03_private_ledger_item_makes_github_write_a_draft(
             visibility="private",
         )
 
-    async def private_item(ctx, args):
-        return await items.get(ctx.conn, "example:private", principal=ctx.principal)
+    read = await call(rpc, token, "search_get", {"source_ref": "example:private"})
+    assert "Private team member fact" in read["result"]
+    assert (await call(rpc, token, "github_create_issue", CREATE))["decision"] == "draft"
+    assert not github_client.issues
 
-    app.state.ctx.registry.add(
-        Tool("search_get", "search", "read", lambda a: "ledger", False, private_item)
-    )
-    read = await call(rpc, token, "search_get", {})
+
+async def test_rule_03_private_lane_read_makes_github_write_a_draft(
+    app, rpc, rpc_token, github_client
+):
+    from illo.ledger import lanes
+
+    run, token = rpc_token
+    async with app.state.ctx.pool.connection() as conn:
+        lane = await lanes.upsert(
+            conn,
+            source="manual",
+            external_id="example:private-lane",
+            title="Private work",
+            owner_person_id=run["person_id"],
+            visibility="private",
+        )
+    read = await call(rpc, token, "lanes_get", {"id": lane["id"]})
     assert read["result"]["visibility"] == "private"
     assert (await call(rpc, token, "github_create_issue", CREATE))["decision"] == "draft"
     assert not github_client.issues
