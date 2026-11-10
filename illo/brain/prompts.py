@@ -1,19 +1,115 @@
-"""Keep the base voice separate from run authority and workspace rules."""
+"""Assemble the system prompt of a run.
 
+The prompt sets the voice and explains the run. It grants no authority:
+the tool server checks each call against the grant of the run.
+The output is deterministic for the same inputs, so tests can compare snapshots.
+"""
+
+from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-BASE_PROMPT = Path(__file__).with_name("base_prompt.md").read_text().strip()
+from illo.ledger import asks
+
+HERE = Path(__file__).parent
+BASE_PROMPT = (HERE / "base_prompt.md").read_text().strip()
+PROFILE_TEXTS = {p.stem: p.read_text().strip() for p in sorted((HERE / "prompts").glob("*.md"))}
+
+CHANNEL_NAMES = {
+    "email": "email",
+    "mcp": "the MCP endpoint for agents",
+    "signals": "the signal intake",
+    "routine": "a routine",
+}
 
 
-def build(workspace, principal: str, profile: str, channel_id: str | None = None) -> str:
-    """Include matching rules and the skill list. Tools enforce the authority."""
-    parts = [BASE_PROMPT, f"Principal: {principal}\nGrant profile: {profile}"]
-    parts.extend(
-        f"Rule: {r.name}\n{r.body}"
-        for r in workspace.matching_rules(principal, profile, channel_id)
-    )
-    if workspace.skills:
+def prompt_profile(principal: str, profile: str) -> str:
+    """An outsider always gets the outsider text, as in the tool grant."""
+    return "outsider" if principal == "outsider" else profile
+
+
+def build(
+    workspace,
+    principal: str,
+    profile: str,
+    channel_id: str | None = None,
+    *,
+    now: datetime | None = None,
+    event_channel: str | None = None,
+    open_asks: int = 0,
+) -> str:
+    """Return base text, profile text, run facts, matching rules, and the skill list."""
+    key = prompt_profile(principal, profile)
+    parts = [BASE_PROMPT, PROFILE_TEXTS.get(key, "")]
+    parts.append(_facts(workspace, principal, key, channel_id, now, event_channel, open_asks))
+    rules = workspace.matching_rules(principal, profile, channel_id)
+    if key == "outsider":
+        # An outsider answer can reach the sender. Team rules name people and owners,
+        # so an outsider run gets only a rule that names the outsider principal.
+        rules = [r for r in rules if "outsider" in r.principals]
+    if rules:
         parts.append(
-            "Skills:\n" + "\n".join(f"- {s.name}: {s.description}" for s in workspace.skills)
+            "## Team rules\nThe team wrote these rules. They apply to this run.\n\n"
+            + "\n\n".join(f"### {r.name}\n{r.body}" for r in rules)
+        )
+    if workspace.skills and key != "outsider":
+        parts.append(
+            "## Skills\nA skill is a procedure that the team wrote. When a request matches "
+            "a skill, load its steps with `skills_get` and follow them.\n"
+            + "\n".join(f"• {s.name}: {s.description}" for s in workspace.skills)
         )
     return "\n\n".join(parts)
+
+
+async def build_for_run(conn, workspace, authority, event, *, now: datetime | None = None) -> str:
+    """Read the facts that need the ledger, then build. The run manager calls this."""
+    open_asks = 0
+    if authority.profile == "person_dm" and authority.person_id:
+        rows = await asks.list_open(
+            conn, owner_person_id=authority.person_id, principal=authority.principal
+        )
+        open_asks = len(rows)
+    return build(
+        workspace,
+        authority.principal,
+        authority.profile,
+        event.payload.get("channel_id"),
+        now=now,
+        event_channel=event.channel,
+        open_asks=open_asks,
+    )
+
+
+def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks) -> str:
+    """State who, when, and where. The model cannot see these facts any other way."""
+    config = workspace.config
+    person = None
+    if principal.startswith("person:"):
+        person = next((p for p in workspace.people if p.key == principal[7:]), None)
+    lines = [f"• Team: {config.team_name}", f"• Principal: {principal}"]
+    if person:
+        detail = f"• Person: {person.name} (`{person.key}`), role {person.role}"
+        if person.areas:
+            detail += ", areas " + ", ".join(person.areas)
+        lines.append(detail)
+    timezone = person.timezone if person else config.timezone
+    local = (now or datetime.now(UTC)).astimezone(ZoneInfo(timezone))
+    lines.append(f"• Local time: {local:%A} {local.day} {local:%B %Y, %H:%M}, {timezone}")
+    where = _where(workspace, channel_id, event_channel, key)
+    if where:
+        lines.append(f"• Channel: {where}")
+    if key == "person_dm" and person and open_asks > 0:
+        lines.append(
+            f"• Open asks of {person.name}: {open_asks}. Read them with a tool before you list them."
+        )
+    return "## Run facts\n" + "\n".join(lines)
+
+
+def _where(workspace, channel_id, event_channel, key) -> str | None:
+    """Name the place of the event. A configured channel also shows its mode."""
+    channel = next((c for c in workspace.config.slack.channels if c.id == channel_id), None)
+    if channel:
+        return f"Slack channel #{channel.name} (`{channel.id}`), mode {channel.mode}"
+    if event_channel == "slack":
+        return "a Slack DM" if key == "person_dm" else "Slack"
+    return CHANNEL_NAMES.get(event_channel or "")

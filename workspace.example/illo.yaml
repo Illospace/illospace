@@ -10,7 +10,7 @@ slack:
     - name: alerts
       id: C_ACME_ALERTS
       mode: coordinator
-      rule_files: [rules/team.md, rules/alerts.md]
+      rule_files: [rules/team.md, rules/alerts-coordinator.md]
 github:
   repositories: [acme-example/engine]
 digest:
