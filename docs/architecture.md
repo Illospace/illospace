@@ -136,7 +136,7 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `submissions`: the receipts of `illo_submit`. `event_id text` (unique, opaque), `token_id`, `idempotency_key`, unique (`token_id`, `idempotency_key`), `desired_outcome`, `envelope jsonb`, `envelope_digest`, `status`, `result jsonb`, `completed_at`, `run_id`.
 - `drafts`: `run_id`, `approver_person_id`, `kind`, `destination`, `content jsonb`, `state` (`pending`, `approved`, `rejected`, `sent`, `expired`), `slack_channel`, `slack_ts`, `decided_at`.
 - `signals`: `token_id`, `source`, `dedupe_key`, unique (`source`, `dedupe_key`), `severity`, `title`, `body`, `data jsonb`, `status` (`received`, `ticketed`, `ignored`), `ticket_url`.
-- `claims`: `key` (unique), `run_id`, `note`. One claim for each alert or signal, so that two runs cannot file the same ticket. A model claim has the prefix `model:`. Server keys, such as `routine:<name>:<time>`, have no prefix.
+- `claims`: `key` (unique), `run_id`, `note`. One claim for each alert or signal, so that two runs cannot file the same ticket. A model claim has the prefix `model:`. The minute timer deletes model claims older than 24 hours. Server keys, such as `routine:<name>:<time>`, have no prefix.
 - `connector_grants`: `connector_key`, `person_id` (null for a team connector), `secret bytea` (encrypted), `scopes text[]`, `expires_at`, `revoked_at`.
 - `secrets`: the vault. `name` (unique), `secret bytea` (encrypted with the key in `ILLO_VAULT_KEY`).
 - `routine_state`: `key` (unique), `last_run_at`, `next_run_at`, `last_status`.

@@ -100,7 +100,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `Gateway.context_authority` in `illo/gateway/dispatch.py` also marks a Slack run tainted when its thread context has a bot or an unknown user (`read_context` in `illo/channels/slack/threads.py`). An unknown author shows as `Outside user (<id>)`.
 - `GRANT_PROFILES["tainted"]` in `illo/tools/checks.py` is the exact tool set: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, `skills_get`. `in_grant` refuses every other tool, even one that names the profile.
 - `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server, not the model, sends the default owner one DM for each such ticket.
-- `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine.
+- `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine. The minute timer deletes model claims older than 24 hours.
 - `read_page` lets a tainted run read only the first URL of the event text, once.
 - `resolve` in `illo/tools/connectors.py` gives a tainted run only a remote tool with `tainted: true` and risk `read`.
 - `build` in `illo/brain/prompts.py` gives an outsider run no team rules and no skills.
