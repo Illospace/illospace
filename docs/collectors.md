@@ -131,7 +131,7 @@ The MCP server requires at least two options. Manual asks therefore offer `Answe
 Both choices leave the T3 request unchanged. A dismiss choice acknowledges only the Illo card.
 When a request ends in T3, the collector calls `ask_cancel` once.
 
-The collector pulls answers with token scope. It checks the exact request again before delivery.
+The collector calls `ask_pull` with `scope: "token"`. It checks the exact request again before delivery.
 It sends this text:
 
 ```text
@@ -145,6 +145,7 @@ A failed send gets no ack. A failed ack retries without another send.
 If the request no longer waits, it records a stale note, sends nothing, and acks.
 The ack contract accepts only `ask_id`, so delivery notes stay in the local state file.
 An answer from a rule must select a proposed option and name the rule. It cannot add free instructions.
+A free answer comes only from a person: a typed reply on the card, or a model draft that the person sent.
 
 T3's MCP interface cannot approve a permission request. Those asks direct the person to the thread.
 The collector never turns a permission approval into a plain message and claims success.

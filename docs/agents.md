@@ -79,6 +79,7 @@ The receipt contains a handle such as `saved:42`. The item and the receipt commi
 Reuse the same idempotency key only for the same body. A different body returns `replay_mismatch` and saves nothing.
 
 For another request, omit `preserve_knowledge`. Illo returns `accepted` and an `event_id` before the model finishes.
+A token can start 60 such requests in one hour. Saves and replays do not count.
 Poll with `illo_get_result` for the final answer.
 After a server restart, an interrupted request reports a failure. Illo does not repeat a possible write.
 The `response` field stores hints only. Illo does not call a supplied callback URL.
@@ -117,9 +118,12 @@ A private item shows only to its owner. A missing or hidden item returns an empt
 ```
 
 The owner defaults to the token's person. `owner` also accepts a person key, GitHub login, email, or Slack id.
+A token writes only the lanes of its own person. A report on a lane of another person fails.
+`owner` can name another person only for a new lane with team visibility.
+Only the GitHub poller writes lanes with the source `github`.
 A report updates the same lane. Omitted fields keep their stored values.
 Use `state: "done"` or `state: "failed"` with `end_summary` to save a searchable lane summary.
-A private lane must belong to the calling person.
+Set `visibility: "private"` for a lane that only its owner may read. A private lane must belong to the calling person.
 
 Collectors can report a batch and their health:
 
@@ -142,7 +146,9 @@ Collectors can report a batch and their health:
 Use one short sentence and two to five options. If you give a recommendation, it must name an option id.
 The asks service sends the card. This call only writes the ledger.
 The same token and `source_ref` return the same ask.
+A token can have 20 open asks for each owner.
 An automatic answer can use only an option that the agent proposed and a matching rule of the owner.
+An answer that the model writes is a draft. The owner reads it and taps Send.
 
 ### `ask_pull`
 
@@ -153,6 +159,7 @@ An automatic answer can use only an option that the agent proposed and a matchin
 The default scope returns answers for this token or lanes whose machine matches this token's label.
 `scope: "person"` returns answers for all tokens of the same person.
 Another person never gets these answers. Each answer includes the option, text, person or rule, and time.
+`answered_via` is `person` or `rule`. A rule answer has no `answer_text`. It names its rule in `rule_text`.
 
 ### `ask_ack`
 
@@ -180,4 +187,5 @@ Source references belong to the calling token. Ask ids also permit a new token o
 
 The same source and dedupe key return the first signal id with `duplicate: true`.
 Illo treats the signal as outside data. The run has the team principal and the tainted profile.
-It gets no personal connector. A signal has no reply destination.
+It can read issues, file an unassigned ticket, and read the first URL of the signal text. It gets no personal connector. A signal has no reply destination.
+A token can send 60 new signals in one hour. A duplicate does not count.

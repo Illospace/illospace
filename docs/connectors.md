@@ -38,7 +38,8 @@ Illo binds the callback to a secure, host-only browser cookie.
 The Google account must match one of your email addresses in `people.yaml`.
 Illo revokes a new grant if the account does not match.
 The callback stores your grant with encryption in Postgres.
-Only your untainted DM runs and agent runs can use your grant.
+Only your own untainted DM runs and your person routines can use your grant.
+An agent request never uses it.
 Send `disconnect my Google` in a DM to revoke and delete it.
 Run `illo connectors status` on the host to see owners and expiry times.
 This command shows no token or secret.
@@ -61,6 +62,7 @@ Drive exports Docs and Slides as plain text. It exports Sheets as CSV.
 For other files, it returns the name, type, and link.
 Results are marked as outside data.
 A later write to a shared destination becomes a draft for the same person.
+After such a read, a connector call is a draft, and the web tool refuses a page.
 
 ## Team MCP connectors
 
@@ -103,6 +105,7 @@ The sensor is `connector:<key>`.
 The file supplies the risk before the tool server runs its three checks.
 Every call uses destination `outside:<key>`, including a read with remote arguments.
 After a personal read, a connector call needs a draft that the requester approves.
+The tool handler also refuses a direct call after a personal read.
 `send_outside` creates a draft. A run without a person cannot create that draft.
 An approved `connectors_call` draft uses the registered connector performer.
 A tainted run can call only a tool with both `risk: read` and `tainted: true`.
@@ -179,7 +182,8 @@ It does not expose a shell, a file tool, or a destructive connector risk.
 Google retries rate limits and temporary server failures with a short backoff.
 Search results include a page token when more results exist.
 The first tools return one bounded page. They do not crawl a mailbox or drive.
-The optional source hooks register mail, personal Drive, and shared Drive when the search module supports them.
+With `connectors/google.yaml`, `search_all` also searches the person's mail and Drive. With a team Google file, it also searches the shared drive.
+A team MCP call has a time limit (`timeout_s`, default 20, maximum 120 seconds) and a byte limit (`max_bytes`, default 262144, maximum 1048576).
 Tests use fake clients and HTTP responses. They do not call a real account.
 
 ## Email sender checks

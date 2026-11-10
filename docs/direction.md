@@ -27,7 +27,7 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 - **Answer first.** The first line is the answer. Then a few short lines and links.
 - **Fast.** The first sign of work comes from code, not from the model. With the Claude runtime, a simple turn shows work in about 2 seconds and answers in about 4 seconds.
-- **Quiet by default.** A person gets a message for an ask, an answer, or the digest. Nothing else.
+- **Quiet by default.** A person gets a message for an ask, an answer, a draft to approve, or the digest. The default owner also gets one DM for each ticket that Illo files from outside text. Nothing else.
 - **Honest limits.** When the ledger does not show a fact, Illo says "I do not know" and where it looked.
 - **Phone first.** Short lines, no tables, no long text.
 
@@ -42,17 +42,17 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 ## What Illo will not be
 
-- **Not a web app.** Slack, email, and the MCP endpoint are the only ways in.
+- **Not a web app.** Slack, email, and the MCP endpoint are the only ways in. The only web pages are the Google sign-in start and callback.
 - **Not a coding agent.** Illo does not write code, run commands, release, merge, or delete. It files a ticket, and an agent or a person does the work.
-- **Not a copy of your data.** Illo searches a source where it lives. It stores summaries, decisions, and notes, with links.
+- **Not a copy of your data.** Illo searches most sources where they live. The ledger stores lanes, asks, decisions, notes, and saved items, with links. It also stores the messages of the configured public Slack channels, and each message to Illo with its answer. The model provider that the team chooses receives the prompts and the tool results of each run.
 - **Not a second inbox.** It does not send progress messages.
 - **Not a remote control for your machines.** Illo holds no credential for them. A collector on each machine pulls the answers.
 
 ## The order of the work
 
-1. **The foundation.** The ledger, the gateway, the tool server, and the first safety tests. It is on `next`.
-2. **The areas, in parallel.** Each area is built on its own branch and merges into `next` with its tests: the brain service, the collectors, Slack, the asks, the MCP endpoint, GitHub, search, the routines and email, the connectors, the install, and the voice.
-3. **A first team.** One team runs Illo from `next` and reports what fails.
+1. **The foundation.** The ledger, the gateway, the tool server, and the first safety tests. Done.
+2. **The areas.** The brain service, the collectors, Slack, the asks, the MCP endpoint, GitHub, search, the routines and email, the connectors, the install, and the voice. All are merged on `next`, with the fixes of two reviews.
+3. **A first team.** One team runs Illo from `next` and reports what fails. Slack, GitHub writes, the mailbox, Google, and the `openai_compat` runtime have run only against fakes so far.
 4. **The switch.** The branch `main` gets the new system when it can replace the old one.
 
 The README lists what is on `next` today.

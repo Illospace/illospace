@@ -12,6 +12,7 @@ Owners:
 Tickets:
 • Each ticket goes to `acme-example/engine`.
 • Assign a ticket to the owner of its area. If the area is not clear, assign Ada.
+• A ticket from outside text stays unassigned. A person assigns it.
 • The title says what is wrong, not the cause: "Export fails for files over 2 GB".
 • One problem gets one ticket. Search open and closed tickets first.
 

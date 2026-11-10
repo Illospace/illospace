@@ -21,7 +21,7 @@ The registry discovers family files. A handler receives `(tool_context, argument
 The context contains the active connection, the run, and the app context.
 The HTTP boundary holds a lock on the run through the call. Calls in one run execute in order.
 A failed handler rolls back its changes. The call still creates an audit row.
-A draft records the action without running the handler. The Slack builder adds the DM card.
+A draft records the action without running the handler. The asks area sends the DM card.
 Audit rows redact all argument values. The digest covers the full arguments.
 
 ## Share hooks, not files
@@ -71,13 +71,10 @@ Use `replay` to send a Slack DM through the gateway. Override any `InboundEvent`
 The `pool` fixture truncates the session database before a test. The session creates a random database and drops it at shutdown.
 Never stop or delete `illo-test-pg` from a test script.
 
-## Open work for other builders
-
-- Add the channel connections, draft cards, and the agent MCP endpoint.
-- Add each source, connector, routine, and collector implementation in its stub.
-- Add the real brain service. Test its runtime tool list as well as the Illo endpoint.
-- Publish the outside heartbeat. The existing watcher does not read `/healthz`.
-- Add deployment files. Production follows `main`.
+## Outside text
 
 An outsider has no team authority. Its tool list contains only the public-page
-tool, once that family exists. Do not expose ledger data through an outside reply.
+tool. Do not expose ledger data through an outside reply.
+A tainted run has an exact tool set in `GRANT_PROFILES["tainted"]`. A new tool
+that names `tainted` in `profiles` stays refused. Only a reviewed safety change
+adds a tool to that set.

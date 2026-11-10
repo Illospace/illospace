@@ -86,15 +86,19 @@ Direct Compose commands must pass the same file with `--env-file`.
    docker compose --env-file "$ILLO_ENV_FILE" -f deploy/compose.yaml up -d
    ```
 
-5. Create an agent token for a person from `people.yaml`.
+5. Create a collector token for a person from `people.yaml`.
    Replace `ada` with that person's key.
    The token appears once. Store it in the agent's secret store.
    Do not paste it in a ticket or a log.
 
    ```sh
    docker compose --env-file "$ILLO_ENV_FILE" -f deploy/compose.yaml \
-     exec illo illo token create --person ada --label laptop
+     exec illo illo token create --person ada --label laptop --scope collector
    ```
+
+   A `collector` token reports lanes, asks, and signals. Use `--scope agent`
+   for a session client that also sends requests with `illo_submit`.
+   [agents.md](agents.md) lists the tools of each scope.
 
 The MCP endpoint is `http://127.0.0.1:8484/mcp`.
 It also accepts requests at `/api/mcp`.
@@ -104,6 +108,8 @@ Publish only the routes that you need, such as `/mcp` and `/oauth/`.
 Do not publish Postgres, the brain, `/brain/mcp`, or the admin reload route.
 
 Optional GitHub and mailbox settings appear in `deploy/env.example`.
+For email, set `ILLO_EMAIL_AUTHSERV_ID` to the name of the receiving server, such as `mx.google.com`.
+[connectors.md](connectors.md) explains the sender check.
 For a GitHub App, mount its private key from an external file into the app container.
 Set `ILLO_GITHUB_APP_PRIVATE_KEY_FILE` to its container path.
 Google connector credentials go into the vault through `illo secret set`.
@@ -120,7 +126,6 @@ deploy/smoke.sh
 It builds both images and starts a separate Compose project with a random name.
 It uses the `echo` brain runtime, no Slack connection, and no model key.
 It checks both services, runs `illo doctor`, creates a temporary agent token, and calls MCP `initialize`.
-If the MCP route is not merged yet, it prints a skip message for that call.
 It also checks a database backup and restore.
 The command removes its containers, networks, volume, and temporary files when it ends.
 Set `ILLO_SMOKE_PORT=18485` if port `18484` is in use.
