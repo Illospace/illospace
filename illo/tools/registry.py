@@ -8,9 +8,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from illo.db import Connection
+from illo.db import Connection, one
 from illo.ledger import audit, drafts
 from illo.tools.checks import PROFILE_NAMES, Decision, check, scope
+
+RUN_LIMITS = {
+    "asks_create": 3,
+    "slack_send_dm": 3,
+    "github_create_issue": 3,
+    "github_comment_issue": 5,
+    "work_start": 1,
+}
 
 
 class Arguments(BaseModel):
@@ -126,6 +134,15 @@ class Registry:
         """Call under the run row lock. The HTTP layer owns the transaction."""
         tool = self.tools.get(name)
         decision, reason, result = "deny", "The tool is not registered", None
+        if tool and name in RUN_LIMITS:
+            calls = await one(
+                ctx.conn,
+                "SELECT count(*) AS n FROM audit WHERE run_id=%s AND tool=%s",
+                (ctx.run["id"], name),
+            )
+            if calls["n"] >= RUN_LIMITS[name]:
+                tool = None
+                reason = f"The run has reached the {name} call limit of {RUN_LIMITS[name]}"
         if tool:
             try:
                 validated = tool.arguments.model_validate(args).model_dump()
