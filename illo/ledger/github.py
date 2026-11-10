@@ -118,7 +118,9 @@ async def statuses(conn: Connection) -> list[dict]:
         conn,
         """SELECT l.*,
         (SELECT text FROM lane_events WHERE lane_id=l.id ORDER BY at DESC,id DESC LIMIT 1) AS last_event
-        FROM lanes l WHERE source='github' AND slack_ts IS NOT NULL ORDER BY id FOR UPDATE OF l SKIP LOCKED""",
+        FROM lanes l WHERE source='github' AND (slack_ts IS NOT NULL OR EXISTS
+        (SELECT 1 FROM kv WHERE key='github:pending-status:' || l.id::text))
+        ORDER BY id FOR UPDATE OF l SKIP LOCKED""",
     )
 
 

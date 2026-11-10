@@ -120,4 +120,8 @@ async def setup(ctx) -> None:
     async def poll_github():
         await poll(ctx)
 
+    async def refresh_work():
+        await refresh_statuses(ctx)
+
+    ctx.every(15, refresh_work)
     ctx.every(ctx.workspace.config.github.poll_seconds, poll_github)

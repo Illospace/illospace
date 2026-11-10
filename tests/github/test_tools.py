@@ -160,3 +160,31 @@ async def test_signature_blocks_duplicates_before_search_index_catches_up(
     second = await call(rpc, token, "github_create_issue", {**CREATE, "title": "Another title"})
     assert not second["result"]["created"]
     assert "Signature: Stable failure" in github_client.issues[0]["body"]
+
+
+async def test_work_recovers_status_after_slack_failure(
+    app, rpc, rpc_token, slack_client, monkeypatch
+):
+    from illo.ledger import kv
+
+    _, token = rpc_token
+    ctx = app.state.ctx
+    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
+    original = slack_client.chat_postMessage
+
+    async def fail(**kwargs):
+        raise RuntimeError("Slack unavailable")
+
+    monkeypatch.setattr(slack_client, "chat_postMessage", fail)
+    result = await call(rpc, token, "work_start", CREATE)
+    assert result["decision"] == "allow"
+    lane_id = result["result"]["lane_id"]
+    async with ctx.pool.connection() as conn:
+        assert await kv.get(conn, f"github:pending-status:{lane_id}")
+    monkeypatch.setattr(slack_client, "chat_postMessage", original)
+    await refresh_statuses(ctx)
+    await refresh_statuses(ctx)
+    assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 1
+    async with ctx.pool.connection() as conn:
+        assert not await kv.get(conn, f"github:pending-status:{lane_id}")
+        assert (await one(conn, "SELECT slack_ts FROM lanes WHERE id=%s", (lane_id,)))["slack_ts"]

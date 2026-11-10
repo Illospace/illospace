@@ -73,3 +73,26 @@ async def test_heartbeat_env_overrides(app, github_client, monkeypatch):
     monkeypatch.setenv("ILLO_HEARTBEAT_BRANCH", "ops/heartbeat")
     assert await publish(app.state.ctx)
     assert github_client.calls[-1]["repo"] == REPO
+
+
+async def test_loop_probe_skips_publication_after_a_stall(app, github_client, monkeypatch):
+    from illo.routines import heartbeat
+
+    ctx = app.state.ctx
+    ctx.workspace.config.heartbeat.repo = REPO
+    now = [1000.0]
+    jobs = {}
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(ctx, "every", lambda seconds, fn: jobs.update({seconds: fn}))
+    await heartbeat.setup(ctx)
+    await jobs[180]()
+    assert not github_client.calls
+    now[0] += 15
+    await jobs[15]()
+    await jobs[180]()
+    assert github_client.calls[-1]["method"] == "write_file"
+    github_client.calls.clear()
+    now[0] += 120
+    await jobs[15]()
+    await jobs[180]()
+    assert not github_client.calls

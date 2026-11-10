@@ -44,6 +44,7 @@ heartbeat:
 
 `work_channel` is optional. Without it, Illo sends the status to the requester
 in a DM. Without Slack access, Illo still creates the ticket and lane.
+A failed Slack send stays in the ledger. The status timer retries it.
 The label map replaces the default map when supplied.
 
 The heartbeat stays disabled until `heartbeat.repo` is set.

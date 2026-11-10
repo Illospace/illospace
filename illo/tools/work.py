@@ -5,7 +5,7 @@ from uuid import NAMESPACE_URL, uuid5
 from pydantic import Field
 
 from illo.ledger import github as ledger
-from illo.ledger import kv, people
+from illo.ledger import kv, people, sensors
 from illo.tools.github import (
     PROFILES,
     CreateArgs,
@@ -52,28 +52,62 @@ async def start(ctx: ToolContext, args: dict) -> dict:
         issue["assignees"] = [{"login": login}]
     lane = await ledger.sync_item(ctx.conn, repo, issue, ctx.app.workspace.config.github.label_map)
     lane["last_event"] = f"State: {lane['state']}"
-    if ctx.app.slack_client:
-        channel = ctx.app.workspace.config.github.work_channel
-        if not channel and ctx.run.get("person_id"):
-            requester = next(
-                (p for p in await people.list_people(ctx.conn) if p["id"] == ctx.run["person_id"]),
-                None,
+    if ctx.app.workspace.config.github.work_channel or ctx.run.get("person_id"):
+        await kv.set(
+            ctx.conn,
+            f"github:pending-status:{lane['id']}",
+            {
+                "channel": ctx.app.workspace.config.github.work_channel,
+                "person_id": ctx.run.get("person_id"),
+            },
+        )
+        await send_status(ctx.app, ctx.conn, lane)
+    return {**result, "lane_id": lane["id"]}
+
+
+async def send_status(app, conn, lane: dict) -> None:
+    if not app.slack_client:
+        return
+    key = f"github:status:{lane['id']}"
+    pending_key = f"github:pending-status:{lane['id']}"
+    pending = await kv.get(conn, pending_key)
+    text = status_text(lane)
+    if not pending and await kv.get(conn, key) == text:
+        return
+    try:
+        if lane.get("slack_ts"):
+            await app.slack_client.chat_update(
+                channel=lane["slack_channel"], ts=lane["slack_ts"], text=text, mrkdwn=False
             )
-            if requester and requester["slack_id"]:
-                opened = await ctx.app.slack_client.conversations_open(users=requester["slack_id"])
+        elif pending:
+            channel = pending.get("channel")
+            if not channel:
+                requester = next(
+                    (
+                        p
+                        for p in await people.list_people(conn)
+                        if p["id"] == pending.get("person_id")
+                    ),
+                    None,
+                )
+                if not requester or not requester["slack_id"]:
+                    return
+                opened = await app.slack_client.conversations_open(users=requester["slack_id"])
                 channel = opened["channel"]["id"]
-        if channel:
-            text = status_text(lane)
-            sent = await ctx.app.slack_client.chat_postMessage(
+            sent = await app.slack_client.chat_postMessage(
                 channel=channel,
                 text=text,
                 mrkdwn=False,
                 unfurl_links=False,
                 client_msg_id=str(uuid5(NAMESPACE_URL, f"illo:github:{lane['external_id']}")),
             )
-            await ledger.status_sent(ctx.conn, lane["id"], channel, sent["ts"])
-            await kv.set(ctx.conn, f"github:status:{lane['id']}", text)
-    return {**result, "lane_id": lane["id"]}
+            await ledger.status_sent(conn, lane["id"], channel, sent["ts"])
+        await kv.set(conn, key, text)
+        await kv.delete(conn, pending_key)
+        await sensors.ok(conn, "github:status")
+    except Exception:
+        # Keep the lane and the pending status after a Slack failure.
+        await sensors.error(conn, "github:status", "The work status could not be sent")
 
 
 async def refresh_statuses(app) -> None:
@@ -81,14 +115,7 @@ async def refresh_statuses(app) -> None:
         return
     async with app.pool.connection() as conn:
         for lane in await ledger.statuses(conn):
-            text = status_text(lane)
-            key = f"github:status:{lane['id']}"
-            if await kv.get(conn, key) == text:
-                continue
-            await app.slack_client.chat_update(
-                channel=lane["slack_channel"], ts=lane["slack_ts"], text=text, mrkdwn=False
-            )
-            await kv.set(conn, key, text)
+            await send_status(app, conn, lane)
 
 
 def register(registry) -> None:
