@@ -6,7 +6,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Source = Literal["t3", "claude-code", "codex", "github", "manual", "email"]
-State = Literal["working", "waiting_person", "blocked", "review", "done", "failed", "unknown"]
+State = Literal[
+    "open", "working", "waiting_person", "blocked", "review", "done", "failed", "unknown"
+]
 
 
 class Arguments(BaseModel):

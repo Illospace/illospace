@@ -17,6 +17,7 @@ from illo.tools.github import (
 from illo.tools.registry import Tool, ToolContext
 
 LABELS = {
+    "open": "Open",
     "working": "Working",
     "waiting_person": "Needs a person",
     "blocked": "Blocked",

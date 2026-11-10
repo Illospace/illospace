@@ -335,3 +335,30 @@ async def test_claim_is_atomic_across_connections(pool):
 
     results = await asyncio.gather(take(), take(), take())
     assert results.count(True) == 1
+
+
+async def test_open_lanes_are_backlog_and_active_lanes_sort_first(conn, ada):
+    active = await lanes.upsert(
+        conn,
+        source="github",
+        external_id="active",
+        title="Acme task",
+        state="working",
+        owner_person_id=ada["id"],
+    )
+    backlog = await lanes.upsert(
+        conn,
+        source="github",
+        external_id="backlog",
+        title="Acme task",
+        state="open",
+        owner_person_id=ada["id"],
+    )
+    await conn.execute(
+        "UPDATE lanes SET last_signal_at=now()-interval '10 days' WHERE id=%s", (backlog["id"],)
+    )
+    assert not (await lanes.get(conn, backlog["id"]))["stale"]
+    assert [r["id"] for r in await lanes.search(conn)] == [active["id"]]
+    assert [r["id"] for r in await lanes.search(conn, "Acme")] == [active["id"], backlog["id"]]
+    assert [r["id"] for r in await lanes.search(conn, state="open")] == [backlog["id"]]
+    assert [r["id"] for r in await lanes.search(conn, "Acme", limit=1)] == [active["id"]]

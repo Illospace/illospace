@@ -6,11 +6,14 @@ from illo.ledger import lanes
 from illo.tools.registry import Arguments, Tool
 
 
-class SearchArgs(Arguments):
+class MineArgs(Arguments):
     query: str = ""
-    owner: str | None = None
     state: str | None = None
     limit: int = Field(default=20, ge=1, le=50)
+
+
+class SearchArgs(MineArgs):
+    owner: str | None = None
 
 
 class GetArgs(Arguments):
@@ -36,7 +39,11 @@ async def lanes_mine(ctx, args):
     if not ctx.principal.startswith("person:"):
         return []
     return await lanes.search(
-        ctx.conn, principal=ctx.principal, owner=ctx.principal[7:], stale_minutes=limits(ctx)
+        ctx.conn,
+        principal=ctx.principal,
+        owner=ctx.principal[7:],
+        stale_minutes=limits(ctx),
+        **args,
     )
 
 
@@ -45,7 +52,7 @@ def register(registry) -> None:
     for name, handler, arguments in (
         ("lanes_search", lanes_search, SearchArgs),
         ("lanes_get", lanes_get, GetArgs),
-        ("lanes_mine", lanes_mine, Arguments),
+        ("lanes_mine", lanes_mine, MineArgs),
     ):
         registry.add(
             Tool(

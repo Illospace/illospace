@@ -82,3 +82,41 @@ async def test_parallel_digest_timers_send_once(app, slack_client):
     now = datetime(2026, 11, 10, 9, tzinfo=UTC)
     await asyncio.gather(send_due(ctx, now), send_due(ctx, now))
     assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 1
+
+
+async def test_digest_counts_only_fresh_work_and_reviews(conn, ada):
+    from illo.ledger import ask_workflow, lanes
+
+    for state in (
+        "open",
+        "unknown",
+        "working",
+        "review",
+        "waiting_person",
+        "blocked",
+        "done",
+        "failed",
+    ):
+        await lanes.upsert(
+            conn,
+            source="github",
+            external_id=state,
+            title=state,
+            state=state,
+            owner_person_id=ada["id"],
+        )
+    stale = await lanes.upsert(
+        conn,
+        source="t3",
+        external_id="stale",
+        title="Stale work",
+        state="working",
+        owner_person_id=ada["id"],
+    )
+    await conn.execute(
+        "UPDATE lanes SET last_signal_at=now()-interval '10 days' WHERE id=%s OR state IN ('open','review')",
+        (stale["id"],),
+    )
+    data = await ask_workflow.digest_data(conn, ada, datetime.now(UTC))
+    assert data["running"] == 2
+    assert "2 run fine" in str(build_digest(data))

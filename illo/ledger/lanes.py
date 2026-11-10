@@ -115,9 +115,11 @@ async def search(
         WHERE (visibility = 'team' OR owner_person_id = (SELECT id FROM people WHERE 'person:' || key = %s AND active))
           AND (%s::text IS NULL OR owner_person_id = (SELECT id FROM people WHERE key = %s))
           AND (%s::text IS NULL OR state = %s)
+          AND (state <> 'open' OR %s::text <> '' OR %s::text IS NOT NULL)
           AND (concat_ws(' ',title,summary) ILIKE %s OR EXISTS
             (SELECT 1 FROM lane_events e WHERE e.lane_id=l.id AND e.text ILIKE %s))
-        ORDER BY updated_at DESC,id DESC LIMIT %s
+        ORDER BY CASE WHEN state IN ('working','review','waiting_person','blocked') THEN 0
+          WHEN state='open' THEN 1 ELSE 2 END,updated_at DESC,id DESC LIMIT %s
     """,
         (
             Jsonb(stale_minutes or DEFAULT_STALE_MINUTES),
@@ -125,6 +127,8 @@ async def search(
             owner,
             owner,
             state,
+            state,
+            query.strip(),
             state,
             f"%{query}%",
             f"%{query}%",

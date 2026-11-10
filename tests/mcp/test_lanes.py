@@ -133,3 +133,19 @@ async def test_stale_filter_runs_before_the_limit(app, http):
     await agent.call("lane_report", {"source": "t3", "external_id": "acme-new", "state": "working"})
     found = await agent.call("lane_search", {"state": "stale", "limit": 1})
     assert len(found["lanes"]) == 1 and found["lanes"][0]["external_id"] == "acme-old"
+
+
+async def test_open_lane_report_search_and_stale_filter(app, http):
+    agent = await AgentClient.create(app, http)
+    row = await agent.call(
+        "lane_report",
+        {"source": "t3", "external_id": "backlog", "title": "Acme backlog", "state": "open"},
+    )
+    assert row["state"] == "open"
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE lanes SET last_signal_at=now()-interval '10 days'")
+    assert (await agent.call("lane_search"))["lanes"] == []
+    assert (await agent.call("lane_search", {"state": "stale"}))["lanes"] == []
+    for args in ({"state": "open"}, {"query": "Acme"}):
+        found = (await agent.call("lane_search", args))["lanes"]
+        assert len(found) == 1 and found[0]["state"] == "open" and not found[0]["stale"]
