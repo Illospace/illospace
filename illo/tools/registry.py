@@ -49,6 +49,9 @@ class Tool:
     # agent_request, outsider. None means: use the default data in checks.py.
     profiles: frozenset[str] | None = None
 
+    # A ledger write can expose text to the whole team, as a note does.
+    team_visible: bool = False
+
     @property
     def json_schema(self) -> dict:
         """Pydantic supplies the same schema used to validate each call."""

@@ -1,5 +1,7 @@
 """Verify schema creation, restart safety, and per-file rollback."""
 
+from pathlib import Path
+
 import pytest
 from psycopg.errors import CheckViolation, ForeignKeyViolation, UndefinedTable
 
@@ -11,7 +13,10 @@ async def test_migrations_apply_twice(pool):
         assert await migrate(conn) == []
         assert await migrate(conn) == []
         records = await all_rows(conn, "SELECT name FROM schema_migrations")
-        assert records == [{"name": "0001_init.sql"}]
+        expected = {
+            path.name for path in (Path(__file__).parents[1] / "illo/migrations").glob("*.sql")
+        }
+        assert {row["name"] for row in records} == expected
         names = {
             r["tablename"]
             for r in await all_rows(

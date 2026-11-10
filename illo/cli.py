@@ -25,6 +25,9 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="illo")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("migrate")
+    archive = commands.add_parser("import-archive")
+    archive.add_argument("file")
+    archive.add_argument("--dry-run", action="store_true")
     commands.add_parser("doctor")
     commands.add_parser("reload")
     serve = commands.add_parser("serve")
@@ -104,6 +107,13 @@ async def execute(args, config: Config) -> int:
         if args.command == "migrate":
             applied = await migrate(conn)
             print(f"Applied {len(applied)} migration(s).")
+        elif args.command == "import-archive":
+            from illo.sources.archive import import_archive
+
+            async with conn.transaction(force_rollback=args.dry_run):
+                await load_workspace(config.workspace_dir).sync_people(conn)
+                counts = await import_archive(conn, args.file, dry_run=args.dry_run)
+            print(("Dry run. " if args.dry_run else "") + counts.text())
         elif args.command == "token":
             if args.action == "create":
                 await load_workspace(config.workspace_dir).sync_people(conn)

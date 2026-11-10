@@ -51,10 +51,10 @@ async def get(conn: Connection, source_ref: str, *, principal: str = "team") -> 
         conn,
         """
         SELECT id,created_at,kind,source_ref,title,body,summary,owner_person_id,visibility,links,meta,source_at
-        FROM items WHERE source_ref=%s AND (visibility='team' OR owner_person_id=
+        FROM items WHERE (source_ref=%s OR id=(SELECT item_id FROM item_aliases WHERE alias=%s)) AND (visibility='team' OR owner_person_id=
           (SELECT id FROM people WHERE 'person:' || key=%s AND active))
     """,
-        (source_ref, principal),
+        (source_ref, source_ref, principal),
     )
 
 
