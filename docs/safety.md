@@ -42,6 +42,10 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
 - `complete` in `illo/connectors/oauth.py` checks the Google account against the person's addresses in `people.yaml` (`GoogleClient.verify_account` in `illo/connectors/google.py`). It revokes a grant for another account. The web callback needs the `__Host-` browser cookie that the start link set.
 - The pasted sign-in address works only as the only text of an untainted person DM (`claim` in `illo/connectors/oauth.py`).
+- ChatGPT model sign-in is separate from personal data tools. `credential_person` in `illo/brain/run_manager.py` selects the requester's grant for person runs. A run with no person uses only the configured team credential. It never borrows another member's grant for a person request.
+- `illo/connectors/chatgpt_oauth.py` binds the paste flow to the person, DM, thread, expiry, and one use. The gateway removes callback addresses before it stores events. The main app refreshes the encrypted grant under a row lock. The brain receives only the access token and account ID for one run.
+
+**ChatGPT tests.** `tests/safety/test_rule_01_02_10_chatgpt.py`, `tests/chatgpt/`, and `tests/brain_service/test_chatgpt.py`.
 
 **Tests.** `tests/safety/test_rule_02_03_06_google.py`, `tests/safety/test_rule_02_routines.py`, `tests/safety/test_rule_02_06_search_visibility.py`, `tests/safety/test_review_s10_rule_02_google_binding.py`, `tests/safety/test_review_s12_token_scopes.py`, `tests/safety/test_review_s24_google_claim.py`, `tests/test_tools.py`.
 

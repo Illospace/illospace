@@ -261,6 +261,7 @@ async def test_truncated_stream_fails(run_request, fake_mcp, monkeypatch):
 async def test_default_base_and_effort(run_request, monkeypatch, base):
     import httpx
 
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     if base is None:
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     else:

@@ -78,6 +78,14 @@ Direct Compose commands must pass the same file with `--env-file`.
    Set `ILLO_BRAIN_MODEL` to the OpenAI model and `ILLO_BRAIN_EFFORT` to its reasoning effort (default `low`).
    `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
    This runtime uses Responses with `store: false` and only the Illo MCP tools.
+   To use each person's ChatGPT subscription, set `brain.runtime: openai_responses` and `brain.auth: chatgpt` in `illo.yaml`.
+   Keep `ILLO_VAULT_KEY` in the main app's environment, outside the checkout.
+   Each member sends `connect my ChatGPT` in their own Slack DM with Illo.
+   Set `brain.team_credential` to an active person key, or omit it to use `default_owner`.
+   `brain.api_key_fallback` defaults to `false`. Set it to `true` only to allow the brain's API key as a fallback.
+   The brain needs no sign-in file, refresh token, or host mount.
+   Check that the provider's terms allow this use. An API key is the alternative.
+   See [The model sign-in](connectors.md#the-model-sign-in) for the device and paste steps.
    For `openai_compat`, set `ILLO_BRAIN_RUNTIME=openai_compat`, `OPENAI_API_KEY`, and `OPENAI_BASE_URL`.
    Set `ILLO_BRAIN_MODEL` to the model name that the provider accepts.
    Set `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` only if that provider needs it.

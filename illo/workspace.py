@@ -111,6 +111,9 @@ class BrainConfig(Model):
     model: str = "default"
     max_turns: int = Field(default=12, ge=1, le=50)
     timeout_s: float = Field(default=120, gt=0, le=3600)
+    auth: Literal["chatgpt", "api_key"] = "api_key"
+    team_credential: str | None = None
+    api_key_fallback: bool = False
 
 
 class RunLimits(Model):
@@ -345,6 +348,12 @@ def load_workspace(root: Path | str) -> Workspace:
     keys = {p.key for p in people if p.active}
     if config.default_owner not in keys:
         raise WorkspaceError(f"{root / 'illo.yaml'}: default_owner: unknown or inactive person")
+    if config.brain.team_credential is not None and config.brain.team_credential not in keys:
+        raise WorkspaceError(
+            f"{root / 'illo.yaml'}: brain.team_credential: unknown or inactive person"
+        )
+    if config.brain.auth == "chatgpt" and config.brain.runtime != "openai_responses":
+        raise WorkspaceError(f"{root / 'illo.yaml'}: brain.auth: ChatGPT needs openai_responses")
     rules, skills, routines, connectors, notes = [], [], [], [], []
     for pattern, model, target in (
         ("rules/*.md", RuleFile, rules),

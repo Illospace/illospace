@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from brain.models import RunRequest, event
+from brain.models import ChatGPTAuth, RunRequest, event
 from brain.process import run_worker
 from brain.runtimes.claude import has_auth
 from brain.runtimes.provider_errors import identifier
@@ -36,7 +36,11 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                     "usable": bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL")),
                     "experimental": True,
                 },
-                "openai_responses": {"usable": bool(os.getenv("OPENAI_API_KEY"))},
+                "openai_responses": {
+                    "usable": bool(os.getenv("OPENAI_API_KEY")),
+                    "api_key": bool(os.getenv("OPENAI_API_KEY")),
+                    "per_run_chatgpt": True,
+                },
                 "echo": {"usable": True},
             },
         }
@@ -66,6 +70,12 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                                 os.getenv("ANTHROPIC_API_KEY"),
                                 os.getenv("ANTHROPIC_AUTH_TOKEN"),
                                 os.getenv("OPENAI_API_KEY"),
+                                body.provider_auth.access_token.get_secret_value()
+                                if isinstance(body.provider_auth, ChatGPTAuth)
+                                else None,
+                                body.provider_auth.account_id.get_secret_value()
+                                if isinstance(body.provider_auth, ChatGPTAuth)
+                                else None,
                             ):
                                 if value:
                                     line = line.replace(json.dumps(value)[1:-1], "[redacted]")

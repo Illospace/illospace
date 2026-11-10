@@ -48,7 +48,7 @@ Illo is one assistant for a whole team. It lives in Slack, it follows the work o
 - **It follows your coding agents on every machine.** A small collector reports each stream of work. Illo needs no access to the machine.
 - **Your team hosts the ledger.** One Postgres on your server. It stores the lanes, the asks, the saved items, and the messages of the public Slack channels that you configure. It also keeps each message to Illo and its answer. Illo searches the other sources where they live.
 - **You choose the model provider.** That provider receives the prompts and the tool results of each run. Only a local model keeps everything on your server.
-- **Any model.** Use the Claude Agent SDK, OpenAI through the Responses API, or OpenAI-compatible Chat Completions for other providers and local servers. Claude Agent SDK has earlier live checks. OpenAI Responses is tested live with `gpt-6.1-sol` and `gpt-6.1-terra` at effort `low`. Chat Completions has offline tests only. See [the brain guide](brain/README.md) for measured results.
+- **Any model.** Use the Claude Agent SDK, OpenAI through the Responses API, or the ChatGPT subscription of each team member. OpenAI-compatible Chat Completions supports other providers and local servers. Claude Agent SDK has earlier live checks. OpenAI Responses with an API key is tested live with `gpt-6.1-sol` and `gpt-6.1-terra` at effort `low`. ChatGPT subscriptions and Chat Completions have offline tests only. See [the brain guide](brain/README.md) for measured results.
 - **Safety rules in code.** The tool server checks each action. The prompt holds no authority.
 
 ## Install in 30 minutes
@@ -56,7 +56,7 @@ Illo is one assistant for a whole team. It lives in Slack, it follows the work o
 1. On a Linux host with Docker, run `git clone --branch next https://github.com/Illospace/illospace.git`. Then run `ILLO_DEPLOY_BRANCH=next deploy/install.sh` in the checkout. Use `next` until the rebuild merges into `main`.
 2. Create the Slack app from `deploy/slack/manifest.yaml`. Give its two tokens to the install script.
 3. Write your team in `people.yaml` and `illo.yaml` in the workspace folder.
-4. Give the brain a model: an Anthropic API key, or an OpenAI-compatible endpoint.
+4. Give the brain a model: each member's ChatGPT sign-in, an API key, or an OpenAI-compatible endpoint.
 5. Connect your first agent machine with `illo token create --person <key> --label <machine> --scope collector` and a collector.
 
 The full steps are in [docs/install.md](docs/install.md).
