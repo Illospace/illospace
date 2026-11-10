@@ -213,11 +213,13 @@ async def conversation(
         calls = [item for item in output if item["type"] == "function_call"]
         if not calls:
             answer = "".join(
-                part["text"]
+                part.get("text", "")
+                if part.get("type") == "output_text"
+                else part.get("refusal", "The model refused this request.")
                 for item in output
                 if item["type"] == "message"
                 for part in item.get("content", [])
-                if part.get("type") == "output_text"
+                if part.get("type") in {"output_text", "refusal"}
             )
             yield event("final", text=fallback_notice + answer, usage=usage)
             return
@@ -234,10 +236,10 @@ async def conversation(
                 raise RunError("runtime", "The model returned an invalid function call")
             yield event("tool_call", name=call["name"])
             try:
-                arguments = json.loads(call["arguments"])
+                arguments = json.loads(call["arguments"].strip() or "{}")
                 if not isinstance(arguments, dict):
                     raise TypeError
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError, AttributeError):
                 result = {
                     "isError": True,
                     "content": [{"type": "text", "text": "Invalid tool arguments"}],

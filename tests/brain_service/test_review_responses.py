@@ -72,3 +72,24 @@ async def test_u08_parallel_calls_stop_at_limit(run_request):
     assert len([e for e in events if e["type"] == "tool_call"]) == 2
     assert events[-1]["type"] == "error" and events[-1]["category"] == "limit"
 
+
+async def test_u09_empty_arguments_call_tool(run_request):
+    count = 0
+
+    def respond(wire):
+        nonlocal count
+        count += 1
+        return stream(complete([call(arguments="  ")] if count == 1 else [message()]))
+
+    events, session = await collect(subscription(run_request), respond)
+    assert session.calls == [{"name": "lanes_search", "arguments": {}}]
+    assert events[-1]["text"] == "Ready."
+
+
+async def test_u09_refusal_has_text(run_request):
+    refusal = {
+        "type": "message",
+        "content": [{"type": "refusal", "refusal": "I cannot help with that."}],
+    }
+    events, _ = await collect(subscription(run_request), lambda wire: stream(complete([refusal])))
+    assert events[-1]["text"] == "I cannot help with that."
