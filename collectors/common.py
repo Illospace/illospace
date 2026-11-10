@@ -81,9 +81,7 @@ class MCPClient:
     def __init__(self, url: str, token: str, client: httpx.Client | None = None):
         self.url = url
         self.token = token
-        self.client = client or httpx.Client(
-            timeout=15, follow_redirects=False, trust_env=False
-        )
+        self.client = client or httpx.Client(timeout=15, follow_redirects=False, trust_env=False)
         self.session: str | None = None
         self.protocol = "2025-03-26"
         self.ready = False
@@ -107,9 +105,7 @@ class MCPClient:
                 if response.status_code in (401, 404):
                     self.ready = False
                     self.session = None
-                raise CollectorError(
-                    f"The MCP request failed (HTTP {response.status_code})."
-                )
+                raise CollectorError(f"The MCP request failed (HTTP {response.status_code}).")
             self.session = response.headers.get("mcp-session-id", self.session)
             if notification:
                 return None
@@ -117,18 +113,14 @@ class MCPClient:
                 entries = []
                 for event in response.text.replace("\r\n", "\n").split("\n\n"):
                     data = "\n".join(
-                        line[5:].lstrip()
-                        for line in event.splitlines()
-                        if line.startswith("data:")
+                        line[5:].lstrip() for line in event.splitlines() if line.startswith("data:")
                     )
                     if data:
                         entries.append(json.loads(data))
             else:
                 value = response.json()
                 entries = value if isinstance(value, list) else [value]
-            result = next(
-                entry for entry in entries if entry.get("id") == self.sequence
-            )
+            result = next(entry for entry in entries if entry.get("id") == self.sequence)
             if result.get("error"):
                 raise CollectorError("The MCP server rejected the request.")
             return result["result"]
@@ -139,9 +131,7 @@ class MCPClient:
             StopIteration,
             TypeError,
         ) as from_error:
-            raise CollectorError(
-                "The MCP reply is unavailable or invalid."
-            ) from from_error
+            raise CollectorError("The MCP reply is unavailable or invalid.") from from_error
 
     def call(self, name: str, arguments: dict) -> Any:
         if not self.ready:
@@ -163,9 +153,7 @@ class MCPClient:
             return result["structuredContent"]
         try:
             return json.loads(
-                next(
-                    part["text"] for part in result["content"] if part["type"] == "text"
-                )
+                next(part["text"] for part in result["content"] if part["type"] == "text")
             )
         except (ValueError, KeyError, StopIteration, TypeError) as error:
             raise CollectorError("The MCP tool reply is invalid.") from error

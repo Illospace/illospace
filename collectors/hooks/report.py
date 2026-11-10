@@ -121,9 +121,7 @@ def worker(source: str, payload: dict, config_path: Path) -> None:
             if payload.get("hook_event_name") == "UserPromptSubmit" and not entry.get(
                 "prompt_title"
             ):
-                lane["title"] = (
-                    clean(payload.get("prompt"), 200, (token,)) or lane["title"]
-                )
+                lane["title"] = clean(payload.get("prompt"), 200, (token,)) or lane["title"]
                 entry["prompt_title"] = True
             MCPClient(config["mcp_url"], token).call("lane_report", lane)
             state[key] = {

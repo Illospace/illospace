@@ -56,9 +56,7 @@ def test_mcp_sse_session_and_protocol():
 )
 def test_mcp_errors_do_not_expose_responses(value):
     def handler(request):
-        return httpx.Response(
-            200, json={"id": json.loads(request.content)["id"], **value}
-        )
+        return httpx.Response(200, json={"id": json.loads(request.content)["id"], **value})
 
     client = MCPClient(
         "https://illo.example/mcp",

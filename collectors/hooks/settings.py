@@ -26,11 +26,7 @@ def merge_claude(settings: dict, command: str, remove: bool = False) -> dict:
     for event in EVENTS:
         entries = []
         for entry in hooks.get(event, []):
-            kept = [
-                hook
-                for hook in entry.get("hooks", [])
-                if hook.get("command") != command
-            ]
+            kept = [hook for hook in entry.get("hooks", []) if hook.get("command") != command]
             if kept:
                 entries.append({**entry, "hooks": kept})
             elif not entry.get("hooks"):
@@ -65,9 +61,7 @@ def notify_span(text: str) -> tuple[int, int] | None:
     return None
 
 
-def merge_codex(
-    text: str, command: list[str], remove: bool = False, previous: str = ""
-) -> str:
+def merge_codex(text: str, command: list[str], remove: bool = False, previous: str = "") -> str:
     """Keep an existing notify program in the bundle's local config."""
     parsed = tomllib.loads(text)
     lines = text.splitlines(keepends=True)
@@ -82,9 +76,7 @@ def merge_codex(
             raise ValueError("The notify value must be a list.")
         entry = "notify = " + json.dumps(command) + " " + MARKER + "\n"
         result = (
-            "".join(lines[: span[0]]) + entry + "".join(lines[span[1] :])
-            if span
-            else entry + text
+            "".join(lines[: span[0]]) + entry + "".join(lines[span[1] :]) if span else entry + text
         )
     tomllib.loads(result)
     return result
@@ -114,10 +106,7 @@ def main() -> int:
     args = parser.parse_args()
     home = args.home.expanduser().resolve()
     config = home / ".config/illo/hooks.json"
-    claude = (
-        Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude")))
-        / "settings.json"
-    )
+    claude = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude"))) / "settings.json"
     codex = Path(os.environ.get("CODEX_HOME", str(home / ".codex"))) / "config.toml"
     script = Path(__file__).resolve().with_name("report.py")
     command = shlex.join(
@@ -149,11 +138,7 @@ def main() -> int:
             )
         current = json.loads(claude.read_text()) if claude.exists() else {}
         previous_command_line = installed.get("claude_command")
-        if (
-            not args.uninstall
-            and previous_command_line
-            and previous_command_line != command
-        ):
+        if not args.uninstall and previous_command_line and previous_command_line != command:
             current = merge_claude(current, previous_command_line, remove=True)
         updated = merge_claude(current, command, args.uninstall)
         codex_text = codex.read_text() if codex.exists() else ""
@@ -188,8 +173,7 @@ def main() -> int:
                 raise ValueError("The token is empty.")
             token_path = home / ".config/illo/token"
             if any(
-                (parent / ".git").exists()
-                for parent in [token_path.parent, *token_path.parents]
+                (parent / ".git").exists() for parent in [token_path.parent, *token_path.parents]
             ):
                 raise ValueError("The token file must stay outside every checkout.")
             # A token has no backup. A backup would keep a revoked credential alive on disk.

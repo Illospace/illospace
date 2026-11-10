@@ -42,9 +42,7 @@ class Config:
     t3_url: str = "http://127.0.0.1:3773"
     t3_token_file: Path | None = None
     data_path: Path | None = None
-    state_file: Path = field(
-        default_factory=lambda: Path.home() / ".local/state/illo/t3.json"
-    )
+    state_file: Path = field(default_factory=lambda: Path.home() / ".local/state/illo/t3.json")
     poll_seconds: float = 30
     projects: dict[str, str] = field(default_factory=dict)
     owner: str | None = None
@@ -68,11 +66,7 @@ class Config:
         }
         for env, key in names.items():
             if env in os.environ:
-                values[key] = (
-                    json.loads(os.environ[env])
-                    if key == "projects"
-                    else os.environ[env]
-                )
+                values[key] = json.loads(os.environ[env]) if key == "projects" else os.environ[env]
         for key in ("token_file", "t3_token_file", "data_path", "state_file"):
             if values.get(key):
                 values[key] = Path(values[key]).expanduser()
@@ -82,9 +76,7 @@ class Config:
         if not values.get("mcp_url") or not values.get("token_file"):
             raise CollectorError("Set ILLO_MCP_URL and ILLO_TOKEN_FILE.")
         if not isinstance(values.get("projects", {}), dict):
-            raise CollectorError(
-                "The project map must be a JSON object or a TOML table."
-            )
+            raise CollectorError("The project map must be a JSON object or a TOML table.")
         return cls(**values)
 
 
@@ -145,9 +137,7 @@ class T3Source:
         self.config = config
         self.client = client or httpx.Client(timeout=15, trust_env=False)
         self.token = read_token(config.t3_token_file) if config.t3_token_file else ""
-        self.mcp = MCPClient(
-            config.t3_url.rstrip("/") + "/mcp", self.token, self.client
-        )
+        self.mcp = MCPClient(config.t3_url.rstrip("/") + "/mcp", self.token, self.client)
         self._cache: dict[str, tuple[str, Thread]] = {}
 
     def _get(self, path: str) -> dict:
@@ -177,9 +167,7 @@ class T3Source:
         ]
 
     def _read_thread(self, row: dict) -> Thread:
-        projection = self._get(
-            "/api/orchestration/threads/" + quote(row["id"], safe="")
-        )
+        projection = self._get("/api/orchestration/threads/" + quote(row["id"], safe=""))
         return self._thread(row, projection["projection"])
 
     def list_threads(self) -> list[Thread]:
@@ -253,11 +241,11 @@ class T3Source:
                         }
                     )
                     values[option_id] = option.get("value", option["label"])
-                    if (
-                        option.get("recommended")
-                        or "(recommended)" in option["label"].lower()
-                    ):
+                    if option.get("recommended") or "(recommended)" in option["label"].lower():
                         recommended = option_id
+                plain_start = not options and start_question(question["question"])
+                if plain_start:
+                    values = {"continue": "Continue", "stop": "Stop"}
                 pending.append(
                     Pending(
                         request["id"],
@@ -268,7 +256,7 @@ class T3Source:
                         request["kind"],
                         manual
                         or bool(question.get("multiSelect"))
-                        or not 2 <= len(options) <= 5,
+                        or (not 2 <= len(options) <= 5 and not plain_start),
                         values,
                     )
                 )
@@ -290,9 +278,7 @@ class T3Source:
         ]
         latest = max(messages, key=lambda msg: msg.get("updatedAt", ""), default={})
         status = row.get("activityRunStatus") or row.get("status", "unknown")
-        state = lane_state(
-            status, bool(pending), row.get("settledOverride") == "settled"
-        )
+        state = lane_state(status, bool(pending), row.get("settledOverride") == "settled")
         if row.get("blockedOnThreadWait") and not pending:
             state = "unknown"
         if state == "waiting_person" and not pending:
@@ -347,9 +333,9 @@ class T3Source:
                 }
                 for key, query in queries.items():
                     for thread_id, payload in connection.execute(query):
-                        projections.setdefault(thread_id, {}).setdefault(
-                            key, []
-                        ).append(json.loads(payload))
+                        projections.setdefault(thread_id, {}).setdefault(key, []).append(
+                            json.loads(payload)
+                        )
                 result = []
                 for (payload,) in rows:
                     row = json.loads(payload)
@@ -364,14 +350,12 @@ class T3Source:
                 "The read-only T3 database is unavailable or its schema changed."
             ) from error
 
-    def deliver(
-        self, thread: Thread, pending: Pending, answer: dict, message: str
-    ) -> None:
+    def deliver(self, thread: Thread, pending: Pending, answer: dict, message: str) -> None:
         if not self.token:
             raise CollectorError("Set ILLO_T3_TOKEN_FILE before answer delivery.")
         if pending.question_id:
-            option_id = answer["answer_option"]["id"]
-            if option_id not in pending.values:
+            option = answer.get("answer_option")
+            if option and option.get("id") not in pending.values:
                 raise CollectorError("The answer does not match the pending options.")
             # T3 resumes a live question only through its structured response path.
             self.mcp.call(
@@ -396,16 +380,10 @@ class T3Source:
 
 
 class Collector:
-    def __init__(
-        self, config: Config, source: T3Source, mcp: MCPClient, clock=time.time
-    ):
+    def __init__(self, config: Config, source: T3Source, mcp: MCPClient, clock=time.time):
         self.config, self.source, self.mcp, self.clock = config, source, mcp, clock
         self.secrets = (mcp.token, source.token)
-        self.state = (
-            json.loads(config.state_file.read_text())
-            if config.state_file.exists()
-            else {}
-        )
+        self.state = json.loads(config.state_file.read_text()) if config.state_file.exists() else {}
         self.state.setdefault("lanes", {})
         self.state.setdefault("asks", {})
         self.state.setdefault("delivered", {})
@@ -459,9 +437,7 @@ class Collector:
             ],
             "source_ref": f"t3:{thread.id}:{pending.id}",
             "proof": {
-                "text": "Open the thread to answer this request."
-                if manual
-                else "Agent question.",
+                "text": "Open the thread to answer this request." if manual else "Agent question.",
                 "links": [thread.link],
             },
         }
@@ -486,8 +462,7 @@ class Collector:
             lane
             for lane in lanes
             if refresh
-            or self.state["lanes"].get(lane["external_id"])
-            != hashes[lane["external_id"]]
+            or self.state["lanes"].get(lane["external_id"]) != hashes[lane["external_id"]]
         ]
         self.mcp.call(
             "lane_report",
@@ -512,9 +487,7 @@ class Collector:
                 active[ref] = (thread, pending)
                 if ref not in self.state["asks"]:
                     self.mcp.call("ask_create", args)
-                    self.state["asks"][ref] = {
-                        "manual": args["options"][0]["id"] == "open-thread"
-                    }
+                    self.state["asks"][ref] = {"manual": args["options"][0]["id"] == "open-thread"}
                     self.save()
         for ref in list(self.state["asks"]):
             if ref not in active and not self.state["asks"][ref].get("cancelled"):
@@ -530,9 +503,7 @@ class Collector:
             except (CollectorError, KeyError, TypeError, ValueError, OSError):
                 failed = True
         if failed:
-            raise CollectorError(
-                "One or more answers could not be delivered or acknowledged."
-            )
+            raise CollectorError("One or more answers could not be delivered or acknowledged.")
 
     def deliver_answer(self, answer: dict) -> None:
         if answer.get("lane", {}).get("source") != "t3":
@@ -546,11 +517,7 @@ class Collector:
             thread = self.source.get_thread(answer["lane"]["external_id"])
             pending = (
                 next(
-                    (
-                        item
-                        for item in thread.pending
-                        if f"t3:{thread.id}:{item.id}" == ref
-                    ),
+                    (item for item in thread.pending if f"t3:{thread.id}:{item.id}" == ref),
                     None,
                 )
                 if thread
@@ -560,21 +527,19 @@ class Collector:
             if pending and thread.state == "waiting_person":
                 manual = self.state["asks"].get(ref, {}).get("manual", False)
                 if not manual:
-                    if answer.get("answered_via") == "rule" and answer.get(
-                        "answer_text"
-                    ):
-                        raise CollectorError(
-                            "A rule answer cannot add free instructions."
-                        )
-                    option = answer.get("answer_option", {})
+                    via = answer.get("answered_via")
+                    if via not in {"person", "rule"}:
+                        raise CollectorError("The answer must come from a person or a rule.")
+                    if answer.get("answered_via") == "rule" and answer.get("answer_text"):
+                        raise CollectorError("A rule answer cannot add free instructions.")
+                    option = answer.get("answer_option")
                     proposed = {
-                        item["id"]: item["label"]
-                        for item in self.ask(thread, pending)["options"]
+                        item["id"]: item["label"] for item in self.ask(thread, pending)["options"]
                     }
-                    if proposed.get(option.get("id")) != option.get("label"):
-                        raise CollectorError(
-                            "The answer does not match the proposed options."
-                        )
+                    if option and proposed.get(option.get("id")) != option.get("label"):
+                        raise CollectorError("The answer does not match the proposed options.")
+                    if not option and (via != "person" or not answer.get("answer_text")):
+                        raise CollectorError("Only a person can give a free answer.")
                     person = answer.get("answered_by") or self.config.owner or "owner"
                     if isinstance(person, dict):
                         person = person.get("name") or person.get("key") or "person"
@@ -584,7 +549,7 @@ class Collector:
                             raise CollectorError("The rule answer must name its rule.")
                         text = "Rule: " + answer["rule_text"]
                     message = (
-                        f"Answer from {person} (via Illo): {option['label']}. {text}"
+                        f"Answer from {person} (via Illo): {option['label'] if option else 'Answer'}. {text}"
                     ).rstrip()
                     self.source.deliver(thread, pending, answer, message)
                     note = "Delivered."
@@ -609,9 +574,7 @@ def main() -> int:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise CollectorError(
-                    "Another collector uses this state file."
-                ) from None
+                raise CollectorError("Another collector uses this state file.") from None
             source = T3Source(config)
             mcp = MCPClient(config.mcp_url, read_token(config.token_file))
             collector = Collector(config, source, mcp)
@@ -630,9 +593,7 @@ def main() -> int:
                 time.sleep(config.poll_seconds)
     except (CollectorError, OSError, ValueError, TypeError) as error:
         print(
-            str(error)
-            if isinstance(error, CollectorError)
-            else "The collector setup failed.",
+            str(error) if isinstance(error, CollectorError) else "The collector setup failed.",
             file=sys.stderr,
         )
         return 1

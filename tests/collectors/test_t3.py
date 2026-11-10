@@ -96,9 +96,7 @@ class APIs:
 
     def response(self, request, value):
         body = json.loads(request.content)
-        return httpx.Response(
-            200, json={"jsonrpc": "2.0", "id": body.get("id"), "result": value}
-        )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body.get("id"), "result": value})
 
     def t3(self, request):
         if request.method == "GET":
@@ -120,9 +118,7 @@ class APIs:
             return httpx.Response(503)
         self.sequence.append("send")
         self.sent.append(body["params"])
-        return self.response(
-            request, {"content": [{"type": "text", "text": '{"sequence": 1}'}]}
-        )
+        return self.response(request, {"content": [{"type": "text", "text": '{"sequence": 1}'}]})
 
     def illo(self, request):
         body = json.loads(request.content)
@@ -140,9 +136,7 @@ class APIs:
             if name == "ask_pull"
             else {"ask_id": 1, "state": "open"}
         )
-        return self.response(
-            request, {"content": [{"type": "text", "text": json.dumps(result)}]}
-        )
+        return self.response(request, {"content": [{"type": "text", "text": json.dumps(result)}]})
 
 
 @pytest.fixture
@@ -207,18 +201,13 @@ def test_changed_lanes_heartbeat_refresh_and_restart(setup):
         "threads_seen": 1,
     }
     api.calls.clear()
-    collector = Collector(
-        collector.config, collector.source, collector.mcp, clock=lambda: now[0]
-    )
+    collector = Collector(collector.config, collector.source, collector.mcp, clock=lambda: now[0])
     now[0] += 30
     collector.poll()
     assert api.calls[0][1]["lanes"] == []
     now[0] += 570
     collector.poll()
-    assert (
-        len([args for name, args in api.calls if name == "lane_report"][-1]["lanes"])
-        == 1
-    )
+    assert len([args for name, args in api.calls if name == "lane_report"][-1]["lanes"]) == 1
     api.projection["messages"][0]["text"] = "The tests pass."
     collector.poll()
     assert [args for name, args in api.calls if name == "lane_report"][-1]["lanes"][0][
@@ -346,13 +335,9 @@ def test_rule_08_names_its_source_and_uses_a_proposed_option(setup):
     api.wait()
     collector.poll()
     api.answer()
-    api.answers[0].update(
-        answered_via="rule", answer_text=None, rule_text="Run tests first."
-    )
+    api.answers[0].update(answered_via="rule", answer_text=None, rule_text="Run tests first.")
     collector.poll()
-    assert api.sent[0]["arguments"]["answers"]["question-a"].endswith(
-        "Rule: Run tests first."
-    )
+    assert api.sent[0]["arguments"]["answers"]["question-a"].endswith("Rule: Run tests first.")
 
 
 @pytest.mark.parametrize(
@@ -393,9 +378,7 @@ def test_plain_start_question_uses_message_and_stable_retry_id(setup):
     sent = api.sent[0]
     assert sent["name"] == "t3_thread_send"
     assert sent["arguments"]["clientRequestId"] == "illo-answer-1"
-    assert sent["arguments"]["message"].startswith(
-        "Answer from Sam (via Illo): Continue."
-    )
+    assert sent["arguments"]["message"].startswith("Answer from Sam (via Illo): Continue.")
 
 
 @pytest.mark.parametrize(
@@ -429,8 +412,7 @@ def test_approval_is_manual(setup):
 def test_rule_09_payload_has_only_permitted_fields_and_no_machine_credential(setup):
     collector, api, _ = setup
     api.projection["messages"][0]["text"] = (
-        "Hello acme-local-token acme-illo-token ```secret file``` password=hidden "
-        + "x" * 600
+        "Hello acme-local-token acme-illo-token ```secret file``` password=hidden " + "x" * 600
     )
     api.projection["turnItems"] = [
         {"type": "command_execution", "input": "private command", "output": "PRIVATE"}
@@ -479,6 +461,34 @@ def test_one_failed_answer_does_not_stop_other_answers(setup, monkeypatch):
         collector.poll()
     assert ("ask_ack", {"ask_id": 2}) in api.calls
     assert ("ask_ack", {"ask_id": 1}) not in api.calls
+
+
+def test_person_can_give_a_free_answer(setup):
+    collector, api, _ = setup
+    api.wait()
+    collector.poll()
+    api.answer()
+    api.answers[0]["answer_option"] = None
+    collector.poll()
+    assert api.sent[0]["arguments"]["answers"]["question-a"] == (
+        "Answer from Sam (via Illo): Answer. Use the local checks."
+    )
+    assert api.calls[-1][0] == "ask_ack"
+
+
+def test_start_question_without_options_can_resume_a_structured_request(setup):
+    collector, api, _ = setup
+    api.wait()
+    api.projection["turnItems"][0]["questions"][0].update(question="May I start?", options=[])
+    collector.poll()
+    args = next(args for name, args in api.calls if name == "ask_create")
+    assert [option["label"] for option in args["options"]] == ["Continue", "Stop"]
+    api.answer()
+    api.answers[0]["answer_option"] = {"id": "continue", "label": "Continue"}
+    collector.poll()
+    assert api.sent[0]["arguments"]["answers"]["question-a"].startswith(
+        "Answer from Sam (via Illo): Continue."
+    )
 
 
 def test_project_filter(setup):

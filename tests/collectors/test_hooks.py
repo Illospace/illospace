@@ -135,10 +135,7 @@ def test_codex_merge_round_trip_preserves_multiline_notify_and_other_settings():
 
 def test_codex_uninstall_keeps_a_notify_program_that_the_person_changed():
     text = 'notify = ["new-program"]\n'
-    assert (
-        merge_codex(text, [], remove=True, previous='notify = ["old-program"]\n')
-        == text
-    )
+    assert merge_codex(text, [], remove=True, previous='notify = ["old-program"]\n') == text
 
 
 def test_install_and_uninstall_make_backup_keep_hooks_and_secure_token(tmp_path):
@@ -147,11 +144,7 @@ def test_install_and_uninstall_make_backup_keep_hooks_and_secure_token(tmp_path)
     codex = home / ".codex/config.toml"
     claude.parent.mkdir(parents=True)
     codex.parent.mkdir(parents=True)
-    original = {
-        "hooks": {
-            "Stop": [{"hooks": [{"type": "command", "command": "acme-existing"}]}]
-        }
-    }
+    original = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "acme-existing"}]}]}}
     claude.write_text(json.dumps(original))
     codex_text = 'notify = ["acme-notify"]\nmodel = "acme-model"\n'
     codex.write_text(codex_text)
@@ -179,9 +172,9 @@ def test_install_and_uninstall_make_backup_keep_hooks_and_secure_token(tmp_path)
     token = home / ".config/illo/token"
     assert token.stat().st_mode & 0o777 == 0o600
     assert "acme-secret" not in result.stdout + result.stderr
-    assert json.loads((home / ".config/illo/hooks.json").read_text())[
-        "previous_notify"
-    ] == ["acme-notify"]
+    assert json.loads((home / ".config/illo/hooks.json").read_text())["previous_notify"] == [
+        "acme-notify"
+    ]
     assert len(json.loads(claude.read_text())["hooks"]["Stop"]) == 2
     assert list(claude.parent.glob("settings.json.illo-*.bak"))
     result = subprocess.run(
@@ -239,9 +232,7 @@ def test_valid_hook_returns_before_its_worker_reads_missing_config(tmp_path):
     assert result.stdout == result.stderr == ""
 
 
-def test_worker_keeps_existing_notify_payload_and_filters_illo_payload(
-    monkeypatch, tmp_path
-):
+def test_worker_keeps_existing_notify_payload_and_filters_illo_payload(monkeypatch, tmp_path):
     from collectors.common import MCPClient
     from collectors.hooks import report
 
@@ -272,13 +263,9 @@ def test_worker_keeps_existing_notify_payload_and_filters_illo_payload(
     }
     notified = []
     reported = []
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda command, **kwargs: notified.append(command)
-    )
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **kwargs: notified.append(command))
     monkeypatch.setattr(report, "repository", lambda cwd: "acme/app")
-    monkeypatch.setattr(
-        MCPClient, "call", lambda self, name, args: reported.append((name, args))
-    )
+    monkeypatch.setattr(MCPClient, "call", lambda self, name, args: reported.append((name, args)))
     report.worker("codex", payload, config)
     assert json.loads(notified[0][-1]) == original_payload
     assert "PRIVATE" not in json.dumps(reported)
