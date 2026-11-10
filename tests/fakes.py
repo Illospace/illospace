@@ -147,6 +147,9 @@ class FakeGitHubClient:
                 issue.setdefault("labels", []).extend(labels)
         return labels
 
+    async def ensure_label(self, repo, name):
+        self.calls.append({"method": "ensure_label", "repo": repo, "name": name})
+
     async def comment_issue(self, repo: str, number: int, body: str):
         self.calls.append({"method": "comment_issue", "repo": repo, "number": number, "body": body})
         for issue in self._items(repo, self.issues):

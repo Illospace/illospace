@@ -128,7 +128,7 @@ def register(registry) -> None:
             False,
             start,
             arguments=StartArgs,
-            profiles=PROFILES,
+            profiles=PROFILES - {"tainted"},
             preflight=write_preflight,
         )
     )
