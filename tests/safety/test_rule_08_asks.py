@@ -23,7 +23,8 @@ async def test_rule_08_only_exact_proposed_label_and_names_rule(conn, ada, value
         assert result is None
     else:
         assert result["answer_option"] == expected and result["answered_via"] == "rule"
-        assert result["answer_text"] == 'Answered by the rule "Use the reviewed plan" of Ada.'
+        assert result["answer_text"] is None
+        assert result["rule_id"] == rule["id"]
         assert (await rules.list_rules(conn, principal="person:ada"))[0]["uses"] == 1
 
 

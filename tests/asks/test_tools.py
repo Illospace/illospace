@@ -117,9 +117,8 @@ async def test_rule_tool_applies_only_matching_rule(app, rpc, rpc_token):
         rpc, token, "asks_answer_with_rule", {"id": row["id"], "rule_id": rule["id"]}
     )
     assert result["result"]["answered"]
-    assert (
-        'Answered by the rule "Use the reviewed plan"' in result["result"]["answer"]["answer_text"]
-    )
+    assert result["result"]["answer"]["answer_text"] is None
+    assert result["result"]["answer"]["rule_id"] == rule["id"]
 
 
 async def test_create_rejects_unknown_owner_and_invalid_recommendation(rpc, rpc_token):

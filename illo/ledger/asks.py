@@ -155,7 +155,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
         if option is None or not rules.matches(rule, ask, lane):
             return None
         owner = await one(
-            conn, "SELECT name FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
+            conn, "SELECT id FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
         )
         if not owner:
             return None
@@ -163,15 +163,10 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
             conn,
             """
             UPDATE asks SET state='answered',answer_option=%s,answered_via='rule',rule_id=%s,
-              answer_text=%s,
+              answer_text=NULL,
               answered_at=now(),delivery_state='pending' WHERE id=%s RETURNING *
         """,
-            (
-                option["id"],
-                rule_id,
-                f'Answered by the rule "{rule["text"]}" of {owner["name"]}.',
-                ask_id,
-            ),
+            (option["id"], rule_id, ask_id),
         )
         await rules.count_use(conn, rule_id)
         return row
