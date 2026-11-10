@@ -146,7 +146,8 @@ async def conversation(
     usage = {}
     fallback_notice = ""
     subscription_limit = None
-    for _ in range(request.max_turns):
+    tool_calls = 0
+    while tool_calls < request.max_turns:
         completed = None
         for attempt in range(2):
             text_deltas = []
@@ -223,6 +224,12 @@ async def conversation(
         # Replay all output, including encrypted reasoning, without a response ID.
         items.extend(output)
         for call in calls:
+            if tool_calls >= request.max_turns:
+                yield event(
+                    "error", category="limit", message="The run reached its turn limit", usage=usage
+                )
+                return
+            tool_calls += 1
             if not call.get("call_id"):
                 raise RunError("runtime", "The model returned an invalid function call")
             yield event("tool_call", name=call["name"])

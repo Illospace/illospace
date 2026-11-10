@@ -60,3 +60,15 @@ async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeyp
     assert any(i.get("type") == "function_call_output" for i in bodies[-1]["input"])
     assert [e["text"] for e in events if e["type"] == "text"] == ["Ready."]
     assert len(session.calls) == 1
+
+
+async def test_u08_parallel_calls_stop_at_limit(run_request):
+    run_request = subscription(run_request)
+    run_request.max_turns = 2
+    events, session = await collect(
+        run_request, lambda wire: stream(complete([call(i) for i in range(3)]))
+    )
+    assert len(session.calls) == 2
+    assert len([e for e in events if e["type"] == "tool_call"]) == 2
+    assert events[-1]["type"] == "error" and events[-1]["category"] == "limit"
+

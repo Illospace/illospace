@@ -262,7 +262,7 @@ Its JSON body has these fields:
 | `mcp_token` | The bearer token for this run. |
 | `runtime` | `claude`, `openai_responses`, `openai_compat`, or `echo`. Default: `claude`. |
 | `model` | The model name. Default: `ILLO_BRAIN_MODEL`, then `claude-opus-5-5`. |
-| `max_turns` | Maximum model turns, from 1 to 50. Default: 8. |
+| `max_turns` | Maximum tool calls for Responses, from 1 to 50. Default: 8. Other runtimes count their turns. |
 | `timeout_s` | Active run deadline in seconds, up to 3600. Default: 120. |
 
 The response uses `application/x-ndjson`. Each line is one JSON object with `type` and `run_id`.
