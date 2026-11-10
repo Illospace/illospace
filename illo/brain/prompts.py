@@ -131,6 +131,8 @@ def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks)
         if person.areas:
             detail += ", areas " + ", ".join(person.areas)
         lines.append(detail)
+    if key in {"person_dm", "team_channel", "tainted", "routine", "agent_request"}:
+        lines.append("• GitHub repositories: " + (", ".join(config.github.repositories) or "none"))
     timezone = person.timezone if person else config.timezone
     local = (now or datetime.now(UTC)).astimezone(ZoneInfo(timezone))
     lines.append(f"• Local time: {local:%A} {local.day} {local:%B %Y, %H:%M}, {timezone}")

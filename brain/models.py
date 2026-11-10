@@ -40,9 +40,12 @@ class RunRequest(BaseModel):
         default_factory=ApiKeyAuth, discriminator="kind", repr=False
     )
     api_key_fallback: bool = False
+    smoke: bool = False
 
     @model_validator(mode="after")
     def auth_runtime(self):
+        if self.smoke and self.runtime != "openai_responses":
+            raise ValueError("The smoke check needs openai_responses")
         if self.provider_auth.kind == "chatgpt" and self.runtime != "openai_responses":
             raise ValueError("ChatGPT sign-in needs the openai_responses runtime")
         return self

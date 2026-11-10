@@ -87,7 +87,7 @@ async def save_item(conn, *, title, body, person_id, visibility, meta) -> dict:
 async def submission_run(conn, event_id) -> dict | None:
     return await one(
         conn,
-        """SELECT r.id,r.status,r.ended_at,r.error FROM runs r JOIN events e ON e.id=r.event_id
+        """SELECT r.id,r.status,r.ended_at,r.error,r.usage FROM runs r JOIN events e ON e.id=r.event_id
         WHERE e.channel='mcp' AND e.external_id=%s ORDER BY r.id DESC LIMIT 1""",
         (event_id,),
     )

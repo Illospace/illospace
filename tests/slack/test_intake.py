@@ -6,9 +6,9 @@ import time
 import pytest
 
 from illo.brain.client import BrainEvent
-from illo.channels.slack.adapter import ERROR
 from illo.channels.slack.intake import CLIP_ERROR
 from illo.db import all_rows, one
+from illo.gateway.replies import error_text
 
 
 async def test_dm_placeholder_precedes_brain_and_final_edits(
@@ -164,7 +164,7 @@ async def test_error_edits_placeholder(intake, message, fake_brain, slack_client
         "method": "chat_update",
         "channel": "D_ACME_ADA",
         "ts": "1",
-        "text": ERROR,
+        "text": error_text("provider"),
     }
 
 

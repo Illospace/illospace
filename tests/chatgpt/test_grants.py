@@ -62,10 +62,10 @@ async def test_refresh_failure_broken_and_one_dm(chatgpt_app, replay, fake_brain
     [
         ("person_dm", "person:ben", 2, False, "ben"),
         ("agent_request", "person:ben", 2, False, "ben"),
-        ("team_channel", "team", None, False, "ada"),
-        ("tainted", "team", None, True, "ada"),
-        ("tainted", "person:ben", 2, True, "ada"),
-        ("routine", "team", None, False, "ada"),
+        ("team_channel", "team", None, False, None),
+        ("tainted", "team", None, True, None),
+        ("tainted", "person:ben", 2, True, None),
+        ("routine", "team", None, False, None),
         ("person_dm", "person:ada", 1, False, "ada"),
     ],
 )
@@ -95,19 +95,39 @@ async def test_missing_can_use_explicit_api_fallback(chatgpt_app, replay, fake_b
 async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
     app, _ = chatgpt_app
     ctx = app.state.ctx
-    authority = Authority("team", "tainted", tainted=True)
+    authority = Authority("team", "team_channel")
     await asyncio.gather(
         provider_auth(ctx, authority, "openai_responses"),
         provider_auth(ctx, authority, "openai_responses"),
     )
-    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.MISSING]) == 1
+    assert (
+        len(
+            [
+                c
+                for c in slack_client.calls
+                if c.get("text")
+                == "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+            ]
+        )
+        == 1
+    )
     async with ctx.pool.connection() as conn:
         assert await one(conn, "SELECT 1 FROM sensors WHERE key='chatgpt:team'")
         await conn.execute(
             "UPDATE kv SET value=jsonb_build_object('at',clock_timestamp()-interval '61 minutes') WHERE key='chatgpt:team-notice'"
         )
     await provider_auth(ctx, authority, "openai_responses")
-    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.MISSING]) == 2
+    assert (
+        len(
+            [
+                c
+                for c in slack_client.calls
+                if c.get("text")
+                == "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+            ]
+        )
+        == 2
+    )
 
 
 async def test_configured_team_credential(chatgpt_app):
@@ -172,3 +192,89 @@ async def test_failed_run_does_not_rollback_rotation(chatgpt_app, replay):
         row = await grants.load(conn, person["id"])
         assert json.loads(vault(ctx).decrypt(row["secret"]))["refresh_token"] == "rotated-refresh"
         assert (await one(conn, "SELECT status FROM runs"))["status"] == "failed"
+
+
+async def test_s5_skipped_tainted_run_has_text_and_a_ledger_record(
+    chatgpt_app, replay, fake_brain
+):
+    app, _ = chatgpt_app
+    result = await replay(
+        kind="channel", text="An outside alert.",
+        payload={"channel_id": "C_ACME_ALERTS", "bot": True},
+    )
+    assert result["text"] == (
+        "Illo did not run the model for this event. "
+        "No model credential is allowed for tainted runs."
+    )
+    assert not fake_brain.requests
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs WHERE event_id=%s", (result["event_id"],))
+    assert row["tainted"] and row["status"] == "completed"
+    assert row["usage"]["skipped"] == "no_model_credential"
+    assert row["ended_at"] and row["token_hash"] is None
+
+
+@pytest.mark.parametrize("body", [{"error": "unknown_code"}, {"error": {}}, "not JSON"])
+async def test_n1_every_token_endpoint_401_breaks_the_grant(chatgpt_app, replay, body):
+    import httpx
+
+    app, _ = chatgpt_app
+    ctx = app.state.ctx
+    person = await save_grant(ctx, expires=0)
+    calls = []
+
+    def reject(request):
+        calls.append(request)
+        return (httpx.Response(401, text=body) if isinstance(body, str)
+                else httpx.Response(401, json=body))
+
+    ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(reject))
+    await replay()
+    await replay()
+    async with ctx.pool.connection() as conn:
+        row = await grants.load(conn, person["id"])
+    assert row["broken_at"] and row["next_refresh_at"] is None
+    assert len(calls) == 1
+
+
+async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app, replay):
+    import httpx
+
+    app, _ = chatgpt_app
+    ctx = app.state.ctx
+    await save_grant(ctx)
+    calls = []
+
+    def unavailable(request):
+        calls.append(request)
+        return httpx.Response(503)
+
+    ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(unavailable))
+
+    class RejectBrain:
+        async def run(self, request):
+            yield BrainEvent(type="error", category="auth", code="invalid_token")
+
+    ctx.brain_client = RejectBrain()
+    result = await replay()
+    assert result["text"] == chatgpt.TEMPORARY
+    assert len(calls) == 1
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs")
+    assert row["status"] == "failed" and row["token_hash"] is None
+    assert row["error"] == "The model sign-in service is unavailable"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_n9_team_grant_fallback_matches_the_safety_doc(chatgpt_app, fallback):
+    from tests.conftest import ROOT
+
+    ctx = chatgpt_app[0].state.ctx
+    ctx.workspace.config.brain.team_credential = "ada"
+    ctx.workspace.config.brain.api_key_fallback = fallback
+    auth = await provider_auth(ctx, Authority("team", "team_channel"), "openai_responses")
+    assert (auth.kind if auth else None) == ("api_key" if fallback else None)
+    assert (
+        "If the team credential has no usable grant, team runs use the API key "
+        "only when `api_key_fallback` is true."
+    ) in (ROOT / "docs/safety.md").read_text()

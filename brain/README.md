@@ -96,6 +96,8 @@ The run replies `Your ChatGPT limit is reached.` and adds that time when availab
 With `api_key_fallback: true`, the loop switches once to an explicit API-key request.
 It resumes the current turn with its existing tool outputs. It does not repeat completed MCP calls.
 The final answer reports the switch. A second provider failure ends the run.
+The switch drops subscription reasoning items. Messages and completed tool results stay.
+The loop holds text deltas until each attempt completes. A failed attempt shows no partial text.
 The same configured model must be available with the subscription and the API key.
 
 #### Sign-in protocol
@@ -129,6 +131,9 @@ It uses no fixed token lifetime. It refreshes within five minutes of expiry.
 A grant row lock serializes refresh across app processes. The rotation commits before a run starts.
 Run cancellation waits for that refresh transaction to finish.
 A refresh failure marks the grant broken and records `chatgpt:<person key>` with no provider text.
+Temporary network errors, timeouts, HTTP 429, and server errors keep the grant.
+Refresh retries wait 30 seconds, then 2 minutes, then 10 minutes.
+The current run gets a short failure reply, or uses the explicitly allowed API fallback.
 The person gets one reconnect DM for that broken grant. A new sign-in resets the notice state.
 No refresh token or ID token enters the brain container.
 
@@ -257,7 +262,7 @@ Its JSON body has these fields:
 | `mcp_token` | The bearer token for this run. |
 | `runtime` | `claude`, `openai_responses`, `openai_compat`, or `echo`. Default: `claude`. |
 | `model` | The model name. Default: `ILLO_BRAIN_MODEL`, then `claude-opus-5-5`. |
-| `max_turns` | Maximum model turns, from 1 to 50. Default: 8. |
+| `max_turns` | Maximum tool calls for Responses, from 1 to 50. Default: 8. Other runtimes count their turns. |
 | `timeout_s` | Active run deadline in seconds, up to 3600. Default: 120. |
 
 The response uses `application/x-ndjson`. Each line is one JSON object with `type` and `run_id`.
@@ -353,3 +358,18 @@ This test-only mode accepts `ANTHROPIC_AUTH_TOKEN` only with a loopback `ANTHROP
 It passes that environment credential to bare mode in memory.
 It does not read, copy, or change any host sign-in file.
 The product container uses `ANTHROPIC_API_KEY` instead.
+
+### Subscription smoke check
+
+Run `illo chatgpt smoke --person <key-or-id>` from the main app environment after sign-in.
+See [Workspace files](../docs/workspace.md#check-the-chatgpt-connection).
+The request sets `smoke: true` on the normal `/run` contract and passes per-run `provider_auth`.
+This check offers only the fixed `smoke_ping` function. It does not connect to the team MCP endpoint.
+The function reads and writes no team data. Normal runs keep their exact MCP catalog.
+The Responses loop accepts complete output from `response.output_item.done` when the terminal event omits it.
+When both forms exist, they must agree.
+
+Offline tests cover refresh, the app-to-brain wire, one function round trip, API fallback, and safe errors.
+No live subscription result is recorded yet. The deployment owner must run the check before the trial.
+Record the model, auth kind, tool result, token usage, latency, and date here after that check.
+Do not record a token, account ID, or real team data.

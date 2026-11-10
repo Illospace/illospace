@@ -61,7 +61,11 @@ def parser() -> argparse.ArgumentParser:
     login.add_argument("--person")
     status = commands.add_parser("connectors").add_subparsers(dest="action", required=True)
     status.add_parser("status")
-    commands.add_parser("chatgpt").add_subparsers(dest="action", required=True).add_parser("status")
+    chatgpt = commands.add_parser("chatgpt").add_subparsers(dest="action", required=True)
+    chatgpt.add_parser("status")
+    smoke = chatgpt.add_parser("smoke")
+    smoke.add_argument("--person", required=True)
+    smoke.add_argument("--auth", choices=("chatgpt", "api_key"), default="chatgpt")
     return result
 
 
@@ -69,7 +73,8 @@ async def doctor(config: Config) -> int:
     """Report missing requirements without exposing credentials."""
     failed = False
     try:
-        load_workspace(config.workspace_dir)
+        workspace = load_workspace(config.workspace_dir)
+        workspace.config.brain.check_runtime(config.brain_runtime)
         print("The workspace is valid.")
     except ValueError as exc:
         print(f"The workspace needs a fix: {exc}")
@@ -112,6 +117,10 @@ async def execute(args, config: Config) -> int:
         from illo.channels.mcp.check import check
 
         return await check(args.url, args.token_file)
+    if args.command == "chatgpt" and args.action == "smoke":
+        from illo.connectors.chatgpt_smoke import smoke
+
+        return await smoke(config, args.person, auth=args.auth)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "reload":

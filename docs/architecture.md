@@ -53,7 +53,7 @@ Channels ──► Gateway ──► Ledger (Postgres)
 The `openai_responses` runtime supports each person's ChatGPT subscription and API keys.
 The main app keeps each ChatGPT grant encrypted in `connector_grants`, and refreshes it under a row lock.
 It sends only the access token and account ID to the brain for one run.
-Person requests use that person's grant. Runs with no person use `brain.team_credential`, or `default_owner`.
+Person requests use that person's grant. Runs with no person use only an explicit `brain.team_credential`.
 The brain keeps the same Illo tool boundary in both modes. It stores no sign-in files.
 `brain.auth` defaults to `api_key`. Subscription mode requires an explicit choice.
 Check that the provider's terms allow this use. An API key is the alternative.
@@ -124,7 +124,10 @@ Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_
 
 ### Limits in one run
 
-`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. The run stops at `brain.timeout_s`.
+`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. At the limit, a normal model request can still answer.
+If the model asks for more tools, the runtime makes one final request with tools disabled.
+The answer has `usage.limited = true`. Claude uses a separate client with no tools and the results from the run.
+The run stops at `brain.timeout_s`.
 
 Each Slack channel starts at most 30 tainted runs per hour. Owner notices have a cap of one per run and six per hour; remaining links wait for an hourly digest.
 
@@ -264,7 +267,8 @@ One function, `search(principal, query, kinds, limit)`, in `illo/sources/search.
 - `items` by full text (`websearch_to_tsquery`, `simple` and `english`), filtered by visibility: a private item shows only to its owner.
 - `lanes` by title, summary, and events.
 - GitHub issues and pull requests, live, through the GitHub client.
-- Slack messages that Illo saw in the configured public channels (stored as items of kind `slack`).
+- Slack messages that Illo saw in configured team channels: the `slack` items and inbound events missing from that index.
+  Event search checks current channel privacy. It never reads DMs or email. Tainted runs cannot use search.
 - When the Google connector files exist: the shared drive, and the mail and Drive of the person (only in an untainted run of the owner).
 
 Each result has a title, a short text, a link, the source, and the time. The brain can search several times with other words. Vectors are not in the first version.

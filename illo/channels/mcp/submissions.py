@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from fastapi.encoders import jsonable_encoder
 
 from illo.gateway import InboundEvent
+from illo.gateway.replies import error_text
 from illo.ledger import mcp as ledger
 
 
@@ -168,7 +169,10 @@ async def get_result(ctx, args: dict) -> dict:
     completed = row["completed_at"] or (run["ended_at"] if run else None)
     failure = result.get("failure")
     if status == "failed" and not failure:
-        failure = {"category": "request_failed", "message": "The request failed."}
+        category = (run.get("usage") or {}).get("failure_category") if run else None
+        if category not in {"limit", "timeout", "provider", "internal"}:
+            category = "timeout" if run_status == "timeout" else "internal"
+        failure = {"category": category, "message": error_text(category)}
     return {
         "event_id": event_id,
         "submission_id": event_id,
@@ -202,10 +206,10 @@ class Adapter:
     async def deliver_final(self, event, text):
         await self._finish(event, text, "completed")
 
-    async def deliver_error(self, event):
-        await self._finish(event, "The request failed.", "failed")
+    async def deliver_error(self, event, *, category="internal"):
+        await self._finish(event, error_text(category), "failed", category=category)
 
-    async def _finish(self, event, text, status):
+    async def _finish(self, event, text, status, *, category=None):
         async with self.app.pool.connection() as conn:
             run = await ledger.submission_run(conn, event.external_id)
             result = receipt(event.external_id)
@@ -220,6 +224,8 @@ class Adapter:
                 handling=handling,
                 message=text,
             )
+            if category:
+                result["failure"] = {"category": category, "message": error_text(category)}
             result["ilo_outcome"].update(handling=handling, message=text)
             await ledger.finish_submission(
                 conn,

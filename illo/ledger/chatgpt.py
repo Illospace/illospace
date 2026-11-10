@@ -21,7 +21,7 @@ async def save(conn, ctx, person_id, token):
         """INSERT INTO connector_grants (connector_key,person_id,secret,scopes,expires_at)
         VALUES ('chatgpt',%s,%s,%s,%s) ON CONFLICT (connector_key,person_id) DO UPDATE
         SET secret=EXCLUDED.secret,scopes=EXCLUDED.scopes,expires_at=EXCLUDED.expires_at,
-        revoked_at=NULL,broken_at=NULL,notified_at=NULL""",
+        revoked_at=NULL,broken_at=NULL,notified_at=NULL,next_refresh_at=NULL,refresh_failures=0""",
         (
             person_id,
             vault(ctx).encrypt(json.dumps(token)),

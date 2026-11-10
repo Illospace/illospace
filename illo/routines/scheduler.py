@@ -138,7 +138,7 @@ class RoutineAdapter:
                 return
         await deliver_routine(self.ctx, destination, text)
 
-    async def deliver_error(self, event):
+    async def deliver_error(self, event, *, category="internal"):
         # Do not post an error to a shared destination from a personal run.
         log.error("Routine failed: %s", event.payload["routine"])
 

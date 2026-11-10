@@ -109,3 +109,22 @@ def test_responses_workspace_and_env_override(monkeypatch):
     assert BrainConfig(runtime="openai_responses").runtime == "openai_responses"
     monkeypatch.setenv("ILLO_BRAIN_RUNTIME", "openai_responses")
     assert Config.from_env().brain_runtime == "openai_responses"
+
+
+def test_s1_default_wire_accepts_a_brain_without_smoke():
+    from pydantic import create_model
+
+    from brain.models import RunRequest as ServiceRequest
+
+    request = RunRequest(
+        run_id=1, system_prompt="Acme", user_message="Hello", mcp_url="http://test/brain/mcp",
+        mcp_token="fake", runtime="openai_responses", model="test", max_turns=1, timeout_s=5,
+    )
+    fields = {
+        name: (field.annotation, field)
+        for name, field in ServiceRequest.model_fields.items() if name != "smoke"
+    }
+    old_request = create_model("OldRequest", __config__=ServiceRequest.model_config, **fields)
+    assert old_request.model_validate(request.wire()).run_id == 1
+    request.smoke = True
+    assert request.wire()["smoke"] is True

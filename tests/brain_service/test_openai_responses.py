@@ -49,7 +49,7 @@ class FakeResponses:
                 "encrypted_content": "opaque-reasoning",
             }
         ]
-        if first or self.loop:
+        if (first or self.loop) and body.get("tool_choice") != "none":
             for index, name in enumerate(self.names):
                 output.append(
                     {
@@ -183,8 +183,10 @@ async def test_turn_limit(run_request, fake_mcp, monkeypatch):
     run_request.max_turns = 2
     provider = FakeResponses(loop=True)
     events = await collect(provider, run_request, fake_mcp, monkeypatch)
-    assert events[-1]["category"] == "limit"
-    assert len(provider.requests) == len(fake_mcp.calls) == 2
+    assert events[-1]["type"] == "final" and events[-1]["usage"]["limited"] is True
+    assert len(provider.requests) == 4 and len(fake_mcp.calls) == 2
+    assert provider.requests[-1]["tools"] == []
+    assert provider.requests[-1]["tool_choice"] == "none"
 
 
 @pytest.mark.parametrize("status,category", [(401, "auth"), (400, "runtime")])

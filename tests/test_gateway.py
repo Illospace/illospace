@@ -260,3 +260,41 @@ async def test_run_limit_serializes_brain_runs(app, replay, channel):
     results = await asyncio.gather(first, second)
     assert all(result.get("text") == "Done" for result in results)
     assert brain.calls == 2 and brain.max_active == 1
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+async def test_g1_limited_answer_keeps_token_until_the_final_request(app, replay, tainted):
+    import httpx
+
+    ctx = app.state.ctx
+    results = []
+
+    class LimitedBrain:
+        async def run(self, request):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+                for _ in range(2):
+                    yield BrainEvent(type="tool_call")
+                    response = await client.post(request.mcp_url, headers={
+                        "Authorization": "Bearer " + request.mcp_token,
+                    }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                        "name": "github_search_issues", "arguments": {"query": "release"},
+                    }})
+                    assert response.status_code == 200
+                    results.append(response.json()["result"])
+            async with ctx.pool.connection() as conn:
+                assert await runs.verify_token(conn, request.mcp_token)
+            yield BrainEvent(type="final", text="I checked one source.", usage={"limited": True})
+
+    ctx.brain_client = LimitedBrain()
+    ctx.workspace.config.brain.max_turns = 1
+    changes = ({"kind": "channel", "payload": {"channel_id": "C_ACME_ALERTS", "bot": True}}
+               if tainted else {})
+    result = await replay(**changes)
+    assert result["text"] == "I checked one source."
+    assert not results[0]["isError"] and results[1]["isError"]
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs")
+        assert (await one(conn, "SELECT count(*) AS n FROM audit WHERE decision='allow'"))["n"] == 1
+        assert (await one(conn, "SELECT count(*) AS n FROM audit WHERE decision='deny'"))["n"] == 1
+    assert row["status"] == "completed" and row["usage"]["limited"] is True
+    assert row["token_hash"] is None and row["tainted"] == tainted

@@ -10,7 +10,7 @@ from illo.channels.slack.limits import notify_unassigned
 from illo.connectors.github_client import GitHubError
 from illo.ledger import github as ledger
 from illo.ledger import kv, people
-from illo.tools._format import data_text, github, github_detail
+from illo.tools._format import data_text, github, github_detail, short
 from illo.tools._format import rows as format_rows
 from illo.tools.checks import Decision, check
 from illo.tools.registry import Arguments, Refusal, Tool, ToolContext
@@ -66,7 +66,11 @@ def repository(app, repo: str) -> str:
         (r for r in app.workspace.config.github.repositories if r.lower() == repo.lower()), None
     )
     if not found or not re.fullmatch(REPO_PATTERN, found):
-        raise ValueError("The repository is not allowed")
+        allowed = ", ".join(
+            name for name in app.workspace.config.github.repositories
+            if re.fullmatch(REPO_PATTERN, name)
+        ) or "none"
+        raise Refusal("The repository is not allowed. Allowed repositories: " + short(allowed, 1000))
     if app.github_client is None:
         raise ValueError("GitHub is not configured")
     return found

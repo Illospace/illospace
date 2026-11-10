@@ -18,12 +18,30 @@ Set `ILLO_VAULT_KEY` in the main app. No connector YAML file or host sign-in fil
 5. After browser sign-in, the local callback address can fail to load. This is expected.
 6. Paste that full address into the same DM and thread. Send only that address.
 
-Illo replies: `ChatGPT is connected. I use your subscription for your requests.`
+Illo sends `http://127.0.0.1:1455/auth/callback`, as the checked Codex source does.
+A pasted callback may use `127.0.0.1` or `localhost`. Illo accepts Slack link wrappers and escaped ampersands.
+
+Illo replies: `ChatGPT is connected as <email>. I use your subscription for your requests.`
 The device flow sends this reply without a paste.
+If a started device sign-in expires, Illo sends one failure notice.
+A temporary provider error keeps the sign-in pending and increases the poll interval.
+The account email must match an address of the person in `people.yaml`, ignoring letter case.
+Illo reads the ID token from the fixed HTTPS token endpoint only for this comparison.
+It refuses missing email claims and revokes rejected tokens at the published revocation endpoint.
+For a shared account, explicitly list its email in `brain.chatgpt_allowed_accounts` in `illo.yaml`.
+This team list defaults to empty.
 Enable device sign-in in your ChatGPT security settings, or ask your workspace administrator to enable it.
 Only enter a device code if you asked Illo to connect your own account.
 Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
-Disconnect also cancels pending links. It does not sign you out of other OpenAI clients.
+Only these exact DM commands can change the sign-in. The model can only check its status.
+Disconnect attempts OpenAI token revocation before it deletes the grant and cancels pending links.
+A provider error does not block local deletion.
+If revocation fails, an old database backup plus the vault key can still hold a usable token.
+Use the ChatGPT account security settings to revoke it in that case.
+Disconnect does not sign you out of other OpenAI clients.
+A crash during a token refresh can need one new sign-in.
+The provider can rotate the token before Illo commits it to the database.
+Illo cannot recover that new token after a crash.
 The operator can run `illo chatgpt status` to list connection states and expiry times without secrets.
 See [Workspace files](workspace.md) for team credentials and the optional API-key fallback.
 Check that the provider's terms allow this use. An API key is the alternative.

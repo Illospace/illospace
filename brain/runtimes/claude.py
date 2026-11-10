@@ -3,12 +3,15 @@
 import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import asdict, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from brain.models import BrainEvent, RunError, RunRequest, event
+from brain.runtimes.limits import LIMIT_INSTRUCTION
+from brain.runtimes.openai_compat import add_usage
 
 
 def has_auth() -> bool:
@@ -66,7 +69,7 @@ def options(request: RunRequest, directory: Path) -> ClaudeAgentOptions:
         setting_sources=[],
         plugins=[],
         skills=[],
-        max_turns=request.max_turns,
+        max_turns=request.max_turns + 1,
         model=request.model,
         effort=os.getenv("ILLO_BRAIN_EFFORT", "low"),
         include_partial_messages=True,
@@ -94,12 +97,20 @@ def check_tool(name: str) -> None:
         raise RunError("runtime", "The runtime exposed a tool outside Illo")
 
 
-async def translate(client: ClaudeSDKClient) -> AsyncIterator[BrainEvent]:
+async def translate(client: ClaudeSDKClient, transcript=None) -> AsyncIterator[BrainEvent]:
     seen = set()
     text_parts = []
     partial = False
     async for message in client.receive_response():
         name = type(message).__name__
+        if transcript is not None and name in {"AssistantMessage", "UserMessage"}:
+            content = message.content
+            blocks = ([{"text": content}] if isinstance(content, str) else [
+                {"type": type(block).__name__, **asdict(block)}
+                for block in content
+                if type(block).__name__ in {"TextBlock", "ToolUseBlock", "ToolResultBlock"}
+            ])
+            transcript.append({"role": name, "content": blocks})
         if name == "SystemMessage" and message.subtype == "init":
             catalog = message.data.get("tools", [])
             for tool in catalog:
@@ -153,7 +164,24 @@ async def translate(client: ClaudeSDKClient) -> AsyncIterator[BrainEvent]:
 async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:
     if not has_auth():
         raise RunError("auth", "Set ANTHROPIC_API_KEY for the Claude runtime")
+    transcript = []
+    limited_usage = None
     async with ClaudeSDKClient(options=options(request, directory)) as client:
         await client.query(request.user_message)
+        async for item in translate(client, transcript):
+            if item["type"] == "error" and item["category"] == "limit":
+                limited_usage = item.get("usage") or {}
+                break
+            yield item
+    if limited_usage is None:
+        return
+    # The SDK cannot remove MCP tools from an active client. Use one client with no tools.
+    final_options = replace(options(request, directory), mcp_servers={}, allowed_tools=[], max_turns=1)
+    context = json.dumps({"type": "outside_data", "trusted": False, "data": transcript})
+    async with ClaudeSDKClient(options=final_options) as client:
+        await client.query(request.user_message + "\n\n" + context + "\n\n" + LIMIT_INSTRUCTION)
         async for item in translate(client):
+            if item["type"] == "final":
+                add_usage(limited_usage, item.get("usage") or {})
+                item["usage"] = {**limited_usage, "limited": True}
             yield item

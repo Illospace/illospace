@@ -49,7 +49,7 @@ async def test_connect_without_model_and_paste_exchange(chatgpt_app, replay, fak
     assert query["code_challenge_method"] == ["S256"]
     assert "verifier" not in query and "offline_access" in query["scope"][0]
     result = await replay(text=address(state))
-    assert result["text"] == chatgpt.CONNECTED
+    assert result["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
     assert backend.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
     body = parse_qs(backend.requests[-1].content.decode())
     assert body["code"] == ["marker-code-never-store"]
@@ -77,7 +77,7 @@ async def test_wrong_owner_and_thread_do_not_consume(chatgpt_app, replay, fake_b
     assert not fake_brain.requests
     assert (
         await replay(text=address(state), payload={"channel_id": "D_ADA"}, reply_to="thread-a")
-    )["text"] == chatgpt.CONNECTED
+    )["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
 
 
 @pytest.mark.parametrize("failure", ["expired", "reused", "tampered", "unstarted"])
@@ -91,7 +91,7 @@ async def test_invalid_state(chatgpt_app, replay, failure):
                 "UPDATE connector_oauth_states SET expires_at=clock_timestamp()-interval '1 second'"
             )
     elif failure == "reused":
-        assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED
+        assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
     elif failure == "tampered":
         state += "x"
     else:
@@ -155,7 +155,7 @@ async def test_device_preferred_and_completed_by_timer(
     backend.pending = False
     await chatgpt_oauth.poll_devices(app.state.ctx)
     await chatgpt_oauth.poll_devices(app.state.ctx)
-    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.CONNECTED]) == 1
+    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.CONNECTED.format(email="ada@example.com")]) == 1
     body = parse_qs(backend.requests[-1].content.decode())
     assert body["redirect_uri"] == [chatgpt.ISSUER + "/deviceauth/callback"]
     assert body["code_verifier"] == ["fake-device-verifier"]
@@ -170,7 +170,7 @@ async def test_device_can_switch_to_paste_once(chatgpt_app, replay):
     assert url.startswith(chatgpt.ISSUER + "/oauth/authorize?")
     with pytest.raises(ValueError):
         await chatgpt_oauth.switch_to_paste(app.state.ctx, state)
-    assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED
+    assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
 
 
 async def test_disconnect_cancels_inflight_exchange(chatgpt_app, replay):
@@ -198,3 +198,40 @@ async def test_status_and_disconnect(chatgpt_app, replay):
         "text"
     ] == "ChatGPT is disconnected from Illo."
     assert (await replay(text="ChatGPT status"))["text"] == "ChatGPT is not connected."
+
+
+async def test_s3_channel_text_keeps_literal_slack_entities(app, replay, fake_brain):
+    text = "please quote: &lt;!channel&gt; and &lt;@U999&gt; &amp; more"
+    result = await replay(
+        kind="channel", text=text, payload={"channel_id": "C_ACME_TEAM", "mentioned": True}
+    )
+    assert result["decision"] == "run"
+    assert fake_brain.requests[-1].user_message == text
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT payload FROM events WHERE id=%s", (result["event_id"],))
+    assert row["payload"]["text"] == text
+
+
+async def test_n2_unverified_email_cannot_connect(chatgpt_app, replay):
+    import httpx
+
+    from tests.chatgpt.conftest import jwt, tokens
+
+    app, _ = chatgpt_app
+    state, person, _, _ = await issue_start(app.state.ctx)
+    data = tokens()
+    data["id_token"] = jwt(
+        email="ada@example.com", email_verified=False,
+        **{"https://api.openai.com/auth": {"chatgpt_account_id": "acme-account"}},
+    )
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json=data)
+
+    app.state.ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(respond))
+    assert (await replay(text=address(state)))["text"] == chatgpt_oauth.FAILED
+    async with app.state.ctx.pool.connection() as conn:
+        assert not await grants.load(conn, person["id"])
+    assert any(str(r.url) == chatgpt.REVOCATION_URL for r in requests)

@@ -127,7 +127,7 @@ async def test_redact_output_and_do_not_emit_exception(run_request):
 
     response = await post(create_app(runner=echo_secret), run_request)
     assert lines(response)[1]["text"] == "[redacted]"
-    assert lines(response)[-1]["category"] == "runtime"
+    assert lines(response)[-1]["category"] == "internal"
     assert "private provider details" not in response.text
 
 
@@ -230,3 +230,16 @@ async def test_responses_health_requires_key(monkeypatch):
     ) as http:
         response = await http.get("/healthz")
     assert not response.json()["runtimes"]["openai_responses"]["usable"]
+
+
+async def test_worker_exit_without_an_answer_is_an_internal_failure(run_request):
+    events = [e async for e in run_worker(run_request, [sys.executable, "-c", "pass"])]
+    assert events[-1]["type"] == "error" and events[-1]["category"] == "internal"
+
+
+def test_unknown_worker_exception_keeps_only_the_internal_category():
+    from brain.worker import failure_event
+
+    result = failure_event(ValueError("fake-credential-in-an-error"))
+    assert result["category"] == "internal"
+    assert "fake-credential" not in json.dumps(result)

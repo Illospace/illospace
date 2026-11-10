@@ -28,6 +28,7 @@ def tokens(access="fake-access", refresh="fake-refresh", account="acme-account",
         "refresh_token": refresh,
         "expires_in": expires,
         "id_token": jwt(
+            email="ada@example.com",
             **{
                 "https://api.openai.com/auth": {
                     "chatgpt_account_id": account,

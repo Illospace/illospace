@@ -170,6 +170,8 @@ class Registry:
                         extra = await tool.preflight(ctx, validated)
                         if extra.outcome == "deny" or verdict.outcome == "allow":
                             verdict = extra
+                except Refusal as exc:
+                    verdict = Decision("deny", f"The tool refused the call: {exc}")
                 except Exception:
                     verdict = Decision("deny", "The tool declaration is invalid")
                 decision, reason = verdict.outcome, verdict.reason

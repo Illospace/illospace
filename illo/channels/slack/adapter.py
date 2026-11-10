@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from illo.brain.client import BrainEvent
 from illo.gateway import InboundEvent
+from illo.gateway.replies import RUN_ERROR, error_text
 
 if TYPE_CHECKING:
     from illo.app import AppContext
@@ -14,7 +15,7 @@ from illo.channels.slack.formatting import chunks
 from illo.db import one
 from illo.ledger import kv
 
-ERROR = "I could not finish this. The error is logged. Please try again."
+ERROR = RUN_ERROR
 
 
 class SlackAdapter:
@@ -108,5 +109,5 @@ class SlackAdapter:
             self.working.pop(event.external_id, None)
             self.progress_at.pop(event.external_id, None)
 
-    async def deliver_error(self, event: InboundEvent) -> None:
-        await self.deliver_final(event, ERROR)
+    async def deliver_error(self, event: InboundEvent, *, category="internal") -> None:
+        await self.deliver_final(event, error_text(category))

@@ -32,7 +32,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.runtime` | Runtime sent to the brain service. Default: `claude`. |
 | `brain.model` | Model sent to the brain service. Default: `default`. |
 | `brain.auth` | `api_key` (default) or `chatgpt`. ChatGPT needs `openai_responses`. |
-| `brain.team_credential` | Active person key for runs with no person. Default: `default_owner`. |
+| `brain.team_credential` | Explicit active person key for runs with no person. Required with `auth: chatgpt`. |
+| `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
 | `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 120. Maximum: 3600. |
@@ -55,14 +56,20 @@ brain:
   model: gpt-6.1-sol
   auth: chatgpt
   team_credential: ada
+  tainted_credential: none
   api_key_fallback: false
 ```
 
 Use an active person key from your own `people.yaml` for `team_credential`.
 If `ILLO_BRAIN_RUNTIME` is set, set it to `openai_responses` too. Environment overrides still take priority.
+The app refuses startup or reload if the effective runtime cannot use ChatGPT.
 Each person sends `connect my ChatGPT` in their own Slack DM with Illo.
 Person DMs, agent requests, and person routines use that person's grant.
-Team channels, tainted runs, team routines, and signals use `team_credential`.
+Team channels and team routines use `team_credential`. They share that person's ChatGPT limit.
+Tainted runs, signals, and outsiders get no model run by default, even with API fallback.
+Set `tainted_credential: team` to share the team credential and its limit.
+Set `tainted_credential: api_key` to use the API key for those runs.
+The default owner gets at most one notice per hour when Illo skips tainted runs.
 A missing personal grant never selects another person's grant.
 The main app refreshes a token when it expires within five minutes.
 No grant means no run, unless `api_key_fallback` is `true`.
@@ -71,6 +78,36 @@ For a subscription limit, an allowed API retry resumes the current turn with its
 It does not repeat completed tool calls. The final answer says that the API key was used.
 The API key must exist in the brain's environment for this retry to work.
 Check that the provider's terms allow this use. An API key is the alternative.
+
+## Check the ChatGPT connection
+
+After sign-in, run this command in the main app environment:
+
+```sh
+illo chatgpt smoke --person ada
+```
+
+`--person` accepts an active person key or database ID.
+The command resolves that person's grant with the normal credential rules.
+The main app refreshes it when needed. It sends `provider_auth` to the brain for this check.
+The brain offers only `smoke_ping`, a test function with no team data or side effects.
+The check makes one tool call, then sends its result back to the model.
+It uses the configured model and can spend subscription usage or API credits.
+It prints the auth kind, model, tool result, token usage, and elapsed time.
+It never prints a token, account ID, prompt, or model answer.
+A failure prints the HTTP status when available and a short reason. It exits with status 1.
+With `brain.api_key_fallback: false`, a missing grant or subscription limit fails without an API retry.
+The brain service must run the same version as the main app.
+
+Example output with a fake provider:
+
+```text
+Auth kind: chatgpt
+Model: test-model
+Tool round trip: yes
+Token usage: input_tokens=4 output_tokens=2 total_tokens=6
+Latency: 0.025 s
+```
 
 ## Other files
 

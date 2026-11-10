@@ -230,3 +230,25 @@ async def test_each_colon_in_a_signature_is_refused(rpc, rpc_token, github_clien
     refused = await call(rpc, token, "github_create_issue", {**CREATE, "signature": signature})
     assert refused["decision"] == "deny"
     assert "no colon" in refused["reason"]
+
+
+@pytest.mark.parametrize("name,args", [
+    ("github_search_issues", {"repo": "wrong/engine", "query": "release"}),
+    ("github_create_issue", {**CREATE, "repo": "wrong/engine"}),
+])
+async def test_g3_wrong_repository_has_a_safe_hint_in_handler_and_preflight(
+    rpc, rpc_token, github_client, name, args
+):
+    _, token = rpc_token
+    result = await call(rpc, token, name, args)
+    assert result["decision"] == "deny"
+    assert "Allowed repositories: acme-example/engine" in result["reason"]
+    assert not github_client.calls
+
+
+async def test_g3_repository_hint_has_a_bound(app, rpc, rpc_token):
+    _, token = rpc_token
+    app.state.ctx.workspace.config.github.repositories = [f"acme/project-{n}" for n in range(500)]
+    result = await call(rpc, token, "github_search_issues", {"repo": "wrong/engine", "query": "release"})
+    assert "acme/project-0" in result["reason"]
+    assert len(result["reason"]) < 1200

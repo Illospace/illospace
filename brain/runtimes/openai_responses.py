@@ -13,6 +13,7 @@ from mcp.types import Tool
 from brain.mcp_client import connect, list_tools
 from brain.models import ApiKeyAuth, BrainEvent, ChatGPTAuth, RunError, RunRequest, event
 from brain.runtimes import chatgpt
+from brain.runtimes.limits import LIMIT_INSTRUCTION, LIMIT_RESULT, NO_FINAL_ANSWER
 from brain.runtimes.openai_compat import add_usage, chunks
 from brain.runtimes.provider_errors import error_body, provider_error
 from brain.runtimes.tool_results import model_text
@@ -35,7 +36,9 @@ def function_tools(tools: list[Tool]) -> list[dict]:
     ]
 
 
-def build_request(request: RunRequest, tools: list[Tool], items: list[dict]) -> dict:
+def build_request(
+    request: RunRequest, tools: list[Tool], items: list[dict], *, tools_disabled=False
+) -> dict:
     catalog = function_tools(tools)
     names = {tool.name for tool in tools}
     assert all(tool["type"] == "function" and tool["name"] in names for tool in catalog)
@@ -53,6 +56,8 @@ def build_request(request: RunRequest, tools: list[Tool], items: list[dict]) -> 
     if request.provider_auth.kind == "chatgpt":
         del payload["max_output_tokens"]
         payload["tool_choice"] = "auto"
+    if tools_disabled:
+        payload["tools"], payload["tool_choice"] = [], "none"
     return payload
 
 
@@ -83,6 +88,19 @@ def check_item(item: dict, names: set[str]) -> None:
         raise RunError("runtime", "The model requested a tool outside the run catalog")
 
 
+def used_fields(item):
+    """Compare the fields we consume. Provider metadata can differ between events."""
+    fields = {key: item.get(key) for key in (
+        "type", "call_id", "name", "arguments", "encrypted_content"
+    )}
+    if item.get("type") == "message":
+        fields["content"] = [
+            {key: part.get(key) for key in ("type", "text", "refusal")}
+            for part in item.get("content", [])
+        ]
+    return fields
+
+
 def effort_rejected(error: dict) -> bool:
     param = error.get("param")
     # Read the message only to classify this rejection. Never emit or log it.
@@ -93,10 +111,10 @@ def effort_rejected(error: dict) -> bool:
     )
 
 
-async def response_chunks(request, tools, items, http):
+async def response_chunks(request, tools, items, http, *, tools_disabled=False):
     base = address(request)
     cache_key = (base, request.model)
-    payload = build_request(request, tools, items)
+    payload = build_request(request, tools, items, tools_disabled=tools_disabled)
     if cache_key not in _without_effort:
         payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or "low"}
     for attempt in range(2):
@@ -146,16 +164,24 @@ async def conversation(
     usage = {}
     fallback_notice = ""
     subscription_limit = None
-    for _ in range(request.max_turns):
+    tool_calls = 0
+    limited = False
+    while True:
         completed = None
         for attempt in range(2):
+            text_deltas = []
+            done_items = {}
             try:
-                async for chunk in response_chunks(request, tools, items, http):
+                async for chunk in response_chunks(
+                    request, tools, items, http, tools_disabled=limited
+                ):
                     kind = chunk.get("type")
                     if kind == "response.output_text.delta":
-                        yield event("text", text=chunk["delta"])
+                        text_deltas.append(chunk["delta"])
                     elif kind in ("response.output_item.added", "response.output_item.done"):
                         check_item(chunk["item"], names)
+                        if kind == "response.output_item.done":
+                            done_items[chunk["output_index"]] = chunk["item"]
                     elif kind in ("error", "response.failed"):
                         failed = chunk.get("response") or {}
                         add_usage(usage, failed.get("usage") or {})
@@ -192,6 +218,10 @@ async def conversation(
                     or error.details.get("code") != "usage_limit_reached"
                 ):
                     raise
+                items = [
+                    {key: value for key, value in item.items() if key != "id"}
+                    for item in items if item.get("type") != "reasoning"
+                ]
                 # Resume the current turn with its tool results. Never replay an MCP write.
                 fallback_notice = str(error) + " I used the API key for this request.\n\n"
                 subscription_limit = error
@@ -201,32 +231,55 @@ async def conversation(
                 # The next request checks for an API key. Failure still reports the subscription limit.
         if completed is None or completed.get("status") != "completed":
             raise RunError("runtime", "The model stream ended without a complete response")
+        for delta in text_deltas:
+            yield event("text", text=delta)
         add_usage(usage, completed.get("usage") or {})
-        output = completed.get("output") or []
+        observed = [done_items[index] for index in sorted(done_items)]
+        output = completed.get("output") or observed
+        if observed and [used_fields(i) for i in output] != [used_fields(i) for i in observed]:
+            raise RunError("runtime", "The model returned conflicting output items")
         for item in output:
             check_item(item, names)
         calls = [item for item in output if item["type"] == "function_call"]
-        if not calls:
+        if not calls or limited:
             answer = "".join(
-                part["text"]
+                part.get("text", "")
+                if part.get("type") == "output_text"
+                else part.get("refusal", "The model refused this request.")
                 for item in output
                 if item["type"] == "message"
                 for part in item.get("content", [])
-                if part.get("type") == "output_text"
+                if part.get("type") in {"output_text", "refusal"}
             )
-            yield event("final", text=fallback_notice + answer, usage=usage)
+            if limited:
+                usage["limited"] = True
+                answer = NO_FINAL_ANSWER if calls else answer
+            yield event(
+                "final",
+                text=fallback_notice + answer,
+                usage=usage,
+                **({"auth_kind": request.provider_auth.kind} if request.smoke else {}),
+            )
             return
         # Replay all output, including encrypted reasoning, without a response ID.
         items.extend(output)
         for call in calls:
+            if tool_calls >= request.max_turns:
+                limited = True
+                if not call.get("call_id"):
+                    raise RunError("runtime", "The model returned an invalid function call")
+                items.append({"type": "function_call_output", "call_id": call["call_id"],
+                              "output": LIMIT_RESULT})
+                continue
+            tool_calls += 1
             if not call.get("call_id"):
                 raise RunError("runtime", "The model returned an invalid function call")
             yield event("tool_call", name=call["name"])
             try:
-                arguments = json.loads(call["arguments"])
+                arguments = json.loads(call["arguments"].strip() or "{}")
                 if not isinstance(arguments, dict):
                     raise TypeError
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError, AttributeError):
                 result = {
                     "isError": True,
                     "content": [{"type": "text", "text": "Invalid tool arguments"}],
@@ -248,16 +301,31 @@ async def conversation(
                     "output": model_text(result),
                 }
             )
-    yield event("error", category="limit", message="The run reached its turn limit", usage=usage)
+
+        if limited:
+            items.append({"role": "developer", "content": LIMIT_INSTRUCTION})
 
 
-async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:
+async def run(request: RunRequest, directory: Path, *, transport=None) -> AsyncIterator[BrainEvent]:
     auth_headers(request)
+    if request.smoke:
+        from brain.smoke import TOOLS, SmokeSession
+
+        session = SmokeSession()
+        async with httpx.AsyncClient(
+            timeout=request.timeout_s, follow_redirects=False, transport=transport
+        ) as http:
+            async for item in conversation(request, session, TOOLS, http):
+                if item["type"] == "final":
+                    item["tool_round_trip"] = session.calls == 1
+                yield item
+        return
     async with connect(request) as session:
         tools = await list_tools(session)
         async with httpx.AsyncClient(
             timeout=request.timeout_s,
             follow_redirects=False,
+            transport=transport,
         ) as http:
             async for item in conversation(request, session, tools, http):
                 yield item
