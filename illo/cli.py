@@ -37,6 +37,9 @@ def parser() -> argparse.ArgumentParser:
     listing = token.add_parser("list")
     listing.add_argument("--person")
     token.add_parser("revoke").add_argument("id", type=int)
+    slack = commands.add_parser("slack").add_subparsers(dest="action", required=True)
+    slack.add_parser("whoami")
+    slack.add_parser("users")
     secret = commands.add_parser("secret").add_subparsers(dest="action", required=True)
     secret.add_parser("set").add_argument("name")
     secret.add_parser("get-names")
@@ -83,6 +86,10 @@ async def doctor(config: Config) -> int:
 
 async def execute(args, config: Config) -> int:
     """Run commands in one connection and one transaction unless migrations own it."""
+    if args.command == "slack":
+        from illo.channels.slack.cli import execute as slack_execute
+
+        return await slack_execute(args.action, config)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "reload":
