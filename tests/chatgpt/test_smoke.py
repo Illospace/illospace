@@ -25,7 +25,7 @@ def test_smoke_parser():
 
 
 @pytest.mark.parametrize(
-    "mode", ["success", "missing", "limit", "fallback", "provider_error", "no_tool"]
+    "mode", ["success", "missing", "limit", "fallback", "provider_error", "no_tool", "explicit_api"]
 )
 async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_path, capsys, mode):
     app, token_backend = chatgpt_app
@@ -37,7 +37,7 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
     path = root / "illo.yaml"
     data = yaml.safe_load(path.read_text())
     data["brain"].update(
-        auth="chatgpt",
+        auth="chatgpt" if mode == "explicit_api" else "api_key",
         runtime="openai_responses",
         team_credential="ada",
         model="test-model",
@@ -112,9 +112,12 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
         "http://brain", "fake-brain-secret", transport=httpx.ASGITransport(app=service)
     )
     monkeypatch.setattr(chatgpt_smoke, "BrainClient", lambda url: client)
-    result = await execute(parser().parse_args(["chatgpt", "smoke", "--person", "ada"]), ctx.config)
+    args = ["chatgpt", "smoke", "--person", "ada"]
+    if mode == "explicit_api":
+        args += ["--auth", "api_key"]
+    result = await execute(parser().parse_args(args), ctx.config)
     output = capsys.readouterr().out
-    assert result == (0 if mode in {"success", "fallback"} else 1)
+    assert result == (0 if mode in {"success", "fallback", "explicit_api"} else 1)
     assert "Model: test-model" in output and "Latency: " in output and "Token usage: " in output
     for secret in (
         "fake-old-token",
@@ -129,13 +132,16 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
         assert not brain_wires and not requests and "fallback is off" in output
         assert token_backend.refresh_count == 0
     else:
-        assert token_backend.refresh_count == 1
-        assert brain_wires[0]["provider_auth"]["access_token"] == "fresh-access"
-        assert brain_wires[0]["provider_auth"]["kind"] == "chatgpt"
+        assert token_backend.refresh_count == (0 if mode == "explicit_api" else 1)
+        if mode != "explicit_api":
+            assert brain_wires[0]["provider_auth"]["access_token"] == "fresh-access"
+        assert brain_wires[0]["provider_auth"]["kind"] == (
+            "api_key" if mode == "explicit_api" else "chatgpt"
+        )
         assert brain_wires[0]["smoke"] is True
-        if mode in {"success", "fallback"}:
+        if mode in {"success", "fallback", "explicit_api"}:
             assert "Tool round trip: yes" in output and "total_tokens=6" in output
-            assert f"Auth kind: {'api_key' if mode == 'fallback' else 'chatgpt'}" in output
+            assert f"Auth kind: {'api_key' if mode in {'fallback', 'explicit_api'} else 'chatgpt'}" in output
             assert any(
                 i.get("type") == "function_call_output"
                 for i in json.loads(requests[-1].content)["input"]

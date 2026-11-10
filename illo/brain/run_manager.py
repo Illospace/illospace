@@ -23,9 +23,11 @@ def credential_person(authority, workspace):
     return workspace.config.brain.team_credential
 
 
-async def provider_auth(ctx, authority, runtime, *, force=False, rejected_token=None):
+async def provider_auth(
+    ctx, authority, runtime, *, force=False, rejected_token=None, auth_kind=None
+):
     config = ctx.workspace.config.brain
-    if config.auth == "api_key":
+    if (auth_kind or config.auth) == "api_key":
         return ProviderAuth()
     if runtime != "openai_responses":
         raise ValueError("ChatGPT sign-in needs the openai_responses runtime")

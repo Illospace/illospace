@@ -24,7 +24,7 @@ def http_status(value):
     return value if type(value) is int and 100 <= value <= 599 else "none"
 
 
-async def smoke(config, person_id):
+async def smoke(config, person_id, *, auth="chatgpt"):
     started = time.monotonic()
     auth_kind, model, round_trip, usage = "none", "unknown", False, {}
     reason, status = "The smoke check did not finish", "none"
@@ -54,7 +54,7 @@ async def smoke(config, person_id):
                 raise ValueError("The person is missing, inactive, or ambiguous")
             person = people[0]
             authority = Authority("person:" + person["key"], "person_dm", person["id"])
-            auth = await provider_auth(ctx, authority, runtime)
+            auth = await provider_auth(ctx, authority, runtime, auth_kind=auth)
             if auth is None:
                 raise ValueError("The person has no usable ChatGPT grant. API fallback is off")
             auth_kind = auth.kind
