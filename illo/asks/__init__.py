@@ -6,7 +6,7 @@ __all__ = ["open_asks_summary"]
 
 
 async def setup(ctx):
-    from illo.asks import actions, drafts, service
+    from illo.asks import actions, drafts, relay, service
 
     ctx.slack_actions.register("ask:", actions.handle)
     ctx.slack_actions.register("draft:", drafts.handle)
@@ -15,5 +15,6 @@ async def setup(ctx):
     async def check_asks():
         await service.tick(ctx)
         await drafts.tick(ctx)
+        await relay.tick(ctx)
 
     ctx.every(2, check_asks)
