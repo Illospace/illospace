@@ -14,6 +14,8 @@ Each call of the brain goes through the tool server, `illo/tools/registry.py`. T
 
 Each call writes one row in `audit`.
 
+Argument digests use HMAC with the encrypted `audit_digest_key` secret. Without `ILLO_VAULT_KEY`, the digest is `unavailable`. `tests/safety/test_review_s25_audit_hmac.py` checks both paths.
+
 Each token permits 20 open asks per owner, 60 new signals per hour, and 60 requests per hour. Saves and retries do not count. Run limits and concurrent requests have tests in `tests/safety/test_review_s14_call_caps.py`.
 
 ## 1. One principal for each run
