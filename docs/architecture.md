@@ -1,10 +1,10 @@
 # Illo: architecture and build contract
 
-This file is the contract for the rebuild. Each builder reads it first. It goes into the repository as `docs/architecture.md`. It is public: it has no data of any team.
+This file is the contract of Illo. Each builder reads it first. It is public: it has no data of any team.
 
 ## 1. The product
 
-Illo is one assistant for a whole team. People talk to it in Slack, and later by email. It knows each lane of agent work on each machine. It answers "give me an update on X". It sends a person a card only for a real blocker, and it sends the answer back to the agent. It carries requests between people. It starts clear work through a GitHub ticket. It finds the team context where that context lives, and it keeps the decisions.
+Illo is one assistant for a whole team. People talk to it in Slack and by email. It knows each lane of agent work on each machine. It answers "give me an update on X". It sends a person a card only for a real blocker, and it sends the answer back to the agent. It carries requests between people. It starts clear work through a GitHub ticket. It finds the team context where that context lives, and it keeps the decisions.
 
 Design goals, in order:
 1. **Safe by code, not by prompt.** The ten safety rules of section 4 live in server code and have tests.
@@ -22,12 +22,12 @@ Each word has one meaning. Use these words in code, in docs, and in the text tha
 - **Ask**: one thing that a person must decide or do. It has an owner, a question, options, a recommended option, proof, a due time, and a path to send the answer back.
 - **Rule**: a standing answer or a standing permission from a person. It is visible, it has an owner, and the owner can remove it.
 - **Connector**: an outside system that Illo can call. Its scope is `team` or `personal`.
-- **Source**: a place where team context lives (a repository, GitHub, Slack, a drive, a mailbox). Illo searches a source. It does not copy it.
+- **Source**: a place where team context lives (a repository, GitHub, Slack, a drive, a mailbox). Illo searches most sources where they live. It stores the messages of the configured public Slack channels, and one lane for each GitHub issue and pull request that it follows.
 - **Item**: one searchable text in the ledger: a saved summary, a decision, a note, an archive entry.
 - **Note**: a fact that has no other home. A note is a file in the workspace folder.
 - **Routine**: a prompt on a schedule, with a destination.
 - **Signal**: a machine-made report (an alert, a log finding) that enters through the signal intake.
-- **Draft**: an action that waits for the approval of a person (a post to a shared place, a message to an outsider).
+- **Draft**: an action that waits for the approval of a person (a post to a shared place, a message to an outsider, a model answer to an agent).
 - **Workspace**: the folder of files that holds the setup of one team (section 9).
 
 ## 3. The five parts
@@ -51,11 +51,11 @@ Channels ──► Gateway ──► Ledger (Postgres)
 | **Tool server** | An MCP server for the brain. Each call passes three checks: scope, destination, risk. Each call writes one audit row. | `illo/tools/` |
 
 Processes (Docker Compose, `deploy/compose.yaml`):
-- `postgres`: Postgres 16.
-- `illo`: one Python process (asyncio): the HTTP server, the Slack connection, the timers, the gateway, the tool server.
-- `brain`: the sandbox service. HTTP `POST /run` streams the events of one run. It has no volume from the host and no Docker socket. It reaches only the `illo` tool server and the model provider.
+- `postgres`: Postgres 16. It joins only the internal `db` network.
+- `illo`: one Python process (asyncio): the HTTP server, the Slack connection, the timers, the gateway, the tool server. It joins `db`, the internal `brainnet` network, and the default network for outbound traffic.
+- `brain`: the sandbox service. HTTP `POST /run` streams the events of one run. It has no volume from the host and no Docker socket. It joins `brainnet` and the default network. It never joins `db`. The install does not limit its outbound destinations; an egress proxy is an optional step in `docs/install.md`.
 
-A collector is a small separate program that runs on a machine where agents work. It reports lanes to Illo and it pulls answers. It uses an MCP token.
+A collector is a small separate program that runs on a machine where agents work. It reports lanes to Illo and it pulls answers. It uses an MCP token with the scope `collector`.
 
 ## 4. The safety rules
 
@@ -72,44 +72,71 @@ Each rule has a test in `tests/safety/` that names the rule number.
 9. Illo holds no credential for the machines where agents work. It starts work with a GitHub ticket. A collector pulls the answers.
 10. The brain runtime has no shell tool, no file tool, and no web tool of its own. A test lists the tools that the model really sees.
 
-A tainted run keeps the `team` principal. Its exact tool set is
-`github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`,
-`web_read_public_page`, `connectors_list`, `connectors_call`, and `skills_get`.
-It can read issues only from configured repositories, allowed connector results,
-and public pages. A connector tool must have `tainted: true` and risk `read`.
-It cannot read lanes, asks, people, rules, notes, search results, Slack, or pull requests.
-It files unassigned tickets from outside text. A person assigns them.
+`docs/safety.md` gives the code and the tests for each rule.
+
+### Grant profiles
+
+The gateway gives each run one profile. The profile decides the tool list. `illo/tools/checks.py` holds the profile names and the default data. A tool can name its own profiles in its `profiles` field.
+
+| Profile | When | Principal | Tools |
+|---|---|---|---|
+| `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | all tools |
+| `team_channel` | a team member in a configured channel | `team` | team reads, tickets, `work_start`, `asks_create`, `slack_read_thread` |
+| `routine` | a team routine | `team` | team reads, tickets, `work_start`, `asks_create`, `slack_send_dm` |
+| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, tickets, `work_start`, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
+| `tainted` | a bot, webhook, or form post; a forwarded email; a signal; a Slack thread with outside text | `team`, or the person of a forwarded email | exactly 8 tools (below) |
+| `outsider` | an email from an unknown or unauthenticated sender | `outsider` | `web_read_public_page` |
+
+"Team reads" are the lane, ask, rule, people, search, notes, skills, shared Drive, GitHub read, connector, and public web tools. The personal tools work only in `person_dm`. `asks_answer`, `asks_cancel_mine`, `rules_remove_mine`, `asks_digest`, and `slack_post_channel` also work only in `person_dm`.
+
+The `tainted` profile has exactly these tools: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, and `skills_get`. A tool that names `tainted` but is not in this set is still refused. With these tools a tainted run reads only issues of the configured repositories, connector results, and public pages. It cannot read lanes, asks, people, rules, notes, search results, Slack, or pull requests. Its tickets have no assignee and the label `from-outside-text`. A person assigns them. A connector tool needs `tainted: true` and risk `read`. A tainted run reads one public page: the first URL of its event text, once.
+
+In a tainted run, `ToolContext.principal` is `team`. So a tainted run never reads private ledger rows, even for a forwarded email of a person. Drafts of that run still go to that person.
 
 ### The three checks of the tool server
 
-Each tool declares, in code: `name`, `family`, `risk`, `destination` (a function of the arguments), `personal` (true if it reads a personal connector), and its JSON schema.
+Each tool declares, in code:
+- `name`, `family`, `risk`, `destination` (a function of the arguments), `personal` (true if it reads personal data), its handler, and its arguments class (the JSON schema).
+- `profiles`: the profiles that may call it. `None` means the default data in `illo/tools/checks.py`.
+- `preflight` (optional): it reads facts from an API before the call, for example the visibility of a GitHub repository. It can only make the result stricter.
+- `team_visible`: true when a ledger write becomes visible to the whole team, as a note does.
+- `resolve` (optional): it turns a generic tool into the configured remote tool before the checks, as `connectors_call` does.
 
-- **Check 1, scope.** The grant of the run lists the tool names that the principal may call. Profiles: `person_dm` (a person in a DM), `team_channel` (the team as principal, small set), `tainted` (starts from outside text; the exact tool set below), `routine`, `agent_request` (a request from an agent token, acts for the person who owns the token).
-- **Check 2, destination.** A tool that writes names its destination: `person:<key>`, `channel:<id>`, `github:<owner>/<repo>`, `outside:<address>`, `ledger`. When the run has `personal_read = true`, each destination other than `person:<principal>` and `ledger` gives the result `draft`.
+The checks:
+- **Check 1, scope.** The tool must be in the grant of the run. A personal tool also needs an untainted `person_dm` run of its owner.
+- **Check 2, destination.** A tool names its destination: `person:<key>`, `channel:<id>`, `github:<owner>/<repo>`, `outside:<key or address>`, `ledger`. A read with a `ledger` destination always passes. A read with an `outside:` destination (a connector call) sends its arguments out, so it is checked like a write. When the run has `personal_read = true`, each destination other than `person:<principal>` and `ledger` gives `draft`. In that case a `team_visible` tool also gives `draft`.
 - **Check 3, risk.** `read` → allow. `write_internal` (a ticket, a note, a lane update, a message to a team member) → allow. `send_outside` → draft. There is no tool for a destructive action.
 
-A check returns `allow`, `draft`, or `deny`. `draft` creates a row in `drafts` and a card for the requester. The tool result tells the model what happened. Each call writes `audit` with: run, principal, tool, the argument digest, the decision, the reason.
+The run gets `personal_read = true` after a personal tool, and after a read result with `visibility: private`.
+
+A check returns `allow`, `draft`, or `deny`. The strictest result wins. `draft` creates a row in `drafts` and a card for the person of the run. A run with no person cannot create a draft: the result is `deny`. The tool result tells the model what happened. Each call writes `audit` with: run, principal, tool, an HMAC digest of the arguments, the redacted arguments, the decision, the reason.
+
+Risks of note: `asks_answer` and `email_draft` have risk `send_outside`, so each call is a draft. A GitHub write to a public repository becomes `send_outside` in its preflight.
+
+### Limits in one run
+
+`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. The run stops at `brain.timeout_s`.
 
 ## 5. The ledger
 
 Postgres 16. Plain SQL in `illo/migrations/NNNN_<area>_<what>.sql`, applied in file order by `illo migrate`. The foundation owns `0001_init.sql`. A later change uses the number block of its area: slack 0100, mcp 0200, github 0300, search 0400, asks 0500, brain 0600, collector 0700, routines 0800, email 0900, connectors 1000, notes 1100. A migration never edits an older file.
 
-Tables in `0001_init.sql` (each has `id bigint generated always as identity`, `created_at timestamptz default now()` unless the text says otherwise):
+The main tables (each has `id bigint generated always as identity`, `created_at timestamptz default now()` unless the text says otherwise):
 
 - `people`: `key` (unique), `name`, `slack_id`, `github_login`, `emails text[]`, `role` (`owner`, `member`), `timezone`, `areas text[]`, `active`. The file `people.yaml` is the truth. The table is a copy that the loader keeps equal.
-- `tokens`: MCP client tokens. `person_id`, `label` (the machine or the agent), `token_hash` (SHA-256), `scopes text[]`, `last_used_at`, `revoked_at`.
+- `tokens`: MCP client tokens. `person_id`, `label` (the machine or the agent), `token_hash` (SHA-256), `scopes text[]` (exactly one of `collector`, `agent`; default `collector`), `last_used_at`, `revoked_at`.
 - `events`: the gateway inbox. `channel`, `external_id`, unique (`channel`, `external_id`), `kind`, `principal`, `person_id`, `tainted`, `payload jsonb`, `status` (`received`, `ignored`, `handled`, `failed`).
 - `runs`: `event_id`, `principal`, `person_id`, `profile`, `tainted`, `personal_read`, `status` (`running`, `completed`, `failed`, `timeout`), `runtime`, `model`, `usage jsonb`, `error`, `started_at`, `ended_at`, `token_hash` (the per-run token), `token_expires_at`.
 - `audit`: `run_id` (nullable), `token_id` (nullable), `principal`, `tool`, `args_digest`, `args jsonb` (redacted), `decision`, `reason`, `at`.
 - `lanes`: `source` (`t3`, `claude-code`, `codex`, `github`, `manual`, `email`), `external_id`, unique (`source`, `external_id`), `title`, `owner_person_id`, `state` (`working`, `waiting_person`, `blocked`, `review`, `done`, `failed`, `unknown`), `summary`, `links jsonb`, `repo`, `machine`, `visibility` (`team`, `private`), `last_signal_at`, `updated_at`, `closed_at`, `end_summary`, `slack_channel`, `slack_ts`. A lane with state `working` and no signal for longer than the limit of its source shows as `stale`. `stale` is computed on read. It is never stored.
 - `lane_events`: `lane_id`, `at`, `kind`, `text`, `data jsonb`.
 - `asks`: `lane_id` (nullable), `kind` (`decision`, `action`, `review`, `reminder`), `requester_token_id` (nullable), `requester_person_id` (nullable), `owner_person_id`, `question`, `options jsonb` (list of `{id, label, detail}`), `recommended_option`, `proof jsonb` (text and links), `due_at`, `expires_at`, `state` (`open`, `answered`, `expired`, `cancelled`), `answer_option`, `answer_text`, `answered_by_person_id`, `answered_via` (`person`, `rule`), `rule_id`, `answered_at`, `delivery_state` (`none`, `pending`, `delivered`, `acked`, `failed`), `delivery_attempts`, `delivered_at`, `acked_at`, `slack_channel`, `slack_ts`, `reminded_at`, `source_ref` (the thing in the source system that this ask mirrors, for the stale check).
-- `rules`: `owner_person_id`, `scope` (`person`, `team`), `kind` (`always_allow`, `standing_answer`), `match jsonb` (ask kind, lane source, repository, a question pattern), `answer_option_label`, `text`, `origin` (`card`, `file`, `proposal`), `uses`, `removed_at`.
+- `rules`: `owner_person_id`, `scope` (`person`, `team`), `kind` (`always_allow`, `standing_answer`), `match jsonb` (ask kind, lane source, repository, requester, a question pattern), `answer_option_id`, `answer_option_label`, `answer_option_detail`, `text`, `origin` (`card`, `file`, `proposal`), `uses`, `removed_at`.
 - `items`: the search table. `kind` (`saved`, `decision`, `note`, `lane_summary`, `archive`, `slack`, `github`, `doc`), `source_ref` (unique), `title`, `body`, `summary`, `owner_person_id`, `visibility` (`team`, `private`), `links jsonb`, `meta jsonb`, `source_at`, `tsv tsvector` (generated from title, summary, body; GIN index).
 - `submissions`: the receipts of `illo_submit`. `event_id text` (unique, opaque), `token_id`, `idempotency_key`, unique (`token_id`, `idempotency_key`), `desired_outcome`, `envelope jsonb`, `envelope_digest`, `status`, `result jsonb`, `completed_at`, `run_id`.
 - `drafts`: `run_id`, `approver_person_id`, `kind`, `destination`, `content jsonb`, `state` (`pending`, `approved`, `rejected`, `sent`, `expired`), `slack_channel`, `slack_ts`, `decided_at`.
-- `signals`: `source`, `dedupe_key`, unique (`source`, `dedupe_key`), `severity`, `title`, `body`, `data jsonb`, `status` (`received`, `ticketed`, `ignored`), `ticket_url`.
-- `claims`: `key` (unique), `run_id`, `note`. One claim for each alert or signal, so that two runs cannot file the same ticket.
+- `signals`: `token_id`, `source`, `dedupe_key`, unique (`source`, `dedupe_key`), `severity`, `title`, `body`, `data jsonb`, `status` (`received`, `ticketed`, `ignored`), `ticket_url`.
+- `claims`: `key` (unique), `run_id`, `note`. One claim for each alert or signal, so that two runs cannot file the same ticket. A model claim has the prefix `model:`. Server keys, such as `routine:<name>:<time>`, have no prefix.
 - `connector_grants`: `connector_key`, `person_id` (null for a team connector), `secret bytea` (encrypted), `scopes text[]`, `expires_at`, `revoked_at`.
 - `secrets`: the vault. `name` (unique), `secret bytea` (encrypted with the key in `ILLO_VAULT_KEY`).
 - `routine_state`: `key` (unique), `last_run_at`, `next_run_at`, `last_status`.
@@ -125,15 +152,18 @@ Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is on
 3. The gateway finds the principal:
    - A Slack DM from a known person → `person:<key>`, profile `person_dm`.
    - A Slack DM from an unknown sender → no answer (rule 7).
-   - A message in a configured channel → `team`, profile `team_channel`. If the text comes from a webhook, a bot, or a form, the run is `tainted`.
-   - An email from a known address → `person:<key>`. The forwarded part is outside text. An email from an unknown address → `outsider`, `tainted`.
+   - A message in a configured channel from a known person → `team`, profile `team_channel`. A message from a webhook, a bot, or a form → `team`, `tainted`. A message from an unknown user, or from a Slack Connect user of another workspace → no run. A private channel → no run.
+   - An email with one aligned DMARC pass from a known address → `person:<key>`, profile `person_dm`. A forwarded email → the same person, `tainted`. Any other email → `outsider`, and the `unknown_sender` claim takes it before a run.
+   - A team routine → `team`, profile `routine`. A person routine → `person:<key>`, profile `person_dm`.
    - An MCP request from an agent token → `person:<owner of the token>`, profile `agent_request`.
    - A signal → `team`, `tainted`.
-4. The gateway shows the first sign of work itself, in code, in less than one second: in Slack it posts a short placeholder message, and later it edits that message with the answer. The model is not in this path.
-5. The run manager inserts a `runs` row, makes a per-run token (random, stored as a hash, valid until the run ends), and calls the brain service: `POST /run` with the system prompt, the message, the URL of the tool server, and the token.
-6. The brain service streams events: `started`, `text`, `tool_call`, `final`, `error`. The run manager can show a tool call as a status line.
-7. The gateway gives the final text to the channel that the event came from. Each other write goes through a tool and its checks.
-8. The run ends. The token stops to work. `runs` gets the status, the usage, and the end time.
+4. Preparers run (`register_preparer`). They change verified input before any claim: Slack reads the transcript of a clip, and the Google sign-in code removes a callback address.
+5. Claims run (`register_claim`). A claim takes an event that continues a flow of its area: a thread reply to an ask, a corrected note, a pasted sign-in address. A claimed event gets no brain run.
+6. The gateway shows the first sign of work itself, in code, in less than one second: in Slack it posts a short placeholder message, and later it edits that message with the answer. The model is not in this path. In Slack this step also adds the thread history. If that history has a bot or an unknown user, the gateway makes the run `tainted` (`Gateway.context_authority`).
+7. The run manager inserts a `runs` row, makes a per-run token (random, stored as a hash, valid until the run ends), and calls the brain service: `POST /run` with the system prompt, the message, the URL of the tool server, and the token.
+8. The brain service streams events: `started`, `text`, `tool_call`, `final`, `error`. The run manager can show a tool call as a status line.
+9. The gateway gives the final text to the channel that the event came from. Each other write goes through a tool and its checks.
+10. The run ends. The token stops to work. `runs` gets the status, the usage, and the end time.
 
 A run has a time limit and a turn limit from the config. A failed run gives the person a short honest message.
 
@@ -146,23 +176,30 @@ Tool names use `family_verb`. Each family is one file in `illo/tools/`. The regi
 | Family | Tools (first set) |
 |---|---|
 | `lanes` | `lanes_search`, `lanes_get`, `lanes_mine` |
-| `asks` | `asks_list`, `asks_get`, `asks_create` (Illo asks a person), `asks_answer_with_rule` |
-| `search` | `search_all` (lanes, items, GitHub, Slack; filters by principal), `search_get` |
+| `asks` | `asks_list`, `asks_get`, `asks_create` (Illo asks a person), `asks_answer` (a draft for the ask owner), `asks_answer_with_rule`, `asks_cancel_mine`, `asks_digest` |
+| `search` | `search_all` (items, lanes, GitHub, Slack, Drive and mail of the person; filters by principal), `search_get` |
 | `people` | `people_list`, `people_get` |
 | `slack` | `slack_send_dm` (to a team member), `slack_post_channel`, `slack_read_thread` |
 | `github` | `github_search_issues` (open and closed), `github_get_issue`, `github_create_issue`, `github_assign_issue`, `github_comment_issue`, `github_get_pull` |
-| `claims` | `claims_take` |
+| `claims` | `claims_take` (the key gets the prefix `model:`) |
+| `skills` | `skills_get` |
 | `rules` | `rules_list`, `rules_remove_mine` |
 | `notes` | `notes_search`, `notes_propose` |
-| `web` | `web_read_public_page` (one public page, text only, no private address) |
+| `web` | `web_read_public_page` (a URL of the event text or the root of its host; text only; no private address) |
 | `connectors` | `connectors_list`, `connectors_call` (a team connector through the MCP client, with a risk level for each tool) |
-| `personal` | `mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get` (personal connectors, read-only) |
+| `personal` | `mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get` (personal connectors, read-only), `drive_shared_search`, `drive_shared_get` (the team shared drive) |
 | `email` | `email_draft` (always a draft) |
-| `work` | `work_start` (a GitHub issue plus a lane plus one Slack thread) |
+| `work` | `work_start` (a GitHub issue plus a lane plus one Slack status message) |
+
+Section 4 says which profile gets which tool.
 
 ## 8. The MCP endpoint for agents
 
-`POST /mcp` (also at `/api/mcp`). Streamable HTTP, stateless, JSON answers. Auth: `Authorization: Bearer <token>` (also `X-Illo-Bridge-Token`). A token belongs to a person and has a label for the machine. `illo token create --person <key> --label <machine>` prints it once.
+`POST /mcp` (also at `/api/mcp`). Streamable HTTP, stateless, JSON answers. Auth: `Authorization: Bearer <token>` (also `X-Illo-Bridge-Token`). A token belongs to a person and has a label for the machine. `illo token create --person <key> --label <machine> --scope collector|agent` prints it once. A token has exactly one scope:
+- `collector` (the default): `lane_report`, `lane_search`, `ask_create`, `ask_pull`, `ask_ack`, `ask_cancel`, `signal_submit`.
+- `agent`: the `collector` tools, plus `illo_submit`, `illo_read`, and `illo_get_result`.
+
+A call to a tool outside the scope fails. `tools/list` shows only the tools of the scope. Caps for each token: 20 open asks for each owner, 60 new signals in one hour, and 60 `illo_submit` requests that start a run in one hour.
 
 Tools. The first three keep the request and answer fields that agents use today. `tests/contracts/` holds fixtures of real calls, and these tests run on each change.
 
@@ -175,7 +212,7 @@ Tools. The first three keep the request and answer fields that agents use today.
   - `knowledge.search`: `query`, `kinds`, `sources`, `limit` (default 10, maximum 50). Answer: `query`, `results` (each: `id`, `source`, `kind`, `source_ref`, `title`, `summary`, `scores`, the source time), `semantic_available: false`, `requested_limit`, `effective_limit`.
   - `knowledge.get`: `source_ref`. Returns the full item if the person of the token may read it.
   - `workspace.search`: the same search as `knowledge.search`. It exists so that an old caller gets real results.
-- `lane_report`: upsert of one lane. `source`, `external_id`, `title`, `state`, `summary`, `links`, `repo`, `machine`, `owner` (a person key or a GitHub login; default: the person of the token), `event` (one line of what happened), `end_summary` (when the lane closes; it also becomes an item).
+- `lane_report`: upsert of one lane. A token writes only the lanes of its own person. It cannot write a `github` lane: only the GitHub poller writes those. `source`, `external_id`, `title`, `state`, `summary`, `links`, `repo`, `machine`, `owner` (a person key, GitHub login, email, or Slack id; default: the person of the token; another person only for a new `team` lane), `visibility` (`team` or `private`), `event` (one line of what happened), `end_summary` (when the lane closes; it also becomes an item).
 - `lane_search`: `query`, `state`, `owner`, `limit`.
 - `ask_create`: `lane` (`source`, `external_id`), `kind`, `question`, `options`, `recommended`, `proof`, `owner` (optional), `due_at`, `expires_at`, `source_ref`. Returns `ask_id` and, if a rule answered at once, the answer.
 - `ask_pull`: returns the answers that wait for the lanes of this token (`ask_id`, lane, option, text, who, when, via). `ask_ack`: `ask_id` → the answer is delivered. An answer that gets no ack is given again. After the end date the delivery state is `failed` and the owner sees it in the digest.
@@ -202,11 +239,11 @@ A secret is never in the workspace. Boot secrets are in the environment file. Co
 
 ## 10. Channels
 
-**Slack** (`illo/channels/slack/`): Socket Mode, so the host needs no public address. The app comes from `deploy/slack/manifest.yaml`. Events: `message.im`, `app_mention`, `message.channels` and `message.groups` for the configured channels, `block_actions`, files. Cards use Block Kit. A click on a button comes in as `block_actions`, the handler writes the ledger, and it edits the card. A card is built from the ledger row, and a check compares each open card with its row. An audio clip becomes text (Slack gives a transcript for a clip; if it does not, Illo says so).
+**Slack** (`illo/channels/slack/`): Socket Mode, so the host needs no public address. The app comes from `deploy/slack/manifest.yaml`. Events: `message.im`, `app_mention`, `message.channels` and `message.groups` for the configured channels, `block_actions`, files. A private channel starts no run and enters no index. A channel is private when Slack says so or when `illo.yaml` sets `visibility: private`. Cards use Block Kit. A click on a button comes in as `block_actions`, the handler writes the ledger, and it edits the card. A card is built from the ledger row, and a check compares each open card with its row. An audio clip becomes text (Slack gives a transcript for a clip; if it does not, Illo says so).
 
-Card types: the ask card (question, options as buttons, the recommended option first, proof, "Always allow" where a rule is possible), the draft card (Approve, Reject), the digest ("3 need you, 14 run fine", one line for each sensor that is not healthy), the note card ("I noted: ...", Correct, Remove).
+Card types: the ask card (question, options as buttons, the recommended option first, proof, "Always allow" where a rule is possible), the draft card (Send, Do not send; the full text, with hidden characters shown as escapes), the digest ("3 need you, 14 run fine", one line for each sensor that is not healthy), the note card ("I noted: ...", Correct, Remove).
 
-**Email** (`illo/channels/email/`): the mailbox is read with IMAP on a timer, so the host needs no public address. Outbound mail is always a draft card first.
+**Email** (`illo/channels/email/`): the mailbox is read with IMAP on a timer, so the host needs no public address. A sender has authority only with exactly one DMARC `pass` result whose `header.from` equals the From domain, in the trusted `Authentication-Results` header. The trusted header is the first one with the server name in `ILLO_EMAIL_AUTHSERV_ID`, or the topmost header when that setting is empty. Outbound mail is always a draft card first.
 
 **MCP**: section 8. **Signals**: `signal_submit`.
 
@@ -216,8 +253,8 @@ One function, `search(principal, query, kinds, limit)`, in `illo/sources/search.
 - `items` by full text (`websearch_to_tsquery`, `simple` and `english`), filtered by visibility: a private item shows only to its owner.
 - `lanes` by title, summary, and events.
 - GitHub issues and pull requests, live, through the GitHub client.
-- Slack messages that Illo saw in the configured channels (stored as items of kind `slack`).
-- Later: the shared drive and the personal connectors (only in a run of the owner).
+- Slack messages that Illo saw in the configured public channels (stored as items of kind `slack`).
+- When the Google connector files exist: the shared drive, and the mail and Drive of the person (only in an untainted run of the owner).
 
 Each result has a title, a short text, a link, the source, and the time. The brain can search several times with other words. Vectors are not in the first version.
 
@@ -235,15 +272,15 @@ illo/
   tools/         registry checks + one file for each family
   channels/      slack/ email/ mcp/ signals/
   sources/       search github slack_index drive archive
-  connectors/    mcp_client google oauth
-  routines/      scheduler digest reminders stale
+  connectors/    mcp_client google oauth github_client
+  routines/      scheduler digest reminders stale heartbeat
 brain/           the sandbox service: server, runtimes, Dockerfile
 collectors/      t3/  hooks/ (Claude Code and Codex)
 deploy/          compose.yaml  Dockerfile  install.sh  update.sh  slack/manifest.yaml  env.example
 workspace.example/
-ops/external_deadman/   the outside alarm (kept from the old tree)
+ops/external_deadman/   the outside alarm
 tests/           conftest.py  safety/  contracts/  one folder for each area
-docs/            architecture.md  direction.md  install.md  agents.md (how an agent connects)
+docs/            README.md (the map of the docs)  architecture.md  safety.md  …
 ```
 
 Rules for builders:
@@ -258,38 +295,26 @@ Rules for builders:
 
 ## Outside alarm
 
-The outside watcher stays in `ops/external_deadman/`. The unchanged workflow
+The outside watcher lives in `ops/external_deadman/`. The workflow
 `.github/workflows/illo-deadman.yml` runs it about every five minutes.
 It reads `heartbeat.json` from the `ops/heartbeat` branch of this repository.
-The new runtime must publish that file in a later change. This foundation does
-not publish it. The file has `ts` (an ISO-8601 UTC time), `last_run_id`
-(a positive integer or null), and `last_surface` (for example, `illo`).
+`illo/routines/heartbeat.py` publishes that file when `heartbeat.repo` is set
+(see `docs/github.md`). The file has `ts` (an ISO-8601 UTC time), `last_run_id`
+(a positive integer or null), and `last_surface` (`illo`).
 The watcher alarms after 12 minutes without a fresh heartbeat. It keeps its
 state in `deadman-state.json` on the same branch. It sends the notice before
 it writes the new state. A failed write can cause a duplicate notice.
 
-## Foundation transport and extension contract
+## The brain tool endpoint
 
-The brain endpoint implements the small JSON-RPC subset directly. It supports
-`initialize`, `ping`, `tools/list`, `tools/call`, and initialization notices.
-It uses stateless JSON responses. Each request checks the run bearer token.
-This keeps each tool list tied to the authenticated run. The official `mcp`
-SDK remains a dependency for channel and connector builders. There is no
-brain sandbox in this foundation, so rule 10 tests cover the server tool list.
-The brain builder must also test the tools exposed by each real runtime.
+`POST /brain/mcp` implements a small JSON-RPC subset directly: `initialize`,
+`ping`, `tools/list`, `tools/call`, and initialization notices. It uses
+stateless JSON responses. Each request checks the per-run bearer token, so
+each tool list belongs to one authenticated run. The server counts the tool
+calls of each run and stops at `brain.max_turns`. The brain service also
+limits the model turns. Rule 10 tests check the server tool list and the tool
+list of each real runtime.
 
-The workspace schemas and defaults are documented in `docs/workspace.md`.
-The foundation does not send draft cards. It records drafts in the ledger.
-The Slack builder must add the DM card and its approval route.
-The module `setup(ctx)` hooks register channel actions and scheduled work.
-The foundation reload route is loopback-only and also requires the configured
-`ILLO_RELOAD_TOKEN`. File checks reload the workspace without that route.
-
-An `outsider` run sees only `web_read_public_page`, once that tool exists.
-It cannot read team ledger data or create a ticket. Tainted runs for a known
-person or the team can read team-visible ledger data. They cannot read private
-ledger data or personal connectors. This narrows outside authority by code.
-
-Until the real runtime exists, `max_turns` limits streamed `tool_call` events
-and authenticated HTTP tool calls. The same value goes to the brain service.
-The runtime builder must also enforce the number of model turns.
+The reload route is loopback-only and requires `ILLO_RELOAD_TOKEN`. File
+checks reload the workspace without that route. The workspace schemas and
+defaults are in `docs/workspace.md`.
