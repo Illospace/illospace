@@ -35,6 +35,9 @@ Only enter a device code if you asked Illo to connect your own account.
 Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
 Only these exact DM commands can change the sign-in. The model can only check its status.
 Disconnect also cancels pending links. It does not sign you out of other OpenAI clients.
+A crash during a token refresh can need one new sign-in.
+The provider can rotate the token before Illo commits it to the database.
+Illo cannot recover that new token after a crash.
 The operator can run `illo chatgpt status` to list connection states and expiry times without secrets.
 See [Workspace files](workspace.md) for team credentials and the optional API-key fallback.
 Check that the provider's terms allow this use. An API key is the alternative.
