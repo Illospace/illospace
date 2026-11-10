@@ -110,3 +110,18 @@ async def test_u12_done_items_work_without_completed_output(run_request):
     events, session = await collect(subscription(run_request), respond)
     assert len(session.calls) == 1
     assert events[-1]["text"] == "Ready." and events[-1]["usage"]["total_tokens"] == 4
+
+
+async def test_s2_exact_tool_limit_gets_a_normal_last_model_call(run_request):
+    request = subscription(run_request)
+    request.max_turns = 1
+    bodies = []
+
+    def respond(wire):
+        bodies.append(json.loads(wire.content))
+        return stream(complete([call()] if len(bodies) == 1 else [message()]))
+
+    events, session = await collect(request, respond)
+    assert len(session.calls) == 1 and len(bodies) == 2
+    assert events[-1]["type"] == "final" and events[-1]["text"] == "Ready."
+    assert bodies[-1]["tools"] and bodies[-1].get("tool_choice") != "none"

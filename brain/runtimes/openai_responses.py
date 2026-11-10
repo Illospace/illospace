@@ -147,7 +147,7 @@ async def conversation(
     fallback_notice = ""
     subscription_limit = None
     tool_calls = 0
-    while tool_calls < request.max_turns:
+    while True:
         completed = None
         for attempt in range(2):
             text_deltas = []
@@ -272,7 +272,6 @@ async def conversation(
                     "output": model_text(result),
                 }
             )
-    yield event("error", category="limit", message="The run reached its turn limit", usage=usage)
 
 
 async def run(request: RunRequest, directory: Path, *, transport=None) -> AsyncIterator[BrainEvent]:
