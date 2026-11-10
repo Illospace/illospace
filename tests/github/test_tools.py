@@ -125,6 +125,33 @@ async def test_work_one_message_then_edit(app, rpc, rpc_token, github_client, sl
     )
 
 
+async def test_work_keeps_the_ticket_when_github_refuses_the_assignment(
+    app, rpc, rpc_token, github_client, slack_client
+):
+    _, token = rpc_token
+    ctx = app.state.ctx
+    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
+    github_client.refuse_assignment = True
+    assert (await call(rpc, token, "work_start", {**CREATE, "assignee": "ada"}))[
+        "decision"
+    ] == "draft"
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE drafts SET state='approved'")
+        draft = await one(conn, "SELECT * FROM drafts")
+    result = await perform_draft(ctx, draft)
+    assert result["created"] and result["lane_id"] and result["assigned"] is False
+    posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
+    assert len(posts) == 1
+    assert posts[0]["text"].startswith("Open · Stable failure · https://github.com/")
+    assert posts[0]["text"].endswith("GitHub refused the assignment. The ticket has no owner.")
+    # The note stays after a refresh, because the lane holds it as an event.
+    await refresh_statuses(ctx)
+    assert not [c for c in slack_client.calls if c["method"] == "chat_update"]
+    async with ctx.pool.connection() as conn:
+        lane = await one(conn, "SELECT * FROM lanes")
+        assert lane["owner_person_id"] is None
+
+
 async def test_work_falls_back_to_requester_dm(app, rpc, rpc_token, slack_client):
     _, token = rpc_token
     app.state.ctx.workspace.config.github.work_channel = None

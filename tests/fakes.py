@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 
+from illo.connectors.github_client import GitHubError
 from illo.gateway.replies import error_text
 
 
@@ -86,6 +87,7 @@ class FakeGitHubClient:
     pulls: list[dict] = field(default_factory=list)
     repositories: dict[str, dict] = field(default_factory=dict)
     files: dict[tuple, dict] = field(default_factory=dict)
+    refuse_assignment: bool = False
 
     def _items(self, repo, items):
         return [i for i in items if i.get("repo", repo).lower() == repo.lower()]
@@ -141,6 +143,8 @@ class FakeGitHubClient:
         self.calls.append(
             {"method": "assign_issue", "repo": repo, "number": number, "assignees": assignees}
         )
+        if self.refuse_assignment:
+            raise GitHubError(403)
         for issue in self._items(repo, self.issues):
             if issue["number"] == number:
                 issue["assignees"] = [{"login": login} for login in assignees]
