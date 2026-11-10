@@ -233,3 +233,43 @@ async def test_file_write_initializes_missing_branch_without_copying_code():
     assert json.loads(commits[0].content)["parents"] == []
     assert json.loads(requests[-1].content)["ref"] == "refs/heads/ops/heartbeat"
     assert not any(r.method == "DELETE" for r in requests)
+
+
+async def test_app_sign_in_survives_a_wrong_host_clock():
+    """GitHub refuses a token signed with a clock that is minutes ahead. Learn its time."""
+    from email.utils import format_datetime
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    ).decode()
+    local, real = 1_800_000_270.0, 1_800_000_000.0  # The host clock is 270 seconds ahead.
+    date = format_datetime(datetime.fromtimestamp(real, UTC), usegmt=True)
+    mints = []
+
+    def handle(request):
+        if request.url.path.endswith("/access_tokens"):
+            payload = request.headers["authorization"].split()[1].split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
+            mints.append(claims)
+            if claims["iat"] > real or claims["exp"] > real + 600:
+                return httpx.Response(
+                    401, json={"message": "Bad credentials"}, headers={"date": date}
+                )
+            return httpx.Response(
+                201,
+                json={
+                    "token": "installation-1",
+                    "expires_at": datetime.fromtimestamp(real + 3600, UTC).isoformat(),
+                },
+                headers={"date": date},
+            )
+        return httpx.Response(200, json={"private": True}, headers={"date": date})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = GitHubClient(
+            app_id="123", private_key=pem, installation_id="456", http=http, clock=lambda: local
+        )
+        await client.get_repository(REPO)
+    assert len(mints) == 2
+    assert mints[0]["iat"] > real and mints[1]["iat"] <= real < mints[1]["exp"] <= real + 600

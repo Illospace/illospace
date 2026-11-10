@@ -5,6 +5,7 @@ import base64
 import json
 import time
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -42,13 +43,16 @@ class GitHubClient:
         self.clock = clock
         self._installation_token = None
         self._expires = 0
+        # Seconds that the local clock is ahead of GitHub. A wrong host clock makes an
+        # app sign-in fail, because GitHub checks the times inside the signed token.
+        self._skew = 0.0
         self._auth_lock = asyncio.Lock()
 
     def _jwt(self) -> str:
         def encode(value):
             return base64.urlsafe_b64encode(value).rstrip(b"=")
 
-        now = int(self.clock())
+        now = int(self.clock() - self._skew)
         header = encode(b'{"alg":"RS256","typ":"JWT"}')
         body = encode(
             json.dumps({"iat": now - 60, "exp": now + 540, "iss": str(self.app_id)}).encode()
@@ -58,17 +62,31 @@ class GitHubClient:
         signature = key.sign(message, padding.PKCS1v15(), hashes.SHA256())
         return (message + b"." + encode(signature)).decode()
 
+    def _note_server_time(self, value: str | None) -> None:
+        """Learn the clock difference from the Date header of each GitHub answer."""
+        if not value:
+            return
+        try:
+            server = parsedate_to_datetime(value).timestamp()
+        except (TypeError, ValueError):
+            return
+        skew = self.clock() - server
+        self._skew = skew if abs(skew) > 30 else 0.0
+
     async def _auth(self) -> str:
         if self.token:
             return self.token
         async with self._auth_lock:
             if self._installation_token and self._expires > self.clock() + 60:
                 return self._installation_token
-            result = await self._request(
-                "POST",
-                f"/app/installations/{self.installation_id}/access_tokens",
-                bearer=self._jwt(),
-            )
+            path = f"/app/installations/{self.installation_id}/access_tokens"
+            try:
+                result = await self._request("POST", path, bearer=self._jwt())
+            except GitHubError as exc:
+                # The refused answer carried the time of GitHub. Sign again with that time.
+                if exc.status != 401 or not self._skew:
+                    raise
+                result = await self._request("POST", path, bearer=self._jwt())
             self._installation_token = result["token"]
             self._expires = datetime.fromisoformat(
                 result["expires_at"].replace("Z", "+00:00")
@@ -94,6 +112,7 @@ class GitHubClient:
             else:
                 async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                     response = await send(client)
+            self._note_server_time(response.headers.get("date"))
             limited = response.status_code == 429 or (
                 response.status_code == 403
                 and (
