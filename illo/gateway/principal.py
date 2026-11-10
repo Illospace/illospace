@@ -33,13 +33,26 @@ async def resolve(conn, event, workspace) -> Authority | None:
         return Authority("team", "tainted" if tainted else "team_channel", tainted=tainted)
     if event.channel == "email":
         person = await people.by_email(conn, event.sender)
-        tainted = not person or bool(event.payload.get("forwarded"))
+        tainted = not person or bool(
+            event.payload.get("forwarded") or event.payload.get("contains_outside_text")
+        )
         return Authority(
             f"person:{person['key']}" if person else "outsider",
             "tainted" if tainted else "person_dm",
             person["id"] if person else None,
             tainted,
         )
+    if event.channel == "routine":
+        routine = next(
+            (r for r in workspace.routines if r.name == event.payload.get("routine") and r.enabled),
+            None,
+        )
+        if not routine or routine.principal != event.payload.get("principal"):
+            return None
+        if routine.principal == "team":
+            return Authority("team", "routine")
+        person = await people.get(conn, routine.principal[7:])
+        return Authority(routine.principal, "person_dm", person["id"]) if person else None
     if event.channel == "mcp":
         # The agent channel passes the raw bearer only in sender, never in stored payload.
         token = await tokens.verify(conn, event.sender)

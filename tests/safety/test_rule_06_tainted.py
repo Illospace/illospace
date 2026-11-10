@@ -53,6 +53,6 @@ async def test_outsider_has_no_team_ledger_authority(app, rpc):
         )
         token = await runs.mint_token(conn, run["id"], 60)
     tools = (await rpc(token, "tools/list")).json()["result"]["tools"]
-    assert tools == []  # The public-page family is still a stub.
+    assert [tool["name"] for tool in tools] == ["web_read_public_page"]
     result = (await rpc(token, "tools/call", {"name": "people_list"})).json()["result"]
     assert result["isError"]

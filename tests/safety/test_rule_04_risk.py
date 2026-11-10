@@ -12,15 +12,16 @@ async def test_outside_send_does_not_run_handler(app, rpc, rpc_token):
 
     app.state.ctx.registry.add(
         Tool(
-            "email_draft",
+            "test_outside_send",
             "email",
             "send_outside",
             lambda a: "outside:recipient@example.net",
             False,
             send,
+            profiles=frozenset({"person_dm"}),
         )
     )
-    result = (await rpc(token, "tools/call", {"name": "email_draft"})).json()["result"][
+    result = (await rpc(token, "tools/call", {"name": "test_outside_send"})).json()["result"][
         "structuredContent"
     ]
     assert result["decision"] == "draft" and result["result"]["draft_id"]

@@ -26,6 +26,20 @@ class Config(BaseModel):
     email_host: str | None = None
     email_user: str | None = None
     email_password: SecretStr | None = None
+    email_port: int = Field(default=993, ge=1, le=65535)
+    email_folder: str = "INBOX"
+    email_poll_seconds: float = Field(default=60, gt=0)
+    email_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1)
+    email_authserv_id: str | None = None
+    email_password_secret: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=465, ge=1, le=65535)
+    smtp_user: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_password_secret: str | None = None
+    smtp_from: str | None = None
+    smtp_starttls: bool = False
+    web_allow_http: bool = False
     revision: str = "unknown"
     migrate_on_start: bool = True
     reload_token: SecretStr | None = None
