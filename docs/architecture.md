@@ -170,7 +170,7 @@ Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is on
 
 A run has a time limit and a turn limit from the config. A failed run gives the person a short honest message.
 
-The brain interface (`illo/brain/client.py`): `async def run(request: RunRequest) -> AsyncIterator[BrainEvent]`. `RunRequest`: `run_id`, `system_prompt`, `user_message`, `mcp_url`, `mcp_token`, `runtime`, `model`, `max_turns`, `timeout_s`. A `fake` runtime in `illo/brain/fake.py` plays a script of tool calls. Each test uses it. The real runtimes live in the `brain/` service.
+The brain interface (`illo/brain/client.py`): `async def run(request: RunRequest) -> AsyncIterator[BrainEvent]`. `RunRequest`: `run_id`, `system_prompt`, `user_message`, `mcp_url`, `mcp_token`, `runtime`, `model`, `max_turns`, `timeout_s`. A `fake` runtime in `illo/brain/fake.py` plays a script of tool calls. Each test uses it. The real runtimes live in the `brain/` service. `openai_responses` uses stateless OpenAI Responses; `openai_compat` keeps Chat Completions for other providers and local servers.
 
 ## 7. The tools that the brain sees
 

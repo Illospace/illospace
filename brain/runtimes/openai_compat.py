@@ -12,6 +12,7 @@ from mcp.types import Tool
 
 from brain.mcp_client import connect, list_tools
 from brain.models import BrainEvent, RunError, RunRequest, event
+from brain.runtimes.provider_errors import error_body, provider_error
 
 
 def function_tools(tools: list[Tool]) -> list[dict]:
@@ -74,16 +75,18 @@ async def conversation(
         }
         if catalog:
             payload["tools"] = catalog
+        if effort := os.getenv("ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT"):
+            payload["reasoning_effort"] = effort
         calls = {}
         text = []
         finish = None
         async with http.stream("POST", base + "/chat/completions", json=payload) as response:
-            if response.status_code in (401, 403):
-                raise RunError("auth", "The model provider rejected authentication")
+            if response.is_error:
+                raise provider_error(await error_body(response), response.status_code)
             response.raise_for_status()
             async for chunk in chunks(response):
                 if "error" in chunk:
-                    raise RunError("runtime", "The model provider returned an error")
+                    raise provider_error(chunk["error"])
                 add_usage(usage, chunk.get("usage") or {})
                 choices = chunk.get("choices") or []
                 if not choices:

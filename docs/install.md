@@ -74,8 +74,14 @@ Direct Compose commands must pass the same file with `--env-file`.
 3. For the `claude` runtime, set `ANTHROPIC_API_KEY`.
    You can also set `ANTHROPIC_BASE_URL`.
    The runtime uses the Claude Agent SDK.
+   For OpenAI, set `ILLO_BRAIN_RUNTIME=openai_responses` and `OPENAI_API_KEY`.
+   Set `ILLO_BRAIN_MODEL` to the OpenAI model and `ILLO_BRAIN_EFFORT` to its reasoning effort (default `low`).
+   `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
+   This runtime uses Responses with `store: false` and only the Illo MCP tools.
    For `openai_compat`, set `ILLO_BRAIN_RUNTIME=openai_compat`, `OPENAI_API_KEY`, and `OPENAI_BASE_URL`.
    Set `ILLO_BRAIN_MODEL` to the model name that the provider accepts.
+   Set `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` only if that provider needs it.
+   See [the brain guide](../brain/README.md) for API details and live measurements.
    The `echo` runtime needs no model key and is only for tests.
 4. Recreate the services after an environment change.
    Use the saved revision so Compose starts the correct image tags:

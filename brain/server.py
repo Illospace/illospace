@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 from contextlib import aclosing
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from brain.models import RunRequest, event
 from brain.process import run_worker
 from brain.runtimes.claude import has_auth
+from brain.runtimes.provider_errors import identifier
 
 
 def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
@@ -34,6 +36,7 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                     "usable": bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL")),
                     "experimental": True,
                 },
+                "openai_responses": {"usable": bool(os.getenv("OPENAI_API_KEY"))},
                 "echo": {"usable": True},
             },
         }
@@ -66,6 +69,17 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                             ):
                                 if value:
                                     line = line.replace(json.dumps(value)[1:-1], "[redacted]")
+                            if item["type"] == "error":
+                                safe = json.loads(line)
+                                logging.getLogger(__name__).warning(
+                                    "Brain error: category=%s http_status=%s code=%s type=%s",
+                                    identifier(safe.get("category")),
+                                    safe.get("http_status")
+                                    if isinstance(safe.get("http_status"), int)
+                                    else None,
+                                    identifier(safe.get("code")),
+                                    identifier(safe.get("provider_type")),
+                                )
                             yield line + "\n"
                             if item["type"] in ("final", "error"):
                                 return

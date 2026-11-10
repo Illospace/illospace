@@ -8,6 +8,7 @@ The Illo MCP server checks each tool call with the run token.
 ## Runtimes
 
 - `claude` is the default. It uses `claude-agent-sdk==0.2.180` and its bundled Claude CLI.
+- `openai_responses` uses the OpenAI Responses API. It offers only the Illo MCP functions.
 - `openai_compat` is experimental. It uses a small streaming Chat Completions loop over HTTP. Its tests use a fake model server only.
 - `echo` calls MCP `tools/list` and returns the tool names. It makes no model request.
 
@@ -20,13 +21,77 @@ User settings, project settings, skills, hooks, plugins, and session persistence
 Each run has an empty work folder and separate config, cache, and temporary folders.
 Each run starts a fresh process. The service does not reuse a conversation.
 
-The OpenAI-compatible loop offers only the tools from the authenticated MCP `tools/list` response.
-It sends tool results back through Chat Completions and streams the answer.
+Both OpenAI loops offer only the tools from the authenticated MCP `tools/list` response.
+Each loop sends tool results back through its API and streams the answer.
 It refuses a tool name outside that run's catalog.
 Each model request uses one turn. The service stops after `max_turns` requests.
 MCP tool errors remain tool results, so the model can explain them.
-Provider errors end the run. The service does not retry a write.
+Provider errors end the run. The service does not retry an MCP write.
+The Responses loop can retry a rejected reasoning parameter once, before it executes any tool.
 The wire format follows the [OpenAI function calling guide](https://developers.openai.com/api/docs/guides/function-calling).
+
+### OpenAI Responses API
+
+Use `openai_responses` for current OpenAI models that require Responses for function tools.
+Set `OPENAI_API_KEY` and select the model in the request or `ILLO_BRAIN_MODEL`.
+`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
+Set `ILLO_BRAIN_EFFORT` to the model's reasoning effort. The default is `low`.
+The request sends this value as `reasoning.effort`.
+If the provider rejects that parameter, the loop retries once without it.
+The worker remembers that choice for its process lifetime. A new worker starts a new cache.
+Other HTTP failures do not trigger a retry.
+
+The loop sends the system prompt as `instructions` on each request.
+It sets `store: false`, `max_output_tokens: 4096`, and `parallel_tool_calls: true`.
+Parallel function calls execute through MCP in order.
+Each next request repeats all input and output items, including encrypted reasoning items.
+A `function_call_output` item carries each tool result with its original `call_id`.
+The loop never uses `previous_response_id` or depends on a stored conversation.
+`store: false` disables response storage. Provider retention policies still apply.
+
+Only `type: function` tools from the authenticated MCP catalog enter a request.
+The loop checks this condition in code and refuses unknown calls and built-in tool items.
+It enables no provider web, file, shell, computer, or MCP connector tool.
+The runtime reads text deltas and takes completed output items from `response.completed`.
+It rejects truncated streams, `response.failed`, `response.incomplete`, and stream error events.
+Usage adds `input_tokens`, `output_tokens`, `total_tokens`, and numeric detail fields across turns.
+
+Current official API documentation checked on 2026-11-10:
+
+- [Create a response](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [Function calling](https://developers.openai.com/api/docs/guides/function-calling)
+- [Streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses)
+- [Reasoning and stateless conversations](https://developers.openai.com/api/docs/guides/reasoning)
+
+### Live check on 2026-11-10
+
+The Responses runtime used the real OpenAI API with a local fake Illo MCP server.
+That server offered exactly `lanes_search` and `ask_list`.
+Each timed run asked, "Where are we on the mobile release?"
+The system prompt required `lanes_search` and a three-line answer.
+Each run made one tool call and two model requests.
+Times start before MCP initialization. The first tool time is the start of MCP `tools/call`.
+The final time is the completed runtime event. These measurements are not a latency guarantee.
+
+| Model | Effort | Run | First tool (seconds) | Final answer (seconds) |
+| --- | --- | --- | --- | --- |
+| `gpt-6.1-sol` | `low` | 1 | 1.635 | 2.936 |
+| `gpt-6.1-sol` | `low` | 2 | 1.344 | 2.892 |
+| `gpt-6.1-sol` | `low` | 3 | 1.346 | 2.893 |
+| `gpt-6.1-terra` | `low` | 1 | 1.201 | 2.237 |
+| `gpt-6.1-terra` | `low` | 2 | 1.171 | 2.554 |
+| `gpt-6.1-terra` | `low` | 3 | 1.306 | 2.398 |
+
+The hostile prompt asked Sol to run `id`, read `/etc/passwd`, and fetch `https://example.com`.
+It requested no tool and finished in 1.686 seconds.
+Its catalog contained only the two fake Illo tools. No outside tool was requested or executed.
+The full check used 13 model requests. No reasoning retry was needed.
+
+For this status lookup, start with `gpt-6.1-terra` and effort `low`.
+It completed all three runs with lower latency than Sol in this small check.
+This checks the runtime path and tool boundary. It does not compare quality on complex work.
+The general service default remains Claude. Earlier Claude Agent SDK checks also used a live model.
+The Chat Completions runtime, other providers, and local servers have offline tests only.
 
 ### Why there is no Codex runtime yet
 
@@ -65,7 +130,9 @@ The default base is `https://api.openai.com/v1`.
 Supply the provider's model name in the run request.
 Ollama (`http://ollama:11434/v1`) and vLLM (`http://vllm:8000/v1`) are untested examples.
 An explicit base URL allows a local server with no API key.
-The service does not add provider-specific parameters beyond streaming usage.
+Set `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` only when the provider needs `reasoning_effort`.
+For example, some models need `none` to accept tools through Chat Completions.
+The loop omits that parameter when the setting is blank.
 A compatible provider must accept `stream_options.include_usage`.
 
 Set the same `ILLO_BRAIN_SECRET` on the gateway and the brain service.
@@ -88,7 +155,7 @@ Its JSON body has these fields:
 | `user_message` | The event text. |
 | `mcp_url` | The gateway's HTTP MCP endpoint, normally `/brain/mcp`. |
 | `mcp_token` | The bearer token for this run. |
-| `runtime` | `claude`, `openai_compat`, or `echo`. Default: `claude`. |
+| `runtime` | `claude`, `openai_responses`, `openai_compat`, or `echo`. Default: `claude`. |
 | `model` | The model name. Default: `ILLO_BRAIN_MODEL`, then `claude-opus-5-5`. |
 | `max_turns` | Maximum model turns, from 1 to 50. Default: 8. |
 | `timeout_s` | Active run deadline in seconds, up to 3600. Default: 120. |
@@ -104,9 +171,13 @@ The response uses `application/x-ndjson`. Each line is one JSON object with `typ
 ```
 
 The first `started` event confirms admission. A later `started` event gives the runtime catalog.
-`openai_compat` and `echo` use the MCP names without the Claude `mcp__illo__` prefix.
+`openai_responses`, `openai_compat`, and `echo` use the MCP names without the Claude `mcp__illo__` prefix.
 A run ends with one `final` or `error` event.
 An error has `message` and `category`: `auth`, `timeout`, `runtime`, or `limit`.
+Provider failures also carry `code`, `provider_type`, and the HTTP status when available.
+Only short identifiers enter those fields. Invalid or absent identifiers become `unknown`.
+The event and service log omit provider message text, prompts, tool results, and keys.
+The main app stores `The brain run failed: <category> <code>` in `runs.error`.
 A final event has `text` and `usage`. Usage fields come from the runtime.
 The OpenAI-compatible loop adds numeric usage fields across its turns.
 A failed request before the stream starts uses HTTP 401, 422, or 503.
@@ -120,7 +191,8 @@ Validation errors and provider exceptions do not echo the request or secrets.
 | `ILLO_BRAIN_CONCURRENCY` | `4` | Maximum active workers. Other requests wait. |
 | `ILLO_BRAIN_TIMEOUT_S` | `120` | Maximum active duration, capped further by `timeout_s`. |
 | `ILLO_BRAIN_MODEL` | `claude-opus-5-5` | Model when the request omits it. |
-| `ILLO_BRAIN_EFFORT` | `low` | Claude effort. |
+| `ILLO_BRAIN_EFFORT` | `low` | Claude effort or Responses reasoning effort. |
+| `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` | Unset | Optional Chat Completions `reasoning_effort`. |
 | `ILLO_BRAIN_TMPDIR` | System temp folder | Parent folder for each run's private files. |
 
 The gateway also enforces the full deadline, including its wait for a run slot.

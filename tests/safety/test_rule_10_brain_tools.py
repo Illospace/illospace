@@ -14,6 +14,7 @@ from brain.models import RunRequest
 from brain.process import run_worker
 from brain.runtimes.claude import options
 from brain.runtimes.openai_compat import function_tools
+from brain.runtimes.openai_responses import build_request
 from tests.brain_service.conftest import TOOLS, FakeMCP, serve
 
 
@@ -78,6 +79,20 @@ def test_rule_10_openai_catalog_has_only_discovered_tools():
     assert {tool["function"]["name"] for tool in catalog} == {tool.name for tool in tools}
     assert all(tool["type"] == "function" for tool in catalog)
     assert catalog[-1]["function"]["parameters"] == {"type": "object"}
+
+
+def test_rule_10_responses_request_has_only_discovered_functions():
+    tools = [Tool.model_validate(tool) for tool in TOOLS]
+    tools.append(Tool(name="new_family_verb", inputSchema={"type": "object"}))
+    payload = build_request(request(runtime="openai_responses"), tools, [])
+    assert {tool["name"] for tool in payload["tools"]} == {tool.name for tool in tools}
+    assert all(tool["type"] == "function" for tool in payload["tools"])
+    assert [tool["parameters"] for tool in payload["tools"]] == [t.inputSchema for t in tools]
+    assert [tool["description"] for tool in payload["tools"]] == [
+        t.description or "" for t in tools
+    ]
+    assert payload["store"] is False
+    assert "previous_response_id" not in payload
 
 
 @pytest.mark.skipif(
