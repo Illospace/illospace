@@ -32,6 +32,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.model` | Model sent to the brain service. Default: `default`. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–100. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 120. Maximum: 3600. |
+| `workspace.git_push` | Commit and push confirmed notes. Default: false. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |
 | `run_limits.max_message_chars` | Maximum inbound text length. Default: 20000. |
 
@@ -56,7 +57,8 @@ No Slack token is required to load these files or start the HTTP app.
   The kind is `mcp`, `google`, or `github`. The scope is `team` or `personal`.
   Each tool has `name` and `risk`: `read`, `write_internal`, or `send_outside`.
   The connector builder resolves personal grants for the authenticated person. The files contain no grants or secrets.
-- `notes/*.md`: Markdown text. The first line supplies the title.
+- `notes/*.md`: team notes with front matter: `title`, `about`, `author`, `created`, and `visibility: team`.
+  Plain Markdown notes still load. See [Search, archive import, and notes](search-notes.md).
 
 The loader checks files every `ILLO_WORKSPACE_CHECK_SECONDS` seconds.
 `illo reload` requests an immediate reload. It needs `ILLO_RELOAD_TOKEN` and a loopback URL.

@@ -110,6 +110,10 @@ class StaleLimits(Model):
     email: int = Field(default=1440, gt=0)
 
 
+class WorkspaceConfig(Model):
+    git_push: bool = False
+
+
 class TeamConfig(Model):
     team_name: str = Field(min_length=1)
     timezone: str = "UTC"
@@ -120,6 +124,7 @@ class TeamConfig(Model):
     stale_minutes: StaleLimits = Field(default_factory=StaleLimits)
     brain: BrainConfig = Field(default_factory=BrainConfig)
     run_limits: RunLimits = Field(default_factory=RunLimits)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
 
     _timezone = field_validator("timezone")(Person.valid_timezone.__func__)
 
@@ -176,6 +181,19 @@ class Note(Model):
     title: str
     body: str
     path: str
+    about: str = ""
+    author: str | None = None
+    created: str | None = None
+    visibility: Literal["team"] = "team"
+
+    @field_validator("created")
+    @classmethod
+    def valid_created(cls, value):
+        if value is not None:
+            from datetime import datetime
+
+            datetime.fromisoformat(value)
+        return value
 
 
 class Workspace(Model):
@@ -326,15 +344,26 @@ def load_workspace(root: Path | str) -> Workspace:
             )
     for path in sorted(root.glob("connectors/*.yaml")):
         connectors.append(_model(Connector, _yaml(path, _read(path)), path))
+    if (root / "notes").is_symlink():
+        raise WorkspaceError(f"{root / 'notes'}: the notes folder must not be a link")
     for path in sorted(root.glob("notes/*.md")):
         body = _read(path)
-        notes.append(
-            Note(
-                title=body.splitlines()[0].lstrip("# ") if body else path.stem,
-                body=body,
-                path=str(path.relative_to(root)),
+        if path.is_symlink():
+            raise WorkspaceError(f"{path}: a note must be a regular file")
+        if body.startswith("---\n"):
+            data = _front(path)
+            # YAML reads an ISO date as a date object.
+            if data.get("created") is not None:
+                data["created"] = str(data["created"])
+            notes.append(_model(Note, {**data, "path": str(path.relative_to(root))}, path))
+        else:
+            notes.append(
+                Note(
+                    title=body.splitlines()[0].lstrip("# ") if body else path.stem,
+                    body=body,
+                    path=str(path.relative_to(root)),
+                )
             )
-        )
     for group in (rules, skills, routines, connectors):
         identifiers = [getattr(x, "key", None) or x.name for x in group]
         if len(identifiers) != len(set(identifiers)):

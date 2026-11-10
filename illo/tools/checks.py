@@ -116,7 +116,9 @@ def destination(run: dict, tool, args: dict) -> Decision:
         target == "ledger" or target.startswith(("person:", "channel:", "github:", "outside:"))
     ):
         return Decision("deny", "The tool has no valid destination")
-    if run["personal_read"] and target not in {run["principal"], "ledger"}:
+    if run["personal_read"] and (
+        getattr(tool, "team_visible", False) or target not in {run["principal"], "ledger"}
+    ):
         return Decision("draft", "Personal data needs approval for this destination")
     return Decision("allow", "The destination is allowed")
 
