@@ -51,7 +51,7 @@ class RunRequest(BaseModel):
     smoke: bool = False
 
     def wire(self):
-        data = self.model_dump()
+        data = self.model_dump(exclude={"smoke"} if not self.smoke else set())
         data["provider_auth"] = self.provider_auth.wire()
         return data
 
