@@ -8,6 +8,7 @@ import yaml
 from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from illo.connectors.config import Connector
 from illo.db import Connection
 
 Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request"]
@@ -185,26 +186,6 @@ class Routine(Model):
     _schedule = field_validator("schedule")(DigestConfig.valid_cron.__func__)
 
 
-class ConnectorTool(Model):
-    name: str = Field(min_length=1)
-    risk: Risk
-
-
-class Connector(Model):
-    key: str = Field(min_length=1)
-    kind: Literal["mcp", "google", "github"]
-    scope: Literal["team", "personal"]
-    url: str
-    tools: list[ConnectorTool] = Field(default_factory=list)
-
-    @field_validator("url")
-    @classmethod
-    def valid_url(cls, value):
-        if not value.startswith(("https://", "http://")):
-            raise ValueError("Use an HTTP or HTTPS URL")
-        return value
-
-
 class Note(Model):
     title: str
     body: str
@@ -379,7 +360,7 @@ def load_workspace(root: Path | str) -> Workspace:
                 )
             )
     for path in sorted(root.glob("connectors/*.yaml")):
-        connectors.append(_model(Connector, _yaml(path, _read(path)), path))
+        connectors.append(_model(Connector, {"key": path.stem, **_yaml(path, _read(path))}, path))
     if (root / "notes").is_symlink():
         raise WorkspaceError(f"{root / 'notes'}: the notes folder must not be a link")
     for path in sorted(root.glob("notes/*.md")):

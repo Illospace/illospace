@@ -8,6 +8,7 @@ async def test_tainted_run_hides_personal_tools_and_private_lanes(app, rpc):
     async def personal(ctx, args):
         raise AssertionError("This handler must not run")
 
+    app.state.ctx.registry.tools.pop("mail_search", None)
     app.state.ctx.registry.add(
         Tool("mail_search", "personal", "read", lambda a: "ledger", True, personal)
     )

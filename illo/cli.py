@@ -49,6 +49,12 @@ def parser() -> argparse.ArgumentParser:
     secret.add_parser("set").add_argument("name")
     secret.add_parser("get-names")
     secret.add_parser("delete").add_argument("name")
+    connector = commands.add_parser("connector").add_subparsers(dest="action", required=True)
+    login = connector.add_parser("login")
+    login.add_argument("name")
+    login.add_argument("--person")
+    status = commands.add_parser("connectors").add_subparsers(dest="action", required=True)
+    status.add_parser("status")
     return result
 
 
@@ -139,6 +145,10 @@ async def execute(args, config: Config) -> int:
             print("Asks answered by a rule:")
             for row in counts["rules"]:
                 print(f"{row['person']}  {row['answered_by_rule']}")
+        elif args.command in {"connector", "connectors"}:
+            from illo.connectors.login import execute as connector_execute
+
+            await connector_execute(conn, args, config)
         elif args.command == "token":
             if args.action == "create":
                 await load_workspace(config.workspace_dir).sync_people(conn)
