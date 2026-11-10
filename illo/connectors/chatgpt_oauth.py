@@ -9,9 +9,6 @@ import time
 from html import unescape
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from fastapi import HTTPException, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
-
 from illo.connectors import chatgpt, oauth
 from illo.connectors.store import vault
 from illo.db import all_rows, one
@@ -21,7 +18,6 @@ from illo.slackapi import dm_person
 
 FAILED = 'ChatGPT sign-in did not finish. Say "connect my ChatGPT" to try again.'
 DEVICE_BASE = chatgpt.ISSUER + "/api/accounts/deviceauth"
-HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
 
 def binding(event):
@@ -43,7 +39,7 @@ async def issue(ctx, person_id, event, *, conn=None):
             .decode()
         )
         details = {**binding(event), "verifier": secrets.token_urlsafe(48)}
-        # A new link cancels the person's previous pending sign-in.
+        # A new attempt cancels the person's previous pending sign-in.
         await conn.execute(
             "UPDATE connector_oauth_states SET cancelled_at=clock_timestamp(), "
             "consumed_at=coalesce(consumed_at,clock_timestamp()) "
@@ -56,11 +52,7 @@ async def issue(ctx, person_id, event, *, conn=None):
             VALUES (%s,'chatgpt',%s,%s,clock_timestamp()+interval '10 minutes')""",
             (oauth.digest(state), person_id, vault(ctx).encrypt(json.dumps(details))),
         )
-        return (
-            ctx.config.public_url.rstrip("/")
-            + "/oauth/chatgpt/start?"
-            + urlencode({"state": state})
-        )
+        return state
 
     if conn is not None:
         return await insert(conn)
@@ -127,36 +119,15 @@ async def start(ctx, state, *, paste=False):
             (vault(ctx).encrypt(json.dumps(details)), row["state_hash"]),
         )
     if device:
-        fallback = (
-            ctx.config.public_url.rstrip("/")
-            + "/oauth/chatgpt/paste?"
-            + urlencode({"state": state})
-        )
         return "device", (
             "1. Open https://auth.openai.com/codex/device and sign in to your own ChatGPT account.\n"
             f"2. Enter this one-time code: {device['user_code']}\n"
-            "The link expires 10 minutes after your request. Illo sends you a DM after sign-in.\n"
+            "The code expires 10 minutes after your request. Illo sends you a DM after sign-in.\n"
             "Use this code only if you asked Illo to connect your ChatGPT.\n"
-            "If device sign-in is off, use the paste flow:\n" + fallback
+            "If ChatGPT refuses the code, turn on the device-code sign-in in the ChatGPT "
+            'security settings, or write "connect my ChatGPT with a link".'
         )
     return "paste", authorize(state, details["verifier"])
-
-
-async def switch_to_paste(ctx, state):
-    async with ctx.pool.connection() as conn:
-        row = await grants.state(conn, oauth.digest(state), lock=True)
-        if not row or not row["started_at"]:
-            raise ValueError(FAILED)
-        details = json.loads(vault(ctx).decrypt(row["secret"]))
-        if details.get("mode") != "device":
-            raise ValueError(FAILED)
-        details = {k: details[k] for k in ("channel_id", "thread", "verifier")}
-        details["mode"] = "paste"
-        await conn.execute(
-            "UPDATE connector_oauth_states SET secret=%s WHERE state_hash=%s",
-            (vault(ctx).encrypt(json.dumps(details)), row["state_hash"]),
-        )
-    return authorize(state, details["verifier"])
 
 
 class AccountMismatch(ValueError):
@@ -357,6 +328,7 @@ async def claim(ctx, event, authority):
     command = event.text.strip().lower()
     if not pasted and command not in {
         "connect my chatgpt",
+        "connect my chatgpt with a link",
         "disconnect my chatgpt",
         "chatgpt status",
     }:
@@ -370,11 +342,14 @@ async def claim(ctx, event, authority):
             return await complete(
                 ctx, params["state"][0], params["code"][0], authority.person_id, event
             )
-        if command == "connect my chatgpt":
-            link = await issue(ctx, authority.person_id, event)
+        if command in {"connect my chatgpt", "connect my chatgpt with a link"}:
+            state = await issue(ctx, authority.person_id, event)
+            mode, answer = await start(ctx, state, paste=command.endswith(" with a link"))
+            if mode == "device":
+                return answer
             return (
                 "Open this one-time link to connect your ChatGPT:\n"
-                + link
+                + answer
                 + (
                     "\nIf you use the paste flow, the final local address can fail to open. "
                     "Paste that full address here, in this same DM and thread."
@@ -417,22 +392,3 @@ async def setup(ctx):
     ctx.every(5, lambda: poll_devices(ctx))
     for name in ("uvicorn.access", "httpx", "httpcore"):
         logging.getLogger(name).addFilter(LogFilter())
-
-    async def start_route(request: Request):
-        try:
-            mode, text = await start(ctx, request.query_params.get("state", ""))
-            if mode == "paste":
-                return RedirectResponse(text, headers=HEADERS)
-            return PlainTextResponse(text, headers=HEADERS)
-        except Exception:
-            raise HTTPException(400, "The sign-in link is invalid or expired") from None
-
-    async def paste_route(request: Request):
-        try:
-            url = await switch_to_paste(ctx, request.query_params.get("state", ""))
-            return RedirectResponse(url, headers=HEADERS)
-        except Exception:
-            raise HTTPException(400, "The sign-in link is invalid or expired") from None
-
-    ctx.app.add_api_route("/oauth/chatgpt/start", start_route, methods=["GET"])
-    ctx.app.add_api_route("/oauth/chatgpt/paste", paste_route, methods=["GET"])
