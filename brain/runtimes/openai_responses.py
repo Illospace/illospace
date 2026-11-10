@@ -83,6 +83,19 @@ def check_item(item: dict, names: set[str]) -> None:
         raise RunError("runtime", "The model requested a tool outside the run catalog")
 
 
+def used_fields(item):
+    """Compare the fields we consume. Provider metadata can differ between events."""
+    fields = {key: item.get(key) for key in (
+        "type", "call_id", "name", "arguments", "encrypted_content"
+    )}
+    if item.get("type") == "message":
+        fields["content"] = [
+            {key: part.get(key) for key in ("type", "text", "refusal")}
+            for part in item.get("content", [])
+        ]
+    return fields
+
+
 def effort_rejected(error: dict) -> bool:
     param = error.get("param")
     # Read the message only to classify this rejection. Never emit or log it.
@@ -212,7 +225,7 @@ async def conversation(
         add_usage(usage, completed.get("usage") or {})
         observed = [done_items[index] for index in sorted(done_items)]
         output = completed.get("output") or observed
-        if observed and output != observed:
+        if observed and [used_fields(i) for i in output] != [used_fields(i) for i in observed]:
             raise RunError("runtime", "The model returned conflicting output items")
         for item in output:
             check_item(item, names)

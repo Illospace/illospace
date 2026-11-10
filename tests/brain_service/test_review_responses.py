@@ -142,3 +142,42 @@ async def test_n4_a_new_turn_cannot_reuse_a_completed_response(run_request):
     with pytest.raises(RunError, match="without a complete response"):
         await collect(subscription(run_request), respond)
     assert count == 2
+
+
+async def test_n5_metadata_differences_do_not_fail_the_run(run_request):
+    def respond(wire):
+        item = message()
+        return stream(
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            complete([{**item, "id": "msg_backend", "status": "completed"}]),
+        )
+
+    events, session = await collect(subscription(run_request), respond)
+    assert events[-1]["text"] == "Ready." and not session.calls
+
+
+@pytest.mark.parametrize("field,value", [
+    ("call_id", "other-call"), ("arguments", '{"query":"different"}'),
+    ("name", "other_tool"), ("type", "message"),
+])
+async def test_n5_conflicting_tool_fields_fail_closed(run_request, field, value):
+    item = call()
+    def respond(wire):
+        return stream(
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            complete([{**item, field: value}]),
+        )
+
+    with pytest.raises(RunError, match="conflicting output items"):
+        await collect(subscription(run_request), respond)
+
+
+async def test_n5_conflicting_answer_text_fails_closed(run_request):
+    def respond(wire):
+        return stream(
+            {"type": "response.output_item.done", "output_index": 0, "item": message("One.")},
+            complete([message("Two.")]),
+        )
+
+    with pytest.raises(RunError, match="conflicting output items"):
+        await collect(subscription(run_request), respond)
