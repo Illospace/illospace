@@ -1,5 +1,6 @@
-"""Collector area. Its builder adds the implementation."""
+"""T3 reference collector."""
 
 
-async def setup(ctx) -> None:
-    """Register collector server routes and timers when they exist."""
+async def setup(ctx):
+    """Collectors run on agent machines. The server starts no collector."""
+    return None
