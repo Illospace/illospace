@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import aclosing
 
 from illo.brain.client import BrainEvent, ProviderAuth, RunRequest
 from illo.brain.prompts import build_for_run
@@ -22,7 +23,7 @@ def credential_person(authority, workspace):
     return workspace.config.brain.team_credential
 
 
-async def provider_auth(ctx, authority, runtime):
+async def provider_auth(ctx, authority, runtime, *, force=False, rejected_token=None):
     config = ctx.workspace.config.brain
     if config.auth == "api_key":
         return ProviderAuth()
@@ -43,7 +44,11 @@ async def provider_auth(ctx, authority, runtime):
         not person or person["id"] != authority.person_id or authority.principal != "person:" + key
     ):
         return None
-    auth = await chatgpt.access(ctx, person) if person else None
+    auth = (
+        await chatgpt.access(ctx, person, force=force, rejected_token=rejected_token)
+        if person
+        else None
+    )
     if auth is not None:
         return auth
     if config.api_key_fallback:
@@ -134,36 +139,60 @@ class RunManager:
         try:
             async with asyncio.timeout(config.timeout_s):
                 turns = 0
-                async for item in ctx.brain_client.run(request):
-                    item = safe_event(item, auth)
-                    if item.type == "tool_call":
-                        turns += 1
-                        if turns > config.max_turns:
-                            raise RuntimeError("The run reached its turn limit")
-                    if on_event:
-                        await on_event(item)
-                    if item.type == "error":
-                        error = item.failure_reason()
-                        if auth.kind == "chatgpt" and item.code == "usage_limit_reached":
-                            from datetime import UTC, datetime
-
-                            final = "Your ChatGPT limit is reached."
-                            if item.resets_at and 0 < item.resets_at < 253402300800:
-                                final += (
-                                    " It resets "
-                                    + datetime.fromtimestamp(item.resets_at, UTC).strftime(
-                                        "%Y-%m-%d %H:%M UTC"
-                                    )
-                                    + "."
+                for attempt in range(2):
+                    retry = False
+                    async with aclosing(ctx.brain_client.run(request)) as stream:
+                        async for item in stream:
+                            item = safe_event(item, auth)
+                            if item.type == "tool_call":
+                                turns += 1
+                                if turns > config.max_turns:
+                                    raise RuntimeError("The run reached its turn limit")
+                            if (
+                                item.type == "error"
+                                and item.category == "auth"
+                                and auth.kind == "chatgpt"
+                                and turns == 0
+                                and attempt == 0
+                            ):
+                                fresh = await provider_auth(
+                                    ctx,
+                                    authority,
+                                    runtime,
+                                    force=True,
+                                    rejected_token=auth.access_token.get_secret_value(),
                                 )
-                            if item.api_key_fallback_failed:
-                                final += " The API fallback failed."
-                            break
-                        if item.category == "timeout":
-                            status = "timeout"
-                        raise RuntimeError(error)
-                    if item.type == "final":
-                        final, usage, status = item.text, item.usage, "completed"
+                                if fresh is not None:
+                                    auth = fresh
+                                    request = request.model_copy(update={"provider_auth": auth})
+                                    retry = True
+                                    break
+                            if on_event:
+                                await on_event(item)
+                            if item.type == "error":
+                                error = item.failure_reason()
+                                if auth.kind == "chatgpt" and item.code == "usage_limit_reached":
+                                    from datetime import UTC, datetime
+
+                                    final = "Your ChatGPT limit is reached."
+                                    if item.resets_at and 0 < item.resets_at < 253402300800:
+                                        final += (
+                                            " It resets "
+                                            + datetime.fromtimestamp(item.resets_at, UTC).strftime(
+                                                "%Y-%m-%d %H:%M UTC"
+                                            )
+                                            + "."
+                                        )
+                                    if item.api_key_fallback_failed:
+                                        final += " The API fallback failed."
+                                    break
+                                if item.category == "timeout":
+                                    status = "timeout"
+                                raise RuntimeError(error)
+                            if item.type == "final":
+                                final, usage, status = item.text, item.usage, "completed"
+                                break
+                    if not retry:
                         break
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
