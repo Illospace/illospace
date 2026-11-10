@@ -1,0 +1,7 @@
+key: docs
+kind: mcp
+scope: team
+url: https://docs.example.com/mcp
+tools:
+  - name: search
+    risk: read

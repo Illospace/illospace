@@ -1,308 +1,187 @@
-"""Shared fixtures for illo-brain tests."""
+"""One isolated database for each session. No real channel or model calls."""
 
 import os
-import sys
-from unittest.mock import MagicMock, patch
+import uuid
+from pathlib import Path
 
+import httpx
 import pytest
-from sqlalchemy import text
-from sqlalchemy.schema import CreateTable
+from psycopg import AsyncConnection, sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from tests.db_engine_utils import create_async_test_engine
+from illo.app import create_app
+from illo.brain.fake import FakeBrain
+from illo.config import Config
+from illo.db import create_pool, migrate
+from illo.gateway import InboundEvent
+from illo.workspace import load_workspace
+from tests.fakes import FakeChannelAdapter, FakeGitHubClient, FakeSlackClient
 
-
-@pytest.fixture
-def healthy_provider_auth(monkeypatch):
-    """Declare healthy admission auth for tests of unrelated consumer behavior."""
-    from brain.platform.integrations.provider_auth_preflight import ProviderAuthPassedPreflightResult
-
-    async def passed(_session, *, provider, model, **_kwargs):
-        return ProviderAuthPassedPreflightResult(provider=provider, model=model)
-
-    monkeypatch.setattr("brain.systems.runs.work_intake.async_probe_provider_auth", passed)
-
-# Ensure the repository package is importable
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
-
-
-@pytest.fixture
-def mock_cursor():
-    """A mock RealDictCursor that tracks execute calls."""
-    cur = MagicMock()
-    cur.fetchone.return_value = {"id": 1, "cnt": 0, "c": 0, "total": 5}
-    cur.fetchall.return_value = []
-    cur.rowcount = 0
-    return cur
-
-
-@pytest.fixture
-def mock_db(mock_cursor):
-    """Return a DB-shaped mock cursor for tests that do not touch a real DB."""
-
-    yield mock_cursor
-
-
-@pytest.fixture
-def mock_uow():
-    """A mock UnitOfWork for tests that need to mock DB operations.
-
-    Usage:
-        def test_something(mock_uow):
-            mock_uow.session.execute.return_value.mappings.return_value.all.return_value = [{"id": 1}]
-            mock_uow.session.get.return_value = SomeMockObj()
-            with patch("brain.some_module.UnitOfWork", return_value=mock_uow):
-                result = function_under_test()
-    """
-    uow = MagicMock()
-    uow.__enter__ = MagicMock(return_value=uow)
-    uow.__exit__ = MagicMock(return_value=False)
-    # Default empty results
-    uow.session.execute.return_value.mappings.return_value.all.return_value = []
-    uow.session.execute.return_value.mappings.return_value.first.return_value = None
-    uow.session.execute.return_value.scalar_one.return_value = 1
-    uow.session.execute.return_value.scalar_one_or_none.return_value = None
-    uow.session.execute.return_value.scalars.return_value.all.return_value = []
-    return uow
-
-
-@pytest.fixture
-def mock_embeddings():
-    """Patch embedding functions to return deterministic vectors."""
-    import numpy as np
-    fake_vec = np.zeros(2000, dtype=np.float32)
-    fake_vec[0] = 1.0
-
-    patches = [
-        patch("brain.systems.memory.embeddings.embed_document", return_value=fake_vec),
-        patch("brain.systems.memory.embeddings.embed_query", return_value=fake_vec),
-        patch("brain.systems.memory.embeddings.embed_batch", return_value=[fake_vec]),
-    ]
-    for p in patches:
-        p.start()
-    yield fake_vec
-    for p in patches:
-        p.stop()
-
-
-@pytest.fixture
-async def rollback_cursor(db_engine):
-    """Yield an async cursor-like object inside a transaction that always rolls back.
-
-    Use for integration tests that need a real DB but must not pollute it.
-    The entire transaction is rolled back after the test, leaving zero residue.
-    """
-
-    connection = await db_engine.connect()
-    transaction = await connection.begin()
-    cur = _RollbackCursor(connection)
-    try:
-        yield cur
-    finally:
-        await transaction.rollback()
-        await connection.close()
-
-
-@pytest.fixture
-def rollback_db(rollback_cursor):
-    """Alias for DB-backed tests that need rollback-scoped SQL access."""
-
-    yield rollback_cursor
-
-
-class _RollbackCursor:
-    def __init__(self, connection):
-        self._connection = connection
-        self._result = None
-        self.rowcount = -1
-
-    async def execute(self, statement: str, params: dict | None = None):
-        self._result = await self._connection.execute(text(statement), params or {})
-        self.rowcount = self._result.rowcount
-        return self
-
-    async def fetchone(self):
-        assert self._result is not None
-        row = self._result.mappings().first()
-        return dict(row) if row else None
-
-    async def fetchall(self):
-        assert self._result is not None
-        return [dict(row) for row in self._result.mappings().all()]
+ROOT = Path(__file__).parents[1]
 
 
 @pytest.fixture(scope="session")
-async def db_engine():
-    """Async SQLAlchemy engine connected to Docker test Postgres. Session-scoped."""
-    if not TEST_DB_URL:
-        pytest.skip("TEST_DB_URL not set")
-    engine = create_async_test_engine(TEST_DB_URL)
+async def database_pool():
+    """Use the admin database only to create and drop this session's database."""
+    url = os.getenv("ILLO_TEST_DATABASE_URL", "postgresql://illo:illo@127.0.0.1:55432/postgres")
+    name = "illo_test_" + uuid.uuid4().hex
+    admin = await AsyncConnection.connect(url, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    params = conninfo_to_dict(url)
+    params["dbname"] = name
+    pool = create_pool(make_conninfo(**params), min_size=1, max_size=8)
     try:
-        yield engine
+        await pool.open(wait=True)
+        async with pool.connection() as conn:
+            await migrate(conn)
+        yield pool
     finally:
-        await engine.dispose()
+        await pool.close()
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
 
 
 @pytest.fixture
-def tmp_workspace(tmp_path):
-    """Create a temporary workspace structure."""
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir()
-    (memory_dir / "2026-03-01.md").write_text(
-        "# Daily Log\n\n## Bug Fix\nFixed a critical bug in the provider API.\n\n"
-        "## Lesson Learned\nAlways verify data assumptions before shipping.\n"
+async def pool(database_pool):
+    """Truncate only the random test database. Keep its migration record."""
+    async with database_pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename<>'schema_migrations'"
+            )
+        ).fetchall()
+        tables = sql.SQL(",").join(sql.Identifier(row["tablename"]) for row in rows)
+        await conn.execute(sql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(tables))
+    yield database_pool
+
+
+@pytest.fixture(scope="session")
+def workspace():
+    return load_workspace(ROOT / "workspace.example")
+
+
+@pytest.fixture
+async def conn(pool, workspace):
+    async with pool.connection() as connection:
+        await workspace.sync_people(connection)
+        yield connection
+
+
+@pytest.fixture
+async def ada(conn):
+    from illo.ledger.people import get
+
+    return await get(conn, "ada")
+
+
+@pytest.fixture
+async def ben(conn):
+    from illo.ledger.people import get
+
+    return await get(conn, "ben")
+
+
+@pytest.fixture
+async def run(conn, ada):
+    from illo.ledger.runs import create
+
+    return await create(
+        conn,
+        principal="person:ada",
+        person_id=ada["id"],
+        profile="person_dm",
+        runtime="fake",
+        model="fake",
     )
-    return tmp_path
 
 
-@pytest.fixture(autouse=True)
-def allow_asgi_test_host_for_dev_auth_fallback(monkeypatch):
-    """Let ASGI test clients use the local-dev auth fallback.
+@pytest.fixture
+def slack_client():
+    return FakeSlackClient()
 
-    Production code only trusts loopback hosts for the fallback. Many API tests
-    use http://test or TestClient's http://testserver synthetic host, so widen
-    the local host set inside pytest instead of weakening runtime auth checks.
-    """
-    from brain.app.api import auth
 
-    monkeypatch.setattr(
-        auth,
-        "_LOCALHOST_NAMES",
-        auth._LOCALHOST_NAMES | {"test", "testserver"},
+@pytest.fixture
+def github_client():
+    return FakeGitHubClient()
+
+
+@pytest.fixture
+def fake_brain():
+    return FakeBrain(final_text="The lane is working.")
+
+
+@pytest.fixture
+async def app(pool, fake_brain, slack_client, github_client):
+    config = Config(
+        workspace_dir=ROOT / "workspace.example",
+        public_url="http://test",
+        revision="test-revision",
+        reload_token="test-reload",
     )
+    application = create_app(config, pool=pool, brain_client=fake_brain)
+    fake_brain.transport = httpx.ASGITransport(app=application)
+    async with application.router.lifespan_context(application):
+        application.state.ctx.slack_client = slack_client
+        application.state.ctx.github_client = github_client
+        yield application
 
 
 @pytest.fixture
-def sqlite_postgres_ddl_patch():
-    """Make postgres-typed tables (JSONB, BIGINT, ::jsonb defaults) render on
-    SQLite so repository tests can create them. Same guarded, idempotent
-    patch as test_agent_run_state_machine._patch_sqlite_for_agent_run_tables
-    (shared here for tests outside that module)."""
-    import re
-
-    from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-
-    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
-        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
-    SQLiteTypeCompiler.visit_BIGINT = lambda self, type_, **kw: "INTEGER"
-    original = SQLiteDDLCompiler.get_column_default_string
-    if getattr(original, "_agent_run_patch", False):
-        return
-
-    def patched(self, column, **kw):
-        result = original(self, column, **kw)
-        if result:
-            result = re.sub(r"::jsonb", "", result)
-            result = result.replace("NOW()", "CURRENT_TIMESTAMP")
-        return result
-
-    patched._agent_run_patch = True
-    SQLiteDDLCompiler.get_column_default_string = patched
-
-
-# --- Docker test DB fixtures ---
-
-TEST_DB_URL = os.environ.get("TEST_DB_URL")
-
-
-requires_db = pytest.mark.requires_db
-
-
-def pytest_collection_modifyitems(config, items):
-    if TEST_DB_URL is not None:
-        return
-    skip_db = pytest.mark.skip(reason="TEST_DB_URL not set — run in the Postgres CI lane")
-    for item in items:
-        if "requires_db" in item.keywords:
-            item.add_marker(skip_db)
+async def http(app):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client
 
 
 @pytest.fixture
-async def async_sqlite_session_factory():
-    """Create isolated async SQLite sessions for repository unit tests."""
-
-    pytest.importorskip("aiosqlite")
-
-    from sqlalchemy import event
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    sessions = []
-    engines = []
-
-    async def make_session(tables, *, connect_listener=None, enable_foreign_keys: bool = False):
-        engine = create_async_engine("sqlite+aiosqlite://", echo=False)
-        engines.append(engine)
-        if connect_listener is not None:
-            event.listen(engine.sync_engine, "connect", connect_listener)
-        async with engine.begin() as connection:
-            for table in tables:
-                await connection.execute(CreateTable(table, if_not_exists=True))
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        session = factory()
-        if enable_foreign_keys:
-            await session.execute(text("PRAGMA foreign_keys=ON"))
-        sessions.append(session)
-        return session
-
-    try:
-        yield make_session
-    finally:
-        for session in reversed(sessions):
-            await session.close()
-        for engine in reversed(engines):
-            await engine.dispose()
+def channel():
+    return FakeChannelAdapter()
 
 
 @pytest.fixture
-async def db_session(db_engine):
-    """Per-test async ORM session that rolls back after each test. Zero residue.
+def replay(app, channel):
+    async def replay_event(**changes):
+        event = InboundEvent.model_validate(
+            {
+                "channel": "slack",
+                "external_id": uuid.uuid4().hex,
+                "kind": "dm",
+                "sender": "U_ACME_ADA",
+                "text": "Give me a lane update",
+                **changes,
+            }
+        )
+        return await app.state.ctx.gateway.receive(event, channel)
 
-    Use for SQLAlchemy ORM tests. Do NOT mix with rollback_db in the same test.
-    """
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    connection = await db_engine.connect()
-    transaction = await connection.begin()
-    session = AsyncSession(bind=connection, expire_on_commit=False)
-    try:
-        yield session
-    finally:
-        await session.close()
-        await transaction.rollback()
-        await connection.close()
+    return replay_event
 
 
 @pytest.fixture
-def unit_of_work_for_session(db_session):
-    """Patch target for UnitOfWork-backed code that should share db_session.
+async def rpc_token(app):
+    from illo.ledger import people, runs
 
-    Many older DB tests seed rows inside a rollback transaction. Production code
-    now uses UnitOfWork, so tests that need read-your-writes behavior can patch
-    the module-local UnitOfWork symbol to this lightweight transaction wrapper.
-    """
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork as AsyncUnitOfWork
-
-    class _SessionUnitOfWork(AsyncUnitOfWork):
-        async def __aenter__(self):
-            self._async_session = db_session
-            return self
-
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            if exc_type is None:
-                await db_session.flush()
-            self._async_session = None
-            self._clear_cached_repositories()
-            return False
-
-    return _SessionUnitOfWork
+    async with app.state.ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        run = await runs.create(
+            conn,
+            principal="person:ada",
+            person_id=ada["id"],
+            profile="person_dm",
+            runtime="fake",
+            model="fake",
+        )
+        token = await runs.mint_token(conn, run["id"], 60)
+    return run, token
 
 
-@pytest.fixture(autouse=True)
-def empty_saved_tool_policies_for_unit_tests(request, monkeypatch):
-    """Keep unit runtimes independent of Postgres; policy tests inject rows."""
-    if request.node.get_closest_marker("requires_db") is not None:
-        return
+@pytest.fixture
+def rpc(http):
+    async def call(token, method, params=None):
+        return await http.post(
+            "/brain/mcp",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}},
+        )
 
-    async def empty_policies(_org_id, _skill_names):
-        return []
-
-    monkeypatch.setattr("brain.systems.runs.tool_policy_store.load_tool_policies", empty_policies)
+    return call

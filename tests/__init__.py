@@ -1,1 +1,1 @@
-# tests package
+"""Foundation tests."""
