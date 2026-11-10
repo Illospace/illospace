@@ -82,13 +82,15 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                             if item["type"] == "error":
                                 safe = json.loads(line)
                                 logging.getLogger(__name__).warning(
-                                    "Brain error: category=%s http_status=%s code=%s type=%s",
+                                    "Brain error: category=%s http_status=%s code=%s type=%s reason=%s",
                                     identifier(safe.get("category")),
                                     safe.get("http_status")
                                     if isinstance(safe.get("http_status"), int)
                                     else None,
                                     identifier(safe.get("code")),
                                     identifier(safe.get("provider_type")),
+                                    # A fixed text of this service, after the redaction above.
+                                    str(safe.get("message") or "")[:120],
                                 )
                             yield line + "\n"
                             if item["type"] in ("final", "error"):
