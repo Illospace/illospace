@@ -16,6 +16,7 @@ async def test_rule_02_team_routine_has_no_personal_tool(app, fake_brain):
     async def personal(ctx, args):
         called.append(args)
 
+    ctx.registry.tools.pop("mail_search", None)
     ctx.registry.add(
         Tool(
             "mail_search",
