@@ -19,6 +19,12 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 API = "https://www.googleapis.com"
+PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+ACCOUNT_MISMATCH = "Use a Google account whose address is in your people.yaml entry."
+
+
+class GoogleAccountMismatch(ValueError):
+    """The consenting Google account does not belong to the state owner."""
 
 
 def google_config(ctx, scope: str = "personal") -> Connector | None:
@@ -44,6 +50,23 @@ def _b64(data: bytes) -> bytes:
 class GoogleClient:
     def __init__(self, http: BoundedHTTP | None = None) -> None:
         self.http = http or BoundedHTTP()
+
+    async def verify_account(self, token: dict, emails: list[str]) -> None:
+        """Revoke a new grant if Google cannot confirm one of the owner's addresses."""
+        try:
+            profile = await self.http.request(
+                "GET", PROFILE_URL, headers={"Authorization": f"Bearer {token['access_token']}"}
+            )
+            address = profile.get("emailAddress")
+            if not isinstance(address, str) or address.lower() not in {e.lower() for e in emails}:
+                raise GoogleAccountMismatch(ACCOUNT_MISMATCH)
+        except Exception:
+            try:
+                await self.http.request("POST", REVOKE_URL, data={"token": token["refresh_token"]})
+            except Exception:
+                # No local grant exists, even if Google cannot confirm revocation.
+                pass
+            raise
 
     async def access_token(self, conn, ctx, config: Connector, person_id: int | None) -> str:
         if config.auth and config.auth.type == "service_account":

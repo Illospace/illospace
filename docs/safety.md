@@ -34,6 +34,12 @@ Each call writes one row in `audit`.
 
 **Tests.** `tests/test_tools.py` (`test_personal_tool_needs_person_and_untainted_run`). The personal tools and their test in `tests/safety/` are in progress.
 
+Google sign-in checks the account against the owner's addresses and binds the callback to the browser.
+`tests/safety/test_review_s10_rule_02_google_binding.py` checks both paths.
+
+The Google paste flow takes only one configured callback URL in an untainted person DM.
+`tests/safety/test_review_s24_google_claim.py` checks unrelated text and callback redaction.
+
 ## 3. Personal data goes only to its owner
 
 **Rule.** A run that read personal data can write only to that person. A write to another destination becomes a draft for that person.
@@ -43,6 +49,9 @@ Each call writes one row in `audit`.
 **Code.** The `destination` check in `illo/tools/checks.py`. `illo/ledger/drafts.py` stores the draft. An ask without a lane is private to its participants; its decision item is private to the requester or owner (`tests/safety/test_review_s08_rule_03_ask_privacy.py`). Private ask and rule reads set `personal_read`; the personal digest does too (`tests/safety/test_review_s07_rule_03_private_asks.py`).
 
 **Tests.** `tests/safety/test_rule_03_personal_destination.py`, `tests/test_tools.py`.
+
+Connector calls need approval after a personal read, even when the remote tool has risk `read`.
+`tests/safety/test_review_s11_rule_03_connector_destination.py` checks the destination and handler.
 
 ## 4. Risk is how hard an action is to undo
 
@@ -84,6 +93,9 @@ Each call writes one row in `audit`.
 
 **Tests.** `tests/safety/test_rule_07_unknown_dm.py`, `tests/test_gateway.py`.
 
+Email requires one aligned DMARC pass from the selected receiving server.
+`tests/safety/test_review_s09_rule_07_email_auth.py` checks quoted text, comments, and duplicate results.
+
 ## 8. A rule answers only with a proposed option
 
 **Rule.** Illo answers an agent alone only with one of the options that the agent proposed, and only when a rule of the owner matches. It names the rule. Free instructions come only from a person.
@@ -113,3 +125,6 @@ Each call writes one row in `audit`.
 **Code.** `illo/brain/server.py` lists only the registered Illo tools in the grant of the run. The brain service in `brain/` starts each runtime with only the Illo tool server: `brain/runtimes/claude.py` turns off the built-in tools of the Claude Agent SDK, and `brain/runtimes/openai_compat.py` offers only the tools that the Illo server lists. Codex CLI is not a runtime, because it shows the model extra tools.
 
 **Tests.** `tests/safety/test_rule_10_tool_list.py`, `tests/safety/test_rule_10_brain_tools.py`. The live part of the second file runs only on request, with a real model.
+
+The brain and Postgres share no network. Outbound Internet access remains available.
+`tests/safety/test_review_s20_rule_10_compose_networks.py` checks the three network memberships.

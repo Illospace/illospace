@@ -36,7 +36,7 @@ def raw_mail(
     ("auth", "trusted"),
     [
         ("dmarc=pass header.from=example.com", True),
-        ("spf=pass smtp.mailfrom=ada@example.com; dkim=pass header.d=example.com", True),
+        ("spf=pass smtp.mailfrom=ada@example.com; dkim=pass header.d=example.com", False),
         ("dmarc=fail header.from=example.com", False),
         ("dmarc=pass header.from=attacker.example", False),
         ("spf=pass smtp.mailfrom=attacker.example; dkim=pass header.d=example.com", False),
@@ -52,10 +52,10 @@ async def test_plain_sender_authentication(conn, workspace, auth, trusted):
     assert event.text.strip() == "Read the active lanes."
 
 
-def test_untrusted_receiving_server_and_missing_config():
+def test_untrusted_receiving_server_and_topmost_default():
     raw = raw_mail()
     assert not parse_message(raw, authserv_id="another.example").sender
-    assert not parse_message(raw, authserv_id=None).sender
+    assert parse_message(raw, authserv_id=None).sender == "ada@example.com"
 
 
 @pytest.mark.parametrize(

@@ -33,6 +33,10 @@ scopes:
 
 Restart Illo or reload the workspace. Send `connect my Google` in a Slack DM.
 Open the one-time link. It expires after 10 minutes.
+Use HTTPS for a public callback and keep the same browser for the whole sign-in.
+Illo binds the callback to a secure, host-only browser cookie.
+The Google account must match one of your email addresses in `people.yaml`.
+Illo revokes a new grant if the account does not match.
 The callback stores your grant with encryption in Postgres.
 Only your untainted DM runs and agent runs can use your grant.
 Send `disconnect my Google` in a DM to revoke and delete it.
@@ -43,7 +47,9 @@ For a host without a public address, create a Desktop OAuth client.
 Use a loopback `ILLO_PUBLIC_URL`, such as `http://127.0.0.1:8000`.
 The DM then gives you the Google sign-in address directly.
 The browser can fail at the final local redirect address. This is expected.
-Paste that full address into the same person's DM with Illo.
+Paste that full address as the only text in the same person's DM with Illo.
+Illo accepts only its configured callback address. Other messages continue to the assistant.
+If a callback address appears inside other text, Illo removes it before the brain sees that text.
 Illo takes this reply before a brain run and removes the address from the event ledger.
 Illo also drops OAuth access-log records. Keep proxy access logs free of OAuth query strings.
 
@@ -95,7 +101,8 @@ The call has a time limit and a byte limit, including the wire response.
 The sensor is `connector:<key>`.
 
 The file supplies the risk before the tool server runs its three checks.
-A write uses destination `outside:<key>`.
+Every call uses destination `outside:<key>`, including a read with remote arguments.
+After a personal read, a connector call needs a draft that the requester approves.
 `send_outside` creates a draft. A run without a person cannot create that draft.
 An approved `connectors_call` draft uses the registered connector performer.
 A tainted run can call only a tool with both `risk: read` and `tainted: true`.
@@ -174,3 +181,14 @@ Search results include a page token when more results exist.
 The first tools return one bounded page. They do not crawl a mailbox or drive.
 The optional source hooks register mail, personal Drive, and shared Drive when the search module supports them.
 Tests use fake clients and HTTP responses. They do not call a real account.
+
+## Email sender checks
+
+Set `ILLO_EMAIL_AUTHSERV_ID` to the receiving server's identity, such as `mx.google.com`.
+Illo uses only the first `Authentication-Results` header with that identity.
+If the setting is blank, Illo uses only the topmost `Authentication-Results` header.
+The receiving server must delete incoming headers that claim its identity.
+It must put its own results above any headers that the sender supplies.
+Illo requires exactly one DMARC result: `pass`, with `header.from` equal to the From domain.
+SPF and DKIM results alone do not give a sender authority.
+A failed check treats the sender as an outsider.

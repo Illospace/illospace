@@ -69,6 +69,8 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
 
 
 async def call_connector(ctx, args: dict) -> dict:
+    if ctx.run["personal_read"]:
+        raise ValueError("A connector call is not allowed after a personal read")
     config, remote = find(ctx.app, args)
     # Check again at the handler boundary, even when trusted code calls it directly.
     if ctx.run["principal"] == "outsider" or (

@@ -34,32 +34,82 @@ def aligned(domain: str, from_domain: str) -> bool:
     return domain.lower().rstrip(".") == from_domain.lower().rstrip(".")
 
 
-def authenticated(message, sender: str, authserv_id: str | None) -> bool:
-    """Trust only the first result, from the configured receiving server.
+def auth_results(header: str) -> list[list[str]]:
+    """Split results outside quoted strings and nested RFC 8601 comments.
 
-    That server must strip incoming results that claim its own identity.
-    Exact alignment is stricter than relaxed DMARC alignment.
+    Keep quotes on tokens so quoted text cannot become a method or property.
+    An incomplete comment, quote, or escape rejects the whole header.
     """
-    if not authserv_id or not sender or "@" not in sender:
+    clean = []
+    depth, quoted, escaped = 0, False, False
+    for char in header:
+        if escaped:
+            if not depth:
+                clean.append(char)
+            escaped = False
+        elif char == "\\" and (depth or quoted):
+            escaped = True
+            if not depth:
+                clean.append(char)
+        elif depth:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+        elif quoted:
+            clean.append(char)
+            if char == '"':
+                quoted = False
+        elif char == "(":
+            depth = 1
+            clean.append(" ")
+        elif char == ")":
+            raise ValueError("The authentication result has an invalid comment")
+        else:
+            clean.append(char)
+            if char == '"':
+                quoted = True
+    if depth or quoted or escaped:
+        raise ValueError("The authentication result is incomplete")
+    tokens = re.findall(r'"(?:\\.|[^"\\])*"|[;=]|[^\s;="]+', "".join(clean))
+    sections = [[]]
+    for token in tokens:
+        if token == ";":
+            sections.append([])
+        else:
+            sections[-1].append(token.lower())
+    return sections
+
+
+def authenticated(message, sender: str, authserv_id: str | None) -> bool:
+    """Trust one aligned DMARC pass from the selected receiving server.
+
+    The receiver must strip incoming results that claim its own identity.
+    Without a configured identity, use only the topmost header.
+    """
+    if not sender or "@" not in sender:
         return False
-    headers = message.get_all("Authentication-Results", [])
-    if not headers:
-        return False
-    sections = str(headers[0]).split(";")
-    if sections[0].strip().lower() != authserv_id.lower():
-        return False
-    domain = sender.rsplit("@", 1)[1]
-    passed = set()
-    for section in sections[1:]:
-        match = re.match(r"\s*(dmarc|spf|dkim)\s*=\s*pass\b", section, re.I)
-        if not match:
+    for header in message.get_all("Authentication-Results", []):
+        try:
+            sections = auth_results(str(header))
+        except ValueError:
+            return False
+        if authserv_id and sections[0] != [authserv_id.lower()]:
             continue
-        method = match[1].lower()
-        field = {"dmarc": "header.from", "spf": "smtp.mailfrom", "dkim": "header.d"}[method]
-        identity = re.search(r"\b" + re.escape(field) + r'\s*=\s*"?([^\s;"()]+)', section, re.I)
-        if identity and aligned(identity[1].rsplit("@", 1)[-1], domain):
-            passed.add(method)
-    return "dmarc" in passed or {"spf", "dkim"} <= passed
+        results = [part for part in sections[1:] if part[:2] == ["dmarc", "="]]
+        count = sum(
+            part[i : i + 2] == ["dmarc", "="] for part in sections[1:] for i in range(len(part) - 1)
+        )
+        if count != 1 or len(results) != 1 or results[0][:3] != ["dmarc", "=", "pass"]:
+            return False
+        result = results[0]
+        identities = [
+            result[i + 2].strip('"')
+            for i in range(3, len(result) - 2)
+            if result[i : i + 2] == ["header.from", "="]
+        ]
+        return len(identities) == 1 and aligned(identities[0], sender.rsplit("@", 1)[1])
+    return False
 
 
 def clean_header(value: str, limit: int = 998) -> str:

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 import secrets
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -11,6 +12,8 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from illo.connectors import google, store
 from illo.db import one
+
+BROWSER_COOKIE = "__Host-illo-google"
 
 
 def digest(value: str) -> str:
@@ -50,7 +53,7 @@ async def issue(ctx, person_id: int) -> str:
     return ctx.config.public_url.rstrip("/") + "/oauth/google/start?" + urlencode({"state": state})
 
 
-async def start(ctx, state: str) -> str:
+async def start(ctx, state: str, *, browser_nonce: str | None = None) -> str:
     async with ctx.pool.connection() as conn:
         row = await one(
             conn,
@@ -63,6 +66,12 @@ async def start(ctx, state: str) -> str:
         if not row:
             raise ValueError("The sign-in link is invalid or expired")
         details = json.loads(store.vault(ctx).decrypt(row["secret"]))
+        if browser_nonce:
+            details["browser_hash"] = digest(browser_nonce)
+            await conn.execute(
+                "UPDATE connector_oauth_states SET secret=%s WHERE state_hash=%s",
+                (store.vault(ctx).encrypt(json.dumps(details)), digest(state)),
+            )
         client_id, _ = await google.credentials(ctx, conn)
     config = google.google_config(ctx)
     import base64
@@ -91,7 +100,9 @@ async def start(ctx, state: str) -> str:
     )
 
 
-async def complete(ctx, state: str, code: str, *, person_id: int | None = None) -> str:
+async def complete(
+    ctx, state: str, code: str, *, person_id: int | None = None, browser_nonce: str | None = None
+) -> str:
     # Consume before the network call. A failed exchange cannot replay the code.
     async with ctx.pool.connection() as conn:
         row = await one(
@@ -105,6 +116,12 @@ async def complete(ctx, state: str, code: str, *, person_id: int | None = None) 
         if not row:
             raise ValueError("The sign-in state is invalid or expired")
         details = json.loads(store.vault(ctx).decrypt(row["secret"]))
+        if person_id is None and (
+            not browser_nonce
+            or not details.get("browser_hash")
+            or not secrets.compare_digest(details["browser_hash"], digest(browser_nonce))
+        ):
+            raise ValueError("Use the browser that opened the sign-in link")
         client_id, client_secret = await google.credentials(ctx, conn)
     config = google.google_config(ctx)
     if not config or config.key != row["connector_key"]:
@@ -127,25 +144,78 @@ async def complete(ctx, state: str, code: str, *, person_id: int | None = None) 
     if not set(scopes) <= set(config.scopes):
         raise ValueError("Google returned a scope that Illo does not allow")
     async with ctx.pool.connection() as conn:
+        owner = await one(
+            conn, "SELECT emails FROM people WHERE id=%s AND active", (row["person_id"],)
+        )
+        await ctx.google_client.verify_account(token, owner["emails"] if owner else [])
         await store.save(conn, ctx, config.key, row["person_id"], token, scopes)
     return "Google is connected. Illo can read your mail, calendar, and drive."
 
 
-def is_callback(text: str) -> bool:
-    return "/oauth/google/callback" in text or (
-        ("http://localhost" in text or "http://127.0.0.1" in text)
-        and ("code=" in text or "state=" in text)
+def callback_address(text: str, expected_url: str) -> str | None:
+    """Accept one plain URL or Slack auto-link at the configured callback endpoint."""
+    raw = text.strip()
+    if raw.startswith("<") and raw.endswith(">"):
+        raw = raw[1:-1]
+    if not raw or any(c.isspace() or c in "<>|" for c in raw):
+        return None
+    try:
+        parsed, expected = urlsplit(raw), urlsplit(expected_url)
+        if (parsed.scheme, parsed.netloc, parsed.path) != (
+            expected.scheme,
+            expected.netloc,
+            expected.path,
+        ):
+            return None
+    except ValueError:
+        return None
+    return raw
+
+
+def redact_text(text: str, expected_url: str) -> str:
+    """Remove real callback addresses without discarding unrelated message text."""
+    return re.sub(
+        r"https?://[^\s<>|]+",
+        lambda match: (
+            "[Google sign-in address removed]"
+            if callback_address(match[0], expected_url)
+            else match[0]
+        ),
+        text,
     )
 
 
-def redact_payload(payload):
+def redact_payload(payload, expected_url: str):
     if isinstance(payload, str):
-        return "[Google sign-in address removed]" if is_callback(payload) else payload
+        return redact_text(payload, expected_url)
     if isinstance(payload, dict):
-        return {key: redact_payload(value) for key, value in payload.items()}
+        return {key: redact_payload(value, expected_url) for key, value in payload.items()}
     if isinstance(payload, list):
-        return [redact_payload(value) for value in payload]
+        return [redact_payload(value, expected_url) for value in payload]
     return payload
+
+
+def person_dm(event, authority) -> bool:
+    return (
+        event.channel == "slack"
+        and event.kind in {"dm", "message.im"}
+        and authority.profile == "person_dm"
+        and not authority.tainted
+        and authority.person_id is not None
+    )
+
+
+async def prepare_callback(ctx, event, authority):
+    # Only a matching DM callback can reach the claim with its code intact.
+    # Other messages can continue to the brain after the callback address is removed.
+    if person_dm(event, authority) and callback_address(event.text, callback_url(ctx)):
+        return None
+    return event.model_copy(
+        update={
+            "text": redact_text(event.text, callback_url(ctx)),
+            "payload": redact_payload(event.payload, callback_url(ctx)),
+        }
+    )
 
 
 class OAuthLogFilter(logging.Filter):
@@ -156,25 +226,17 @@ class OAuthLogFilter(logging.Filter):
 
 
 async def claim(ctx, event, authority) -> str | None:
-    pasted = is_callback(event.text)
+    if not person_dm(event, authority):
+        return None
+    pasted = callback_address(event.text, callback_url(ctx))
     if not pasted and event.text.strip().lower() not in {
         "connect my google",
         "disconnect my google",
     }:
         return None
-    if authority.profile != "person_dm" or authority.tainted or event.channel != "slack":
-        return "Use a DM to connect your Google account."
     try:
         if pasted:
-            raw = event.text.strip().strip("<>").split("|", 1)[0]
-            parsed = urlsplit(raw)
-            expected = urlsplit(callback_url(ctx))
-            if (parsed.scheme, parsed.netloc, parsed.path) != (
-                expected.scheme,
-                expected.netloc,
-                expected.path,
-            ):
-                raise ValueError("The redirect address is invalid")
+            parsed = urlsplit(pasted)
             params = parse_qs(parsed.query, strict_parsing=True)
             if len(params.get("state", [])) != 1 or len(params.get("code", [])) != 1:
                 raise ValueError("The redirect address is invalid")
@@ -202,6 +264,8 @@ async def claim(ctx, event, authority) -> str | None:
                 "Remove Illo's access in your Google account settings."
             )
         return "Google is disconnected."
+    except google.GoogleAccountMismatch:
+        return google.ACCOUNT_MISMATCH
     except Exception:
         return "Google sign-in did not finish. Send ‘connect my Google’ to try again."
 
@@ -215,16 +279,28 @@ async def setup(ctx) -> None:
 
     ctx.every(300, expire_states)
     ctx.gateway.register_claim(claim)
-    ctx.gateway.register_payload_filter(redact_payload)
+    ctx.gateway.register_preparer(prepare_callback)
+    ctx.gateway.register_payload_filter(lambda payload: redact_payload(payload, callback_url(ctx)))
     for name in ("uvicorn.access", "httpx", "httpcore"):
         logging.getLogger(name).addFilter(OAuthLogFilter())
 
     async def start_route(request: Request):
         try:
-            url = await start(ctx, request.query_params.get("state", ""))
-            return RedirectResponse(
+            nonce = secrets.token_urlsafe(32)
+            url = await start(ctx, request.query_params.get("state", ""), browser_nonce=nonce)
+            response = RedirectResponse(
                 url, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
             )
+            response.set_cookie(
+                BROWSER_COOKIE,
+                nonce,
+                max_age=600,
+                secure=True,
+                httponly=True,
+                samesite="lax",
+                path="/",
+            )
+            return response
         except Exception:
             raise HTTPException(400, "The sign-in link is invalid or expired") from None
 
@@ -233,11 +309,18 @@ async def setup(ctx) -> None:
             if request.query_params.get("error"):
                 raise ValueError("Google sign-in was cancelled")
             text = await complete(
-                ctx, request.query_params.get("state", ""), request.query_params.get("code", "")
+                ctx,
+                request.query_params.get("state", ""),
+                request.query_params.get("code", ""),
+                browser_nonce=request.cookies.get(BROWSER_COOKIE),
             )
-            return PlainTextResponse(
+            response = PlainTextResponse(
                 text, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
             )
+            response.delete_cookie(BROWSER_COOKIE, secure=True, httponly=True, samesite="lax")
+            return response
+        except google.GoogleAccountMismatch:
+            raise HTTPException(400, google.ACCOUNT_MISMATCH) from None
         except Exception:
             raise HTTPException(400, "Google sign-in did not finish") from None
 

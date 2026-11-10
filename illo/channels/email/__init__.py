@@ -94,8 +94,8 @@ async def setup(ctx) -> None:
     ctx.draft_performers["email"] = perform_email
     ctx.draft_performers["email_draft"] = perform_email
     if ctx.config.email_host:
-        if not ctx.config.email_user or not ctx.config.email_authserv_id:
-            raise ValueError("Set the email user and receiving authentication server")
+        if not ctx.config.email_user:
+            raise ValueError("Set the email user")
         # Check the credential before the first timer. Do not print its value.
         await password(ctx)
 

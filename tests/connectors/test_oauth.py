@@ -20,6 +20,8 @@ async def login_app(google_app, monkeypatch):
 
     def respond(request):
         requests.append(request)
+        if request.url.path.endswith("/profile"):
+            return httpx.Response(200, json={"emailAddress": "ada@example.com"})
         return httpx.Response(
             200,
             json={
@@ -65,7 +67,7 @@ async def test_state_one_use_owner_bound_and_tokens_encrypted(login_app):
         row, token = await store.load(conn, ctx, "google", ada["id"])
         assert token["refresh_token"] == "test-refresh"
         assert b"test-refresh" not in row["secret"]
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 async def test_state_expires_and_rejects_tamper(login_app):
@@ -120,12 +122,13 @@ async def test_callback_routes_and_disconnect(login_app, http, replay):
     ctx = app.state.ctx
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
+    ctx.config.public_url = "https://test"
     link = await oauth.issue(ctx, ada["id"])
     response = await http.get(link, follow_redirects=False)
     assert response.status_code == 307
     state = parse_qs(urlsplit(link).query)["state"][0]
     response = await http.get(
-        "/oauth/google/callback", params={"state": state, "code": "test-code"}
+        "https://test/oauth/google/callback", params={"state": state, "code": "test-code"}
     )
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
@@ -159,4 +162,4 @@ async def test_loopback_install_uses_direct_signin_then_paste(login_app, replay)
         text=oauth.callback_url(ctx) + "?" + urlencode({"state": state, "code": "test-code"})
     )
     assert "connected" in result["text"]
-    assert len(requests) == 1
+    assert len(requests) == 2
