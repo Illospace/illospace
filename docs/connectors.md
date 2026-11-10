@@ -23,6 +23,8 @@ A pasted callback may use `127.0.0.1` or `localhost`. Illo accepts Slack link wr
 
 Illo replies: `ChatGPT is connected as <email>. I use your subscription for your requests.`
 The device flow sends this reply without a paste.
+If a started device sign-in expires, Illo sends one failure notice.
+A temporary provider error keeps the sign-in pending and increases the poll interval.
 The account email must match an address of the person in `people.yaml`, ignoring letter case.
 Illo reads the ID token from the fixed HTTPS token endpoint only for this comparison.
 It refuses missing email claims and revokes rejected tokens at the published revocation endpoint.

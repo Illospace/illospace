@@ -234,6 +234,21 @@ async def complete(ctx, state, code, person_id, event):
 
 async def poll_devices(ctx):
     async with ctx.pool.connection() as conn:
+        expired = await all_rows(
+            conn,
+            """UPDATE connector_oauth_states SET consumed_at=clock_timestamp()
+            WHERE connector_key='chatgpt' AND consumed_at IS NULL AND cancelled_at IS NULL
+            AND started_at IS NOT NULL AND expires_at<=clock_timestamp()
+            RETURNING secret,(SELECT key FROM people WHERE id=person_id AND active) AS person""",
+        )
+    for row in expired:
+        try:
+            details = json.loads(vault(ctx).decrypt(row["secret"]))
+            if row["person"] and details.get("mode") == "device":
+                await dm_person(ctx, row["person"], FAILED)
+        except Exception:
+            pass
+    async with ctx.pool.connection() as conn:
         rows = await all_rows(
             conn,
             """SELECT state_hash FROM connector_oauth_states
@@ -258,14 +273,18 @@ async def poll_device(ctx, state_hash):
         if details.get("mode") != "device" or details.get("next_poll", 0) > time.time():
             return
         try:
-            data = await ctx.chatgpt_client.request(
-                DEVICE_BASE + "/token",
-                json={
-                    "device_auth_id": details["device_auth_id"],
-                    "user_code": details["user_code"],
-                },
-                pending=True,
-            )
+            try:
+                data = await ctx.chatgpt_client.request(
+                    DEVICE_BASE + "/token",
+                    json={
+                        "device_auth_id": details["device_auth_id"],
+                        "user_code": details["user_code"],
+                    },
+                    pending=True,
+                )
+            except chatgpt.PendingPoll:
+                details["interval"] = min(60, details["interval"] * 2)
+                data = None
             if data is None:
                 details["next_poll"] = time.time() + details["interval"]
                 await conn.execute(
@@ -295,7 +314,7 @@ async def poll_device(ctx, state_hash):
         )
         if person:
             person_key = person["key"]
-            if answer == chatgpt.CONNECTED:
+            if answer.startswith("ChatGPT is connected as "):
                 await sensors.ok(conn, "chatgpt:" + person_key)
     if person_key:
         try:

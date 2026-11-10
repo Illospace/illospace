@@ -48,6 +48,10 @@ class TokenError(ValueError):
         }
 
 
+class PendingPoll(TokenError):
+    pass
+
+
 def claims(token):
     """Read metadata from a token received directly from the fixed HTTPS endpoint."""
     try:
@@ -105,6 +109,8 @@ class ChatGPTClient:
                 async with http.stream("POST", url, data=data, json=json) as response:
                     if pending and response.status_code in (403, 404):
                         return None
+                    if pending and (response.status_code == 429 or response.status_code >= 500):
+                        raise PendingPoll(response.status_code)
                     body = bytearray()
                     async for part in response.aiter_bytes():
                         body.extend(part)
