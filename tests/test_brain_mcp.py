@@ -38,7 +38,7 @@ async def test_initialize_ping_errors_and_list(rpc, rpc_token, http):
     assert malformed.json()["error"]["code"] == -32700
     names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}
     assert "rules_remove_mine" in names
-    assert "github_create_issue" not in names  # Its family is still a stub.
+    assert "github_create_issue" in names
 
 
 async def test_filtered_list_denial_and_audit(app, rpc):

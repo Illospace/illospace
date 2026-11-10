@@ -48,6 +48,8 @@ class Tool:
     # The profiles that may call this tool: person_dm, team_channel, tainted, routine,
     # agent_request, outsider. None means: use the default data in checks.py.
     profiles: frozenset[str] | None = None
+    # Resolve API facts before a write. A preflight can only narrow the checks.
+    preflight: Callable[[ToolContext, dict], Awaitable[Decision]] | None = None
 
     # A ledger write can expose text to the whole team, as a note does.
     team_visible: bool = False
@@ -60,6 +62,17 @@ class Tool:
     def declaration(self) -> dict:
         """Return the MCP tool shape without a server handler."""
         return {"name": self.name, "description": self.description, "inputSchema": self.json_schema}
+
+
+def _has_private_data(value) -> bool:
+    """A private ledger read has the same destination limit as a personal connector."""
+    if isinstance(value, dict):
+        return value.get("visibility") == "private" or any(
+            _has_private_data(v) for v in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_has_private_data(v) for v in value)
+    return False
 
 
 @dataclass
@@ -118,6 +131,10 @@ class Registry:
             else:
                 try:
                     verdict = check(ctx.run, tool, validated)
+                    if verdict.outcome != "deny" and tool.preflight:
+                        extra = await tool.preflight(ctx, validated)
+                        if extra.outcome == "deny" or verdict.outcome == "allow":
+                            verdict = extra
                 except Exception:
                     verdict = Decision("deny", "The tool declaration is invalid")
                 decision, reason = verdict.outcome, verdict.reason
@@ -143,6 +160,12 @@ class Registry:
                     try:
                         async with ctx.conn.transaction():
                             result = await tool.handler(ctx, validated)
+                            if tool.risk == "read" and _has_private_data(result):
+                                await ctx.conn.execute(
+                                    "UPDATE runs SET personal_read=true WHERE id=%s",
+                                    (ctx.run["id"],),
+                                )
+                                ctx.run["personal_read"] = True
                     except Exception:
                         # Keep secrets out of errors and keep the audit row after a rollback.
                         decision, reason = "deny", "The tool failed"

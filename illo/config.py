@@ -22,6 +22,7 @@ class Config(BaseModel):
     github_token: SecretStr | None = None
     github_app_id: str | None = None
     github_app_private_key_file: Path | None = None
+    github_app_private_key_secret: str = "github_app_private_key"
     github_app_installation_id: str | None = None
     email_host: str | None = None
     email_user: str | None = None

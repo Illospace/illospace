@@ -1,5 +1,33 @@
-"""Claims tool area. Its builder adds handlers and declarations."""
+"""Atomic claims prevent two coordinators from handling the same alert."""
+
+from pydantic import Field
+
+from illo.ledger import claims
+from illo.tools.registry import Arguments, Tool, ToolContext
+
+
+class TakeArgs(Arguments):
+    key: str = Field(min_length=1, max_length=500)
+    note: str = Field(default="", max_length=2000)
+
+
+async def take(ctx: ToolContext, args: dict) -> bool:
+    return await claims.take(ctx.conn, args["key"], ctx.run["id"], args["note"])
 
 
 def register(registry) -> None:
-    """Register this family when its implementation is ready."""
+    # A claim writes no outside text and reads no personal data.
+    registry.add(
+        Tool(
+            "claims_take",
+            "claims",
+            "write_internal",
+            lambda a: "ledger",
+            False,
+            take,
+            arguments=TakeArgs,
+            profiles=frozenset(
+                {"person_dm", "team_channel", "tainted", "routine", "agent_request"}
+            ),
+        )
+    )
