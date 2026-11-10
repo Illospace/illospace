@@ -2,12 +2,37 @@
 
 from datetime import UTC, datetime
 
+from psycopg.types.json import Jsonb
+
+from illo.channels.slack.limits import flush_owner_notices
 from illo.connectors.github_client import GitHubClient
 from illo.ledger import github as ledger
 from illo.ledger import kv, runs, sensors
 from illo.tools.registry import ToolContext
 from illo.tools.work import refresh_statuses
 from illo.vault import Vault
+
+WRITE_TOOLS = frozenset({
+    "github_create_issue", "github_assign_issue", "github_comment_issue", "work_start",
+})
+
+
+async def prepare_draft_card(ctx, conn, draft):
+    """Save the issue title and link before the card offers Send."""
+    content = draft["content"]
+    args = content["arguments"]
+    if "number" not in args or "github_issue" in content:
+        return
+    from illo.tools.github import repository
+
+    issue = await ctx.github_client.get_issue(repository(ctx, args["repo"]), args["number"])
+    if not issue or not issue.get("title") or not issue.get("html_url"):
+        raise ValueError("The issue title and link are unavailable")
+    content["github_issue"] = {
+        "title": issue["title"], "link": issue["html_url"],
+        "assignees": [person["login"] for person in issue.get("assignees", [])],
+    }
+    await conn.execute("UPDATE drafts SET content=%s WHERE id=%s", (Jsonb(content), draft["id"]))
 
 
 async def poll(ctx) -> None:
@@ -55,14 +80,11 @@ async def perform_draft(ctx, draft: dict) -> dict:
         raise ValueError("The draft is not approved")
     content = draft["content"]
     tool = ctx.registry.tools[content["tool"]]
-    if tool.name not in {
-        "github_create_issue",
-        "github_assign_issue",
-        "github_comment_issue",
-        "work_start",
-    }:
+    if tool.name not in WRITE_TOOLS or draft["kind"] != tool.name:
         raise ValueError("The draft does not contain a GitHub write")
     args = tool.arguments.model_validate(content["arguments"]).model_dump()
+    if tool.destination(args) != draft["destination"]:
+        raise ValueError("The draft destination does not match the stored action")
     repository(ctx, args["repo"])
     async with ctx.pool.connection() as conn:
         run = await runs.get(conn, draft["run_id"])
@@ -75,7 +97,8 @@ async def perform_draft(ctx, draft: dict) -> dict:
             raise ValueError("The requester is not active")
         tc = ToolContext(conn, run, ctx)
         if args.get("assignee"):
-            await validate_assignee(tc, args["assignee"])
+            if await validate_assignee(tc, args["assignee"]) != args["assignee"]:
+                raise ValueError("The assignee no longer matches the stored action")
         return await tool.handler(tc, args)
 
 
@@ -130,5 +153,9 @@ async def setup(ctx) -> None:
     async def refresh_work():
         await refresh_statuses(ctx)
 
+    async def owner_notices():
+        await flush_owner_notices(ctx)
+
+    ctx.every(60, owner_notices)
     ctx.every(15, refresh_work)
     ctx.every(ctx.workspace.config.github.poll_seconds, poll_github)

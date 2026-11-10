@@ -39,7 +39,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 - The personal tools (`mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get`, `asks_digest`) have `personal = true` and the profile `person_dm` only. `scope` in `illo/tools/checks.py` also refuses a personal tool in a tainted run or a run without a person principal.
 - `personal_call` in `illo/connectors/google.py` loads the grant of the run's person. It never takes an owner from the arguments.
-- An agent request never reads a personal connector. The personal tools do not have the profile `agent_request`.
+- An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
 - `complete` in `illo/connectors/oauth.py` checks the Google account against the person's addresses in `people.yaml` (`GoogleClient.verify_account` in `illo/connectors/google.py`). It revokes a grant for another account. The web callback needs the `__Host-` browser cookie that the start link set.
 - The pasted sign-in address works only as the only text of an untainted person DM (`claim` in `illo/connectors/oauth.py`).
 
@@ -54,11 +54,12 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 - `Registry.call` sets `personal_read` on the run after a personal tool. It also sets it after a read result with `visibility: private`: a private lane, item, ask, rule, or private Slack thread.
 - `destination` in `illo/tools/checks.py` then makes each write to another destination a draft. After such a read, a tool with `team_visible = true` (`notes_propose`) is also a draft, although its destination is the ledger.
-- A connector call sends its arguments to `outside:<key>`. After a personal read it is a draft, and `call_connector` in `illo/tools/connectors.py` refuses a direct call.
+- A connector call sends its arguments to `outside:<key>`. After a personal read it is refused, without a draft. The handler and the draft performer also enforce this rule.
 - `read_page` in `illo/tools/web.py` refuses a public page after a personal read.
 - An ask without a lane is private to its owner and its requester (`get` and `list_open` in `illo/ledger/asks.py`). Its decision item is private too (`decision` in `illo/ledger/ask_workflow.py`).
 - Both ask creation tools refuse a private lane when the ask owner does not own that lane.
 - A private Slack channel starts no run and enters no index (`SlackIntake.receive` in `illo/channels/slack/intake.py`). `slack_read_thread` reads it only for a member, with a live membership check (`require_member` in `illo/channels/slack/access.py`).
+- Slack caches channel privacy for 10 minutes. A failed probe keeps the index and records a failed event and a sensor error.
 - A person routine with personal data sends its answer to another destination only as a draft (`RoutineAdapter.deliver_final` in `illo/routines/scheduler.py`).
 
 **Tests.** `tests/safety/test_rule_03_personal_destination.py`, `tests/safety/test_rule_03_ask_destination.py`, `tests/safety/test_rule_03_github_personal.py`, `tests/safety/test_rule_03_web_routines.py`, `tests/safety/test_rule_03_06_notes.py`, `tests/safety/test_review_s07_rule_03_private_asks.py`, `tests/safety/test_review_s08_rule_03_ask_privacy.py`, `tests/safety/test_review_s11_rule_03_connector_destination.py`, `tests/safety/test_review_s19_private_slack.py`.
@@ -99,8 +100,9 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 - `resolve` in `illo/gateway/principal.py` marks these runs tainted: a Slack post from a bot, a webhook, or a form; a forwarded email; each signal.
 - `Gateway.context_authority` in `illo/gateway/dispatch.py` also marks a Slack run tainted when its thread context has a bot or an unknown user (`read_context` in `illo/channels/slack/threads.py`). An unknown author shows as `Outside user (<id>)`.
+- An Illo reply taints a follow-up only when the thread has the stored `slack:thread-tainted:` marker. Normal DM follow-ups keep `person_dm`.
 - `GRANT_PROFILES["tainted"]` in `illo/tools/checks.py` is the exact tool set: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, `skills_get`. `in_grant` refuses every other tool, even one that names the profile.
-- `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server, not the model, sends the default owner one DM for each such ticket.
+- `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server sends at most one owner notice per run and six per hour. The remaining links wait for one digest at the end of the hour.
 - `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine. The minute timer deletes model claims older than 24 hours.
 - `read_page` lets a tainted run read only the first URL of the event text, once.
 - `resolve` in `illo/tools/connectors.py` gives a tainted run only a remote tool with `tainted: true` and risk `read`.
@@ -150,7 +152,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential.
-- `work_start` in `illo/tools/work.py` creates a GitHub issue, a lane, and one Slack status message. Nothing more.
+- `work_start` in `illo/tools/work.py` creates a GitHub issue, a lane, and one Slack status message. Assignments, comments, and agent trigger labels need a draft. Without a person, tickets stay unassigned and drop model labels.
 - The collectors in `collectors/` call out to Illo with an MCP token. They open no inbound port.
 - Collector reports are private by default. `share = "team"` makes them team lanes. `clean` in `collectors/common.py` removes code blocks, URL credentials, and common tokens.
 
@@ -175,15 +177,15 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 The rules limit damage. They do not make hostile text harmless. These risks remain:
 
 - **A tainted run reads team GitHub issues.** It can search and read issues of the configured repositories, private ones too. In Slack, its final answer goes to the thread of the hostile post. So that thread can show issue text.
-- **A tainted run files tickets.** It can file up to 3 tickets in one run in a configured private repository. Each ticket has no assignee, the label `from-outside-text`, and a warning line. A public repository needs a draft, so a signal run cannot write there. Each ticket sends one DM to the default owner.
+- **A tainted run files tickets.** It can file up to 3 tickets in one run in a configured private repository. Each ticket has no assignee, the label `from-outside-text`, and a warning line. A public repository needs a draft, so a signal run cannot write there. Owner notices have the caps below.
 - **A tainted run reads one public page.** It can fetch the first URL of the event text, once. The owner of that page sees the request.
 - **A tainted run calls connector reads.** It can call a remote tool with `tainted: true`. Its arguments go to that connector's server.
 - **A tainted run takes claims.** A `model:` claim can block another model run that wants the same key.
-- **An untainted run can read hostile text through a tool.** Examples: an issue body, a web page, a mail, a connector result. The run keeps its full grant. Only the prompt tells the model to treat that text as data. Code still turns each write to another destination into a draft after a personal or private read. Before such a read, a person DM run can file, comment on, and assign tickets in private repositories, create asks, start work, send DMs, and post in a channel, within the run caps.
+- **An untainted run can read hostile text through a tool.** Examples: an issue body, a web page, a mail, a connector result. The run keeps its full grant. Only the prompt tells the model to treat that text as data. Code still turns each write to another destination into a draft after a personal or private read. Before such a read, a person DM run can file tickets in private repositories, create asks, send DMs, and post in a channel, within the run caps. Assignments, comments, and agent trigger labels still need approval.
 - **A model answer can be wrong.** A draft in a person's DM can say something false or something that a hostile text put there. The code shows the full text. The person must read each draft before they tap Send.
 - **Email trust depends on the receiving server.** The server must remove incoming `Authentication-Results` headers that claim its identity.
 - **Collector filters are not complete.** `clean` removes common credentials, including Slack app and refresh tokens, Stripe, GitLab, npm, and named AWS secrets. It cannot find all private text. Use `share = "team"` only for work that the team may read.
-- **Slack posts have no hourly cap.** Each bot post in a `coordinator` channel can start a run. `run_limits.max_concurrent` limits only the runs at the same time.
+- **Slack automation has an hourly cap.** Each channel can start at most 30 tainted runs in one hour, counted from `events`. Further events start no run and cause one sensor error per hour. `illo/channels/slack/limits.py` also caps owner notices and sends the deferred digest.
 
 ## Limits
 

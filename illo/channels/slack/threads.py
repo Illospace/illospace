@@ -3,7 +3,7 @@
 import asyncio
 from collections import deque
 
-from illo.ledger import people
+from illo.ledger import kv, people
 
 
 async def read_context(ctx, event, bot_id: str, working_ts: str | None) -> list[str]:
@@ -29,16 +29,21 @@ async def read_context(ctx, event, bot_id: str, working_ts: str | None) -> list[
             if not cursor:
                 break
         async with ctx.pool.connection() as conn:
+            tainted = bool(await kv.get(
+                conn,
+                f"slack:thread-tainted:{event.payload['channel_id']}:{event.payload['thread_ts']}",
+            ))
             names = {
                 person["slack_id"]: person["name"] for person in await people.list_people(conn)
             }
         names[bot_id] = "Illo"
+        if tainted:
+            event.payload["contains_outside_text"] = True
         context = []
         for message in messages:
             user = message.get("user", "")
-            if (
-                message.get("bot_id") or message.get("subtype")
-                or user == bot_id or not user or user not in names
+            if user != bot_id and (
+                message.get("bot_id") or message.get("subtype") or not user or user not in names
             ):
                 event.payload["contains_outside_text"] = True
             if user and user not in names:

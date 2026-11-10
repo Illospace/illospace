@@ -11,7 +11,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from illo.connectors import store
 from illo.connectors.http import BoundedHTTP, marked
-from illo.ledger import sensors
+from illo.ledger import runs, sensors
 
 
 class LimitedStream(httpx.AsyncByteStream):
@@ -173,15 +173,23 @@ class MCPClient:
 async def perform_draft(ctx, draft: dict) -> dict:
     if draft["state"] != "approved":
         raise ValueError("Only an approved draft can call a connector")
-    args = draft["content"]["arguments"]
-    from illo.tools.connectors import find
+    from illo.tools.connectors import call_connector, resolve
+    from illo.tools.registry import ToolContext
 
-    config, _ = find(ctx, args)
+    tool = ctx.registry.tools["connectors_call"]
+    args = tool.arguments.model_validate(draft["content"]["arguments"]).model_dump()
+    if draft["kind"] != tool.name or draft["content"].get("tool") != tool.name:
+        raise ValueError("The draft does not contain a connector call")
     async with ctx.pool.connection() as conn:
-        return await ctx.mcp_client.call(ctx, conn, config, args["tool"], args["arguments"])
+        run = await runs.get(conn, draft["run_id"])
+        if not run or run["person_id"] != draft["approver_person_id"]:
+            raise ValueError("The draft approver is not the requester")
+        tc = ToolContext(conn, run, ctx)
+        if resolve(tc, args).destination(args) != draft["destination"]:
+            raise ValueError("The draft destination does not match the stored action")
+        return await call_connector(tc, args)
 
 
 async def setup(ctx) -> None:
     ctx.mcp_client = MCPClient()
-    ctx.draft_performers["connector_call"] = perform_draft
     ctx.draft_performers["connectors_call"] = perform_draft

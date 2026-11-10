@@ -66,7 +66,7 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
         raise ValueError("Slack is not connected")
     private = True
     if configured(ctx.app, args["channel"]):
-        private = await channel_private(ctx.app, args["channel"])
+        private = await channel_private(ctx.app, args["channel"], conn=ctx.conn)
         if private:
             person = (
                 await people.get(ctx.conn, ctx.principal[7:])

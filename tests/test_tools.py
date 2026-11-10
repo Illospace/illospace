@@ -9,7 +9,8 @@ from illo.tools.registry import Registry, Tool
 
 
 def tool(name="lanes_search", risk="read", target="ledger", personal=False):
-    return SimpleNamespace(name=name, risk=risk, destination=lambda a: target, personal=personal)
+    return SimpleNamespace(name=name, family=name.split("_", 1)[0], risk=risk,
+                           destination=lambda a: target, personal=personal)
 
 
 def authority(**changes):

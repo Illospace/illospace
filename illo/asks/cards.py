@@ -137,6 +137,9 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
 def draft_preview(draft: dict) -> str | None:
     """Keep the entire proposed action visible before a person can send it."""
     content = draft["content"]
+    if draft.get("kind") in {"github_assign_issue", "github_comment_issue"}:
+        if not content.get("github_issue"):
+            return None
     if draft.get("kind") == "asks_answer":
         content = draft.get("answer_preview")
         if content is None:

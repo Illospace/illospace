@@ -10,7 +10,6 @@ from illo.db import one
     {"user": "U_OUTSIDE"},
     {"user": "U_ACME_BEN", "bot_id": "B_FORM"},
     {"user": "U_ACME_BEN", "subtype": "bot_message"},
-    {"user": "U_ACME_ILLO"},
 ])
 @pytest.mark.parametrize("in_preparer", [False, True])
 async def test_rule_06_outside_thread_context_taints_before_tools(

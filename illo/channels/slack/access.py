@@ -1,16 +1,41 @@
 """Keep private channel text out of the shared ledger."""
 
 import asyncio
+from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
+
+from illo.ledger import kv, sensors
 
 
-async def channel_private(ctx, channel_id: str) -> bool:
+async def channel_private(ctx, channel_id: str, *, conn=None) -> bool:
     channel = next(c for c in ctx.workspace.config.slack.channels if c.id == channel_id)
     if channel.visibility == "private":
         return True
-    response = await ctx.slack_client.conversations_info(channel=channel_id)
-    private = response.get("channel", {}).get("is_private")
-    if type(private) is not bool:
-        raise ValueError("Slack did not report channel privacy")
+    key = f"slack:privacy:{channel_id}"
+    async with (nullcontext(conn) if conn is not None else ctx.pool.connection()) as conn:
+        # One probe per channel also covers concurrent messages in an alert storm.
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
+        cached = await kv.get(conn, key)
+        if cached and datetime.fromisoformat(cached["expires_at"]) > datetime.now(UTC):
+            return cached["private"]
+        try:
+            response = await ctx.slack_client.conversations_info(channel=channel_id)
+            private = response.get("channel", {}).get("is_private")
+            if type(private) is not bool:
+                raise ValueError("Slack did not report channel privacy")
+        except Exception:
+            await sensors.error(conn, key, "Slack could not verify channel privacy")
+            # Commit the sensor error before the caller records the missed event.
+            failed = True
+        else:
+            failed = False
+            await kv.set(conn, key, {
+                "private": private,
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            })
+            await sensors.ok(conn, key)
+    if failed:
+        raise ValueError("Slack could not verify channel privacy")
     return private
 
 

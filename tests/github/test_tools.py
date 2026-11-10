@@ -77,7 +77,9 @@ async def test_read_assign_comment_and_claim(rpc, rpc_token, github_client):
         ("github_assign_issue", {"repo": REPO, "number": number, "assignee": "ada"}),
         ("github_comment_issue", {"repo": REPO, "number": number, "body": "A team comment."}),
     ]:
-        assert (await call(rpc, token, name, args))["decision"] == "allow"
+        assert (await call(rpc, token, name, args))["decision"] == (
+            "draft" if name in {"github_assign_issue", "github_comment_issue"} else "allow"
+        )
     assert (await call(rpc, token, "claims_take", {"key": "alert:1", "note": "Handle the alert"}))[
         "result"
     ] is True
@@ -99,7 +101,11 @@ async def test_work_one_message_then_edit(app, rpc, rpc_token, github_client, sl
     ctx = app.state.ctx
     ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
     result = await call(rpc, token, "work_start", {**CREATE, "assignee": "ada"})
-    assert result["decision"] == "allow"
+    assert result["decision"] == "draft"
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE drafts SET state='approved'")
+        draft = await one(conn, "SELECT * FROM drafts")
+    result = {"result": await perform_draft(ctx, draft)}
     assert result["result"]["lane_id"]
     assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 1
     await refresh_statuses(ctx)

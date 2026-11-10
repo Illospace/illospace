@@ -105,17 +105,20 @@ Each tool declares, in code:
 The checks:
 - **Check 1, scope.** The tool must be in the grant of the run. A personal tool also needs an untainted `person_dm` run of its owner.
 - **Check 2, destination.** A tool names its destination: `person:<key>`, `channel:<id>`, `github:<owner>/<repo>`, `outside:<key or address>`, `ledger`. A read with a `ledger` destination always passes. A read with an `outside:` destination (a connector call) sends its arguments out, so it is checked like a write. When the run has `personal_read = true`, each destination other than `person:<principal>` and `ledger` gives `draft`. In that case a `team_visible` tool also gives `draft`.
+- After a personal read, a connector call gives `deny`, with no draft.
 - **Check 3, risk.** `read` → allow. `write_internal` (a ticket, a note, a lane update, a message to a team member) → allow. `send_outside` → draft. There is no tool for a destructive action.
 
 The run gets `personal_read = true` after a personal tool, and after a read result with `visibility: private`.
 
 A check returns `allow`, `draft`, or `deny`. The strictest result wins. `draft` creates a row in `drafts` and a card for the person of the run. A run with no person cannot create a draft: the result is `deny`. The tool result tells the model what happened. Each call writes `audit` with: run, principal, tool, an HMAC digest of the arguments, the redacted arguments, the decision, the reason.
 
-Risks of note: `asks_answer` and `email_draft` have risk `send_outside`, so each call is a draft. A GitHub write to a public repository becomes `send_outside` in its preflight.
+Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_comment_issue` have risk `send_outside`. Assignments through `work_start` and agent trigger labels also need approval. Without a person, tickets stay unassigned and drop model labels. A GitHub write to a public repository becomes `send_outside` in its preflight.
 
 ### Limits in one run
 
 `RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. The run stops at `brain.timeout_s`.
+
+Each Slack channel starts at most 30 tainted runs per hour. Owner notices have a cap of one per run and six per hour; remaining links wait for an hourly digest.
 
 ## 5. The ledger
 

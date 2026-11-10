@@ -6,6 +6,7 @@ from pydantic import Field
 
 from illo.ledger import github as ledger
 from illo.ledger import kv, people, sensors
+from illo.tools.checks import Decision
 from illo.tools.github import (
     PROFILES,
     CreateArgs,
@@ -30,6 +31,20 @@ LABELS = {
 
 class StartArgs(CreateArgs):
     assignee: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+async def start_preflight(ctx: ToolContext, args: dict) -> Decision:
+    verdict = await write_preflight(ctx, args)
+    if verdict.outcome != "allow" or not args.get("assignee"):
+        return verdict
+    if ctx.run.get("person_id"):
+        return Decision("draft", "An assignment needs approval")
+    # The assignment is refused. Filing an unassigned ticket remains allowed.
+    if ctx.run["personal_read"]:
+        return Decision("deny", "Personal data cannot enter an unassigned ticket")
+    result = await start(ctx, {**args, "assignee": None})
+    link = (result.get("issue") or {}).get("html_url", "")
+    return Decision("deny", f"The assignment needs approval. The ticket stays unassigned. {link}")
 
 
 def status_text(lane: dict) -> str:
@@ -130,6 +145,6 @@ def register(registry) -> None:
             start,
             arguments=StartArgs,
             profiles=PROFILES - {"tainted"},
-            preflight=write_preflight,
+            preflight=start_preflight,
         )
     )

@@ -4,6 +4,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from psycopg.types.json import Jsonb
+
 if TYPE_CHECKING:
     from illo.app import AppContext
     from illo.gateway.principal import Authority
@@ -13,6 +15,7 @@ from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context
+from illo.db import one
 from illo.gateway import InboundEvent
 from illo.ledger import items, kv, people
 
@@ -86,8 +89,20 @@ class SlackIntake:
             try:
                 private = await channel_private(self.ctx, channel)
             except Exception:
-                private = True
                 log.error("Slack could not verify channel privacy")
+                payload = {"text": raw.get("text", ""), "payload": {
+                    "channel_id": channel, "message_ts": ts,
+                }}
+                for fn in self.ctx.gateway.payload_filters:
+                    payload = fn(payload)
+                async with self.ctx.pool.connection() as conn:
+                    row = await one(conn, """
+                        INSERT INTO events (channel,external_id,kind,payload,status)
+                        VALUES ('slack',%s,'message',%s,'failed')
+                        ON CONFLICT (channel,external_id) DO NOTHING RETURNING id
+                    """, (f"{channel}:{ts}", Jsonb(payload)))
+                return {"decision": "ignore", "event_id": row["id"] if row else None,
+                        "error": "Slack could not verify channel privacy"}
             if private:
                 await hide_index(self.ctx, channel)
                 return {"decision": "ignore"}

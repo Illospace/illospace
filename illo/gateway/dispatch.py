@@ -125,8 +125,15 @@ class Gateway:
                         "UPDATE events SET status='handled' WHERE id=%s", (row["id"],)
                     )
                 return {"decision": decision, "event_id": row["id"], "text": text}
+            from illo.channels.slack.limits import admit_tainted_run
+
+            if not await admit_tainted_run(ctx, event, authority, row["id"]):
+                return {"decision": "ignore", "event_id": row["id"]}
             await adapter.show_working(event)
             authority = await self.context_authority(event, authority, row["id"])
+            if not await admit_tainted_run(ctx, event, authority, row["id"]):
+                await adapter.deliver_final(event, "The channel reached 30 tainted runs in one hour.")
+                return {"decision": "ignore", "event_id": row["id"]}
             if decision == "direct":
                 text = await self.direct_handlers[(event.channel, event.kind)](
                     ctx, event, authority

@@ -268,7 +268,7 @@ async def personal_call(ctx, method: str, args: dict) -> dict:
     )
     if (
         run["tainted"]
-        or run["profile"] not in {"person_dm", "agent_request"}
+        or run["profile"] != "person_dm"
         or not person
         or person["id"] != run["person_id"]
     ):
