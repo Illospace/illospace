@@ -29,10 +29,23 @@ MISSING = 'I have no model sign-in for you yet. Say "connect my ChatGPT".'
 BROKEN = 'Your ChatGPT sign-in for Illo stopped working. Say "connect my ChatGPT" to sign in again.'
 
 
+TEMPORARY = "I could not reach the model sign-in service. Try again in a minute."
+
+
+class TemporaryRefresh(ValueError):
+    pass
+
+
 class TokenError(ValueError):
-    def __init__(self, status=None):
+    def __init__(self, status=None, code=None):
         super().__init__("ChatGPT sign-in did not finish")
         self.status = status
+        self.permanent = status in (400, 401) and code in {
+            "invalid_grant",
+            "refresh_token_reused",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+        }
 
 
 def claims(token):
@@ -92,17 +105,28 @@ class ChatGPTClient:
                 async with http.stream("POST", url, data=data, json=json) as response:
                     if pending and response.status_code in (403, 404):
                         return None
-                    if response.status_code != 200:
-                        raise TokenError(response.status_code)
                     body = bytearray()
                     async for part in response.aiter_bytes():
                         body.extend(part)
                         if len(body) > 262144:
                             raise TokenError()
-                    result = loads(body)
+                    try:
+                        result = loads(body)
+                    except ValueError:
+                        raise TokenError(response.status_code) from None
+                    if response.status_code != 200:
+                        error = result.get("error") if isinstance(result, dict) else None
+                        code = (
+                            error.get("code") or error.get("type")
+                            if isinstance(error, dict)
+                            else error
+                        )
+                        raise TokenError(response.status_code, code)
                     if not isinstance(result, dict):
                         raise TokenError()
                     return result
+        except TokenError:
+            raise
         except Exception:
             # Exception text, causes, response bodies and URLs can hold credentials.
             raise TokenError() from None
@@ -147,7 +171,7 @@ class ChatGPTClient:
         )
 
 
-async def access(ctx, person):
+async def access(ctx, person, *, force=False, rejected_token=None):
     """Commit a rotation before a run can fail. Serialize refreshes across app processes."""
     auth = None
 
@@ -159,10 +183,17 @@ async def access(ctx, person):
                 row = await grants.load(conn, person["id"], lock=True)
                 if not row or row["revoked_at"] or row["broken_at"]:
                     return
+                if row["next_refresh_at"] and row["next_refresh_at"] > datetime.now(UTC):
+                    return
                 try:
                     token = json.loads(vault(ctx).decrypt(row["secret"]))
-                    if not row["expires_at"] or row["expires_at"] <= datetime.now(UTC) + timedelta(
-                        minutes=5
+                    must_refresh = force and (
+                        rejected_token is None or token["access_token"] == rejected_token
+                    )
+                    if (
+                        must_refresh
+                        or not row["expires_at"]
+                        or row["expires_at"] <= datetime.now(UTC) + timedelta(minutes=5)
                     ):
                         fresh = await ctx.chatgpt_client.refresh(token)
                         # Save the rotated token in this transaction. Nothing else runs before commit.
@@ -173,14 +204,22 @@ async def access(ctx, person):
                         access_token=token["access_token"],
                         account_id=token["account_id"],
                     )
-                except Exception:
-                    await conn.execute(
-                        "UPDATE connector_grants SET broken_at=clock_timestamp() WHERE id=%s",
-                        (row["id"],),
-                    )
-                    await sensors.error(
-                        conn, "chatgpt:" + person["key"], "The ChatGPT sign-in stopped working"
-                    )
+                except Exception as error:
+                    if isinstance(error, TokenError) and error.permanent:
+                        await conn.execute(
+                            "UPDATE connector_grants SET broken_at=clock_timestamp() WHERE id=%s",
+                            (row["id"],),
+                        )
+                        detail = "The ChatGPT sign-in stopped working"
+                    else:
+                        delay = (30, 120, 600)[min(row["refresh_failures"], 2)]
+                        await conn.execute(
+                            "UPDATE connector_grants SET next_refresh_at=clock_timestamp()+%s*interval '1 second', "
+                            "refresh_failures=refresh_failures+1 WHERE id=%s",
+                            (delay, row["id"]),
+                        )
+                        detail = TEMPORARY
+                    await sensors.error(conn, "chatgpt:" + person["key"], detail)
 
     work = asyncio.create_task(locked_refresh())
     try:

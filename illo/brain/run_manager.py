@@ -42,6 +42,15 @@ async def provider_auth(ctx, authority, runtime):
         return auth
     if config.api_key_fallback:
         return ProviderAuth()
+    if person:
+        async with ctx.pool.connection() as conn:
+            pending = await one(
+                conn,
+                "SELECT 1 FROM connector_grants WHERE connector_key='chatgpt' AND person_id=%s AND broken_at IS NULL AND next_refresh_at>clock_timestamp()",
+                (person["id"],),
+            )
+        if pending:
+            raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
     if not personal:
         await chatgpt.notify_team_missing(ctx)
     return None
@@ -81,7 +90,10 @@ class RunManager:
         config = ctx.workspace.config.brain
         runtime = ctx.config.brain_runtime or config.runtime
         model = ctx.config.brain_model or config.model
-        auth = await provider_auth(ctx, authority, runtime)
+        try:
+            auth = await provider_auth(ctx, authority, runtime)
+        except chatgpt.TemporaryRefresh:
+            return chatgpt.TEMPORARY
         if auth is None:
             return (
                 chatgpt.MISSING if not authority.tainted and authority.person_id is not None else ""

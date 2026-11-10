@@ -129,6 +129,9 @@ It uses no fixed token lifetime. It refreshes within five minutes of expiry.
 A grant row lock serializes refresh across app processes. The rotation commits before a run starts.
 Run cancellation waits for that refresh transaction to finish.
 A refresh failure marks the grant broken and records `chatgpt:<person key>` with no provider text.
+Temporary network errors, timeouts, HTTP 429, and server errors keep the grant.
+Refresh retries wait 30 seconds, then 2 minutes, then 10 minutes.
+The current run gets a short failure reply, or uses the explicitly allowed API fallback.
 The person gets one reconnect DM for that broken grant. A new sign-in resets the notice state.
 No refresh token or ID token enters the brain container.
 
