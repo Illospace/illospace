@@ -17,6 +17,7 @@ def test_rule10_brain_container_has_no_host_access():
     assert brain["security_opt"] == ["no-new-privileges:true"]
     assert brain["user"] == "10001:10001"
     assert brain["tmpfs"]
+    assert brain["init"] is True
     assert brain["pids_limit"]
     assert brain["mem_limit"]
     assert brain["cpus"]

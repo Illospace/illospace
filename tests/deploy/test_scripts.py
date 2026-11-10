@@ -272,3 +272,9 @@ def test_scripts_parse_and_compose_keeps_postgres_private():
     assert "ports" not in postgres
     assert postgres["networks"] == ["internal"]
     assert compose["networks"]["internal"]["internal"] is True
+
+
+def test_compose_reaps_orphan_processes():
+    services = yaml.safe_load((ROOT / "deploy/compose.yaml").read_text())["services"]
+    assert services["brain"]["init"] is True
+    assert services["illo"]["init"] is True
