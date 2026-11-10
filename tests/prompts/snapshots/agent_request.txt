@@ -107,6 +107,7 @@ The agent reads your answer as plain text. Give facts, links, and ids. No Slack 
 • Team: Acme
 • Principal: person:ben
 • Person: Ben (`ben`), role member, areas infrastructure
+• GitHub repositories: acme-example/engine
 • Local time: Tuesday 10 November 2026, 09:04, America/New_York
 • Channel: the MCP endpoint for agents
 

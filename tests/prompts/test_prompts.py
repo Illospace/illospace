@@ -167,3 +167,14 @@ def test_runtime_prompt_size_boundary_keeps_all_text(example):
     changed.rules[0].body += "x"
     with pytest.raises(WorkspaceError, match="rules/boundary.md.*60,000"):
         build(changed, "person:ada", "person_dm", now=NOW)
+
+
+@pytest.mark.parametrize("profile", ["person_dm", "team_channel", "tainted", "routine", "agent_request"])
+async def test_g3_run_prompt_names_the_configured_repositories(conn, workspace, profile):
+    workspace = workspace.model_copy(deep=True)
+    workspace.config.github.repositories = ["acme/new-repository"]
+    event = InboundEvent(channel="slack", external_id="repositories", kind="message")
+    text = await build_for_run(conn, workspace, Authority("team", profile), event)
+    assert "GitHub repositories: acme/new-repository" in text
+    outside = await build_for_run(conn, workspace, Authority("outsider", "outsider"), event)
+    assert "acme/new-repository" not in outside

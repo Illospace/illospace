@@ -103,6 +103,7 @@ You must not:
 • Team: Acme
 • Principal: person:ada
 • Person: Ada (`ada`), role owner, areas product, engineering
+• GitHub repositories: acme-example/engine
 • Local time: Tuesday 10 November 2026, 15:04, Europe/Paris
 • Channel: a routine
 
