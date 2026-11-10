@@ -31,6 +31,9 @@ The App needs these repository permissions:
 Install the App on the required repositories. Each team uses its own App or
 token. No access means that the client stays disabled.
 
+The App can be installed on more than one owner. Illo finds the installation
+of each repository by itself. `github_app_installation_id` is the default installation.
+
 ## Workspace settings
 
 Add these fields to `illo.yaml` as needed:
