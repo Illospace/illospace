@@ -19,6 +19,26 @@ from illo.tools.registry import Tool
 from . import asks, lanes, reads, schemas, submissions
 
 PROFILES = frozenset({"agent_request"})
+COLLECTOR_TOOLS = frozenset(
+    {
+        "lane_report",
+        "lane_search",
+        "ask_create",
+        "ask_pull",
+        "ask_ack",
+        "ask_cancel",
+        "signal_submit",
+    }
+)
+AGENT_TOOLS = COLLECTOR_TOOLS | {"illo_submit", "illo_read", "illo_get_result"}
+
+
+def allowed_tools(token: dict) -> frozenset[str]:
+    if token["scopes"] == ["agent"]:
+        return AGENT_TOOLS
+    if token["scopes"] == ["collector"]:
+        return COLLECTOR_TOOLS
+    return frozenset()
 
 
 def agent_tool(name, arguments, handler, risk, description):
@@ -146,7 +166,13 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": [tool.declaration() for tool in TOOLS.values()]}
+        result = {
+            "tools": [
+                tool.declaration()
+                for tool in TOOLS.values()
+                if tool.name in allowed_tools(ctx.token)
+            ]
+        }
     elif method == "tools/call":
         name, args = params.get("name"), params.get("arguments", {})
         if not isinstance(name, str) or not isinstance(args, dict):
@@ -161,6 +187,8 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
         if not tool:
             return _error(request_id, -32602, "Unknown tool"), name, args, "deny", "Unknown tool"
         try:
+            if name not in allowed_tools(ctx.token):
+                raise ValueError("The token scope does not allow this tool")
             validated = tool.arguments.model_validate(args)
             # Reports are snapshots: omitted fields must not reset a stored lane.
             clean = validated.model_dump(exclude_unset=name == "lane_report")

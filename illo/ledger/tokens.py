@@ -15,6 +15,9 @@ async def create(
     conn: Connection, person_id: int, label: str, scopes: list[str] | None = None
 ) -> str:
     """Create a client token for an active person."""
+    scopes = ["collector"] if scopes is None else scopes
+    if scopes not in (["collector"], ["agent"]):
+        raise ValueError("Choose one token scope: collector or agent")
     token = secrets.token_urlsafe(32)
     row = await one(
         conn,
@@ -22,7 +25,7 @@ async def create(
         INSERT INTO tokens (person_id,label,token_hash,scopes)
         SELECT id,%s,%s,%s FROM people WHERE id = %s AND active RETURNING id
     """,
-        (label, digest(token), scopes or [], person_id),
+        (label, digest(token), scopes, person_id),
     )
     if not row:
         raise ValueError("The person is missing or inactive")

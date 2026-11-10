@@ -44,6 +44,7 @@ def parser() -> argparse.ArgumentParser:
     create = token.add_parser("create")
     create.add_argument("--person", required=True)
     create.add_argument("--label", required=True)
+    create.add_argument("--scope", choices=("collector", "agent"), default="collector")
     listing = token.add_parser("list")
     listing.add_argument("--person")
     token.add_parser("revoke").add_argument("id", type=int)
@@ -164,14 +165,14 @@ async def execute(args, config: Config) -> int:
                 person = await people.get(conn, args.person)
                 if not person:
                     raise ValueError("The person is missing or inactive")
-                print(await tokens.create(conn, person["id"], args.label))
+                print(await tokens.create(conn, person["id"], args.label, scopes=[args.scope]))
             elif args.action == "list":
                 person = await people.get(conn, args.person) if args.person else None
                 if args.person and not person:
                     raise ValueError("The person is missing or inactive")
                 for row in await tokens.list_tokens(conn, person["id"] if person else None):
                     state = "revoked" if row["revoked_at"] else "active"
-                    print(f"{row['id']}  {row['label']}  {state}")
+                    print(f"{row['id']}  {row['label']}  {','.join(row['scopes'])}  {state}")
             elif args.action == "revoke":
                 print(
                     "The token was revoked."

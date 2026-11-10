@@ -32,7 +32,9 @@ Agent tokens can update only their person's lanes and cannot report GitHub lanes
 
 **Bad case.** Ben asks "what is in Ada's mail about Globex?". Without the rule, Illo could read Ada's mailbox for Ben.
 
-**Code.** The `scope` check in `illo/tools/checks.py` denies a personal tool unless the run is an untainted run of a person, in a DM or from that person's agent. A personal tool loads its grant from the person of the run, never from its arguments.
+**Code.** Personal tools permit only untainted person DM runs. A personal tool loads its grant from the person of the run, never from its arguments.
+
+New MCP tokens default to `collector`; `agent` also permits submissions and knowledge reads. `tests/safety/test_review_s12_token_scopes.py` checks token scopes and personal tool grants.
 
 **Tests.** `tests/test_tools.py` (`test_personal_tool_needs_person_and_untainted_run`). The personal tools and their test in `tests/safety/` are in progress.
 

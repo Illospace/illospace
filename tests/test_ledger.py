@@ -33,7 +33,7 @@ async def test_people_lookups(conn, ada):
 
 
 async def test_token_lifecycle(conn, ada):
-    raw = await tokens.create(conn, ada["id"], "test machine", ["lanes:read"])
+    raw = await tokens.create(conn, ada["id"], "test machine", ["collector"])
     stored = await one(conn, "SELECT * FROM tokens")
     assert stored["token_hash"] == tokens.digest(raw)
     assert raw not in str(stored)

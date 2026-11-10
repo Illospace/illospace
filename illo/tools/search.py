@@ -41,7 +41,7 @@ async def search_all(ctx, args):
         **args,
         conn=ctx.conn,
         tainted=ctx.run["tainted"],
-        personal_allowed=ctx.run["profile"] in {"person_dm", "agent_request"},
+        personal_allowed=ctx.run["profile"] == "person_dm",
     )
     if hits.personal_read:
         await search.mark_personal(ctx)
