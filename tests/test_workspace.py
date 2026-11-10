@@ -82,3 +82,59 @@ async def test_sync_insert_update_deactivate(conn, example):
     assert await people.get(conn, "chloe") is None
     row = await (await conn.execute("SELECT active FROM people WHERE key='chloe'")).fetchone()
     assert row["active"] is False
+
+
+@pytest.mark.parametrize(("field", "length"), [("description", 301), ("name", 101)])
+def test_skill_metadata_size_names_file(example, field, length):
+    path = next((example / "skills").glob("*/SKILL.md"))
+    front = {"name": "large", "description": "A procedure", field: "x" * length}
+    path.write_text("---\n" + yaml.safe_dump(front) + "---\nSteps.")
+    with pytest.raises(WorkspaceError, match=field) as error:
+        load_workspace(example)
+    assert str(path) in str(error.value)
+
+
+def test_rule_total_prompt_size_names_file(example):
+    path = example / "rules/team.md"
+    path.write_text("---\nname: team\n---\n" + "x" * 60_000)
+    with pytest.raises(WorkspaceError, match="rules/team.md.*60,000"):
+        load_workspace(example)
+
+
+def test_skill_list_total_prompt_size_names_skill(example):
+    for index in range(200):
+        path = example / "skills" / f"large-{index:03d}" / "SKILL.md"
+        path.parent.mkdir()
+        path.write_text(
+            f"---\nname: large-{index:03d}\ndescription: " + "x" * 300 + "\n---\nSteps."
+        )
+    with pytest.raises(WorkspaceError, match=r"skills/large-.*SKILL.md.*skill large-.*60,000"):
+        load_workspace(example)
+
+
+async def test_oversized_workspace_reload_keeps_active_workspace(app, example):
+    ctx = app.state.ctx
+    previous = ctx.workspace
+    ctx.config.workspace_dir = example
+    path = example / "rules/team.md"
+    path.write_text("---\nname: team\n---\n" + "x" * 60_000)
+    with pytest.raises(WorkspaceError, match="rules/team.md.*60,000"):
+        await ctx.reload()
+    assert ctx.workspace is previous
+
+
+def test_fixed_prompt_size_names_config_file(example):
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["team_name"] = "x" * 60_000
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(WorkspaceError, match="illo.yaml.*60,000"):
+        load_workspace(example)
+
+
+def test_combined_rule_size_names_last_file(example):
+    for name in ["large-a", "large-b"]:
+        path = example / "rules" / f"{name}.md"
+        path.write_text(f"---\nname: {name}\n---\n" + "x" * 30_000)
+    with pytest.raises(WorkspaceError, match="rules/large-b.md.*60,000"):
+        load_workspace(example)

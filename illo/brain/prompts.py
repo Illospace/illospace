@@ -10,10 +10,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from illo.ledger import asks
+from illo.workspace import WorkspaceError
 
 HERE = Path(__file__).parent
 BASE_PROMPT = (HERE / "base_prompt.md").read_text().strip()
 PROFILE_TEXTS = {p.stem: p.read_text().strip() for p in sorted((HERE / "prompts").glob("*.md"))}
+
+MAX_PROMPT_CHARS = 60_000
+# Allow for changing dates and the count of open asks after a workspace loads.
+RUN_FACTS_RESERVE = 128
 
 CHANNEL_NAMES = {
     "email": "email",
@@ -37,28 +42,62 @@ def build(
     now: datetime | None = None,
     event_channel: str | None = None,
     open_asks: int = 0,
+    _fact_reserve: int = 0,
 ) -> str:
     """Return base text, profile text, run facts, matching rules, and the skill list."""
     key = prompt_profile(principal, profile)
     parts = [BASE_PROMPT, PROFILE_TEXTS.get(key, "")]
     parts.append(_facts(workspace, principal, key, channel_id, now, event_channel, open_asks))
+    text = "\n\n".join(parts)
+    limit = MAX_PROMPT_CHARS - max(0, _fact_reserve)
+
+    def check_size(source):
+        if len(text) > limit:
+            raise WorkspaceError(
+                f"{source}: the system prompt exceeds {MAX_PROMPT_CHARS:,} characters "
+                "with space for run facts"
+            )
+
+    check_size(f"{workspace.root / 'illo.yaml'} or {workspace.root / 'people.yaml'}")
     rules = workspace.matching_rules(principal, profile, channel_id)
     if key == "outsider":
         # An outsider answer can reach the sender. Team rules name people and owners,
         # so an outsider run gets only a rule that names the outsider principal.
         rules = [r for r in rules if "outsider" in r.principals]
-    if rules:
-        parts.append(
-            "## Team rules\nThe team wrote these rules. They apply to this run.\n\n"
-            + "\n\n".join(f"### {r.name}\n{r.body}" for r in rules)
-        )
-    if workspace.skills and key != "outsider":
-        parts.append(
-            "## Skills\nA skill is a procedure that the team wrote. When a request matches "
-            "a skill, load its steps with `skills_get` and follow them.\n"
-            + "\n".join(f"• {s.name}: {s.description}" for s in workspace.skills)
-        )
-    return "\n\n".join(parts)
+    for index, rule in enumerate(rules):
+        heading = "## Team rules\nThe team wrote these rules. They apply to this run.\n\n"
+        text += "\n\n" + (heading if index == 0 else "") + f"### {rule.name}\n{rule.body}"
+        check_size(workspace.root / rule.path)
+    if key != "outsider":
+        for index, skill in enumerate(workspace.skills):
+            if index == 0:
+                text += (
+                    "\n\n## Skills\nA skill is a procedure that the team wrote. When a request matches "
+                    "a skill, load its steps with `skills_get` and follow them.\n"
+                )
+            else:
+                text += "\n"
+            text += f"• {skill.name}: {skill.description}"
+            check_size(f"{workspace.root / skill.path} (skill {skill.name})")
+    return text
+
+
+def validate_workspace_prompts(workspace) -> None:
+    """Reject a workspace before any profile can receive an oversized prompt."""
+    principals = ["team", "outsider", *(f"person:{p.key}" for p in workspace.people if p.active)]
+    channels = [None, *(c.id for c in workspace.config.slack.channels)]
+    for profile in PROFILE_TEXTS:
+        for principal in principals:
+            for channel_id in channels:
+                build(
+                    workspace,
+                    principal,
+                    profile,
+                    channel_id,
+                    event_channel="mcp",
+                    open_asks=10**19,
+                    _fact_reserve=RUN_FACTS_RESERVE,
+                )
 
 
 async def build_for_run(conn, workspace, authority, event, *, now: datetime | None = None) -> str:

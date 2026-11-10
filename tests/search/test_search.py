@@ -210,3 +210,84 @@ async def test_long_question_falls_back_to_any_word(app):
     refs = [h.source_ref for h in hits]
     assert "saved:relaxed-1" in refs
     assert refs.index("saved:relaxed-1") == 0
+
+
+@pytest.mark.parametrize(("query", "titles", "expected"), [
+    ("runner -deprecated", ["runner", "deprecated", "runner deprecated"], ["runner"]),
+    ('"foo bar"', ["foo bar", "foo gap bar", "foo", "bar"], ["foo bar"]),
+    ("foo OR bar", ["foo", "bar", "or"], ["bar", "foo"]),
+    ("foo or bar", ["foo", "bar", "or"], ["bar", "foo"]),
+])
+async def test_explicit_search_syntax_has_no_fallback(app, query, titles, expected):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        for index, title in enumerate(titles):
+            await items.upsert(conn, source_ref=f"saved:{index}", title=title)
+    hits = await search.search(ctx, "team", query, kinds=["saved"])
+    assert sorted(h.title for h in hits) == expected
+
+
+async def test_url_ampersands_keep_exact_fallback_rank(app):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        now = datetime.now(UTC)
+        await items.upsert(
+            conn, source_ref="saved:exact", title="https://example.com/a?b=c&d=e",
+            source_at=now-timedelta(days=2),
+        )
+        await items.upsert(
+            conn, source_ref="saved:wrong", title="https://example.com/unrelated", source_at=now,
+        )
+    hits = await search.search(ctx, "team", "missing https://example.com/a?b=c&d=e")
+    assert [h.source_ref for h in hits] == ["saved:exact", "saved:wrong"]
+
+
+@pytest.mark.parametrize("config", ["simple", "english"])
+async def test_fallback_quotes_each_lexeme(conn, config):
+    expression = search.RELAXED_QUERY.split(" || ")[0 if config == "simple" else 1]
+    row = await one(conn, f"SELECT {expression} AS query", ("https://example.com/a?b=c&d=e",))
+    assert "&d=e" in row["query"]
+    assert "|d=e" not in row["query"]
+
+
+@pytest.mark.parametrize("query", ["", "?!", "'", "the", "O'Reilly"])
+async def test_fallback_empty_and_quoted_lexemes_parse(conn, query):
+    row = await one(conn, f"SELECT {search.RELAXED_QUERY} AS query", (query, query))
+    if query in {"", "?!", "'"}:
+        assert row["query"] == ""
+    elif query == "the":
+        assert row["query"] == "'the'"  # English is empty; simple still has this word.
+    else:
+        assert row["query"]
+
+
+async def test_strict_lane_precedes_fallback_item_at_limit(app):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        await items.upsert(conn, source_ref="archive:partial", kind="archive", title="orchard")
+        lane = await lanes.upsert(conn, source="manual", external_id="strict", title="orchard runner")
+    hits = await search.search(ctx, "team", "orchard runner", limit=1)
+    assert [h.source_ref for h in hits] == [f"lane:{lane['id']}"]
+    assert hits[0].match_tier == "strict"
+    all_hits = await search.search(ctx, "team", "orchard runner")
+    assert [h.match_tier for h in all_hits] == ["strict", "fallback"]
+
+
+async def test_merge_deduplicates_across_tiers_before_limit(app):
+    async def partial(ctx, principal, query, kinds, limit):
+        return [
+            Hit("doc:one", "doc", "partial", "partial", match_tier="fallback"),
+            Hit("doc:two", "doc", "partial", "partial", match_tier="fallback"),
+        ]
+
+    async def strict(ctx, principal, query, kinds, limit):
+        return [Hit("doc:one", "doc", "strict", "full match")]
+
+    search.register_provider("partial", partial)
+    search.register_provider("strict", strict)
+    hits = await search.search(app.state.ctx, "team", "orchard runner", limit=2)
+    assert [h.source_ref for h in hits] == ["doc:one", "doc:two"]
+    assert [h.match_tier for h in hits] == ["strict", "fallback"]
+    assert hits[0].title == "full match"
+    assert hits[0].score == 1 / 61
+    assert hits[1].score == 1 / 62

@@ -84,6 +84,8 @@ async def handle(ctx, person, action):
 async def claim_thread(ctx, event, authority):
     if event.channel != "slack" or authority.profile != "person_dm" or authority.tainted:
         return None
+    if event.payload.get("clip_unreadable"):
+        return None
     thread = event.payload.get("thread_ts") or event.reply_to
     channel = event.payload.get("channel_id")
     if not thread or not channel or not channel.startswith("D"):

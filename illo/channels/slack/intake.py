@@ -8,8 +8,6 @@ if TYPE_CHECKING:
     from illo.app import AppContext
     from illo.gateway.principal import Authority
 
-from psycopg.types.json import Jsonb
-
 from illo.channels.slack import actions
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.clips import read_clips
@@ -34,17 +32,16 @@ class SlackIntake:
         self.ctx, self.bot_id = ctx, bot_id
         self.bot_identity = bot_identity
         self.clip_timeout, self.clip_poll = clip_timeout, clip_poll
-        self.adapter = SlackAdapter(ctx, self.prepare)
+        self.adapter = SlackAdapter(ctx, self.prepare_context)
         ctx.gateway.register("slack", self.adapter)
+        ctx.gateway.register_preparer(self.prepare)
         ctx.gateway.register_claim(self.claim_unreadable_clip)
 
     async def claim_unreadable_clip(
         self, ctx: "AppContext", event: InboundEvent, authority: "Authority"
     ) -> str | None:
-        if event.channel == "slack" and event.payload.get("files"):
-            await self.adapter.show_working(event)
-            if event.payload.get("clip_unreadable"):
-                return CLIP_ERROR
+        if event.channel == "slack" and event.payload.get("clip_unreadable"):
+            return CLIP_ERROR
         return None
 
     async def receive(self, envelope: dict) -> dict | None:
@@ -158,26 +155,25 @@ class SlackIntake:
         except Exception:
             log.error("Slack could not index a channel message")
 
-    async def prepare(self, event: InboundEvent) -> None:
-        """Read slow context only after the placeholder exists."""
+    async def prepare(self, ctx, event: InboundEvent, authority) -> InboundEvent | None:
+        """Read clips after verification and before any business claim."""
+        if event.channel != "slack" or not event.payload.get("files"):
+            return None
+        await self.adapter.show_working(event, prepare=False)
         clip_text = await read_clips(
             self.ctx.slack_client,
-            event.payload.get("files", []),
+            event.payload["files"],
             self.clip_timeout,
             self.clip_poll,
         )
+        payload = dict(event.payload)
         if clip_text is None:
-            event.payload["clip_unreadable"] = True
-            return
-        if clip_text:
-            event.text = "\n".join([event.text, *clip_text]).strip()
-            # Store the actual request before a run reads it through another tool.
-            async with self.ctx.pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE events SET payload=jsonb_set(payload,'{text}',%s) "
-                    "WHERE channel='slack' AND external_id=%s",
-                    (Jsonb(event.text), event.external_id),
-                )
+            payload["clip_unreadable"] = True
+            return event.model_copy(update={"payload": payload})
+        return event.model_copy(update={"text": "\n".join([event.text, *clip_text]).strip()})
+
+    async def prepare_context(self, event: InboundEvent) -> None:
+        """Add thread history only after claims pass."""
         limit = self.ctx.workspace.config.run_limits.max_message_chars
         if len(event.text) > limit:
             raise ValueError("The message is too long")

@@ -63,6 +63,22 @@ async def submission_run(conn, event_id) -> dict | None:
     )
 
 
+async def requester_token_for_run(conn, run_id: int) -> int:
+    """Resolve the agent token from the authenticated event, never from model text."""
+    row = await one(
+        conn,
+        """SELECT s.token_id FROM runs r
+        JOIN events e ON e.id=r.event_id AND e.channel='mcp'
+        JOIN submissions s ON s.event_id=e.external_id
+        JOIN tokens t ON t.id=s.token_id AND t.person_id=r.person_id
+        WHERE r.id=%s AND r.profile='agent_request'""",
+        (run_id,),
+    )
+    if not row:
+        raise ValueError("The agent run has no authenticated submission")
+    return row["token_id"]
+
+
 async def recover_submissions(conn) -> None:
     """A process restart must not leave an accepted receipt pending forever.
 

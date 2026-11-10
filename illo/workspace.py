@@ -167,8 +167,8 @@ class RuleFile(Model):
 
 
 class Skill(Model):
-    name: str = Field(min_length=1)
-    description: str
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(max_length=300)
     body: str = ""
     path: str = ""
 
@@ -430,7 +430,7 @@ def load_workspace(root: Path | str) -> Workspace:
             for p in rule.principals
         ):
             raise WorkspaceError(f"{root / rule.path}: principals: unknown principal")
-    return Workspace(
+    workspace = Workspace(
         root=root,
         people=people,
         config=config,
@@ -441,3 +441,7 @@ def load_workspace(root: Path | str) -> Workspace:
         notes=notes,
         fingerprint=fingerprint(root),
     )
+    from illo.brain.prompts import validate_workspace_prompts
+
+    validate_workspace_prompts(workspace)
+    return workspace

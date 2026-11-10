@@ -20,6 +20,7 @@ class Gateway:
         self.adapters: dict[str, ChannelAdapter] = {}
         self.direct_handlers = {}
         self.claims = []
+        self.preparers = []
         self.payload_filters = []
 
     def register(self, channel: str, adapter: ChannelAdapter) -> None:
@@ -29,6 +30,14 @@ class Gateway:
     def register_direct(self, channel: str, kind: str, handler) -> None:
         """Register a ledger action. The handler must check action ownership."""
         self.direct_handlers[(channel, kind)] = handler
+
+    def register_preparer(self, fn) -> None:
+        """Register async fn(ctx, event, authority) -> InboundEvent | None.
+
+        Prepare verified input before any claim. Return a changed event or None.
+        A preparer must preserve the event identity and authority metadata.
+        """
+        self.preparers.append(fn)
 
     def register_claim(self, claim) -> None:
         """Register `async claim(ctx, event, authority) -> str | None`.
@@ -78,6 +87,20 @@ class Gateway:
                 raise RuntimeError("The channel has no delivery adapter")
             if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
                 raise ValueError("The message is too long")
+            for prepare in self.preparers:
+                prepared = await prepare(ctx, event, authority)
+                if prepared is not None:
+                    event = prepared
+            if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
+                raise ValueError("The message is too long")
+            prepared_payload = {"text": event.text}
+            for fn in self.payload_filters:
+                prepared_payload = fn(prepared_payload)
+            async with ctx.pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE events SET payload=jsonb_set(payload,'{text}',%s) WHERE id=%s",
+                    (Jsonb(prepared_payload["text"]), row["id"]),
+                )
             claimed = None
             for claim in self.claims:
                 claimed = await claim(ctx, event, authority)
