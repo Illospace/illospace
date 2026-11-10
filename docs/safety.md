@@ -131,6 +131,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - `answer_with_rule` in `illo/ledger/asks.py` and `matches` and `matching_option` in `illo/ledger/rules.py`. A card rule stores the option id, label, and detail. All three must match. An old rule matches only one option with the exact label.
+- Migration `0503_rules_remove_unscoped.sql` removes old non-file rules that lack the lane source or repository key.
 - A card rule keeps the lane source, the repository, and the requester fixed, also when they are absent (`handle` in `illo/asks/actions.py`).
 - A rule answer has no `answer_text`. The rule travels as `rule_text`.
 - An approved model answer records `answered_via=approved_draft`; the collector names the person who approved it.
