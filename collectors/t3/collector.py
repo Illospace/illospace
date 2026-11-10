@@ -535,8 +535,10 @@ class Collector:
                 manual = self.state["asks"].get(ref, {}).get("manual", False)
                 if not manual:
                     via = answer.get("answered_via")
-                    if via not in {"person", "rule"}:
-                        raise CollectorError("The answer must come from a person or a rule.")
+                    if via not in {"person", "rule", "approved_draft"}:
+                        raise CollectorError(
+                            "The answer needs a person, an approved draft, or a rule."
+                        )
                     if answer.get("answered_via") == "rule" and answer.get("answer_text"):
                         raise CollectorError("A rule answer cannot add free instructions.")
                     option = answer.get("answer_option")
@@ -545,7 +547,9 @@ class Collector:
                     }
                     if option and proposed.get(option.get("id")) != option.get("label"):
                         raise CollectorError("The answer does not match the proposed options.")
-                    if not option and (via != "person" or not answer.get("answer_text")):
+                    if not option and (
+                        via not in {"person", "approved_draft"} or not answer.get("answer_text")
+                    ):
                         raise CollectorError("Only a person can give a free answer.")
                     person = answer.get("answered_by") or self.config.owner or "owner"
                     if isinstance(person, dict):
@@ -555,9 +559,11 @@ class Collector:
                         if not answer.get("rule_text"):
                             raise CollectorError("The rule answer must name its rule.")
                         text = "Rule: " + answer["rule_text"]
-                    origin = (
-                        f"Answer by rule of {person}" if via == "rule" else f"Answer from {person}"
-                    )
+                    origin = {
+                        "rule": f"Answer by rule of {person}",
+                        "person": f"Answer from {person}",
+                        "approved_draft": f"Answer approved by {person}",
+                    }[via]
                     message = (
                         f"{origin} (via Illo): {option['label'] if option else 'Answer'}. {text}"
                     ).rstrip()
