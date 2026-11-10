@@ -16,7 +16,7 @@ from illo.gateway import InboundEvent
 from illo.gateway.principal import Authority
 from illo.ledger import asks
 from illo.tools.checks import PROFILE_NAMES
-from illo.workspace import load_workspace
+from illo.workspace import WorkspaceError, load_workspace
 
 ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOTS = Path(__file__).with_name("snapshots")
@@ -114,3 +114,56 @@ async def test_the_run_gets_the_assembled_prompt(app, replay, fake_brain):
     assert prompt.startswith(BASE_PROMPT)
     assert PROFILE_TEXTS["person_dm"] in prompt
     assert "• Principal: person:ada" in prompt
+
+
+@pytest.mark.parametrize("name", CASES)
+def test_every_profile_fits_real_brain_request(example, name):
+    from brain.models import RunRequest
+
+    principal, profile, channel_id, event_channel, open_asks = CASES[name]
+    prompt = build(
+        example,
+        principal,
+        profile,
+        channel_id,
+        now=NOW,
+        event_channel=event_channel,
+        open_asks=open_asks,
+    )
+    assert len(prompt) <= 60_000
+    request = RunRequest(
+        run_id=1,
+        system_prompt=prompt,
+        user_message="Hello",
+        mcp_url="http://test/brain/mcp",
+        mcp_token="invented",
+        model="test",
+    )
+    assert request.system_prompt == prompt
+
+
+def test_runtime_rejects_prompt_growth_without_cutting_rules(example):
+    from illo.workspace import RuleFile
+
+    changed = example.model_copy(
+        update={"rules": [RuleFile(name="large", body="x" * 60_000, path="rules/large.md")]}
+    )
+    with pytest.raises(WorkspaceError, match="rules/large.md.*60,000"):
+        build(changed, "person:ada", "person_dm")
+
+
+def test_runtime_prompt_size_boundary_keeps_all_text(example):
+    from illo.workspace import RuleFile
+
+    changed = example.model_copy(
+        update={
+            "rules": [RuleFile(name="boundary", body="", path="rules/boundary.md")],
+            "skills": [],
+        }
+    )
+    remaining = 60_000 - len(build(changed, "person:ada", "person_dm", now=NOW))
+    changed.rules[0].body = "x" * remaining
+    assert len(build(changed, "person:ada", "person_dm", now=NOW)) == 60_000
+    changed.rules[0].body += "x"
+    with pytest.raises(WorkspaceError, match="rules/boundary.md.*60,000"):
+        build(changed, "person:ada", "person_dm", now=NOW)
