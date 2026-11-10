@@ -55,7 +55,10 @@ async def create(ctx, args: dict) -> dict:
                 title=ref["external_id"],
                 owner_person_id=ctx.token["person_id"],
                 machine=ctx.token["label"],
+                visibility="private",
             )
+    if lane and lane["visibility"] == "private" and lane["owner_person_id"] != person["id"]:
+        raise ValueError("The lane is not visible to the owner")
     row = await asks.create(
         ctx.conn,
         owner_person_id=person["id"],
