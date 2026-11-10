@@ -17,15 +17,13 @@ async def test_personal_read_is_stored_and_shared_write_is_draft(app, rpc, rpc_t
 
     registry = app.state.ctx.registry
     registry.add(Tool("mail_search", "personal", "read", lambda a: "ledger", True, read_personal))
-    registry.add(
-        Tool(
-            "slack_post_channel",
-            "slack",
-            "write_internal",
-            lambda a: "channel:C_ACME_TEAM",
-            False,
-            shared_write,
-        )
+    registry.tools["slack_post_channel"] = Tool(
+        "slack_post_channel",
+        "slack",
+        "write_internal",
+        lambda a: "channel:C_ACME_TEAM",
+        False,
+        shared_write,
     )
     read = await rpc(token, "tools/call", {"name": "mail_search"})
     assert not read.json()["result"]["isError"]

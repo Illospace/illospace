@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
   "fastapi", "uvicorn", "psycopg[binary,pool]>=3.2", "pydantic>=2,<3",
-  "pyyaml", "httpx", "slack_sdk", "mcp", "cryptography", "croniter",
+  "pyyaml", "httpx", "slack_sdk", "aiohttp", "mcp", "cryptography", "croniter",
 ]
 
 [project.optional-dependencies]
