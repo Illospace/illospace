@@ -1,0 +1,23 @@
+people:
+  - key: ada
+    name: Ada
+    slack_id: U_ACME_ADA
+    github_login: acme-ada-example
+    emails: [ada@example.com]
+    role: owner
+    timezone: Europe/Paris
+    areas: [product, engineering]
+  - key: ben
+    name: Ben
+    slack_id: U_ACME_BEN
+    github_login: acme-ben-example
+    emails: [ben@example.com]
+    timezone: America/New_York
+    areas: [infrastructure]
+  - key: chloe
+    name: Chloé
+    slack_id: U_ACME_CHLOE
+    github_login: acme-chloe-example
+    emails: [chloe@example.com]
+    timezone: Europe/Paris
+    areas: [support]

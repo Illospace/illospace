@@ -1,0 +1,385 @@
+"""Validate the workspace before it becomes active."""
+
+from pathlib import Path
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import yaml
+from croniter import croniter
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from illo.db import Connection
+
+Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request"]
+Risk = Literal["read", "write_internal", "send_outside"]
+
+
+class Model(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Person(Model):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
+    name: str = Field(min_length=1)
+    slack_id: str | None = None
+    github_login: str | None = None
+    emails: list[str] = Field(default_factory=list)
+    role: Literal["owner", "member"] = "member"
+    timezone: str = "UTC"
+    areas: list[str] = Field(default_factory=list)
+    active: bool = True
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value):
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Use an IANA time zone") from exc
+        return value
+
+    @field_validator("emails")
+    @classmethod
+    def valid_emails(cls, values):
+        if any("@" not in value or " " in value for value in values):
+            raise ValueError("Each email must contain an address")
+        return [value.lower() for value in values]
+
+    @field_validator("github_login")
+    @classmethod
+    def normalize_login(cls, value):
+        return value.lower() if value else None
+
+
+class PeopleFile(Model):
+    people: list[Person] = Field(min_length=1)
+
+
+class SlackChannel(Model):
+    name: str = Field(min_length=1)
+    id: str = Field(min_length=1)
+    mode: Literal["coordinator", "listen", "off"] = "listen"
+    rule_files: list[str] = Field(default_factory=list)
+
+
+class SlackConfig(Model):
+    channels: list[SlackChannel] = Field(default_factory=list)
+
+
+class GitHubConfig(Model):
+    repositories: list[str] = Field(default_factory=list)
+
+    @field_validator("repositories")
+    @classmethod
+    def valid_repositories(cls, values):
+        if any(len(v.split("/")) != 2 or not all(v.split("/")) for v in values):
+            raise ValueError("Use owner/repository")
+        return values
+
+
+class DigestConfig(Model):
+    schedule: str = "0 9 * * 1-5"
+    destination: str
+
+    @field_validator("schedule")
+    @classmethod
+    def valid_cron(cls, value):
+        if len(value.split()) != 5 or not croniter.is_valid(value):
+            raise ValueError("Use a five-field cron schedule")
+        return value
+
+
+class BrainConfig(Model):
+    runtime: str = "claude"
+    model: str = "default"
+    max_turns: int = Field(default=12, ge=1, le=100)
+    timeout_s: float = Field(default=120, gt=0, le=3600)
+
+
+class RunLimits(Model):
+    max_concurrent: int = Field(default=4, ge=1, le=100)
+    max_message_chars: int = Field(default=20000, ge=1)
+
+
+class StaleLimits(Model):
+    t3: int = Field(default=30, gt=0)
+    claude_code: int = Field(default=30, gt=0, alias="claude-code")
+    codex: int = Field(default=30, gt=0)
+    github: int = Field(default=1440, gt=0)
+    manual: int = Field(default=1440, gt=0)
+    email: int = Field(default=1440, gt=0)
+
+
+class TeamConfig(Model):
+    team_name: str = Field(min_length=1)
+    timezone: str = "UTC"
+    default_owner: str
+    slack: SlackConfig = Field(default_factory=SlackConfig)
+    github: GitHubConfig = Field(default_factory=GitHubConfig)
+    digest: DigestConfig
+    stale_minutes: StaleLimits = Field(default_factory=StaleLimits)
+    brain: BrainConfig = Field(default_factory=BrainConfig)
+    run_limits: RunLimits = Field(default_factory=RunLimits)
+
+    _timezone = field_validator("timezone")(Person.valid_timezone.__func__)
+
+
+class RuleFile(Model):
+    name: str = Field(min_length=1)
+    description: str = ""
+    channels: list[str] = Field(default_factory=list)
+    profiles: list[Profile] = Field(default_factory=list)
+    principals: list[str] = Field(default_factory=list)
+    body: str = ""
+    path: str = ""
+
+
+class Skill(Model):
+    name: str = Field(min_length=1)
+    description: str
+    body: str = ""
+    path: str = ""
+
+
+class Routine(Model):
+    name: str = Field(min_length=1)
+    schedule: str
+    destination: str
+    principal: str
+    body: str = ""
+    path: str = ""
+
+    _schedule = field_validator("schedule")(DigestConfig.valid_cron.__func__)
+
+
+class ConnectorTool(Model):
+    name: str = Field(min_length=1)
+    risk: Risk
+
+
+class Connector(Model):
+    key: str = Field(min_length=1)
+    kind: Literal["mcp", "google", "github"]
+    scope: Literal["team", "personal"]
+    url: str
+    tools: list[ConnectorTool] = Field(default_factory=list)
+
+    @field_validator("url")
+    @classmethod
+    def valid_url(cls, value):
+        if not value.startswith(("https://", "http://")):
+            raise ValueError("Use an HTTP or HTTPS URL")
+        return value
+
+
+class Note(Model):
+    title: str
+    body: str
+    path: str
+
+
+class Workspace(Model):
+    root: Path
+    people: list[Person]
+    config: TeamConfig
+    rules: list[RuleFile]
+    skills: list[Skill]
+    routines: list[Routine]
+    connectors: list[Connector]
+    notes: list[Note]
+    fingerprint: str = ""
+
+    def matching_rules(
+        self, principal: str, profile: str, channel_id: str | None
+    ) -> list[RuleFile]:
+        """Match rule metadata and the channel's explicit rule list."""
+        channel = next((c for c in self.config.slack.channels if c.id == channel_id), None)
+        return [
+            r
+            for r in self.rules
+            if (not r.channels or channel_id in r.channels)
+            and (not r.profiles or profile in r.profiles)
+            and (not r.principals or principal in r.principals)
+            and (not channel or not channel.rule_files or r.path in channel.rule_files)
+        ]
+
+    async def sync_people(self, conn: Connection) -> None:
+        """Keep the database copy equal to people.yaml, including deactivation."""
+        async with conn.transaction():
+            # Clear old unique identities first, so a valid identity transfer works.
+            await conn.execute(
+                "UPDATE people SET active = false, slack_id = NULL, github_login = NULL, emails = '{}'"
+            )
+            for p in self.people:
+                await conn.execute(
+                    """
+                    INSERT INTO people (key,name,slack_id,github_login,emails,role,timezone,areas,active)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (key) DO UPDATE SET name=EXCLUDED.name, slack_id=EXCLUDED.slack_id,
+                      github_login=EXCLUDED.github_login, emails=EXCLUDED.emails, role=EXCLUDED.role,
+                      timezone=EXCLUDED.timezone, areas=EXCLUDED.areas, active=EXCLUDED.active
+                """,
+                    (
+                        p.key,
+                        p.name,
+                        p.slack_id,
+                        p.github_login,
+                        p.emails,
+                        p.role,
+                        p.timezone,
+                        p.areas,
+                        p.active,
+                    ),
+                )
+
+
+class WorkspaceError(ValueError):
+    """A file or a field in the workspace is invalid."""
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text()
+    except (OSError, UnicodeError) as exc:
+        raise WorkspaceError(f"{path}: cannot read the file") from exc
+
+
+def _yaml(path: Path, text: str):
+    try:
+        return yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        raise WorkspaceError(f"{path}: invalid YAML: {exc}") from exc
+
+
+def _model(model, data, path: Path):
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        errors = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())
+        raise WorkspaceError(f"{path}: {errors}") from exc
+
+
+def _front(path: Path):
+    text = _read(path)
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        raise WorkspaceError(f"{path}: front matter must start with ---")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as exc:
+        raise WorkspaceError(f"{path}: front matter must end with ---") from exc
+    data = _yaml(path, "\n".join(lines[1:end]))
+    if not isinstance(data, dict):
+        raise WorkspaceError(f"{path}: front matter must be a mapping")
+    return {**data, "body": "\n".join(lines[end + 1 :]).strip()}
+
+
+def fingerprint(root: Path) -> str:
+    """Hash file content so atomic file replacements are detected."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for pattern in (
+        "people.yaml",
+        "illo.yaml",
+        "rules/*.md",
+        "skills/*/SKILL.md",
+        "routines/*.md",
+        "connectors/*.yaml",
+        "notes/*.md",
+    ):
+        for path in sorted(root.glob(pattern)):
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(_read(path).encode())
+    return digest.hexdigest()
+
+
+def load_workspace(root: Path | str) -> Workspace:
+    """Load every supported file. Reject unknown keys and broken references."""
+    root = Path(root).resolve()
+    people = _model(
+        PeopleFile, _yaml(root / "people.yaml", _read(root / "people.yaml")), root / "people.yaml"
+    ).people
+    config = _model(
+        TeamConfig, _yaml(root / "illo.yaml", _read(root / "illo.yaml")), root / "illo.yaml"
+    )
+    for field in ("key", "slack_id", "github_login", "emails"):
+        seen = set()
+        for person in people:
+            value = getattr(person, field)
+            for entry in value if isinstance(value, list) else [value]:
+                if entry and entry in seen:
+                    raise WorkspaceError(f"{root / 'people.yaml'}: {field}: duplicate {entry}")
+                seen.add(entry)
+    keys = {p.key for p in people if p.active}
+    if config.default_owner not in keys:
+        raise WorkspaceError(f"{root / 'illo.yaml'}: default_owner: unknown or inactive person")
+    rules, skills, routines, connectors, notes = [], [], [], [], []
+    for pattern, model, target in (
+        ("rules/*.md", RuleFile, rules),
+        ("skills/*/SKILL.md", Skill, skills),
+        ("routines/*.md", Routine, routines),
+    ):
+        for path in sorted(root.glob(pattern)):
+            target.append(
+                _model(model, {**_front(path), "path": str(path.relative_to(root))}, path)
+            )
+    for path in sorted(root.glob("connectors/*.yaml")):
+        connectors.append(_model(Connector, _yaml(path, _read(path)), path))
+    for path in sorted(root.glob("notes/*.md")):
+        body = _read(path)
+        notes.append(
+            Note(
+                title=body.splitlines()[0].lstrip("# ") if body else path.stem,
+                body=body,
+                path=str(path.relative_to(root)),
+            )
+        )
+    for group in (rules, skills, routines, connectors):
+        identifiers = [getattr(x, "key", None) or x.name for x in group]
+        if len(identifiers) != len(set(identifiers)):
+            raise WorkspaceError(f"{root}: name/key: duplicate workspace entry")
+    channel_ids = [c.id for c in config.slack.channels]
+    if len(channel_ids) != len(set(channel_ids)):
+        raise WorkspaceError(f"{root / 'illo.yaml'}: slack.channels.id: duplicate channel")
+    rule_paths = {r.path for r in rules}
+    for channel in config.slack.channels:
+        for path in channel.rule_files:
+            if path not in rule_paths:
+                raise WorkspaceError(
+                    f"{root / 'illo.yaml'}: slack.channels.rule_files: unknown {path}"
+                )
+
+    def check_destination(value, path):
+        if value.startswith("person:") and value[7:] in keys:
+            return
+        if value.startswith("channel:") and value[8:] in channel_ids:
+            return
+        raise WorkspaceError(f"{path}: destination: use a configured person or channel")
+
+    check_destination(config.digest.destination, root / "illo.yaml")
+    for routine in routines:
+        if routine.principal != "team" and not (
+            routine.principal.startswith("person:") and routine.principal[7:] in keys
+        ):
+            raise WorkspaceError(f"{root / routine.path}: principal: unknown person")
+        check_destination(routine.destination, root / routine.path)
+    for rule in rules:
+        if any(c not in channel_ids for c in rule.channels):
+            raise WorkspaceError(f"{root / rule.path}: channels: unknown channel")
+        if any(
+            p != "team" and p != "outsider" and not (p.startswith("person:") and p[7:] in keys)
+            for p in rule.principals
+        ):
+            raise WorkspaceError(f"{root / rule.path}: principals: unknown principal")
+    return Workspace(
+        root=root,
+        people=people,
+        config=config,
+        rules=rules,
+        skills=skills,
+        routines=routines,
+        connectors=connectors,
+        notes=notes,
+        fingerprint=fingerprint(root),
+    )

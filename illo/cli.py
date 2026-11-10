@@ -1,0 +1,174 @@
+"""Small commands for an install, its tokens, and its vault."""
+
+import argparse
+import asyncio
+import getpass
+import sys
+from urllib.parse import urlsplit
+
+import httpx
+import uvicorn
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from pydantic import ValidationError
+
+from illo.config import Config
+from illo.db import migrate, one
+from illo.ledger import people, tokens
+from illo.log import configure
+from illo.vault import Vault, delete, get_names
+from illo.workspace import load_workspace
+
+
+def parser() -> argparse.ArgumentParser:
+    """Secrets have no value argument, so shell history cannot capture them."""
+    result = argparse.ArgumentParser(prog="illo")
+    commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("migrate")
+    commands.add_parser("doctor")
+    commands.add_parser("reload")
+    serve = commands.add_parser("serve")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    token = commands.add_parser("token").add_subparsers(dest="action", required=True)
+    create = token.add_parser("create")
+    create.add_argument("--person", required=True)
+    create.add_argument("--label", required=True)
+    listing = token.add_parser("list")
+    listing.add_argument("--person")
+    token.add_parser("revoke").add_argument("id", type=int)
+    secret = commands.add_parser("secret").add_subparsers(dest="action", required=True)
+    secret.add_parser("set").add_argument("name")
+    secret.add_parser("get-names")
+    secret.add_parser("delete").add_argument("name")
+    return result
+
+
+async def doctor(config: Config) -> int:
+    """Report missing requirements without exposing credentials."""
+    failed = False
+    try:
+        load_workspace(config.workspace_dir)
+        print("The workspace is valid.")
+    except ValueError as exc:
+        print(f"The workspace needs a fix: {exc}")
+        failed = True
+    try:
+        async with await AsyncConnection.connect(
+            config.database_url, row_factory=dict_row, connect_timeout=3
+        ) as conn:
+            await one(conn, "SELECT 1")
+            schema = await one(conn, "SELECT to_regclass('public.schema_migrations') AS name")
+            if not schema["name"]:
+                print("The database needs migrations. Run: illo migrate")
+                failed = True
+            else:
+                print("The database is ready.")
+    except Exception:
+        print("The database is unavailable. Check ILLO_DATABASE_URL and the database service.")
+        failed = True
+    if config.vault_key:
+        try:
+            Vault(config.vault_key.get_secret_value())
+            print("The vault key is valid.")
+        except ValueError:
+            print("ILLO_VAULT_KEY must be a Fernet key.")
+            failed = True
+    else:
+        print("The vault has no key. Set ILLO_VAULT_KEY before you store a secret.")
+    if not config.slack_bot_token:
+        print("Slack is optional and has no bot token.")
+    return int(failed)
+
+
+async def execute(args, config: Config) -> int:
+    """Run commands in one connection and one transaction unless migrations own it."""
+    if args.command == "doctor":
+        return await doctor(config)
+    if args.command == "reload":
+        if not config.reload_token:
+            raise ValueError("Set ILLO_RELOAD_TOKEN before a reload")
+        if urlsplit(config.public_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Workspace reload needs a loopback ILLO_PUBLIC_URL")
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+            response = await client.post(
+                config.public_url.rstrip("/") + "/admin/reload",
+                headers={"Authorization": f"Bearer {config.reload_token.get_secret_value()}"},
+            )
+            response.raise_for_status()
+        print("The workspace was reloaded.")
+        return 0
+    async with await AsyncConnection.connect(
+        config.database_url, row_factory=dict_row, connect_timeout=5
+    ) as conn:
+        if args.command == "migrate":
+            applied = await migrate(conn)
+            print(f"Applied {len(applied)} migration(s).")
+        elif args.command == "token":
+            if args.action == "create":
+                await load_workspace(config.workspace_dir).sync_people(conn)
+                person = await people.get(conn, args.person)
+                if not person:
+                    raise ValueError("The person is missing or inactive")
+                print(await tokens.create(conn, person["id"], args.label))
+            elif args.action == "list":
+                person = await people.get(conn, args.person) if args.person else None
+                if args.person and not person:
+                    raise ValueError("The person is missing or inactive")
+                for row in await tokens.list_tokens(conn, person["id"] if person else None):
+                    state = "revoked" if row["revoked_at"] else "active"
+                    print(f"{row['id']}  {row['label']}  {state}")
+            elif args.action == "revoke":
+                print(
+                    "The token was revoked."
+                    if await tokens.revoke(conn, args.id)
+                    else "No active token has that ID."
+                )
+        elif args.command == "secret":
+            if args.action == "get-names":
+                for name in await get_names(conn):
+                    print(name)
+            elif args.action == "delete":
+                print(
+                    "The secret was deleted."
+                    if await delete(conn, args.name)
+                    else "No secret has that name."
+                )
+            else:
+                if not config.vault_key:
+                    raise ValueError("Set ILLO_VAULT_KEY before you store a secret")
+                value = (
+                    getpass.getpass("Secret value: ")
+                    if sys.stdin.isatty()
+                    else sys.stdin.read().rstrip("\r\n")
+                )
+                if not value:
+                    raise ValueError("The secret value is empty")
+                await Vault(config.vault_key.get_secret_value()).set(conn, args.name, value)
+                print("The secret was stored.")
+    return 0
+
+
+def main() -> None:
+    """Use a nonzero exit status when a command cannot finish."""
+    args = parser().parse_args()
+    configure()
+    try:
+        config = Config.from_env()
+        if args.command == "serve":
+            from illo.app import create_app
+
+            uvicorn.run(create_app(config), host=args.host, port=args.port)
+            return
+        result = asyncio.run(execute(args, config))
+    except ValidationError as exc:
+        fields = ", ".join(".".join(map(str, e["loc"])) for e in exc.errors())
+        print(f"The configuration has invalid fields: {fields}", file=sys.stderr)
+        result = 1
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        result = 1
+    except Exception:
+        print("The command failed. Check the configuration and the service.", file=sys.stderr)
+        result = 1
+    raise SystemExit(result)

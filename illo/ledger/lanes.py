@@ -1,0 +1,133 @@
+"""Read and update lanes. Stale is computed, never stored."""
+
+from psycopg.types.json import Jsonb
+
+from illo.db import Connection, all_rows, one
+
+DEFAULT_STALE_MINUTES = {
+    "t3": 30,
+    "claude-code": 30,
+    "codex": 30,
+    "github": 1440,
+    "manual": 1440,
+    "email": 1440,
+}
+
+
+async def upsert(
+    conn: Connection,
+    *,
+    source: str,
+    external_id: str,
+    title: str,
+    state: str = "unknown",
+    owner_person_id: int | None = None,
+    summary: str = "",
+    links: list | None = None,
+    repo: str | None = None,
+    machine: str | None = None,
+    visibility: str = "team",
+    end_summary: str | None = None,
+) -> dict:
+    """Refresh the source snapshot and its last signal time."""
+    return await one(
+        conn,
+        """
+        INSERT INTO lanes (source,external_id,title,state,owner_person_id,summary,links,repo,machine,visibility,end_summary,closed_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s IN ('done','failed') THEN now() END)
+        ON CONFLICT (source,external_id) DO UPDATE SET title=EXCLUDED.title,state=EXCLUDED.state,
+          owner_person_id=EXCLUDED.owner_person_id,summary=EXCLUDED.summary,links=EXCLUDED.links,
+          repo=EXCLUDED.repo,machine=EXCLUDED.machine,visibility=EXCLUDED.visibility,
+          end_summary=EXCLUDED.end_summary,closed_at=EXCLUDED.closed_at,last_signal_at=now(),updated_at=now()
+        RETURNING *
+    """,
+        (
+            source,
+            external_id,
+            title,
+            state,
+            owner_person_id,
+            summary,
+            Jsonb(links or []),
+            repo,
+            machine,
+            visibility,
+            end_summary,
+            state,
+        ),
+    )
+
+
+async def add_event(
+    conn: Connection, lane_id: int, kind: str, text: str, data: dict | None = None
+) -> dict:
+    """Append a source event and refresh the lane signal time."""
+    await conn.execute(
+        "UPDATE lanes SET last_signal_at=now(),updated_at=now() WHERE id=%s", (lane_id,)
+    )
+    return await one(
+        conn,
+        """
+        INSERT INTO lane_events (lane_id,kind,text,data) VALUES (%s,%s,%s,%s) RETURNING *
+    """,
+        (lane_id, kind, text, Jsonb(data or {})),
+    )
+
+
+def _select() -> str:
+    return """
+        SELECT l.*, (state = 'working' AND last_signal_at < now() -
+          COALESCE((%s::jsonb ->> source)::integer,30) * interval '1 minute') AS stale
+        FROM lanes l
+    """
+
+
+async def get(
+    conn: Connection, lane_id: int, *, principal: str = "team", stale_minutes: dict | None = None
+) -> dict | None:
+    """Only an owner can read a private lane."""
+    return await one(
+        conn,
+        _select()
+        + """
+        WHERE l.id = %s AND (visibility = 'team' OR owner_person_id =
+          (SELECT id FROM people WHERE 'person:' || key = %s AND active))
+    """,
+        (Jsonb(stale_minutes or DEFAULT_STALE_MINUTES), lane_id, principal),
+    )
+
+
+async def search(
+    conn: Connection,
+    query: str = "",
+    *,
+    principal: str = "team",
+    owner: str | None = None,
+    state: str | None = None,
+    limit: int = 20,
+    stale_minutes: dict | None = None,
+) -> list[dict]:
+    """Search visible lanes by text, owner key, and state. Include source events."""
+    return await all_rows(
+        conn,
+        _select()
+        + """
+        WHERE (visibility = 'team' OR owner_person_id = (SELECT id FROM people WHERE 'person:' || key = %s AND active))
+          AND (%s::text IS NULL OR owner_person_id = (SELECT id FROM people WHERE key = %s))
+          AND (%s::text IS NULL OR state = %s)
+          AND (concat_ws(' ',title,summary) ILIKE %s OR EXISTS
+            (SELECT 1 FROM lane_events e WHERE e.lane_id=l.id AND e.text ILIKE %s))
+        ORDER BY updated_at DESC,id DESC LIMIT %s
+    """,
+        (
+            Jsonb(stale_minutes or DEFAULT_STALE_MINUTES),
+            principal,
+            owner,
+            owner,
+            state,
+            state,
+            f"%{query}%",
+            f"%{query}%",
+            max(1, min(limit, 50)),
+        ),
+    )

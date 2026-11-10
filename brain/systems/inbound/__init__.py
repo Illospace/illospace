@@ -1,1 +1,0 @@
-"""Inbound coordination foundation."""
