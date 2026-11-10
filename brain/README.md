@@ -96,6 +96,8 @@ The run replies `Your ChatGPT limit is reached.` and adds that time when availab
 With `api_key_fallback: true`, the loop switches once to an explicit API-key request.
 It resumes the current turn with its existing tool outputs. It does not repeat completed MCP calls.
 The final answer reports the switch. A second provider failure ends the run.
+The switch drops subscription reasoning items. Messages and completed tool results stay.
+The loop holds text deltas until each attempt completes. A failed attempt shows no partial text.
 The same configured model must be available with the subscription and the API key.
 
 #### Sign-in protocol

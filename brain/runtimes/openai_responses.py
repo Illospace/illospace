@@ -149,11 +149,12 @@ async def conversation(
     for _ in range(request.max_turns):
         completed = None
         for attempt in range(2):
+            text_deltas = []
             try:
                 async for chunk in response_chunks(request, tools, items, http):
                     kind = chunk.get("type")
                     if kind == "response.output_text.delta":
-                        yield event("text", text=chunk["delta"])
+                        text_deltas.append(chunk["delta"])
                     elif kind in ("response.output_item.added", "response.output_item.done"):
                         check_item(chunk["item"], names)
                     elif kind in ("error", "response.failed"):
@@ -192,6 +193,7 @@ async def conversation(
                     or error.details.get("code") != "usage_limit_reached"
                 ):
                     raise
+                items = [item for item in items if item.get("type") != "reasoning"]
                 # Resume the current turn with its tool results. Never replay an MCP write.
                 fallback_notice = str(error) + " I used the API key for this request.\n\n"
                 subscription_limit = error
@@ -201,6 +203,8 @@ async def conversation(
                 # The next request checks for an API key. Failure still reports the subscription limit.
         if completed is None or completed.get("status") != "completed":
             raise RunError("runtime", "The model stream ended without a complete response")
+        for delta in text_deltas:
+            yield event("text", text=delta)
         add_usage(usage, completed.get("usage") or {})
         output = completed.get("output") or []
         for item in output:
