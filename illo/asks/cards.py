@@ -3,6 +3,7 @@
 import hashlib
 import html
 import json
+import unicodedata
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
@@ -145,7 +146,13 @@ def draft_preview(draft: dict) -> str | None:
         if len(content) == 1 and set(content) <= {"text", "body"}
         else json.dumps(content, ensure_ascii=False, default=str)
     )
-    escaped = escape(text)
+    visible = "".join(
+        (f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\U{ord(c):08x}")
+        if unicodedata.category(c) == "Cf"
+        else c
+        for c in str(text)
+    )
+    escaped = escape(visible)
     return escaped if len(escaped.replace("\n", "\n> ")) <= 120000 else None
 
 

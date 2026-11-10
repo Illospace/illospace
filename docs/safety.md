@@ -60,7 +60,7 @@ Each call writes one row in `audit`.
 
 **Bad case.** Ben sees a draft card of Ada in a shared channel and clicks Approve. Without the rule, Ben sends Ada's message.
 
-**Code.** `decide` in `illo/ledger/drafts.py` changes a draft only for its approver. The draft card and its buttons are in progress.
+**Code.** `decide` in `illo/ledger/drafts.py` changes a draft only for its approver. Draft cards show bidi and zero-width format characters as visible escapes (`tests/safety/test_review_s27_rule_05_visible_draft.py`).
 
 **Tests.** `tests/test_ledger.py` (`test_draft_owner_dm_and_send_state`). The test in `tests/safety/` is in progress.
 
