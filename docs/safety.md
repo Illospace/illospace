@@ -54,7 +54,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 - `Registry.call` sets `personal_read` on the run after a personal tool. It also sets it after a read result with `visibility: private`: a private lane, item, ask, rule, or private Slack thread.
 - `destination` in `illo/tools/checks.py` then makes each write to another destination a draft. After such a read, a tool with `team_visible = true` (`notes_propose`) is also a draft, although its destination is the ledger.
-- A connector call sends its arguments to `outside:<key>`. After a personal read it is a draft, and `call_connector` in `illo/tools/connectors.py` refuses a direct call.
+- A connector call sends its arguments to `outside:<key>`. After a personal read it is refused, without a draft. The handler and the draft performer also enforce this rule.
 - `read_page` in `illo/tools/web.py` refuses a public page after a personal read.
 - An ask without a lane is private to its owner and its requester (`get` and `list_open` in `illo/ledger/asks.py`). Its decision item is private too (`decision` in `illo/ledger/ask_workflow.py`).
 - Both ask creation tools refuse a private lane when the ask owner does not own that lane.

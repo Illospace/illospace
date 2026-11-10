@@ -105,6 +105,7 @@ Each tool declares, in code:
 The checks:
 - **Check 1, scope.** The tool must be in the grant of the run. A personal tool also needs an untainted `person_dm` run of its owner.
 - **Check 2, destination.** A tool names its destination: `person:<key>`, `channel:<id>`, `github:<owner>/<repo>`, `outside:<key or address>`, `ledger`. A read with a `ledger` destination always passes. A read with an `outside:` destination (a connector call) sends its arguments out, so it is checked like a write. When the run has `personal_read = true`, each destination other than `person:<principal>` and `ledger` gives `draft`. In that case a `team_visible` tool also gives `draft`.
+- After a personal read, a connector call gives `deny`, with no draft.
 - **Check 3, risk.** `read` → allow. `write_internal` (a ticket, a note, a lane update, a message to a team member) → allow. `send_outside` → draft. There is no tool for a destructive action.
 
 The run gets `personal_read = true` after a personal tool, and after a read result with `visibility: private`.

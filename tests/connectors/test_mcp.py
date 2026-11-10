@@ -90,7 +90,7 @@ async def test_risk_mapping_and_approved_performer(mcp_app, rpc, rpc_token):
     assert session.calls[-1]["name"] == "send"
 
 
-async def test_write_without_person_denied_and_private_read_write_drafts(mcp_app, rpc, rpc_token):
+async def test_write_without_person_and_write_after_personal_read_are_denied(mcp_app, rpc, rpc_token):
     ctx, _, session = mcp_app
     async with ctx.pool.connection() as conn:
         run = await runs.create(
@@ -106,7 +106,7 @@ async def test_write_without_person_denied_and_private_read_write_drafts(mcp_app
     row, token = rpc_token
     async with ctx.pool.connection() as conn:
         await conn.execute("UPDATE runs SET personal_read=true WHERE id=%s", (row["id"],))
-    assert (await call(rpc, token, "write"))["decision"] == "draft"
+    assert (await call(rpc, token, "write"))["decision"] == "deny"
     assert not session.calls
 
 

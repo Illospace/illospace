@@ -115,6 +115,8 @@ def scope(run: dict, tool) -> Decision:
 def destination(run: dict, tool, args: dict) -> Decision:
     """Check 2: personal data cannot leave its owner's destination without a draft."""
     target = tool.destination(args)
+    if run["personal_read"] and tool.family == "connectors" and target.startswith("outside:"):
+        return Decision("deny", "This run read personal data, so it cannot call a connector.")
     if tool.risk == "read" and not target.startswith("outside:"):
         return Decision("allow", "The tool does not write")
     if not target or not (
