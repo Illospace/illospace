@@ -10,7 +10,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from illo.db import Connection, one
 from illo.ledger import audit, drafts
+from illo.tools._format import Compact, json_text
 from illo.tools.checks import PROFILE_NAMES, Decision, check, scope
+
+MAX_RESULT_CHARS = 12_000
+
 
 RUN_LIMITS = {
     "asks_create": 3,
@@ -77,6 +81,8 @@ class Tool:
 
 def _has_private_data(value) -> bool:
     """A private ledger read has the same destination limit as a personal connector."""
+    if isinstance(value, Compact):
+        return value.private
     if isinstance(value, dict):
         return value.get("visibility") == "private" or any(
             _has_private_data(v) for v in value.values()
@@ -202,4 +208,21 @@ class Registry:
             decision=decision,
             reason=reason,
         )
+        if isinstance(result, Compact):
+            result = result.text
+        # Apply the cap after privacy checks, including rows beyond the cut.
+        text = result if isinstance(result, str) else json_text(result)
+        envelope = {"decision": decision, "reason": reason, "result": result}
+        if len(json_text(envelope)) > MAX_RESULT_CHARS:
+            note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."
+            # Count JSON escapes too. The model receives this encoded content.
+            low, high = 0, min(len(text), MAX_RESULT_CHARS)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = {**envelope, "result": text[:middle] + note}
+                if len(json_text(candidate)) <= MAX_RESULT_CHARS:
+                    low = middle
+                else:
+                    high = middle - 1
+            result = text[:low] + note
         return {"decision": decision, "reason": reason, "result": result}

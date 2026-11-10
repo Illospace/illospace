@@ -4,6 +4,7 @@ import pytest
 
 from illo.db import one
 from illo.ledger import ask_workflow, asks, items, people, runs
+from tests.tool_results import read_result
 
 
 @pytest.mark.parametrize(
@@ -52,7 +53,7 @@ async def test_rule_03_laneless_ask_is_invisible_to_tainted_run(app, rpc):
         token = await runs.mint_token(conn, run["id"], 60)
     for tool, args in [("asks_get", {"id": ask["id"]}), ("asks_list", {})]:
         response = await rpc(token, "tools/call", {"name": tool, "arguments": args})
-        result = response.json()["result"]["structuredContent"]
+        result = read_result(response.json()["result"])
         assert result["decision"] == "deny" or not result["result"]
 
 

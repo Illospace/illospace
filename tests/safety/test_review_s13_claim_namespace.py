@@ -4,6 +4,7 @@ import pytest
 
 from illo.db import one
 from illo.ledger import claims
+from tests.tool_results import read_result
 
 
 @pytest.mark.parametrize("tainted", [False, True])
@@ -19,7 +20,7 @@ async def test_rule_06_model_claim_cannot_suppress_routine(app, rpc, rpc_token, 
     response = await rpc(token, "tools/call", {
         "name": "claims_take", "arguments": {"key": key},
     })
-    assert response.json()["result"]["structuredContent"]["result"] is True
+    assert read_result(response.json()["result"])["result"] is True
     async with app.state.ctx.pool.connection() as conn:
         assert await one(conn, "SELECT * FROM claims WHERE key=%s", (key,)) is None
         assert await claims.take(conn, key, None)
@@ -27,4 +28,4 @@ async def test_rule_06_model_claim_cannot_suppress_routine(app, rpc, rpc_token, 
     again = await rpc(token, "tools/call", {
         "name": "claims_take", "arguments": {"key": key},
     })
-    assert again.json()["result"]["structuredContent"]["result"] is False
+    assert read_result(again.json()["result"])["result"] is False

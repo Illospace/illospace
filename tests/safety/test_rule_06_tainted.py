@@ -2,6 +2,7 @@
 
 from illo.ledger import lanes, people, runs
 from illo.tools.registry import Tool
+from tests.tool_results import read_result
 
 
 async def test_tainted_run_hides_personal_tools_and_private_lanes(app, rpc):
@@ -35,9 +36,7 @@ async def test_tainted_run_hides_personal_tools_and_private_lanes(app, rpc):
     names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}
     assert "mail_search" not in names and "rules_remove_mine" not in names
     assert (await rpc(token, "tools/call", {"name": "mail_search"})).json()["result"]["isError"]
-    result = (await rpc(token, "tools/call", {"name": "lanes_search"})).json()["result"][
-        "structuredContent"
-    ]
+    result = read_result((await rpc(token, "tools/call", {"name": "lanes_search"})).json()["result"])
     assert result["decision"] == "deny"
 
 

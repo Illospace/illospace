@@ -1,11 +1,9 @@
 """Search tools share the run's SQL visibility and personal-read state."""
 
-import json
-
-from fastapi.encoders import jsonable_encoder
 from pydantic import Field
 
 from illo.sources import search
+from illo.tools._format import Compact, body, data_text, header, hit, iso_date, line
 from illo.tools.registry import Arguments, Tool
 
 # Hostile text may search team data. SQL hides private rows and providers skip personal reads.
@@ -16,22 +14,21 @@ HINT = "Search again with other words if this is not enough."
 class SearchArgs(Arguments):
     query: str = Field(min_length=1, max_length=2000)
     kinds: list[str] | None = None
-    limit: int = Field(default=10, ge=1, le=50)
+    limit: int = Field(default=8, ge=1, le=20)
 
 
 class GetArgs(Arguments):
     source_ref: str = Field(min_length=1, max_length=2000)
+    offset: int = Field(default=0, ge=0)
 
 
 def format_hits(hits):
-    blocks = [
-        f"{hit.title}\nRef: {hit.source_ref}\nSource: {hit.source} | Date: {hit.at or 'unknown'}"
-        f"\n{hit.snippet}\n{hit.link or ''}".strip()
-        for hit in hits
-    ]
+    blocks = [header(len(hits), f"at least {len(hits)}",
+                     "Narrow the query, or pass limit=. Use search_get with source_ref= for detail.")]
+    blocks.extend(hit(value) for value in hits)
     if hits.partial:
         blocks.append("Some sources are unavailable: " + ", ".join(hits.failures))
-    return "\n\n".join([*blocks, HINT])
+    return Compact(data_text("search", "\n".join([*blocks, HINT])), hits.personal_read)
 
 
 async def search_all(ctx, args):
@@ -52,15 +49,24 @@ async def search_get(ctx, args):
     row = await search.get(ctx.app, ctx.principal, args["source_ref"], conn=ctx.conn)
     if row and row.get("visibility") == "private":
         await search.mark_personal(ctx)
-    return (
-        (
-            json.dumps(jsonable_encoder(row), ensure_ascii=False)
-            if row
-            else "No visible item has this ref."
-        )
-        + "\n"
-        + HINT
-    )
+    if not row:
+        return "No visible item has this ref."
+    text = row.get("body") or row.get("summary") or row.get("text") or ""
+    if not isinstance(text, str):
+        text = str(text)
+    offset = args["offset"]
+    page = text[offset:offset+6000]
+    remaining = max(0, len(text)-offset-len(page))
+    lines = [line(row.get("kind"), row.get("title"), args["source_ref"],
+                  iso_date(row.get("source_at") or row.get("created_at"))), page]
+    if remaining:
+        lines.append(f"{remaining} characters omitted. Read on with offset={offset+len(page)}.")
+    lines.extend(str(link) for link in row.get("links", []))
+    if row.get("events"):
+        lines.extend(body(event.get("text"),300) for event in row["events"][-5:])
+    if row.get("error"):
+        lines.append(row["error"])
+    return Compact(data_text("search", "\n".join(lines)), row.get("visibility") == "private")
 
 
 def register(registry) -> None:

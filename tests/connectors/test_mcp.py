@@ -10,6 +10,7 @@ from illo.connectors.config import Connector
 from illo.connectors.mcp_client import LimitedStream, MCPClient
 from illo.ledger import runs
 from tests.fakes import FakeMCPSession
+from tests.tool_results import read_result
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ async def call(rpc, token, name, **extra):
             },
         },
     )
-    return response.json()["result"]["structuredContent"]
+    return read_result(response.json()["result"])
 
 
 async def test_only_listed_tools_and_schema_cache(mcp_app, rpc, rpc_token):

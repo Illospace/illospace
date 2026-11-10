@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from illo.db import one
 from illo.ledger import runs
 from illo.tools import web
+from tests.tool_results import read_result
 
 
 @pytest.mark.parametrize("address", [
@@ -42,8 +43,8 @@ async def test_rule_06_tainted_web_fetches_first_url_at_most_once(
                                 tainted=True, event_id=event["id"], runtime="fake", model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     async def call(url):
-        return (await rpc(token, "tools/call", {"name": "web_read_public_page",
-                    "arguments": {"url": url}})).json()["result"]["structuredContent"]
+        return read_result((await rpc(token, "tools/call", {"name": "web_read_public_page",
+                    "arguments": {"url": url}})).json()["result"])
     first = await call(first_call)
     assert first["decision"] == ("allow" if first_call.endswith("/page") else "deny")
     assert (await call("https://first.example/page"))["decision"] == "deny"

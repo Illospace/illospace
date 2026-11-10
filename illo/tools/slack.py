@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 from illo.db import Connection, one
 from illo.ledger import people
+from illo.tools._format import data_text, header, line, short
 from illo.tools.registry import Arguments, Registry, Tool, ToolContext
 
 
@@ -26,6 +27,8 @@ class PostChannel(Arguments):
 
 
 class ReadThread(Arguments):
+    limit: int = Field(default=15, ge=1, le=40)
+    offset: int = Field(default=0, ge=0)
     channel: str = Field(min_length=1)
     thread_ts: str = Field(min_length=1)
 
@@ -89,10 +92,15 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
     response = await ctx.app.slack_client.conversations_replies(
         channel=args["channel"], ts=args["thread_ts"], limit=50
     )
-    return {
-        "messages": response.get("messages", []), "has_more": response.get("has_more", False),
-        "visibility": "private" if private else "team",
-    }
+    messages = response.get("messages", [])
+    page = messages[args["offset"]:args["offset"]+args["limit"]]
+    text = [header(len(page), len(messages), "Pass offset= / limit= to read more messages.")]
+    text.extend(line(m.get("user"), m.get("ts"), short(m.get("text"), 500)) for m in page)
+    if response.get("has_more"):
+        text.append("The thread has more messages at the source.")
+    return {"text": data_text("slack", "\n".join(text)),
+            "has_more": response.get("has_more", False),
+            "visibility": "private" if private else "team"}
 
 
 async def perform_dm(app: "AppContext", draft: dict) -> dict:

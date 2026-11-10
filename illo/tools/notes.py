@@ -24,6 +24,7 @@ async def notes_search(ctx, args):
         ctx.principal,
         args["query"],
         kinds=["note"],
+        limit=8,
         conn=ctx.conn,
         tainted=ctx.run["tainted"],
         personal_allowed=False,

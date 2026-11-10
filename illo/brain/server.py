@@ -35,12 +35,12 @@ def initialize_result(params: dict, name: str) -> dict:
     }
 
 
-def tool_result(value: dict, *, is_error: bool = False) -> dict:
-    """Keep the JSON text envelope equal across both MCP endpoints."""
+def tool_result(value: dict, *, is_error: bool = False, brain: bool = False) -> dict:
+    """Keep agent contracts. Brain results have only one data channel."""
     value = jsonable_encoder(value)
     return {
-        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
-        "structuredContent": value,
+        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}],
+        "structuredContent": {k: value[k] for k in ("decision", "reason")} if brain else value,
         "isError": is_error,
     }
 
@@ -118,7 +118,7 @@ async def endpoint(request: Request):
                         (count + 1, run["id"]),
                     )
                     called = await ctx.registry.call(ToolContext(conn, run, ctx), name, args)
-                result = tool_result(called, is_error=called["decision"] == "deny")
+                result = tool_result(called, is_error=called["decision"] == "deny", brain=True)
             else:
                 return _error(request_id, -32601, "Method not found")
             return JSONResponse(

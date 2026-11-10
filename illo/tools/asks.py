@@ -9,7 +9,7 @@ from illo.asks.service import is_live
 from illo.channels.mcp.schemas import check_ask_text
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, lanes, mcp, people
-from illo.routines.digest import build_digest, snapshot
+from illo.tools._format import Compact, ask, body, json_text, rows
 from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Tool
 
@@ -20,6 +20,7 @@ RULE_PROFILES = frozenset({"person_dm", "agent_request"})
 
 class ListArgs(Arguments):
     owner: str | None = None
+    limit: int = Field(default=15, ge=1, le=40)
 
 
 class GetArgs(Arguments):
@@ -61,16 +62,19 @@ class RuleAnswerArgs(GetArgs):
 
 
 async def asks_list(ctx, args):
-    person = await people.get(ctx.conn, args["owner"]) if args["owner"] else None
-    if args["owner"] and not person:
-        return []
-    return await asks.list_open(
-        ctx.conn, owner_person_id=person["id"] if person else None, principal=ctx.principal
-    )
+    values = await asks.compact_list(ctx.conn, principal=ctx.principal, **args)
+    return rows(values, ask, total=values[0]["total"] if values else 0,
+                hint="Pass owner= or limit= to read more asks.")
 
 
 async def asks_get(ctx, args):
-    return await asks.get(ctx.conn, args["id"], principal=ctx.principal)
+    row = await asks.get(ctx.conn, args["id"], principal=ctx.principal)
+    if not row:
+        return None
+    text = [ask(row), body(row["question"]), "Options: " + json_text(row["options"]),
+            "Recommended: " + str(row["recommended_option"] or "none"),
+            "Proof: " + body(json_text(row["proof"]))]
+    return Compact("\n".join(text), row["visibility"] == "private")
 
 
 def date(value):
@@ -163,8 +167,9 @@ async def asks_cancel_mine(ctx, args):
 
 
 async def asks_digest(ctx, args):
-    person = await people.get(ctx.conn, ctx.principal[7:])
-    return {"blocks": build_digest(await snapshot(ctx.conn, person, ctx.app))}
+    from illo.tools.lanes import lanes_attention
+
+    return await lanes_attention(ctx, args)
 
 
 def register(registry):

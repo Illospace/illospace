@@ -10,6 +10,7 @@ from illo.db import one
 from illo.gateway import InboundEvent
 from illo.gateway.principal import resolve
 from illo.ledger import lanes, people, runs, tokens
+from tests.tool_results import read_result
 
 
 async def test_known_dm_end_to_end(app, replay, channel, fake_brain):
@@ -28,7 +29,7 @@ async def test_known_dm_end_to_end(app, replay, channel, fake_brain):
     assert len(channel.working) == 1
     assert channel.final[0][1] == "The lane is working."
     assert not channel.errors
-    assert fake_brain.results[0]["structuredContent"]["result"][0]["title"] == "Fix a test"
+    assert "Fix a test" in read_result(fake_brain.results[0])["result"]
     request = fake_brain.requests[0]
     async with app.state.ctx.pool.connection() as conn:
         row = await runs.get(conn, request.run_id)

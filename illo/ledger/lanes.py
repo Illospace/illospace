@@ -135,3 +135,43 @@ async def search(
             max(1, min(limit, 50)),
         ),
     )
+
+
+async def compact_search(conn, *, principal, owner=None, query="", state=None, repo=None,
+                         limit=15, stale_minutes=None, attention=False):
+    """Filter visible rows and counts in SQL before any compact text reaches the model."""
+    params = (principal, owner, owner, repo, repo, query, f"%{query}%", f"%{query}%")
+    visible = """
+        FROM lanes l LEFT JOIN people p ON p.id=l.owner_person_id
+        WHERE (l.visibility='team' OR l.owner_person_id=(
+          SELECT id FROM people WHERE 'person:'||key=%s AND active))
+          AND (%s::text IS NULL OR p.key=%s)
+          AND (%s::text IS NULL OR l.repo=%s)
+          AND (%s='' OR concat_ws(' ',l.title,l.summary) ILIKE %s OR EXISTS
+            (SELECT 1 FROM lane_events e WHERE e.lane_id=l.id AND e.text ILIKE %s))
+    """
+    counts = await all_rows(conn, "SELECT l.state,count(*) AS n,bool_or(l.visibility='private') AS private " + visible + " GROUP BY l.state", params)
+    if attention:
+        selection = """AND (l.state IN ('waiting_person','blocked','failed') OR
+          (l.state='working' AND l.last_signal_at<now()-
+          COALESCE((%s::jsonb->>l.source)::integer,30)*interval '1 minute'))"""
+        selected_params = (Jsonb(stale_minutes or DEFAULT_STALE_MINUTES),)
+    elif state:
+        selection, selected_params = "AND l.state=%s", (state,)
+    elif query.strip():
+        selection, selected_params = "", ()
+    else:
+        selection = """AND l.state IN ('working','waiting_person','blocked','review','failed')
+          AND l.last_signal_at>=now()-interval '7 days'"""
+        selected_params = ()
+    rows = await all_rows(conn, """
+        SELECT l.id,l.state,l.title,p.key AS owner,l.source,l.last_signal_at,l.links,l.visibility,
+          left(l.summary,200) AS summary,
+          (SELECT left(e.text,200) FROM lane_events e WHERE e.lane_id=l.id
+            ORDER BY e.at DESC,e.id DESC LIMIT 1) AS last_event,
+          (l.state='working' AND l.last_signal_at<now()-
+            COALESCE((%s::jsonb->>l.source)::integer,30)*interval '1 minute') AS stale,
+          count(*) OVER () AS total
+    """ + visible + selection + " ORDER BY l.last_signal_at DESC,l.id DESC LIMIT %s",
+        (Jsonb(stale_minutes or DEFAULT_STALE_MINUTES), *params, *selected_params, max(1,min(limit,40))))
+    return rows, {r['state']: r['n'] for r in counts}, any(r['private'] for r in counts)

@@ -9,6 +9,7 @@ from illo.db import one
 from illo.ledger import items, lanes
 from illo.sources import search
 from illo.sources.search import Hit
+from tests.tool_results import read_result
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +115,7 @@ async def test_personal_provider_skips_team_taint_routine_and_marks_read(app, rp
     response = await rpc(
         token, "tools/call", {"name": "search_all", "arguments": {"query": "orchard"}}
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow"
     assert "A private orchard" in result["result"]
     assert "Search again with other words" in result["result"]
@@ -178,7 +179,7 @@ async def test_personal_read_survives_limit_and_kind_filter(app, rpc, rpc_token)
         "tools/call",
         {"name": "search_all", "arguments": {"query": "orchard", "kinds": ["note"], "limit": 1}},
     )
-    assert "A private result" not in response.json()["result"]["structuredContent"]["result"]
+    assert "A private result" not in read_result(response.json()["result"])["result"]
     async with app.state.ctx.pool.connection() as conn:
         assert (await one(conn, "SELECT personal_read FROM runs WHERE id=%s", (run["id"],)))[
             "personal_read"

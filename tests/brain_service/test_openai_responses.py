@@ -152,8 +152,22 @@ async def test_function_loop(run_request, fake_mcp, monkeypatch, names, tool_err
     assert payload["input"][1]["encrypted_content"] == "opaque-reasoning"
     results = [i for i in payload["input"] if i.get("type") == "function_call_output"]
     assert [i["call_id"] for i in results] == [f"call_{i}" for i in range(len(names))]
-    assert all(json.loads(i["output"])["isError"] == tool_error for i in results)
+    assert all(i["output"].startswith("Tool error.") == tool_error for i in results)
+    assert all(i["output"].removeprefix("Tool error.\n") == "Acme release is ready" for i in results)
     assert "fake-run-token" not in json.dumps(provider.requests)
+
+
+async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp, monkeypatch):
+    fake_mcp.result_override = {
+        "content": [{"type": "text", "text": "Acme release is ready"}],
+        "structuredContent": {"result": "duplicate payload must stay out"},
+    }
+    provider = FakeResponses()
+    events = await collect(provider, run_request, fake_mcp, monkeypatch)
+    assert events[-1]["type"] == "final"
+    results = [i for i in provider.requests[1]["input"] if i.get("type") == "function_call_output"]
+    assert [i["output"] for i in results] == ["Acme release is ready"]
+    assert "duplicate payload" not in json.dumps(provider.requests)
 
 
 @pytest.mark.parametrize("names", [["shell"], ["lanes_search", "shell"], ["builtin"]])
@@ -237,7 +251,7 @@ async def test_invalid_arguments_return_tool_error(run_request, fake_mcp, monkey
     events = await collect(provider, run_request, fake_mcp, monkeypatch)
     assert events[-1]["type"] == "final"
     assert fake_mcp.calls == []
-    assert json.loads(provider.requests[-1]["input"][-1]["output"])["isError"] is True
+    assert provider.requests[-1]["input"][-1]["output"].startswith("Tool error.\n")
 
 
 async def test_retry_stops_after_second_rejection(run_request, fake_mcp, monkeypatch):

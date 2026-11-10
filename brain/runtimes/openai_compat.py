@@ -13,6 +13,7 @@ from mcp.types import Tool
 from brain.mcp_client import connect, list_tools
 from brain.models import BrainEvent, RunError, RunRequest, event
 from brain.runtimes.provider_errors import error_body, provider_error
+from brain.runtimes.tool_results import model_text
 
 
 def function_tools(tools: list[Tool]) -> list[dict]:
@@ -145,7 +146,7 @@ async def conversation(
                         "content": [{"type": "text", "text": "The MCP tool failed"}],
                     }
             messages.append(
-                {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result)}
+                {"role": "tool", "tool_call_id": call["id"], "content": model_text(result)}
             )
     yield event("error", category="limit", message="The run reached its turn limit", usage=usage)
 

@@ -80,6 +80,6 @@ async def test_rule_03_private_lane_read_makes_github_write_a_draft(
             visibility="private",
         )
     read = await call(rpc, token, "lanes_get", {"id": lane["id"]})
-    assert read["result"]["visibility"] == "private"
+    assert "Private work" in read["result"]
     assert (await call(rpc, token, "github_create_issue", CREATE))["decision"] == "draft"
     assert not github_client.issues
