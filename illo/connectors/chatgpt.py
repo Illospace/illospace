@@ -40,7 +40,7 @@ class TokenError(ValueError):
     def __init__(self, status=None, code=None):
         super().__init__("ChatGPT sign-in did not finish")
         self.status = status
-        self.permanent = status in (400, 401) and code in {
+        self.permanent = status == 401 or status == 400 and code in {
             "invalid_grant",
             "refresh_token_reused",
             "refresh_token_expired",
@@ -115,7 +115,7 @@ class ChatGPTClient:
                     async for part in response.aiter_bytes():
                         body.extend(part)
                         if len(body) > 262144:
-                            raise TokenError()
+                            raise TokenError(response.status_code)
                     try:
                         result = loads(body)
                     except ValueError:

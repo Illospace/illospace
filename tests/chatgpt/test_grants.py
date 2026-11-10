@@ -212,3 +212,26 @@ async def test_s5_skipped_tainted_run_has_text_and_a_ledger_record(
     assert row["tainted"] and row["status"] == "completed"
     assert row["usage"]["skipped"] == "no_model_credential"
     assert row["ended_at"] and row["token_hash"] is None
+
+
+@pytest.mark.parametrize("body", [{"error": "unknown_code"}, {"error": {}}, "not JSON"])
+async def test_n1_every_token_endpoint_401_breaks_the_grant(chatgpt_app, replay, body):
+    import httpx
+
+    app, _ = chatgpt_app
+    ctx = app.state.ctx
+    person = await save_grant(ctx, expires=0)
+    calls = []
+
+    def reject(request):
+        calls.append(request)
+        return (httpx.Response(401, text=body) if isinstance(body, str)
+                else httpx.Response(401, json=body))
+
+    ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(reject))
+    await replay()
+    await replay()
+    async with ctx.pool.connection() as conn:
+        row = await grants.load(conn, person["id"])
+    assert row["broken_at"] and row["next_refresh_at"] is None
+    assert len(calls) == 1
