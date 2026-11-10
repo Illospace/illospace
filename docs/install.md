@@ -152,6 +152,11 @@ It writes results to `~/.local/state/illo/update.log`.
 `ILLO_STATE_DIR` can select another state folder.
 Do not delete old image tags that you need for rollback.
 
+The updater applies the whole Compose project and removes orphan containers when the layout changes.
+It recreates Postgres only when its definition changes, then waits for its health before migrations and app startup.
+It saves the deploy folder of each good revision and uses that folder with the old images for rollback.
+It never runs `down` during an update and keeps the named database volume.
+
 If a build, migration, restart, or health check fails, the updater starts the last good images.
 It never deletes the database volume.
 The checkout can stay at the failed commit. The next run retries that commit.

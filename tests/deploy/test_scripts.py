@@ -17,8 +17,9 @@ FAKE_DOCKER = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_STATE"])
+layout = pathlib.Path(args[args.index("-f") + 1]).read_text() if "-f" in args else ""
 with (state / "calls").open("a") as log:
-    log.write(json.dumps({"args": args, "revision": os.getenv("ILLO_REVISION")}) + "\n")
+    log.write(json.dumps({"args": args, "revision": os.getenv("ILLO_REVISION"), "layout": layout}) + "\n")
 revision = os.getenv("ILLO_REVISION", "local")
 if args == ["info"] or args == ["compose", "version"]:
     sys.exit(0)
@@ -29,7 +30,7 @@ else:
     sys.exit("Unexpected fake Docker call")
 if operation == "build" and os.getenv("FAIL_BUILD") == "1":
     sys.exit(1)
-if operation == "up" and "illo" in args:
+if operation == "up" and ("--remove-orphans" in args or "illo" in args):
     (state / "running").write_text(revision)
 if operation == "run" and os.getenv("FAIL_MIGRATION") == "1":
     sys.exit(1)
@@ -106,7 +107,7 @@ def init(install):
     return result
 
 
-def remote_commit(install):
+def remote_commit(install, *, layout_change=False):
     root = install[0]
     remote = root.parent / "remote.git"
     git(root, "clone", "--bare", str(root), str(remote))
@@ -116,7 +117,14 @@ def remote_commit(install):
     git(writer, "config", "user.name", "Acme Tests")
     git(writer, "config", "user.email", "tests@example.com")
     (writer / "change").write_text("a new revision")
-    git(writer, "add", "change")
+    if layout_change:
+        compose = writer / "deploy/compose.yaml"
+        compose.write_text(
+            compose.read_text().replace("brainnet", "newbrainnet")
+            .replace("[db]", "[newdb]").replace("[db,", "[newdb,")
+            .replace("  db:", "  newdb:")
+        )
+    git(writer, "add", ".")
     git(writer, "commit", "-m", "new")
     git(writer, "push", "origin", "main")
     return git(writer, "rev-parse", "HEAD")
@@ -272,3 +280,38 @@ def test_scripts_parse_and_compose_keeps_postgres_private():
     assert "ports" not in postgres
     assert postgres["networks"] == ["db"]
     assert compose["networks"]["db"]["internal"] is True
+
+
+@pytest.mark.parametrize("fail_health", [False, True])
+def test_layout_change_applies_project_and_rolls_back_saved_layout(install, fail_health):
+    init(install)
+    root, env, _ = install
+    state = Path(env["ILLO_STATE_DIR"])
+    old = git(root, "rev-parse", "HEAD")
+    old_layout = (root / "deploy/compose.yaml").read_text()
+    # An older install has no snapshot yet.
+    shutil.rmtree(state / "revisions")
+    target = remote_commit(install, layout_change=True)
+    result = run(install, "update.sh", **({"FAIL_HEALTH_REVISION": target} if fail_health else {}))
+    assert result.returncode == int(fail_health), result.stderr
+    update_calls = calls(install)
+    database = next(c for c in update_calls if c["revision"] == target and "--wait" in c["args"])
+    assert database["args"][-1] == "postgres"
+    migration = next(c for c in update_calls if c["revision"] == target and "migrate" in c["args"])
+    assert update_calls.index(database) < update_calls.index(migration)
+    project = [c for c in update_calls if "--remove-orphans" in c["args"]]
+    assert project[0]["revision"] == target
+    assert "newbrainnet" in project[0]["layout"]
+    assert "--no-deps" not in project[0]["args"]
+    assert project[0]["args"][-1] == "--remove-orphans"
+    if fail_health:
+        rollback = project[-1]
+        assert rollback["revision"] == old
+        assert rollback["layout"] == old_layout
+        saved = state / "revisions" / old / "deploy/compose.yaml"
+        assert rollback["args"][rollback["args"].index("-f") + 1] == str(saved)
+        assert f"rollback {old} ok" in (state / "update.log").read_text()
+    else:
+        assert (state / "revisions" / target / "deploy/compose.yaml").read_text() == project[0]["layout"]
+    assert (state / "revisions" / old / "deploy/compose.yaml").read_text() == old_layout
+    assert not any("down" in c["args"] or "volume" in c["args"] for c in update_calls)
