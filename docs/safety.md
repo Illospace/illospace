@@ -46,7 +46,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
   Channel runs share the explicit team credential and that account's ChatGPT limit.
   Tainted and outsider model runs stop by default. `brain.tainted_credential` can allow `team` or `api_key`.
   Subscription mode requires `brain.team_credential` to name an active person.
-  Without that setting, they use the API key only when `api_key_fallback` is true; otherwise they do not start.
+  If the team credential has no usable grant, team runs use the API key only when `api_key_fallback` is true.
 - `illo/connectors/chatgpt_oauth.py` binds the paste flow to the person, DM, thread, expiry, and one use. The gateway removes callback addresses before it stores events. The main app refreshes the encrypted grant under a row lock. The brain receives only the access token and account ID for one run.
 
 **ChatGPT tests.** `tests/safety/test_rule_01_02_10_chatgpt.py`, `tests/chatgpt/`, and `tests/brain_service/test_chatgpt.py`.

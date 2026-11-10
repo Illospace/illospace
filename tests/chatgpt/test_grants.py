@@ -263,3 +263,18 @@ async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app,
         row = await one(conn, "SELECT * FROM runs")
     assert row["status"] == "failed" and row["token_hash"] is None
     assert row["error"] == "The model sign-in service is unavailable"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_n9_team_grant_fallback_matches_the_safety_doc(chatgpt_app, fallback):
+    from tests.conftest import ROOT
+
+    ctx = chatgpt_app[0].state.ctx
+    ctx.workspace.config.brain.team_credential = "ada"
+    ctx.workspace.config.brain.api_key_fallback = fallback
+    auth = await provider_auth(ctx, Authority("team", "team_channel"), "openai_responses")
+    assert (auth.kind if auth else None) == ("api_key" if fallback else None)
+    assert (
+        "If the team credential has no usable grant, team runs use the API key "
+        "only when `api_key_fallback` is true."
+    ) in (ROOT / "docs/safety.md").read_text()
