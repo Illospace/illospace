@@ -19,7 +19,7 @@ def credential_person(authority, workspace):
         and authority.principal.startswith("person:")
     ):
         return authority.principal[7:]
-    return workspace.config.brain.team_credential or workspace.config.default_owner
+    return workspace.config.brain.team_credential
 
 
 async def provider_auth(ctx, authority, runtime):
@@ -28,6 +28,12 @@ async def provider_auth(ctx, authority, runtime):
         return ProviderAuth()
     if runtime != "openai_responses":
         raise ValueError("ChatGPT sign-in needs the openai_responses runtime")
+    if authority.tainted or authority.profile in {"tainted", "outsider"}:
+        if config.tainted_credential == "none":
+            await chatgpt.notify_team_missing(ctx, tainted=True)
+            return None
+        if config.tainted_credential == "api_key":
+            return ProviderAuth()
     key = credential_person(authority, ctx.workspace)
     personal = not authority.tainted and authority.profile in {"person_dm", "agent_request"}
     async with ctx.pool.connection() as conn:

@@ -32,7 +32,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.runtime` | Runtime sent to the brain service. Default: `claude`. |
 | `brain.model` | Model sent to the brain service. Default: `default`. |
 | `brain.auth` | `api_key` (default) or `chatgpt`. ChatGPT needs `openai_responses`. |
-| `brain.team_credential` | Active person key for runs with no person. Default: `default_owner`. |
+| `brain.team_credential` | Explicit active person key for runs with no person. Required with `auth: chatgpt`. |
+| `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
 | `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 120. Maximum: 3600. |
@@ -55,6 +56,7 @@ brain:
   model: gpt-6.1-sol
   auth: chatgpt
   team_credential: ada
+  tainted_credential: none
   api_key_fallback: false
 ```
 
@@ -62,7 +64,11 @@ Use an active person key from your own `people.yaml` for `team_credential`.
 If `ILLO_BRAIN_RUNTIME` is set, set it to `openai_responses` too. Environment overrides still take priority.
 Each person sends `connect my ChatGPT` in their own Slack DM with Illo.
 Person DMs, agent requests, and person routines use that person's grant.
-Team channels, tainted runs, team routines, and signals use `team_credential`.
+Team channels and team routines use `team_credential`. They share that person's ChatGPT limit.
+Tainted runs, signals, and outsiders get no model run by default, even with API fallback.
+Set `tainted_credential: team` to share the team credential and its limit.
+Set `tainted_credential: api_key` to use the API key for those runs.
+The default owner gets at most one notice per hour when Illo skips tainted runs.
 A missing personal grant never selects another person's grant.
 The main app refreshes a token when it expires within five minutes.
 No grant means no run, unless `api_key_fallback` is `true`.

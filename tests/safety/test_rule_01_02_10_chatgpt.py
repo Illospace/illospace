@@ -49,8 +49,9 @@ async def test_rule_01_02_team_only_uses_configured_person(subscription_app):
     await save_grant(ctx, "ada", access="ada-only-token")
     await save_grant(ctx, "ben", access="ben-only-token")
     auth = await provider_auth(ctx, Authority("team", "routine"), "openai_responses")
-    assert auth.access_token.get_secret_value() == "ada-only-token"
+    assert auth is None
     ctx.workspace.config.brain.team_credential = "ben"
+    ctx.workspace.config.brain.tainted_credential = "team"
     auth = await provider_auth(ctx, Authority("team", "tainted", tainted=True), "openai_responses")
     assert auth.access_token.get_secret_value() == "ben-only-token"
 

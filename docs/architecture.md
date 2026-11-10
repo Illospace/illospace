@@ -53,7 +53,7 @@ Channels ──► Gateway ──► Ledger (Postgres)
 The `openai_responses` runtime supports each person's ChatGPT subscription and API keys.
 The main app keeps each ChatGPT grant encrypted in `connector_grants`, and refreshes it under a row lock.
 It sends only the access token and account ID to the brain for one run.
-Person requests use that person's grant. Runs with no person use `brain.team_credential`, or `default_owner`.
+Person requests use that person's grant. Runs with no person use only an explicit `brain.team_credential`.
 The brain keeps the same Illo tool boundary in both modes. It stores no sign-in files.
 `brain.auth` defaults to `api_key`. Subscription mode requires an explicit choice.
 Check that the provider's terms allow this use. An API key is the alternative.

@@ -62,10 +62,10 @@ async def test_refresh_failure_broken_and_one_dm(chatgpt_app, replay, fake_brain
     [
         ("person_dm", "person:ben", 2, False, "ben"),
         ("agent_request", "person:ben", 2, False, "ben"),
-        ("team_channel", "team", None, False, "ada"),
-        ("tainted", "team", None, True, "ada"),
-        ("tainted", "person:ben", 2, True, "ada"),
-        ("routine", "team", None, False, "ada"),
+        ("team_channel", "team", None, False, None),
+        ("tainted", "team", None, True, None),
+        ("tainted", "person:ben", 2, True, None),
+        ("routine", "team", None, False, None),
         ("person_dm", "person:ada", 1, False, "ada"),
     ],
 )
@@ -95,19 +95,39 @@ async def test_missing_can_use_explicit_api_fallback(chatgpt_app, replay, fake_b
 async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
     app, _ = chatgpt_app
     ctx = app.state.ctx
-    authority = Authority("team", "tainted", tainted=True)
+    authority = Authority("team", "team_channel")
     await asyncio.gather(
         provider_auth(ctx, authority, "openai_responses"),
         provider_auth(ctx, authority, "openai_responses"),
     )
-    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.MISSING]) == 1
+    assert (
+        len(
+            [
+                c
+                for c in slack_client.calls
+                if c.get("text")
+                == "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+            ]
+        )
+        == 1
+    )
     async with ctx.pool.connection() as conn:
         assert await one(conn, "SELECT 1 FROM sensors WHERE key='chatgpt:team'")
         await conn.execute(
             "UPDATE kv SET value=jsonb_build_object('at',clock_timestamp()-interval '61 minutes') WHERE key='chatgpt:team-notice'"
         )
     await provider_auth(ctx, authority, "openai_responses")
-    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.MISSING]) == 2
+    assert (
+        len(
+            [
+                c
+                for c in slack_client.calls
+                if c.get("text")
+                == "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+            ]
+        )
+        == 2
+    )
 
 
 async def test_configured_team_credential(chatgpt_app):

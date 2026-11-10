@@ -262,20 +262,27 @@ async def notify_broken(ctx, person):
             )
 
 
-async def notify_team_missing(ctx):
+async def notify_team_missing(ctx, *, tainted=False):
+    key = "chatgpt:tainted" if tainted else "chatgpt:team"
+    message = (
+        "Illo skips tainted model runs. Set brain.tainted_credential to team or api_key to allow them."
+        if tainted
+        else "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+    )
     async with ctx.pool.connection() as conn:
-        await sensors.error(conn, "chatgpt:team", "The team has no model sign-in")
+        await sensors.error(conn, key, message)
         # An atomic ledger write also caps notices across app processes.
         row = await one(
             conn,
             """INSERT INTO kv (key,value) VALUES
-            ('chatgpt:team-notice',jsonb_build_object('at',clock_timestamp()))
+            (%s,jsonb_build_object('at',clock_timestamp()))
             ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
             WHERE (kv.value->>'at')::timestamptz < clock_timestamp()-interval '1 hour'
             RETURNING key""",
+            (key + "-notice",),
         )
     if row:
         try:
-            await dm_person(ctx, ctx.workspace.config.default_owner, MISSING)
+            await dm_person(ctx, ctx.workspace.config.default_owner, message)
         except Exception:
             pass
