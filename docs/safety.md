@@ -66,6 +66,8 @@ Each call writes one row in `audit`.
 
 ## 6. Outside text is data
 
+Thread context from bots or unknown users makes the run tainted, including context read by a preparer. Test: `tests/safety/test_review_s18_thread_taint.py`.
+
 Model claims use the `model:` prefix and cannot reserve server routine keys. Test: `tests/safety/test_review_s13_claim_namespace.py`.
 
 Tainted tickets have an outside-text warning and label, and no assignee. Only the server tells the default owner once. Test: `tests/safety/test_review_s04_tainted_tickets.py`.

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import replace
 
 from psycopg.types.json import Jsonb
 
@@ -54,6 +55,14 @@ class Gateway:
         """Remove sign-in secrets before the gateway stores an event."""
         self.payload_filters.append(fn)
 
+    async def context_authority(self, event, authority, event_id):
+        """Thread reads can narrow authority before claims or a brain run."""
+        if event.channel == "slack" and event.payload.get("contains_outside_text"):
+            authority = replace(authority, profile="tainted", tainted=True)
+            async with self.ctx.pool.connection() as conn:
+                await conn.execute("UPDATE events SET tainted=true WHERE id=%s", (event_id,))
+        return authority
+
     async def receive(self, event: InboundEvent, adapter: ChannelAdapter | None = None) -> dict:
         """Commit dedupe before a run. A retry cannot start a second run."""
         ctx = self.ctx
@@ -91,6 +100,7 @@ class Gateway:
                 prepared = await prepare(ctx, event, authority)
                 if prepared is not None:
                     event = prepared
+            authority = await self.context_authority(event, authority, row["id"])
             if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
                 raise ValueError("The message is too long")
             prepared_payload = {"text": event.text}
@@ -116,6 +126,7 @@ class Gateway:
                     )
                 return {"decision": decision, "event_id": row["id"], "text": text}
             await adapter.show_working(event)
+            authority = await self.context_authority(event, authority, row["id"])
             if decision == "direct":
                 text = await self.direct_handlers[(event.channel, event.kind)](
                     ctx, event, authority
