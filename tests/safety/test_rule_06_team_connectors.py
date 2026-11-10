@@ -99,7 +99,7 @@ async def test_rule_06_tainted_search_cannot_bypass_shared_drive_grant(app, rpc,
         "tools/call",
         {"name": "search_all", "arguments": {"query": "Acme plan", "kinds": ["doc"]}},
     )
-    assert response.json()["result"]["structuredContent"]["decision"] == "allow"
+    assert response.json()["result"]["structuredContent"]["decision"] == "deny"
     assert not ctx.google_client.calls
     hits = await search.search(ctx, "team", "Acme plan", kinds=["doc"])
     assert hits[0].title == "Acme plan"

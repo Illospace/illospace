@@ -9,7 +9,7 @@ from illo.sources import search
 from illo.tools.registry import Arguments, Tool
 
 # Hostile text may search team data. SQL hides private rows and providers skip personal reads.
-READ_PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request"})
+READ_PROFILES = frozenset({"person_dm", "team_channel", "routine", "agent_request"})
 HINT = "Search again with other words if this is not enough."
 
 

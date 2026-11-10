@@ -182,7 +182,7 @@ def register(registry) -> None:
                 False,
                 handler,
                 arguments=model,
-                profiles=PROFILES,
+                profiles=PROFILES - {"tainted"} if name == "github_get_pull" else PROFILES,
                 preflight=write_preflight if risk != "read" else None,
             )
         )

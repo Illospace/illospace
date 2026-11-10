@@ -194,6 +194,6 @@ def register(registry):
                 handler,
                 name.replace("_", " "),
                 arguments,
-                profiles=profiles,
+                profiles=profiles - {"tainted"},
             )
         )

@@ -69,7 +69,7 @@ async def test_rule_02_06_lane_events_visibility(app, rpc):
         {"name": "search_get", "arguments": {"source_ref": f"lane:{lane['id']}"}},
     )
     assert "Secret orchard" not in str(response.json())
-    assert response.json()["result"]["structuredContent"]["decision"] == "allow"
+    assert response.json()["result"]["structuredContent"]["decision"] == "deny"
 
 
 async def test_rule_03_private_get_sets_personal_read(app, rpc, rpc_token):
