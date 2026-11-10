@@ -31,6 +31,7 @@ class SlackIntake:
     ):
         self.ctx, self.bot_id = ctx, bot_id
         self.bot_identity = bot_identity
+        self.team_id: str | None = None
         self.clip_timeout, self.clip_poll = clip_timeout, clip_poll
         self.adapter = SlackAdapter(ctx, self.prepare_context)
         ctx.gateway.register("slack", self.adapter)
@@ -81,6 +82,11 @@ class SlackIntake:
         if not dm and not configured:
             return
         thread = raw.get("thread_ts")
+        outside_workspace = False
+        if raw.get("user_team"):
+            if not self.team_id:
+                self.team_id = (await self.ctx.slack_client.auth_test())["team_id"]
+            outside_workspace = raw["user_team"] != self.team_id
         mentioned = kind == "app_mention" or f"<@{self.bot_id}>" in raw.get("text", "")
         if thread and not dm:
             async with self.ctx.pool.connection() as conn:
@@ -96,6 +102,7 @@ class SlackIntake:
             reply_to=thread if dm else thread or ts,
             payload={
                 "channel_id": channel,
+                "outside_workspace": outside_workspace,
                 "message_ts": ts,
                 "thread_ts": thread,
                 "mentioned": mentioned,

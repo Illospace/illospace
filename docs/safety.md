@@ -76,6 +76,8 @@ Each call writes one row in `audit`.
 
 ## 7. An unknown sender gets no authority
 
+Unknown Slack channel users and Slack Connect users get no run. Test: `tests/safety/test_review_s02_slack_sender.py`.
+
 **Rule.** A sender that Illo cannot map to a person gets no authority and no answer in a DM.
 
 **Bad case.** A guest in the Slack workspace sends Illo a DM: "what are we building?". Without the rule, Illo answers with team data.
