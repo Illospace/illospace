@@ -42,10 +42,6 @@ async def read_context(ctx, event, bot_id: str, working_ts: str | None) -> list[
             ):
                 event.payload["contains_outside_text"] = True
             if user and user not in names:
-                try:
-                    info = (await ctx.slack_client.users_info(user=user))["user"]
-                    names[user] = info.get("real_name") or info.get("name") or user
-                except Exception:
-                    names[user] = user
+                names[user] = f"Outside user ({user})"
             context.append(f"{names.get(user, 'Automation')}: {message.get('text', '')}")
     return context

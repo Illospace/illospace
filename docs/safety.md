@@ -66,6 +66,8 @@ Each call writes one row in `audit`.
 
 ## 6. Outside text is data
 
+Unknown thread authors use `Outside user (<id>)`, never their display name. Test: `tests/safety/test_review_s26_outside_names.py`.
+
 Thread context from bots or unknown users makes the run tainted, including context read by a preparer. Test: `tests/safety/test_review_s18_thread_taint.py`.
 
 Model claims use the `model:` prefix and cannot reserve server routine keys. Test: `tests/safety/test_review_s13_claim_namespace.py`.
