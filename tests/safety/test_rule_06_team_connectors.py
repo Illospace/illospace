@@ -59,3 +59,49 @@ async def test_rule_06_tainted_connector_read_requires_opt_in(app, rpc):
         )
         assert response.json()["result"]["structuredContent"]["decision"] == expected
     assert [c["name"] for c in session.calls] == ["read"]
+
+
+async def test_rule_06_tainted_search_cannot_bypass_shared_drive_grant(app, rpc, monkeypatch):
+    from illo.connectors import google
+    from illo.sources import search
+    from tests.fakes import FakeGoogleClient
+
+    ctx = app.state.ctx
+    monkeypatch.setattr(search, "_providers", {})
+    ctx.workspace = ctx.workspace.model_copy(
+        update={
+            "connectors": [
+                Connector(
+                    key="drive-shared",
+                    kind="google",
+                    scope="team",
+                    drive_id="acme-drive",
+                    auth={"type": "service_account", "secret": "acme-service"},
+                )
+            ]
+        }
+    )
+    await google.setup(ctx)
+    ctx.google_client = FakeGoogleClient(result={"files": [{"id": "doc", "name": "Acme plan"}]})
+    async with ctx.pool.connection() as conn:
+        run = await runs.create(
+            conn,
+            principal="team",
+            person_id=None,
+            profile="tainted",
+            tainted=True,
+            runtime="fake",
+            model="fake",
+        )
+        token = await runs.mint_token(conn, run["id"], 60)
+    response = await rpc(
+        token,
+        "tools/call",
+        {"name": "search_all", "arguments": {"query": "Acme plan", "kinds": ["doc"]}},
+    )
+    assert response.json()["result"]["structuredContent"]["decision"] == "allow"
+    assert not ctx.google_client.calls
+    hits = await search.search(ctx, "team", "Acme plan", kinds=["doc"])
+    assert hits[0].title == "Acme plan"
+    assert not hits.personal_read
+    assert len(ctx.google_client.calls) == 1

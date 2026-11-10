@@ -8,7 +8,7 @@ from illo.connectors import store
 from illo.connectors.config import Connector
 from illo.connectors.google import personal_call
 from illo.ledger import people, runs
-from illo.tools.registry import Arguments, Tool, ToolContext
+from illo.tools.registry import ToolContext
 from tests.fakes import FakeGoogleClient
 
 
@@ -82,31 +82,22 @@ async def test_rule_02_handler_checks_owner_even_without_registry(app):
 async def test_rule_03_mail_read_then_shared_draft_and_owner_dm(app, rpc, rpc_token):
     ctx = await prepare(app)
     row, token = rpc_token
-    sent = []
-
-    async def record(ctx, args):
-        sent.append(True)
-        return {"sent": True}
-
-    # The Slack builder has not merged yet. Use its real tool names and destinations.
-    for name, destination in (
-        ("slack_post_channel", "channel:C_ACME_TEAM"),
-        ("slack_send_dm", "person:ada"),
-    ):
-        ctx.registry.tools[name] = Tool(
-            name,
-            "slack",
-            "write_internal",
-            lambda a, d=destination: d,
-            False,
-            record,
-            arguments=Arguments,
-            profiles=frozenset({"person_dm"}),
-        )
     assert (await call(rpc, token, "mail_search", {"query": "invoice"}))["decision"] == "allow"
-    assert (await call(rpc, token, "slack_post_channel", {}))["decision"] == "draft"
-    assert (await call(rpc, token, "slack_send_dm", {}))["decision"] == "allow"
-    assert len(sent) == 1
+    assert (
+        await call(
+            rpc,
+            token,
+            "slack_post_channel",
+            {"channel": "C_ACME_TEAM", "text": "A private mail summary"},
+        )
+    )["decision"] == "draft"
+    assert not ctx.slack_client.calls
+    assert (
+        await call(
+            rpc, token, "slack_send_dm", {"person": "ada", "text": "Your private mail summary"}
+        )
+    )["decision"] == "allow"
+    assert len(ctx.slack_client.calls) == 2
     async with ctx.pool.connection() as conn:
         result = await runs.get(conn, row["id"])
         assert result["personal_read"]

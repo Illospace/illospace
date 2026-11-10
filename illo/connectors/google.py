@@ -342,5 +342,5 @@ async def setup(ctx) -> None:
             providers.append(("drive_shared", shared_provider, False))
         for name, fn, personal in providers:
             # Several app instances can share this module. Providers take their app as an argument.
-            if getattr(search, "_providers", {}).get(name) != (fn, personal):
-                register(name, fn, personal=personal)
+            if getattr(search, "_providers", {}).get(name) != (fn, personal, False):
+                register(name, fn, personal=personal, tainted=False)
