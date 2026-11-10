@@ -7,7 +7,7 @@ from pydantic import Field
 
 from illo.asks.service import is_live
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import asks, lanes, people
+from illo.ledger import asks, lanes, mcp, people
 from illo.routines.digest import build_digest, snapshot
 from illo.tools.registry import Arguments, Tool
 
@@ -85,8 +85,12 @@ async def asks_create(ctx, args):
         if not lane or (lane["visibility"] == "private" and lane["owner_person_id"] != owner["id"]):
             raise ValueError("The lane is not visible to the owner")
     args["due_at"], args["expires_at"] = date(args["due_at"]), date(args["expires_at"])
+    requester_token_id = None
+    if ctx.run["profile"] == "agent_request":
+        requester_token_id = await mcp.requester_token_for_run(ctx.conn, ctx.run["id"])
     ask = await asks.create(
-        ctx.conn, owner_person_id=owner["id"], requester_person_id=ctx.run["person_id"], **args
+        ctx.conn, owner_person_id=owner["id"], requester_person_id=ctx.run["person_id"],
+        requester_token_id=requester_token_id, **args
     )
     return {"ask_id": ask["id"], "state": ask["state"]}
 
