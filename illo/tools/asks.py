@@ -3,9 +3,10 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from illo.asks.service import is_live
+from illo.channels.mcp.schemas import check_ask_text
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, lanes, mcp, people
 from illo.routines.digest import build_digest, snapshot
@@ -43,6 +44,11 @@ class CreateArgs(Arguments):
     expires_at: str | None = None
     allow_rule: bool = True
     permission: bool = False
+
+    @model_validator(mode="after")
+    def visible_text(self):
+        check_ask_text(self.model_dump_json())
+        return self
 
 
 class AnswerArgs(GetArgs):

@@ -133,6 +133,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - A rule answer has no `answer_text`. The rule travels as `rule_text`.
 - An approved model answer records `answered_via=approved_draft`; the collector names the person who approved it.
 - `asks_answer` has risk `send_outside`. A model answer is always a draft for the ask owner. The card shows the question, the option, and the full text. `answer_preflight` in `illo/tools/asks.py` refuses an ask of another owner.
+- Both ask creation tools refuse hidden format controls in the question, options, and proof.
 - An ask card shows the host of each proof link, not a label from the agent. It names the token and its person (`illo/asks/cards.py`).
 - On the machine, `deliver_answer` in `collectors/t3/collector.py` refuses a rule answer with free text or with an option that the agent did not propose.
 
