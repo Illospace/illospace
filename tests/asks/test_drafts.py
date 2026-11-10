@@ -35,6 +35,7 @@ async def test_approve_performs_once_after_concurrent_clicks(app, seed):
     sent = []
 
     async def perform(ctx, row):
+        assert row["state"] == "approved" and row["decided_at"]
         sent.append(row["id"])
 
     ctx.draft_performers["example"] = perform

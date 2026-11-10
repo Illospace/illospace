@@ -134,9 +134,11 @@ async def handle(ctx, person, action):
             return
         else:
             approved = parts[2] == "approve"
-            await drafts.decide(
+            decided = await drafts.decide(
                 conn, draft_id, person_id=person["id"], approve=approved, in_dm=True
             )
+            approved = approved and decided
+            draft = await ledger.lock_draft(conn, draft_id)
     # Commit the decision before the external action. A second click or a restart cannot send again.
     if approved:
         try:
