@@ -62,6 +62,7 @@ brain:
 
 Use an active person key from your own `people.yaml` for `team_credential`.
 If `ILLO_BRAIN_RUNTIME` is set, set it to `openai_responses` too. Environment overrides still take priority.
+The app refuses startup or reload if the effective runtime cannot use ChatGPT.
 Each person sends `connect my ChatGPT` in their own Slack DM with Illo.
 Person DMs, agent requests, and person routines use that person's grant.
 Team channels and team routines use `team_credential`. They share that person's ChatGPT limit.

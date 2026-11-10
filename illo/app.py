@@ -85,6 +85,7 @@ class AppContext:
         """Validate first. Keep the old workspace if validation or sync fails."""
         async with self.reload_lock:
             workspace = load_workspace(self.config.workspace_dir)
+            workspace.config.brain.check_runtime(self.config.brain_runtime)
             async with self.pool.connection() as conn:
                 await workspace.sync_people(conn)
             self.workspace = workspace
@@ -108,6 +109,7 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
                 if config.migrate_on_start:
                     await migrate(conn)
                 workspace = load_workspace(config.workspace_dir)
+                workspace.config.brain.check_runtime(config.brain_runtime)
                 await workspace.sync_people(conn)
             registry = Registry()
             registry.discover()

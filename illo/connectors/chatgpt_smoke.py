@@ -31,6 +31,7 @@ async def smoke(config, person_id):
     try:
         workspace = load_workspace(config.workspace_dir)
         brain = workspace.config.brain
+        brain.check_runtime(config.brain_runtime)
         runtime = config.brain_runtime or brain.runtime
         model = safe_model(config.brain_model or brain.model)
         if runtime != "openai_responses":

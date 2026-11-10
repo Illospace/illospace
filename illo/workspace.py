@@ -117,6 +117,10 @@ class BrainConfig(Model):
     chatgpt_allowed_accounts: list[str] = Field(default_factory=list)
     api_key_fallback: bool = False
 
+    def check_runtime(self, override=None):
+        if self.auth == "chatgpt" and (override or self.runtime) != "openai_responses":
+            raise ValueError("ChatGPT needs openai_responses")
+
 
 class RunLimits(Model):
     max_concurrent: int = Field(default=4, ge=1, le=100)
@@ -351,13 +355,17 @@ def load_workspace(root: Path | str) -> Workspace:
     if config.default_owner not in keys:
         raise WorkspaceError(f"{root / 'illo.yaml'}: default_owner: unknown or inactive person")
     if config.brain.auth == "chatgpt" and config.brain.team_credential is None:
-        raise WorkspaceError(f"{root / 'illo.yaml'}: brain.team_credential: ChatGPT needs an explicit person")
+        raise WorkspaceError(
+            f"{root / 'illo.yaml'}: brain.team_credential: ChatGPT needs an explicit person"
+        )
     if config.brain.team_credential is not None and config.brain.team_credential not in keys:
         raise WorkspaceError(
             f"{root / 'illo.yaml'}: brain.team_credential: unknown or inactive person"
         )
-    if config.brain.auth == "chatgpt" and config.brain.runtime != "openai_responses":
-        raise WorkspaceError(f"{root / 'illo.yaml'}: brain.auth: ChatGPT needs openai_responses")
+    try:
+        config.brain.check_runtime()
+    except ValueError as error:
+        raise WorkspaceError(f"{root / 'illo.yaml'}: brain.auth: {error}") from None
     rules, skills, routines, connectors, notes = [], [], [], [], []
     for pattern, model, target in (
         ("rules/*.md", RuleFile, rules),
