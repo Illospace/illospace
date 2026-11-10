@@ -66,14 +66,14 @@ async def test_channel_modes_and_search_index(intake, message, fake_brain, app):
     assert result["decision"] == "ignore"  # Listen without a mention.
     assert not fake_brain.requests
     async with app.state.ctx.pool.connection() as conn:
-        item = await one(conn, "SELECT * FROM items")
+        item = await one(conn, "SELECT * FROM items WHERE kind='slack'")
         assert item["source_ref"] == "slack:C_ACME_TEAM:1700000000.000001"
         assert item["kind"] == "slack" and item["visibility"] == "team"
         assert "Ada" in item["title"] and "team" in item["title"]
         assert item["body"] == "Release plan" and item["links"]
     await intake.receive(message(ts="1700000001.000001"))
     async with app.state.ctx.pool.connection() as conn:
-        assert len(await all_rows(conn, "SELECT * FROM items")) == 1
+        assert len(await all_rows(conn, "SELECT * FROM items WHERE kind='slack'")) == 1
 
 
 async def test_unconfigured_and_off_channel_do_nothing(

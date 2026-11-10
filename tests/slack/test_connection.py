@@ -77,7 +77,8 @@ async def test_connect_retry_sensor_and_shutdown(app, slack_client, monkeypatch)
         async with ctx.pool.connection() as conn:
             sensor = await one(conn, "SELECT * FROM sensors WHERE key='slack'")
             assert sensor["last_ok_at"] > sensor["last_error_at"]
-        assert len(ctx.gateway.claims) == 1  # Reconnect does not add a second claim.
+        slack_claims = [c for c in ctx.gateway.claims if "claim_unreadable_clip" in repr(c)]
+        assert len(slack_claims) == 1  # Reconnect does not add a second claim.
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

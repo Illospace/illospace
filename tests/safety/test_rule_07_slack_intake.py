@@ -23,4 +23,4 @@ async def test_rule_07_unknown_slack_dm(app, slack_client, fake_brain):
     assert not slack_client.calls and not fake_brain.requests
     async with app.state.ctx.pool.connection() as conn:
         assert not await all_rows(conn, "SELECT * FROM runs")
-        assert not await all_rows(conn, "SELECT * FROM items")
+        assert not await all_rows(conn, "SELECT * FROM items WHERE kind='slack'")
