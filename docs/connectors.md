@@ -99,7 +99,8 @@ The call has a time limit and a byte limit, including the wire response.
 The sensor is `connector:<key>`.
 
 The file supplies the risk before the tool server runs its three checks.
-A write uses destination `outside:<key>`.
+Every call uses destination `outside:<key>`, including a read with remote arguments.
+After a personal read, a connector call needs a draft that the requester approves.
 `send_outside` creates a draft. A run without a person cannot create that draft.
 An approved `connectors_call` draft uses the registered connector performer.
 A tainted run can call only a tool with both `risk: read` and `tainted: true`.

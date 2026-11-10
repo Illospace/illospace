@@ -47,6 +47,9 @@ Google sign-in checks the account against the owner's addresses and binds the ca
 
 **Tests.** `tests/safety/test_rule_03_personal_destination.py`, `tests/test_tools.py`.
 
+Connector calls need approval after a personal read, even when the remote tool has risk `read`.
+`tests/safety/test_review_s11_rule_03_connector_destination.py` checks the destination and handler.
+
 ## 4. Risk is how hard an action is to undo
 
 **Rule.** Illo reads, and it files tickets, alone. A message to an outsider is a draft. A release or a deletion is not a tool: a person does it.
