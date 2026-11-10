@@ -6,7 +6,7 @@ from illo.sources import search
 from illo.tools._format import Compact, body, data_text, header, hit, iso_date, line
 from illo.tools.registry import Arguments, Tool
 
-# Hostile text may search team data. SQL hides private rows and providers skip personal reads.
+# Only untainted profiles may search. SQL hides private rows from other principals.
 READ_PROFILES = frozenset({"person_dm", "team_channel", "routine", "agent_request"})
 HINT = "Search again with other words if this is not enough."
 

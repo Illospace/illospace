@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from illo.db import all_rows
 from illo.ledger import items, lanes
+from illo.sources import slack_index
 
 
 @dataclass(frozen=True)
@@ -230,6 +231,13 @@ async def search(
         await _items(conn, principal, query, kinds, limit),
         await _lanes(conn, principal, query, kinds, limit),
     ]
+    failures = []
+    if not tainted:
+        try:
+            async with conn.transaction():
+                groups.append(await slack_index.search(ctx, conn, query, kinds, limit))
+        except Exception:
+            failures.append("slack_inbound")
     jobs = [("github", _github(ctx, query, kinds, limit), False)]
     for name, (fn, personal, allow_tainted) in tuple(_providers.items()):
         if tainted and not allow_tainted:
@@ -247,7 +255,7 @@ async def search(
             return await job
 
     answers = await asyncio.gather(*(bounded(job) for _, job, _ in jobs), return_exceptions=True)
-    failures, personal_read = [], any(hit.personal for group in groups for hit in group)
+    personal_read = any(hit.personal for group in groups for hit in group)
     for (name, _, personal), answer in zip(jobs, answers, strict=True):
         if isinstance(answer, BaseException):
             failures.append(name)
@@ -291,6 +299,8 @@ async def get(ctx, principal, source_ref, *, conn=None):
     if conn is None:
         async with ctx.pool.connection() as connection:
             return await get(ctx, principal, source_ref, conn=connection)
+    if source_ref.startswith("slack-event:"):
+        return await slack_index.get(ctx, conn, source_ref)
     item = await items.get(conn, source_ref, principal=principal)
     if item:
         return item

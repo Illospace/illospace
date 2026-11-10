@@ -267,7 +267,8 @@ One function, `search(principal, query, kinds, limit)`, in `illo/sources/search.
 - `items` by full text (`websearch_to_tsquery`, `simple` and `english`), filtered by visibility: a private item shows only to its owner.
 - `lanes` by title, summary, and events.
 - GitHub issues and pull requests, live, through the GitHub client.
-- Slack messages that Illo saw in the configured public channels (stored as items of kind `slack`).
+- Slack messages that Illo saw in configured team channels: the `slack` items and inbound events missing from that index.
+  Event search checks current channel privacy. It never reads DMs or email. Tainted runs cannot use search.
 - When the Google connector files exist: the shared drive, and the mail and Drive of the person (only in an untainted run of the owner).
 
 Each result has a title, a short text, a link, the source, and the time. The brain can search several times with other words. Vectors are not in the first version.
