@@ -133,6 +133,10 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
 def draft_preview(draft: dict) -> str | None:
     """Keep the entire proposed action visible before a person can send it."""
     content = draft["content"]
+    if draft.get("kind") == "asks_answer":
+        content = draft.get("answer_preview")
+        if content is None:
+            return None
     text = (
         next(iter(content.values()))
         if len(content) == 1 and set(content) <= {"text", "body"}

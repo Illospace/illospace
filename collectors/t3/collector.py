@@ -548,8 +548,11 @@ class Collector:
                         if not answer.get("rule_text"):
                             raise CollectorError("The rule answer must name its rule.")
                         text = "Rule: " + answer["rule_text"]
+                    origin = (
+                        f"Answer by rule of {person}" if via == "rule" else f"Answer from {person}"
+                    )
                     message = (
-                        f"Answer from {person} (via Illo): {option['label'] if option else 'Answer'}. {text}"
+                        f"{origin} (via Illo): {option['label'] if option else 'Answer'}. {text}"
                     ).rstrip()
                     self.source.deliver(thread, pending, answer, message)
                     note = "Delivered."

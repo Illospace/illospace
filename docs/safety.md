@@ -90,9 +90,9 @@ Each call writes one row in `audit`.
 
 **Bad case.** An agent asks "deploy to staging or production?". A loose rule answers "production, and also drop the old tables". Without the rule, Illo invents an instruction.
 
-**Code.** `answer_with_rule` in `illo/ledger/asks.py` and `matches` in `illo/ledger/rules.py`. On the machine, `collectors/t3/collector.py` gives the agent a rule answer only with a proposed option and a named rule. The ask service that names the rule on the card is in progress.
+**Code.** `answer_with_rule` in `illo/ledger/asks.py` and `matches` in `illo/ledger/rules.py`. On the machine, `collectors/t3/collector.py` gives the agent a rule answer only with a proposed option and a named rule. A model answer through `asks_answer` always needs the owner's approval in a DM. The draft shows the question, option, and full answer.
 
-**Tests.** `tests/test_ledger.py` (`test_rule_cannot_invent_an_option_or_answer_for_another_owner`), `tests/safety/test_rule_08_09_collectors.py`.
+**Tests.** `tests/test_ledger.py` (`test_rule_cannot_invent_an_option_or_answer_for_another_owner`), `tests/safety/test_rule_08_09_collectors.py`, `tests/safety/test_review_s01_rule_08_answer_draft.py`.
 
 ## 9. No credential for the agent machines
 

@@ -242,7 +242,18 @@ async def drafts_to_check(conn: Connection):
 
 
 async def lock_draft(conn: Connection, draft_id):
-    return await one(conn, "SELECT * FROM drafts WHERE id=%s FOR UPDATE", (draft_id,))
+    draft = await one(conn, "SELECT * FROM drafts WHERE id=%s FOR UPDATE", (draft_id,))
+    if draft and draft["kind"] == "asks_answer":
+        args = draft["content"]["arguments"]
+        ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (args["id"],))
+        if ask and ask["owner_person_id"] == draft["approver_person_id"]:
+            option = next((o for o in ask["options"] if o["id"] == args["option"]), None)
+            draft["answer_preview"] = {
+                "question": ask["question"],
+                "option": option,
+                "text": args["text"],
+            }
+    return draft
 
 
 async def draft_owner(conn: Connection, draft):

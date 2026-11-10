@@ -9,6 +9,7 @@ from illo.asks.service import is_live
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, lanes, mcp, people
 from illo.routines.digest import build_digest, snapshot
+from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Tool
 
 READ_PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request"})
@@ -95,6 +96,24 @@ async def asks_create(ctx, args):
     return {"ask_id": ask["id"], "state": ask["state"]}
 
 
+async def answer_preflight(ctx, args):
+    ask = await ledger.lock_ask(ctx.conn, args["id"])
+    if (
+        not ask
+        or ask["owner_person_id"] != ctx.run["person_id"]
+        or not await is_live(ctx.conn, ask)
+        or (args["option"] is None and not args["text"])
+        or (
+            args["option"] is not None
+            and not any(o["id"] == args["option"] for o in ask["options"])
+        )
+    ):
+        return Decision(
+            "deny", "Only the owner can answer an open ask with a proposed option or text"
+        )
+    return Decision("allow", "The ask belongs to this person")
+
+
 async def asks_answer(ctx, args):
     ask = await ledger.lock_ask(ctx.conn, args["id"])
     if (
@@ -154,7 +173,7 @@ def register(registry):
             "asks_answer",
             asks_answer,
             AnswerArgs,
-            "write_internal",
+            "send_outside",
             PERSON_PROFILES,
             lambda a: "ledger",
         ),
@@ -195,5 +214,6 @@ def register(registry):
                 name.replace("_", " "),
                 arguments,
                 profiles=profiles,
+                preflight=answer_preflight if name == "asks_answer" else None,
             )
         )
