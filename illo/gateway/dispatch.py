@@ -113,8 +113,11 @@ class Gateway:
                     (Jsonb(prepared_payload["text"]), row["id"]),
                 )
             claimed = None
+            claim_event = event
+            if event.channel == "slack" and "slack_typed_text" in event.payload:
+                claim_event = event.model_copy(update={"text": event.payload["slack_typed_text"]})
             for claim in self.claims:
-                claimed = await claim(ctx, event, authority)
+                claimed = await claim(ctx, claim_event, authority)
                 if claimed is not None:
                     break
             if claimed is not None:

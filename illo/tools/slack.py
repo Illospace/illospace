@@ -5,13 +5,14 @@ from typing import TYPE_CHECKING
 from pydantic import Field
 
 from illo.channels.slack.access import channel_private, require_member
+from illo.channels.slack.blocks import message_text
 
 if TYPE_CHECKING:
     from illo.app import AppContext
 
 from illo.db import Connection, one
 from illo.ledger import people
-from illo.tools._format import data_text, header, line, short
+from illo.tools._format import data_text, header, line
 from illo.tools.registry import Arguments, Registry, Tool, ToolContext
 
 
@@ -95,7 +96,7 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
     messages = response.get("messages", [])
     page = messages[args["offset"]:args["offset"]+args["limit"]]
     text = [header(len(page), len(messages), "Pass offset= / limit= to read more messages.")]
-    text.extend(line(m.get("user"), m.get("ts"), short(m.get("text"), 500)) for m in page)
+    text.extend(line(m.get("user"), m.get("ts"), message_text(m)) for m in page)
     if response.get("has_more"):
         text.append("The thread has more messages at the source.")
     return {"text": data_text("slack", "\n".join(text)),

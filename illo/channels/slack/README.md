@@ -30,6 +30,11 @@ Illo sends audio to the transcription API only with `voice.transcription: openai
 See [voice setup](../../../docs/workspace.md#voice-clips) for limits and privacy checks.
 Private DMs never become search items.
 Messages of a configured public channel become team search items after the gateway handles them.
+Illo reads message text, Block Kit text, button links, and legacy attachments in display order.
+The event, search item, and thread readers use the same text reader.
+It keeps Slack escapes and skips unknown elements. It cuts text at 8,000 characters with a clear marker.
+It reads at most 1,000 elements and 12 nested levels. Bot text keeps its `tainted` status.
+Sign-in commands and card answers use only the person's typed text or verified voice transcript.
 A private channel starts no run and enters no index.
 A channel is private when Slack says so, when `illo.yaml` sets `visibility: private`, or when Slack does not answer.
 `slack_read_thread` reads a private channel only for a member. It checks membership live on each call.

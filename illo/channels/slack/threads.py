@@ -3,6 +3,7 @@
 import asyncio
 from collections import deque
 
+from illo.channels.slack.blocks import message_text
 from illo.ledger import kv, people
 
 
@@ -48,5 +49,5 @@ async def read_context(ctx, event, bot_id: str, working_ts: str | None) -> list[
                 event.payload["contains_outside_text"] = True
             if user and user not in names:
                 names[user] = f"Outside user ({user})"
-            context.append(f"{names.get(user, 'Automation')}: {message.get('text', '')}")
+            context.append(f"{names.get(user, 'Automation')}: {message_text(message)}")
     return context
