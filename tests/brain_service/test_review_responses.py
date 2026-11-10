@@ -45,7 +45,8 @@ async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeyp
         if len(bodies) == 1:
             return stream(
                 complete(
-                    [{"type": "reasoning", "encrypted_content": "fake-chatgpt-reasoning"}, call()]
+                    [{"type": "reasoning", "encrypted_content": "fake-chatgpt-reasoning"}, {**call(), "id": "fc_subscription"},
+                     {"type": "message", "id": "msg_subscription", "content": []}]
                 )
             )
         if len(bodies) == 2:
@@ -62,6 +63,8 @@ async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeyp
     assert any(i.get("type") == "function_call_output" for i in bodies[-1]["input"])
     assert [e["text"] for e in events if e["type"] == "text"] == ["Ready."]
     assert len(session.calls) == 1
+    assert all("id" not in i for i in bodies[-1]["input"])
+    assert any(i.get("call_id") == "call-0" for i in bodies[-1]["input"])
 
 
 async def test_u08_parallel_calls_stop_at_limit(run_request):

@@ -210,7 +210,10 @@ async def conversation(
                     or error.details.get("code") != "usage_limit_reached"
                 ):
                     raise
-                items = [item for item in items if item.get("type") != "reasoning"]
+                items = [
+                    {key: value for key, value in item.items() if key != "id"}
+                    for item in items if item.get("type") != "reasoning"
+                ]
                 # Resume the current turn with its tool results. Never replay an MCP write.
                 fallback_notice = str(error) + " I used the API key for this request.\n\n"
                 subscription_limit = error
