@@ -7,7 +7,7 @@ sends the answer to that person in a DM, once, and then marks it delivered.
 import logging
 
 from illo.asks.service import post_dm
-from illo.db import all_rows
+from illo.db import all_rows, one
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ WHERE a.state = 'answered' AND a.delivery_state = 'pending'
   AND a.requester_person_id IS NOT NULL AND a.requester_token_id IS NULL
   AND a.requester_person_id <> a.owner_person_id
 ORDER BY a.answered_at
-LIMIT 20
+LIMIT 1
 FOR UPDATE OF a SKIP LOCKED
 """
 
@@ -38,23 +38,40 @@ def answer_text(row: dict) -> str:
 
 
 async def tick(ctx) -> None:
-    """Send each waiting answer once. The row lock keeps two timers apart."""
+    """Commit one send marker before each call. Never retry an uncertain post."""
+    async with ctx.pool.connection() as conn:
+        expired = await all_rows(
+            conn,
+            """UPDATE asks SET delivery_state='failed'
+            WHERE state='answered' AND delivery_state='delivered'
+              AND requester_token_id IS NULL AND acked_at IS NULL
+              AND delivered_at < now() - interval '2 minutes' RETURNING id""",
+        )
+    for row in expired:
+        log.error("The delivery result of ask %s is unknown; no retry", row["id"])
     if not ctx.slack_client:
         return
-    async with ctx.pool.connection() as conn:
-        async with conn.transaction():
-            for row in await all_rows(conn, WAITING):
-                requester = {"slack_id": row["requester_slack_id"]}
-                try:
-                    sent = await post_dm(
-                        ctx, requester, answer_text(row), None, "ask-answer", row["id"]
-                    )
-                except Exception:
-                    log.error("Could not send the answer of ask %s to its requester", row["id"])
-                    continue
-                if sent:
-                    await conn.execute(
-                        "UPDATE asks SET delivery_state='acked', delivered_at=now(), "
-                        "acked_at=now(), delivery_attempts=delivery_attempts+1 WHERE id=%s",
-                        (row["id"],),
-                    )
+    for _ in range(20):
+        async with ctx.pool.connection() as conn:
+            row = await one(conn, WAITING)
+            if not row:
+                return
+            await conn.execute(
+                "UPDATE asks SET delivery_state='delivered', delivered_at=now(), "
+                "delivery_attempts=delivery_attempts+1 WHERE id=%s",
+                (row["id"],),
+            )
+        # The transaction has committed. No ask locks span a network call.
+        requester = {"slack_id": row["requester_slack_id"]}
+        try:
+            sent = await post_dm(ctx, requester, answer_text(row), None, "ask-answer", row["id"])
+        except Exception:
+            log.error("The delivery result of ask %s is unknown", row["id"])
+            continue
+        if sent:
+            async with ctx.pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE asks SET delivery_state='acked', acked_at=now() "
+                    "WHERE id=%s AND delivery_state='delivered'",
+                    (row["id"],),
+                )
