@@ -111,7 +111,7 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                             event(
                                 "error",
                                 run_id=body.run_id,
-                                category="runtime",
+                                category="internal",
                                 message="The brain run failed",
                             )
                         )

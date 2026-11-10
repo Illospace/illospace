@@ -10,6 +10,7 @@ from illo.brain.run_manager import RunManager
 from illo.db import one
 from illo.gateway.events import ChannelAdapter, InboundEvent
 from illo.gateway.principal import resolve
+from illo.gateway.replies import error_text, failure_category
 
 log = logging.getLogger(__name__)
 
@@ -155,14 +156,17 @@ class Gateway:
                 )
             return {"decision": decision, "event_id": row["id"], "text": text}
         except (Exception, asyncio.CancelledError) as exc:
+            category = failure_category(exc)
             async with ctx.pool.connection() as conn:
                 await conn.execute("UPDATE events SET status='failed' WHERE id=%s", (row["id"],))
             if adapter:
                 try:
-                    await adapter.deliver_error(event)
+                    await adapter.deliver_error(event, category=category)
                 except Exception:
                     log.error("The channel could not deliver the error")
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            log.error("The gateway could not finish event %s", row["id"])
-            return {"decision": decision, "event_id": row["id"], "error": "The request failed"}
+            log.error("The gateway could not finish event %s: category=%s exception_type=%s",
+                      row["id"], category, type(exc).__name__)
+            return {"decision": decision, "event_id": row["id"],
+                    "error": error_text(category), "category": category}

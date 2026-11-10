@@ -43,7 +43,7 @@ async def run_worker(
             if not terminal:
                 yield event(
                     "error",
-                    category="runtime",
+                    category="internal",
                     message="The brain worker stopped without an answer",
                 )
         finally:

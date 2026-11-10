@@ -23,12 +23,12 @@ def error_category(error: BaseException) -> str:
         return error.category
     if isinstance(error, BaseExceptionGroup):
         categories = [error_category(child) for child in error.exceptions]
-        return "auth" if "auth" in categories else "runtime"
+        return next((c for c in ("auth", "timeout", "limit", "runtime") if c in categories), "internal")
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
         return "auth"
     if isinstance(error, (TimeoutError, httpx.TimeoutException)):
         return "timeout"
-    return "runtime"
+    return "internal"
 
 
 def failure_event(error: BaseException) -> dict:
@@ -54,7 +54,7 @@ async def main() -> None:
             print(
                 json.dumps(
                     event(
-                        "error", category="runtime", message="The runtime stopped without an answer"
+                        "error", category="internal", message="The runtime stopped without an answer"
                     )
                 ),
                 flush=True,

@@ -4,10 +4,13 @@ import asyncio
 import json
 from contextlib import aclosing
 
+import httpx
+
 from illo.brain.client import BrainEvent, ProviderAuth, RunRequest
 from illo.brain.prompts import build_for_run
 from illo.connectors import chatgpt
 from illo.db import one
+from illo.gateway.replies import RunFailure, failure_category
 from illo.ledger import runs, sensors
 
 
@@ -152,6 +155,7 @@ class RunManager:
             api_key_fallback=config.api_key_fallback,
         )
         status, error, usage, final = "failed", None, {}, None
+        failure = "internal"
         try:
             async with asyncio.timeout(config.timeout_s):
                 turns = 0
@@ -184,6 +188,9 @@ class RunManager:
                             if on_event:
                                 await on_event(item)
                             if item.type == "error":
+                                failure = {"limit": "limit", "timeout": "timeout", "internal": "internal"}.get(
+                                    item.category, "provider"
+                                )
                                 error = item.failure_reason()
                                 if auth.kind == "chatgpt" and item.code == "usage_limit_reached":
                                     from datetime import UTC, datetime
@@ -202,10 +209,10 @@ class RunManager:
                                     break
                                 if item.category == "timeout":
                                     status = "timeout"
-                                raise RuntimeError(error)
+                                raise RunFailure(failure)
                             if item.type == "final":
                                 if turns > config.max_turns and item.usage.get("limited") is not True:
-                                    raise RuntimeError("The run reached its turn limit")
+                                    raise RunFailure("limit")
                                 final, usage, status = item.text, item.usage, "completed"
                                 break
                     if not retry:
@@ -213,17 +220,22 @@ class RunManager:
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
         except chatgpt.TemporaryRefresh:
+            failure = "provider"
             final, error = chatgpt.TEMPORARY, "The model sign-in service is unavailable"
-        except TimeoutError:
+        except (TimeoutError, httpx.TimeoutException):
+            failure = "timeout"
             status, error = "timeout", "The run reached its time limit"
-            raise RuntimeError(error) from None
+            raise RunFailure("timeout") from None
         except asyncio.CancelledError:
             error = "The run was cancelled"
             raise
-        except Exception:
+        except Exception as exc:
+            failure = failure_category(exc)
             error = error or "The brain run failed"
             raise
         finally:
+            if status != "completed":
+                usage = {**usage, "failure_category": failure}
             async with ctx.pool.connection() as conn:
                 await runs.finish(conn, row["id"], status, usage=usage, error=error)
                 if status == "completed":

@@ -41,7 +41,7 @@ class Adapter:
         # A signal has no person or reply destination. Tools can file a ticket.
         pass
 
-    async def deliver_error(self, event):
+    async def deliver_error(self, event, *, category="internal"):
         pass
 
 

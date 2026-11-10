@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from illo.gateway.replies import RUN_ERROR
+from illo.gateway.replies import error_text
 
 
 @dataclass
@@ -212,8 +212,8 @@ class FakeChannelAdapter:
     async def deliver_final(self, event, text):
         self.final.append((event, text))
 
-    async def deliver_error(self, event):
-        self.errors.append((event, RUN_ERROR))
+    async def deliver_error(self, event, *, category="internal"):
+        self.errors.append((event, error_text(category)))
 
 
 @dataclass

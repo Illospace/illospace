@@ -61,7 +61,7 @@ class BrainEvent(BaseModel):
     type: Literal["started", "text", "tool_call", "final", "error"]
     text: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
-    category: Literal["auth", "timeout", "runtime", "limit"] = "runtime"
+    category: Literal["auth", "timeout", "runtime", "limit", "internal"] = "runtime"
     code: str = "unknown"
     resets_at: int | None = None
     api_key_fallback_failed: bool = False
