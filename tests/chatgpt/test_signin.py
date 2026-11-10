@@ -49,7 +49,7 @@ async def test_connect_without_model_and_paste_exchange(chatgpt_app, replay, fak
     assert query["code_challenge_method"] == ["S256"]
     assert "verifier" not in query and "offline_access" in query["scope"][0]
     result = await replay(text=address(state))
-    assert result["text"] == chatgpt.CONNECTED
+    assert result["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
     assert backend.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
     body = parse_qs(backend.requests[-1].content.decode())
     assert body["code"] == ["marker-code-never-store"]
@@ -77,7 +77,7 @@ async def test_wrong_owner_and_thread_do_not_consume(chatgpt_app, replay, fake_b
     assert not fake_brain.requests
     assert (
         await replay(text=address(state), payload={"channel_id": "D_ADA"}, reply_to="thread-a")
-    )["text"] == chatgpt.CONNECTED
+    )["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
 
 
 @pytest.mark.parametrize("failure", ["expired", "reused", "tampered", "unstarted"])
@@ -91,7 +91,7 @@ async def test_invalid_state(chatgpt_app, replay, failure):
                 "UPDATE connector_oauth_states SET expires_at=clock_timestamp()-interval '1 second'"
             )
     elif failure == "reused":
-        assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED
+        assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
     elif failure == "tampered":
         state += "x"
     else:
@@ -155,7 +155,7 @@ async def test_device_preferred_and_completed_by_timer(
     backend.pending = False
     await chatgpt_oauth.poll_devices(app.state.ctx)
     await chatgpt_oauth.poll_devices(app.state.ctx)
-    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.CONNECTED]) == 1
+    assert len([c for c in slack_client.calls if c.get("text") == chatgpt.CONNECTED.format(email="ada@example.com")]) == 1
     body = parse_qs(backend.requests[-1].content.decode())
     assert body["redirect_uri"] == [chatgpt.ISSUER + "/deviceauth/callback"]
     assert body["code_verifier"] == ["fake-device-verifier"]
@@ -170,7 +170,7 @@ async def test_device_can_switch_to_paste_once(chatgpt_app, replay):
     assert url.startswith(chatgpt.ISSUER + "/oauth/authorize?")
     with pytest.raises(ValueError):
         await chatgpt_oauth.switch_to_paste(app.state.ctx, state)
-    assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED
+    assert (await replay(text=address(state)))["text"] == chatgpt.CONNECTED.format(email="ada@example.com")
 
 
 async def test_disconnect_cancels_inflight_exchange(chatgpt_app, replay):

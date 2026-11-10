@@ -158,6 +158,43 @@ async def switch_to_paste(ctx, state):
     return authorize(state, details["verifier"])
 
 
+class AccountMismatch(ValueError):
+    pass
+
+
+async def verify_account(ctx, conn, person_id, data):
+    # The ID token comes directly from the fixed HTTPS token endpoint, never the paste.
+    # Decode only for this comparison. It grants no authority or tool access.
+    email = chatgpt.claims(data.get("id_token", "")).get("email")
+    person = await one(conn, "SELECT key,emails FROM people WHERE id=%s AND active", (person_id,))
+    if (
+        not isinstance(email, str)
+        or email.count("@") != 1
+        or any(c.isspace() or c in "<>|&" for c in email)
+    ):
+        await ctx.chatgpt_client.revoke(data)
+        raise ValueError(FAILED)
+    allowed = (
+        person["emails"] if person else []
+    ) + ctx.workspace.config.brain.chatgpt_allowed_accounts
+    if email.casefold() not in {address.casefold() for address in allowed}:
+        await ctx.chatgpt_client.revoke(data)
+        if person:
+            async with ctx.pool.connection() as warning_conn:
+                await sensors.error(
+                    warning_conn,
+                    "chatgpt:" + person["key"],
+                    "The ChatGPT account does not match the person",
+                )
+        local, domain = email.split("@")
+        masked = local[:1] + "***@" + domain
+        raise AccountMismatch(
+            f"That ChatGPT account ({masked}) is not one of your addresses in people.yaml. "
+            "Sign in with your own account."
+        )
+    return email
+
+
 async def complete(ctx, state, code, person_id, event):
     # Commit consumption before exchange. A failed exchange cannot reuse the code.
     async with ctx.pool.connection() as conn:
@@ -187,10 +224,11 @@ async def complete(ctx, state, code, person_id, event):
         )
         if not current:
             raise ValueError(FAILED)
+        email = await verify_account(ctx, conn, person_id, data)
         await grants.save(conn, ctx, person_id, token)
         person = await one(conn, "SELECT key FROM people WHERE id=%s AND active", (person_id,))
         await sensors.ok(conn, "chatgpt:" + person["key"])
-    return chatgpt.CONNECTED
+    return chatgpt.CONNECTED.format(email=email)
 
 
 async def poll_devices(ctx):
@@ -240,8 +278,11 @@ async def poll_device(ctx, state_hash):
                 data["code_verifier"],
                 chatgpt.ISSUER + "/deviceauth/callback",
             )
+            email = await verify_account(ctx, conn, row["person_id"], exchanged)
             await grants.save(conn, ctx, row["person_id"], chatgpt.credential(exchanged))
-            answer = chatgpt.CONNECTED
+            answer = chatgpt.CONNECTED.format(email=email)
+        except AccountMismatch as error:
+            answer = str(error)
         except Exception:
             answer = FAILED
         await conn.execute(
@@ -312,6 +353,8 @@ async def claim(ctx, event, authority):
                 return "ChatGPT is disconnected from Illo."
             rows = await grants.status(conn, authority.person_id)
             return status_text(rows[0])
+    except AccountMismatch as error:
+        return str(error)
     except Exception:
         return FAILED
 

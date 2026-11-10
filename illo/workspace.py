@@ -113,6 +113,7 @@ class BrainConfig(Model):
     timeout_s: float = Field(default=120, gt=0, le=3600)
     auth: Literal["chatgpt", "api_key"] = "api_key"
     team_credential: str | None = None
+    chatgpt_allowed_accounts: list[str] = Field(default_factory=list)
     api_key_fallback: bool = False
 
 

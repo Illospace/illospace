@@ -20,10 +20,11 @@ from illo.slackapi import dm_person
 
 ISSUER = "https://auth.openai.com"
 TOKEN_URL = ISSUER + "/oauth/token"
+REVOCATION_URL = ISSUER + "/api/accounts/oauth/revoke"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 REDIRECT_URI = "http://127.0.0.1:1455/auth/callback"
 SCOPES = "openid profile email offline_access"
-CONNECTED = "ChatGPT is connected. I use your subscription for your requests."
+CONNECTED = "ChatGPT is connected as {email}. I use your subscription for your requests."
 MISSING = 'I have no model sign-in for you yet. Say "connect my ChatGPT".'
 BROKEN = 'Your ChatGPT sign-in for Illo stopped working. Say "connect my ChatGPT" to sign in again.'
 
@@ -105,6 +106,23 @@ class ChatGPTClient:
         except Exception:
             # Exception text, causes, response bodies and URLs can hold credentials.
             raise TokenError() from None
+
+    async def revoke(self, data):
+        """Revoke rejected tokens at the endpoint published by the issuer."""
+        for key in ("refresh_token", "access_token"):
+            if not data.get(key):
+                continue
+            try:
+                await self.request(
+                    REVOCATION_URL,
+                    data={
+                        "client_id": CLIENT_ID,
+                        "token": data[key],
+                        "token_type_hint": key,
+                    },
+                )
+            except Exception:
+                pass
 
     async def exchange(self, code, verifier, redirect_uri=REDIRECT_URI):
         return await self.request(
