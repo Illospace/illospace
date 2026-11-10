@@ -63,7 +63,8 @@ async def conversation(
         {"role": "user", "content": request.user_message},
     ]
     usage = {}
-    base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    # Compose passes an empty value when the operator sets none. Treat empty as not set.
+    base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
     for _ in range(request.max_turns):
         payload = {
             "model": request.model,

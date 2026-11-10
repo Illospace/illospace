@@ -147,3 +147,13 @@ async def test_provider_auth_error_survives_mcp_task_group(run_request, fake_mcp
         with pytest.raises(ExceptionGroup) as error:
             _ = [item async for item in openai_compat.run(run_request, None)]
     assert error_category(error.value) == "auth"
+
+
+def test_empty_base_url_means_the_default(monkeypatch):
+    """Compose passes OPENAI_BASE_URL as an empty string when the operator sets none."""
+    import inspect
+
+    from brain.runtimes import openai_compat
+
+    source = inspect.getsource(openai_compat.conversation)
+    assert 'os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"' in source
