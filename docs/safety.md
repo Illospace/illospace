@@ -34,6 +34,9 @@ Each call writes one row in `audit`.
 
 **Tests.** `tests/test_tools.py` (`test_personal_tool_needs_person_and_untainted_run`). The personal tools and their test in `tests/safety/` are in progress.
 
+Google sign-in checks the account against the owner's addresses and binds the callback to the browser.
+`tests/safety/test_review_s10_rule_02_google_binding.py` checks both paths.
+
 ## 3. Personal data goes only to its owner
 
 **Rule.** A run that read personal data can write only to that person. A write to another destination becomes a draft for that person.

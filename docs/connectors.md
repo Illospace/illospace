@@ -33,6 +33,10 @@ scopes:
 
 Restart Illo or reload the workspace. Send `connect my Google` in a Slack DM.
 Open the one-time link. It expires after 10 minutes.
+Use HTTPS for a public callback and keep the same browser for the whole sign-in.
+Illo binds the callback to a secure, host-only browser cookie.
+The Google account must match one of your email addresses in `people.yaml`.
+Illo revokes a new grant if the account does not match.
 The callback stores your grant with encryption in Postgres.
 Only your untainted DM runs and agent runs can use your grant.
 Send `disconnect my Google` in a DM to revoke and delete it.
