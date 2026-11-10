@@ -89,10 +89,12 @@ def check_item(item: dict, names: set[str]) -> None:
 
 
 def used_fields(item):
-    """Compare the fields we consume. Provider metadata can differ between events."""
-    fields = {key: item.get(key) for key in (
-        "type", "call_id", "name", "arguments", "encrypted_content"
-    )}
+    """Compare the fields that decide a tool call or the answer text.
+
+    Provider metadata can differ between events. A reasoning item is opaque: the provider can
+    encode it again in the final event, so only its type takes part in the comparison.
+    """
+    fields = {key: item.get(key) for key in ("type", "call_id", "name", "arguments")}
     if item.get("type") == "message":
         fields["content"] = [
             {key: part.get(key) for key in ("type", "text", "refusal")}
@@ -237,7 +239,16 @@ async def conversation(
         observed = [done_items[index] for index in sorted(done_items)]
         output = completed.get("output") or observed
         if observed and [used_fields(i) for i in output] != [used_fields(i) for i in observed]:
-            raise RunError("runtime", "The model returned conflicting output items")
+            # Name the fields only. Their values can hold private text.
+            differs = sorted({
+                f"{a.get('type')}.{key}"
+                for a, b in zip(map(used_fields, output), map(used_fields, observed), strict=False)
+                for key in a.keys() | b.keys() if a.get(key) != b.get(key)
+            }) or ["count"]
+            raise RunError(
+                "runtime",
+                "The model returned conflicting output items: " + ", ".join(differs)[:80],
+            )
         for item in output:
             check_item(item, names)
         calls = [item for item in output if item["type"] == "function_call"]
