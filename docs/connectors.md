@@ -3,7 +3,30 @@
 Illo calls only the tools that a workspace connector file lists.
 Each person connects Google with their own sign-in.
 Team members do not need the host's credentials.
-The brain never receives a token, a client secret, or a sign-in code.
+The brain never receives a connector token, a client secret, or a sign-in code.
+The model sign-in below has a separate, per-run credential path.
+
+## The model sign-in
+
+Each member can use their own ChatGPT subscription with `brain.auth: chatgpt` and `brain.runtime: openai_responses`.
+Set `ILLO_VAULT_KEY` in the main app. No connector YAML file or host sign-in file is needed.
+
+1. Send `connect my ChatGPT` in your own Slack DM with Illo.
+2. Open the one-time link within 10 minutes.
+3. For device sign-in, open the OpenAI address on the page. Sign in and enter the displayed code there.
+4. If device sign-in is off, open the paste-flow link on that page.
+5. After browser sign-in, the local callback address can fail to load. This is expected.
+6. Paste that full address into the same DM and thread. Send only that address.
+
+Illo replies: `ChatGPT is connected. I use your subscription for your requests.`
+The device flow sends this reply without a paste.
+Enable device sign-in in your ChatGPT security settings, or ask your workspace administrator to enable it.
+Only enter a device code if you asked Illo to connect your own account.
+Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
+Disconnect also cancels pending links. It does not sign you out of other OpenAI clients.
+The operator can run `illo chatgpt status` to list connection states and expiry times without secrets.
+See [Workspace files](workspace.md) for team credentials and the optional API-key fallback.
+Check that the provider's terms allow this use. An API key is the alternative.
 
 ## Google for a person
 

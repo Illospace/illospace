@@ -11,7 +11,8 @@ from mcp.shared.exceptions import McpError
 from mcp.types import Tool
 
 from brain.mcp_client import connect, list_tools
-from brain.models import BrainEvent, RunError, RunRequest, event
+from brain.models import ApiKeyAuth, BrainEvent, ChatGPTAuth, RunError, RunRequest, event
+from brain.runtimes import chatgpt
 from brain.runtimes.openai_compat import add_usage, chunks
 from brain.runtimes.provider_errors import error_body, provider_error
 
@@ -37,7 +38,7 @@ def build_request(request: RunRequest, tools: list[Tool], items: list[dict]) -> 
     catalog = function_tools(tools)
     names = {tool.name for tool in tools}
     assert all(tool["type"] == "function" and tool["name"] in names for tool in catalog)
-    return {
+    payload = {
         "model": request.model,
         "instructions": request.system_prompt,
         "input": items,
@@ -48,6 +49,29 @@ def build_request(request: RunRequest, tools: list[Tool], items: list[dict]) -> 
         "max_output_tokens": 4096,
         "parallel_tool_calls": True,
     }
+    if request.provider_auth.kind == "chatgpt":
+        del payload["max_output_tokens"]
+        payload["tool_choice"] = "auto"
+    return payload
+
+
+def address(request):
+    if request.provider_auth.kind == "chatgpt":
+        return chatgpt.BASE_URL
+    return (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+
+
+def auth_headers(request):
+    if isinstance(request.provider_auth, ChatGPTAuth):
+        return {
+            "Authorization": "Bearer " + request.provider_auth.access_token.get_secret_value(),
+            "chatgpt-account-id": request.provider_auth.account_id.get_secret_value(),
+            "originator": "illo-brain",
+        }
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RunError("auth", "Set OPENAI_API_KEY for the Responses runtime")
+    return {"Authorization": "Bearer " + key}
 
 
 def check_item(item: dict, names: set[str]) -> None:
@@ -68,6 +92,50 @@ def effort_rejected(error: dict) -> bool:
     )
 
 
+async def response_chunks(request, tools, items, http):
+    base = address(request)
+    cache_key = (base, request.model)
+    payload = build_request(request, tools, items)
+    if cache_key not in _without_effort:
+        payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or "low"}
+    for attempt in range(2):
+        async with http.stream(
+            "POST", base + "/responses", json=payload, headers=auth_headers(request)
+        ) as response:
+            if response.is_error:
+                error = await error_body(response)
+                limited = (
+                    chatgpt.limit_error(error, response.status_code)
+                    if request.provider_auth.kind == "chatgpt"
+                    else None
+                )
+                if limited:
+                    raise limited
+                if (
+                    response.status_code == 400
+                    and attempt == 0
+                    and "reasoning" in payload
+                    and effort_rejected(error)
+                ):
+                    _without_effort.add(cache_key)
+                    del payload["reasoning"]
+                    continue
+                raise provider_error(error, response.status_code)
+            response.raise_for_status()
+            async for chunk in chunks(response):
+                # Reject credential echoes before a function argument can reach MCP.
+                encoded = json.dumps(chunk)
+                values = [os.getenv("OPENAI_API_KEY")]
+                if isinstance(request.provider_auth, ChatGPTAuth):
+                    values.append(request.provider_auth.access_token.get_secret_value())
+                if chunk.get("type") not in {"error", "response.failed"} and any(
+                    value and json.dumps(value)[1:-1] in encoded for value in values
+                ):
+                    raise RunError("runtime", "The provider returned a credential")
+                yield chunk
+            return
+
+
 async def conversation(
     request: RunRequest, session: ClientSession, tools: list[Tool], http: httpx.AsyncClient
 ) -> AsyncIterator[BrainEvent]:
@@ -75,47 +143,61 @@ async def conversation(
     yield event("started", catalog=sorted(names))
     items = [{"role": "user", "content": request.user_message}]
     usage = {}
-    base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-    cache_key = (base, request.model)
+    fallback_notice = ""
+    subscription_limit = None
     for _ in range(request.max_turns):
-        payload = build_request(request, tools, items)
-        if cache_key not in _without_effort:
-            payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or "low"}
         completed = None
         for attempt in range(2):
-            async with http.stream("POST", base + "/responses", json=payload) as response:
-                if response.is_error:
-                    error = await error_body(response)
-                    if (
-                        response.status_code == 400
-                        and attempt == 0
-                        and "reasoning" in payload
-                        and effort_rejected(error)
-                    ):
-                        _without_effort.add(cache_key)
-                        del payload["reasoning"]
-                        continue
-                    raise provider_error(error, response.status_code)
-                response.raise_for_status()
-                async for chunk in chunks(response):
+            try:
+                async for chunk in response_chunks(request, tools, items, http):
                     kind = chunk.get("type")
                     if kind == "response.output_text.delta":
                         yield event("text", text=chunk["delta"])
                     elif kind in ("response.output_item.added", "response.output_item.done"):
                         check_item(chunk["item"], names)
-                    elif kind == "error":
-                        raise provider_error(chunk)
-                    elif kind in ("response.failed", "response.incomplete"):
+                    elif kind in ("error", "response.failed"):
                         failed = chunk.get("response") or {}
                         add_usage(usage, failed.get("usage") or {})
-                        if kind == "response.incomplete":
-                            raise RunError(
-                                "limit", "The model response did not complete", usage=usage
-                            )
-                        raise provider_error(failed.get("error"))
+                        error = (
+                            failed.get("error")
+                            if kind == "response.failed"
+                            else chunk.get("error", chunk)
+                        )
+                        limited = (
+                            chatgpt.limit_error(error)
+                            if request.provider_auth.kind == "chatgpt"
+                            else None
+                        )
+                        raise limited or provider_error(error)
+                    elif kind == "response.incomplete":
+                        add_usage(usage, (chunk.get("response") or {}).get("usage") or {})
+                        raise RunError("limit", "The model response did not complete", usage=usage)
                     elif kind == "response.completed":
                         completed = chunk["response"]
                 break
+            except Exception as error:
+                if subscription_limit is not None:
+                    raise RunError(
+                        "limit",
+                        str(subscription_limit) + " The API fallback failed.",
+                        **subscription_limit.details,
+                        api_key_fallback_failed=True,
+                    ) from None
+                if (
+                    not isinstance(error, RunError)
+                    or attempt
+                    or request.provider_auth.kind != "chatgpt"
+                    or not request.api_key_fallback
+                    or error.details.get("code") != "usage_limit_reached"
+                ):
+                    raise
+                # Resume the current turn with its tool results. Never replay an MCP write.
+                fallback_notice = str(error) + " I used the API key for this request.\n\n"
+                subscription_limit = error
+                request = request.model_copy(
+                    update={"provider_auth": ApiKeyAuth(), "api_key_fallback": False}
+                )
+                # The next request checks for an API key. Failure still reports the subscription limit.
         if completed is None or completed.get("status") != "completed":
             raise RunError("runtime", "The model stream ended without a complete response")
         add_usage(usage, completed.get("usage") or {})
@@ -131,7 +213,7 @@ async def conversation(
                 for part in item.get("content", [])
                 if part.get("type") == "output_text"
             )
-            yield event("final", text=answer, usage=usage)
+            yield event("final", text=fallback_notice + answer, usage=usage)
             return
         # Replay all output, including encrypted reasoning, without a response ID.
         items.extend(output)
@@ -169,13 +251,10 @@ async def conversation(
 
 
 async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RunError("auth", "Set OPENAI_API_KEY for the Responses runtime")
+    auth_headers(request)
     async with connect(request) as session:
         tools = await list_tools(session)
         async with httpx.AsyncClient(
-            headers={"Authorization": "Bearer " + key},
             timeout=request.timeout_s,
             follow_redirects=False,
         ) as http:

@@ -61,6 +61,7 @@ def parser() -> argparse.ArgumentParser:
     login.add_argument("--person")
     status = commands.add_parser("connectors").add_subparsers(dest="action", required=True)
     status.add_parser("status")
+    commands.add_parser("chatgpt").add_subparsers(dest="action", required=True).add_parser("status")
     return result
 
 
@@ -147,6 +148,18 @@ async def execute(args, config: Config) -> int:
                 print(
                     f"{row['name']}  {row['next_run_at'] or 'not scheduled'}  {row['last_status']}"
                 )
+        elif args.command == "chatgpt":
+            from illo.ledger.chatgpt import status
+
+            for row in await status(conn):
+                state = (
+                    "broken"
+                    if row["broken_at"]
+                    else "connected"
+                    if row["expires_at"] and not row["revoked_at"]
+                    else "missing"
+                )
+                print(f"{row['person']}  {state}  {row['expires_at'] or 'no expiry'}")
         elif args.command == "stats":
             counts = await ask_workflow.stats(conn)
             print("Cards sent for each person and day:")

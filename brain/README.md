@@ -40,6 +40,7 @@ The request sends this value as `reasoning.effort`.
 If the provider rejects that parameter, the loop retries once without it.
 The worker remembers that choice for its process lifetime. A new worker starts a new cache.
 Other HTTP failures do not trigger a retry.
+The ChatGPT mode below can make one explicitly allowed API-key retry after a subscription limit.
 
 The loop sends the system prompt as `instructions` on each request.
 It sets `store: false`, `max_output_tokens: 4096`, and `parallel_tool_calls: true`.
@@ -62,6 +63,105 @@ Current official API documentation checked on 2026-11-10:
 - [Function calling](https://developers.openai.com/api/docs/guides/function-calling)
 - [Streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses)
 - [Reasoning and stateless conversations](https://developers.openai.com/api/docs/guides/reasoning)
+
+### ChatGPT subscriptions
+
+The same `openai_responses` loop also supports `provider_auth.kind: chatgpt`.
+The main app owns sign-in, the encrypted grant, refresh, and credential selection.
+The brain receives this object over the private app-to-brain connection for one run:
+
+```json
+{"provider_auth":{"kind":"chatgpt","access_token":"<secret>","account_id":"<account>"},"api_key_fallback":false}
+```
+
+The token fields use secret types. Normal model dumps and representations hide them.
+The explicit wire serializer sends them through the HTTP request and the worker's standard input.
+No token enters a file, process argument, prompt, tool result, log, or exception message.
+The service removes credential echoes. The runtime refuses an echo before it can enter a tool call.
+`{"provider_auth":{"kind":"api_key"}}` uses the brain's `OPENAI_API_KEY` as before.
+Requests that omit `provider_auth` keep this API-key behavior.
+
+ChatGPT uses `https://chatgpt.com/backend-api/codex/responses`.
+Headers include `Authorization: Bearer <access_token>`, `chatgpt-account-id`, and `originator: illo-brain`.
+`OPENAI_BASE_URL` does not change the ChatGPT address. It applies only to API-key requests.
+The request includes `instructions`, `store: false`, `stream: true`, and `tool_choice: auto`.
+It omits the API-only `max_output_tokens` field.
+Reasoning options, function tools, encrypted reasoning, and function outputs use the same loop as the API-key path.
+Only Illo MCP functions enter the request. No provider tool or Codex CLI runs.
+
+The backend reports subscription exhaustion as HTTP 429 with `error.type: usage_limit_reached`.
+Illo also accepts that identifier in `error.code`, and in streamed errors.
+An integer `resets_at` gives the reset time as Unix seconds. Illo displays it in UTC.
+The run replies `Your ChatGPT limit is reached.` and adds that time when available.
+With `api_key_fallback: true`, the loop switches once to an explicit API-key request.
+It resumes the current turn with its existing tool outputs. It does not repeat completed MCP calls.
+The final answer reports the switch. A second provider failure ends the run.
+The same configured model must be available with the subscription and the API key.
+
+#### Sign-in protocol
+
+The main app first gives the person a one-use link under `/oauth/chatgpt/start`.
+Encrypted state binds the person. The ledger binds the DM, thread, ten-minute expiry, and one use.
+The app keeps the PKCE verifier encrypted on the server.
+It first requests a device code from `https://auth.openai.com/api/accounts/deviceauth/usercode`.
+The person opens `https://auth.openai.com/codex/device` and enters the code there.
+The app polls `/api/accounts/deviceauth/token` at the provider's interval, with a five-second minimum.
+HTTP 403 and 404 mean pending, as in the Codex source.
+After authorization, the endpoint supplies an authorization code and PKCE verifier.
+The app exchanges them at `https://auth.openai.com/oauth/token` with redirect `https://auth.openai.com/deviceauth/callback`.
+Illo limits the whole attempt to ten minutes. Codex CLI currently allows fifteen minutes for device sign-in.
+
+If device setup fails, the link redirects to the browser flow.
+The device page also offers `/oauth/chatgpt/paste` to switch to that flow.
+It uses `https://auth.openai.com/oauth/authorize`, client ID `app_EMoamEEZ73f0CkXaXp7hrann`, and PKCE S256.
+Scopes are `openid profile email offline_access`. No OpenAI connector tools are enabled.
+The current Codex browser client also asks for `api.connectors.read api.connectors.invoke`; Illo omits those scopes.
+The redirect is the current Codex loopback address: `http://127.0.0.1:1455/auth/callback`.
+The person pastes the failed browser address into the same DM and thread, as the only text.
+The gateway claims it before a brain run. Its payload filter removes callback addresses before any event write.
+The app sends the authorization-code exchange as form data. Refresh uses JSON, as in the current Codex client.
+Neither exchange retries a one-use code or token.
+
+The encrypted `connector_grants` secret holds the access token, refresh token, account ID, expiry, and plan when known.
+Token metadata comes only from the token endpoint, over HTTPS.
+The app reads account and plan claims from the ID token, and expiry from the access token or `expires_in`.
+It uses no fixed token lifetime. It refreshes within five minutes of expiry.
+A grant row lock serializes refresh across app processes. The rotation commits before a run starts.
+Run cancellation waits for that refresh transaction to finish.
+A refresh failure marks the grant broken and records `chatgpt:<person key>` with no provider text.
+The person gets one reconnect DM for that broken grant. A new sign-in resets the notice state.
+No refresh token or ID token enters the brain container.
+
+Protocol sources checked on 2026-11-10:
+
+- [Official Codex authentication guide](https://developers.openai.com/codex/auth), including device sign-in and automatic refresh.
+- [Current Codex source revision](https://github.com/openai/codex/commit/c37fd5665f55fa2b5accdf1d229855416ce696c1).
+- [Browser flow, scopes, redirect, and code exchange](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/login/src/server.rs).
+- [OAuth encoding](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/login/src/oauth/client.rs).
+- [Device flow and polling](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/login/src/device_code_auth.rs).
+- [Client ID, expiry window, refresh, and rotation errors](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/login/src/auth/manager.rs).
+- [Headers](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/login/src/auth/default_client.rs).
+- [ChatGPT backend address](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/model-provider-info/src/lib.rs).
+- [Responses request shape](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/codex-api/src/common.rs).
+- [Subscription limit status and reset field](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/codex-api/src/api_bridge.rs).
+- [Stream errors](https://github.com/openai/codex/blob/c37fd5665f55fa2b5accdf1d229855416ce696c1/codex-rs/codex-api/src/sse/responses_error.rs).
+- [Old Illo transport](https://github.com/Illospace/illospace/blob/legacy/brain/platform/integrations/openai_codex_client.py) and [old sign-in helpers](https://github.com/Illospace/illospace/blob/legacy/brain/platform/integrations/openai_codex_auth.py).
+
+These details are based on source and offline fakes. They are not a live ChatGPT check.
+The director must check the following with a real person's sign-in:
+
+- The public Codex client ID accepts Illo's device flow and its `illo-brain` originator.
+- The device permission works for that account. Pending responses use 403 or 404.
+- The browser fallback accepts the four identity scopes without OpenAI connector scopes.
+- The exact loopback redirect, form exchange, and JSON refresh work for this client.
+- Tokens supply the account claim, access-token expiry or `expires_in`, and a refresh token.
+- The configured model accepts the legacy `instructions` field and this stateless HTTP SSE shape.
+  Current Codex source puts base instructions in developer input messages; Illo keeps its existing Responses contract.
+- The endpoint accepts only Illo function tools, `store: false`, encrypted reasoning replay, and no `max_output_tokens`.
+- Subscription exhaustion supplies `usage_limit_reached` and optional `resets_at` as read from the source.
+- A rotated refresh token works on the next refresh, and an API retry accepts the same model and conversation items.
+
+The operator must check that the provider's terms allow this use. An API key is the alternative.
 
 ### Live check on 2026-11-10
 

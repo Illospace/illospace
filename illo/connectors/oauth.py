@@ -172,26 +172,26 @@ def callback_address(text: str, expected_url: str) -> str | None:
     return raw
 
 
-def redact_text(text: str, expected_url: str) -> str:
+def redact_text(
+    text: str, expected_url: str, replacement="[Google sign-in address removed]"
+) -> str:
     """Remove real callback addresses without discarding unrelated message text."""
     return re.sub(
         r"https?://[^\s<>|]+",
-        lambda match: (
-            "[Google sign-in address removed]"
-            if callback_address(match[0], expected_url)
-            else match[0]
-        ),
+        lambda match: replacement if callback_address(match[0], expected_url) else match[0],
         text,
     )
 
 
-def redact_payload(payload, expected_url: str):
+def redact_payload(payload, expected_url: str, replacement="[Google sign-in address removed]"):
     if isinstance(payload, str):
-        return redact_text(payload, expected_url)
+        return redact_text(payload, expected_url, replacement)
     if isinstance(payload, dict):
-        return {key: redact_payload(value, expected_url) for key, value in payload.items()}
+        return {
+            key: redact_payload(value, expected_url, replacement) for key, value in payload.items()
+        }
     if isinstance(payload, list):
-        return [redact_payload(value, expected_url) for value in payload]
+        return [redact_payload(value, expected_url, replacement) for value in payload]
     return payload
 
 

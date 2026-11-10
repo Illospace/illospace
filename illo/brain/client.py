@@ -7,11 +7,36 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+
+
+class ProviderAuth(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    kind: Literal["api_key", "chatgpt"] = "api_key"
+    access_token: SecretStr | None = None
+    account_id: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def valid_credential(self):
+        values = (self.access_token, self.account_id)
+        if self.kind == "chatgpt" and not all(v and v.get_secret_value() for v in values):
+            raise ValueError("ChatGPT needs an access token and an account ID")
+        if self.kind == "api_key" and any(v is not None for v in values):
+            raise ValueError("API-key mode uses only the brain's environment key")
+        return self
+
+    def wire(self):
+        if self.kind == "api_key":
+            return {"kind": "api_key"}
+        return {
+            "kind": "chatgpt",
+            "access_token": self.access_token.get_secret_value(),
+            "account_id": self.account_id.get_secret_value(),
+        }
 
 
 class RunRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     run_id: int
     system_prompt: str
     user_message: str
@@ -21,6 +46,13 @@ class RunRequest(BaseModel):
     model: str
     max_turns: int
     timeout_s: float
+    provider_auth: ProviderAuth = Field(default_factory=ProviderAuth, repr=False)
+    api_key_fallback: bool = False
+
+    def wire(self):
+        data = self.model_dump()
+        data["provider_auth"] = self.provider_auth.wire()
+        return data
 
 
 class BrainEvent(BaseModel):
@@ -30,6 +62,8 @@ class BrainEvent(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     category: Literal["auth", "timeout", "runtime", "limit"] = "runtime"
     code: str = "unknown"
+    resets_at: int | None = None
+    api_key_fallback_failed: bool = False
 
     def failure_reason(self) -> str:
         code = self.code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.code) else "unknown"
@@ -49,7 +83,7 @@ class BrainClient:
             async with client.stream(
                 "POST",
                 f"{self.url}/run",
-                json=request.model_dump(),
+                json=request.wire(),
                 headers={"X-Illo-Brain-Secret": self._secret},
             ) as response:
                 response.raise_for_status()

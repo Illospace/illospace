@@ -31,6 +31,9 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `stale_minutes.email` | Default: 1440. |
 | `brain.runtime` | Runtime sent to the brain service. Default: `claude`. |
 | `brain.model` | Model sent to the brain service. Default: `default`. |
+| `brain.auth` | `api_key` (default) or `chatgpt`. ChatGPT needs `openai_responses`. |
+| `brain.team_credential` | Active person key for runs with no person. Default: `default_owner`. |
+| `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 120. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Default: false. |
@@ -43,6 +46,31 @@ A channel adapter supplies mention and bot metadata from the channel API.
 Webhook, bot, and form text uses the `tainted` profile.
 A message from a person who is not in `people.yaml` starts no run.
 No Slack token is required to load these files or start the HTTP app.
+
+To use subscriptions, set these keys in `illo.yaml`:
+
+```yaml
+brain:
+  runtime: openai_responses
+  model: gpt-6.1-sol
+  auth: chatgpt
+  team_credential: ada
+  api_key_fallback: false
+```
+
+Use an active person key from your own `people.yaml` for `team_credential`.
+If `ILLO_BRAIN_RUNTIME` is set, set it to `openai_responses` too. Environment overrides still take priority.
+Each person sends `connect my ChatGPT` in their own Slack DM with Illo.
+Person DMs, agent requests, and person routines use that person's grant.
+Team channels, tainted runs, team routines, and signals use `team_credential`.
+A missing personal grant never selects another person's grant.
+The main app refreshes a token when it expires within five minutes.
+No grant means no run, unless `api_key_fallback` is `true`.
+A team run with no grant records a sensor error. The default owner gets at most one notice per hour.
+For a subscription limit, an allowed API retry resumes the current turn with its existing tool results.
+It does not repeat completed tool calls. The final answer says that the API key was used.
+The API key must exist in the brain's environment for this retry to work.
+Check that the provider's terms allow this use. An API key is the alternative.
 
 ## Other files
 

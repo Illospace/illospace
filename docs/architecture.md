@@ -50,6 +50,14 @@ Channels ──► Gateway ──► Ledger (Postgres)
 | **Brain** | One agent run for each event. A standard agent runtime in a container with no host mount, no shell tool, no file tool, and no web tool. It sees only the Illo tool server, through a token that is valid for that run. | `illo/brain/` (client and run manager), `brain/` (the sandbox service) |
 | **Tool server** | An MCP server for the brain. Each call passes three checks: scope, destination, risk. Each call writes one audit row. | `illo/tools/` |
 
+The `openai_responses` runtime supports each person's ChatGPT subscription and API keys.
+The main app keeps each ChatGPT grant encrypted in `connector_grants`, and refreshes it under a row lock.
+It sends only the access token and account ID to the brain for one run.
+Person requests use that person's grant. Runs with no person use `brain.team_credential`, or `default_owner`.
+The brain keeps the same Illo tool boundary in both modes. It stores no sign-in files.
+`brain.auth` defaults to `api_key`. Subscription mode requires an explicit choice.
+Check that the provider's terms allow this use. An API key is the alternative.
+
 Processes (Docker Compose, `deploy/compose.yaml`):
 - `postgres`: Postgres 16. It joins only the internal `db` network.
 - `illo`: one Python process (asyncio): the HTTP server, the Slack connection, the timers, the gateway, the tool server. It joins `db`, the internal `brainnet` network, and the default network for outbound traffic.

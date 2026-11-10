@@ -3,9 +3,21 @@
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
 type BrainEvent = dict[str, Any]
+
+
+class ApiKeyAuth(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    kind: Literal["api_key"] = "api_key"
+
+
+class ChatGPTAuth(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    kind: Literal["chatgpt"] = "chatgpt"
+    access_token: SecretStr
+    account_id: SecretStr
 
 
 class RunRequest(BaseModel):
@@ -24,10 +36,26 @@ class RunRequest(BaseModel):
     )
     max_turns: int = Field(default=8, ge=1, le=50)
     timeout_s: float = Field(default=120, gt=0, le=3600)
+    provider_auth: ApiKeyAuth | ChatGPTAuth = Field(
+        default_factory=ApiKeyAuth, discriminator="kind", repr=False
+    )
+    api_key_fallback: bool = False
+
+    @model_validator(mode="after")
+    def auth_runtime(self):
+        if self.provider_auth.kind == "chatgpt" and self.runtime != "openai_responses":
+            raise ValueError("ChatGPT sign-in needs the openai_responses runtime")
+        return self
 
     def wire(self) -> dict:
         data = self.model_dump(mode="json")
         data["mcp_token"] = self.mcp_token.get_secret_value()
+        if isinstance(self.provider_auth, ChatGPTAuth):
+            data["provider_auth"] = {
+                "kind": "chatgpt",
+                "access_token": self.provider_auth.access_token.get_secret_value(),
+                "account_id": self.provider_auth.account_id.get_secret_value(),
+            }
         return data
 
 
