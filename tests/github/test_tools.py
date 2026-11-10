@@ -193,3 +193,26 @@ async def test_work_recovers_status_after_slack_failure(
     async with ctx.pool.connection() as conn:
         assert not await kv.get(conn, f"github:pending-status:{lane_id}")
         assert (await one(conn, "SELECT slack_ts FROM lanes WHERE id=%s", (lane_id,)))["slack_ts"]
+
+
+async def test_refused_signature_gives_the_reason(rpc, rpc_token, github_client, caplog):
+    _, token = rpc_token
+    refused = await call(
+        rpc, token, "github_create_issue", {**CREATE, "signature": "generation: unreadable image"}
+    )
+    assert refused["decision"] == "deny"
+    assert "no colon" in refused["reason"]
+    assert not [c for c in github_client.calls if c["method"] == "create_issue"]
+    assert "Tool github_create_issue failed" in caplog.text
+
+
+async def test_unexpected_failure_hides_the_cause(rpc, rpc_token, github_client, monkeypatch):
+    _, token = rpc_token
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(github_client, "search_issues", broken)
+    failed = await call(rpc, token, "github_create_issue", CREATE)
+    assert failed["decision"] == "deny"
+    assert failed["reason"] == "The tool failed"

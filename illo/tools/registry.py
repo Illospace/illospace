@@ -1,6 +1,7 @@
 """Discover tool families and execute each call through the authority checks."""
 
 import importlib
+import logging
 import pkgutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -14,6 +15,12 @@ from illo.tools._format import Compact, json_text
 from illo.tools.checks import PROFILE_NAMES, Decision, check, scope
 
 MAX_RESULT_CHARS = 12_000
+
+log = logging.getLogger(__name__)
+
+
+class Refusal(ValueError):
+    """A tool refuses a call. The model may read the reason, so the text must be fixed."""
 
 
 RUN_LIMITS = {
@@ -194,9 +201,15 @@ class Registry:
                                     (ctx.run["id"],),
                                 )
                                 ctx.run["personal_read"] = True
-                    except Exception:
+                    except Exception as exc:
                         # Keep secrets out of errors and keep the audit row after a rollback.
                         decision, reason = "deny", "The tool failed"
+                        if isinstance(exc, Refusal):
+                            # A fixed text from the tool. The model can correct the call.
+                            reason = f"The tool refused the call: {exc}"
+                        log.warning(
+                            "Tool %s failed in run %s", name, ctx.run["id"], exc_info=True
+                        )
                         if tool.on_error:
                             await tool.on_error(ctx, validated)
         await audit.write(

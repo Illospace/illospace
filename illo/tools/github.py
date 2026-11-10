@@ -13,7 +13,7 @@ from illo.ledger import kv, people
 from illo.tools._format import data_text, github, github_detail
 from illo.tools._format import rows as format_rows
 from illo.tools.checks import Decision, check
-from illo.tools.registry import Arguments, Tool, ToolContext
+from illo.tools.registry import Arguments, Refusal, Tool, ToolContext
 
 # These tools use only team repositories. Outside text never grants personal access.
 PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request"})
@@ -43,7 +43,11 @@ class SearchArgs(Arguments):
 class CreateArgs(RepoArgs):
     title: str = Field(min_length=1, max_length=256)
     body: str = Field(max_length=60000)
-    signature: str = Field(min_length=3, max_length=200)
+    signature: str = Field(
+        min_length=3,
+        max_length=200,
+        description="A short stable phrase. Words only: no colon, quote, or backslash.",
+    )
     labels: list[str] = Field(default_factory=list)
     force_new_reason: str | None = Field(default=None, min_length=5, max_length=1000)
 
@@ -108,7 +112,7 @@ async def write_preflight(ctx: ToolContext, args: dict) -> Decision:
 async def search(ctx: ToolContext, args: dict):
     # GitHub combines repeated repo qualifiers with OR. Reject scope overrides.
     if re.search(r"\b(?:repo|org|user):", args["query"], re.I):
-        raise ValueError("Use the repository argument to select a repository")
+        raise Refusal("Use the repository argument to select a repository")
     repos = (
         [repository(ctx.app, args["repo"])]
         if args["repo"]
@@ -136,7 +140,9 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
     repo = repository(ctx.app, args["repo"])
     signature = " ".join(args["signature"].split())
     if not signature or any(c in signature for c in '\\"\n\r') or re.search(r"\b\w+:", signature):
-        raise ValueError("Use a short phrase for the signature")
+        raise Refusal(
+            "Use a short phrase for the signature: words only, with no colon, quote, or backslash"
+        )
     await ledger.lock_repository(ctx.conn, repo.lower())
     matches = await ctx.app.github_client.search_issues(
         f'"{signature}" is:issue', repo=repo, state="all"
