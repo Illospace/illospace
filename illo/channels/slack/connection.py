@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from illo.app import AppContext
 
+from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
@@ -94,6 +95,7 @@ async def setup(ctx: "AppContext") -> None:
         log.info("Slack is off. Set ILLO_SLACK_APP_TOKEN and ILLO_SLACK_BOT_TOKEN to connect.")
         return
     ctx.slack_client = AsyncWebClient(token=ctx.config.slack_bot_token.get_secret_value())
+    ctx.slack_client.retry_handlers.append(AsyncRateLimitErrorRetryHandler(max_retry_count=1))
     connection = SlackConnection(ctx)
     # The scheduler cancels and awaits this task before the pool closes.
     ctx.scheduler.tasks.append(asyncio.create_task(connection.run()))
