@@ -127,3 +127,46 @@ async def test_network_call_holds_no_ask_locks(app, slack_client):
     slack_client.chat_postMessage = check_locks
     await relay.tick(ctx)
     assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 2
+
+
+async def test_missing_slack_ids_cannot_starve_valid_recipient(app, slack_client):
+    ctx = app.state.ctx
+    await ctx.scheduler.close()
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET slack_id=NULL WHERE key='ada'")
+    missing = [await _ask(ctx) for _ in range(20)]
+    valid = await _ask(ctx, requester="chloe")
+    await relay.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        assert (await one(conn, "SELECT * FROM asks WHERE id=%s", (valid,)))["delivery_state"] == "acked"
+        rows = await (await conn.execute(
+            "SELECT delivery_state FROM asks WHERE id=ANY(%s)", (missing,)
+        )).fetchall()
+    assert all(r["delivery_state"] == "failed" for r in rows)
+    assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 1
+
+
+async def test_failed_attempts_are_fair_and_stop_at_five(app, slack_client):
+    ctx = app.state.ctx
+    await ctx.scheduler.close()
+    failing = [await _ask(ctx) for _ in range(20)]
+    valid = await _ask(ctx, requester="chloe")
+    original = slack_client.conversations_open
+
+    async def fail_ada(**kwargs):
+        if kwargs["users"] == "U_ACME_ADA":
+            raise RuntimeError("The route is unavailable")
+        return await original(**kwargs)
+
+    slack_client.conversations_open = fail_ada
+    await relay.tick(ctx)
+    await relay.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        assert (await one(conn, "SELECT * FROM asks WHERE id=%s", (valid,)))["delivery_state"] == "acked"
+    for _ in range(5):
+        await relay.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        rows = await (await conn.execute(
+            "SELECT * FROM asks WHERE id=ANY(%s)", (failing,)
+        )).fetchall()
+    assert all(r["delivery_state"] == "failed" and r["delivery_attempts"] == 5 for r in rows)
