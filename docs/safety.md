@@ -118,7 +118,7 @@ Email requires one aligned DMARC pass from the selected receiving server.
 
 **Bad case.** An attacker takes over Illo. With SSH keys for each machine, the attacker also takes over each machine.
 
-**Code.** The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential. The collectors in `collectors/` call out to Illo with an MCP token, and they open no inbound port. They send lane facts, not tool output. `work_start`, which files the GitHub ticket, is in progress.
+**Code.** The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential. The collectors in `collectors/` call out to Illo with an MCP token, and they open no inbound port. Their private reports can include prompts and assistant text. `share = "team"` permits team reports; `tests/safety/test_review_s17_collector_privacy.py` checks visibility and credential filters.
 
 **Tests.** `tests/safety/test_rule_08_09_collectors.py`, `tests/collectors/`.
 

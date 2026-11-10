@@ -90,6 +90,7 @@ def test_codex_notify_does_not_invent_session_end_or_permission_events():
         "repo",
         "machine",
         "links",
+        "visibility",
     }
     payload["type"] = "approval-requested"
     assert lane_from_hook("codex", payload) is None

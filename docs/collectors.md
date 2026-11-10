@@ -21,7 +21,7 @@ They do not import the `illo` package. Copy the whole `collectors/` folder when 
 3. Create an Illo token on the Illo host:
 
    ```sh
-   illo token create --person sam --label acme-laptop
+   illo token create --person sam --label acme-laptop --scope collector
    ```
 
 4. Store the token on the collector machine at `~/.config/illo/token`. Set mode `600`.
@@ -71,6 +71,7 @@ Environment values override the TOML file. All paths can use `~`.
 | `projects` | `ILLO_PROJECTS` | All projects; environment form is a JSON object |
 | `owner` | `ILLO_OWNER` | Owner of the Illo token |
 | `environment_id` | `ILLO_T3_ENVIRONMENT_ID` | Local thread links; set it for cross-device links |
+| `share` | `ILLO_SHARE` | `private`; use `team` to share reports with the team |
 
 Use HTTPS for remote servers. Local loopback HTTP is supported.
 The program disables proxy environment values and does not follow redirects with a bearer token.
@@ -104,7 +105,9 @@ An empty batch still reports liveness. Every 10 minutes, the collector refreshes
 The collector sends the title, state, last assistant text, links, repository, and machine.
 It cuts the summary to 500 characters. It sends no attachment, tool result, file change, or command output field.
 It removes code blocks and common credentials from text. This filter cannot detect all private prose.
-Select only projects whose short summaries the team may read.
+Reports use private visibility by default. Set `share = "team"` only for sessions that the team may read.
+The next report also changes an existing lane to the configured visibility.
+Use the token owner's person for private reports. Another owner requires `share = "team"`.
 
 | T3 state | Lane state |
 | --- | --- |
@@ -191,6 +194,9 @@ Failed background reports do not stop the agent. Hooks do not provide the collec
 | Codex notify `agent-turn-complete` | `unknown`; the session can continue |
 
 The title uses the first prompt when the hook supplies it. Otherwise, it uses the folder name.
+Hook reports use private visibility by default, including the prompt and last assistant text.
+Set `"share": "team"` in `~/.config/illo/hooks.json` to share them with the team.
+Use a token with the `collector` scope. These hooks do not need the `agent` scope.
 The repository comes from `git remote get-url origin`. The worker never reads a transcript.
 Current Codex notify documents only `agent-turn-complete`. It does not expose permission or session-end events.
 Use T3 if you need complete state and answer delivery.

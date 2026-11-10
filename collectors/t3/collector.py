@@ -47,6 +47,11 @@ class Config:
     projects: dict[str, str] = field(default_factory=dict)
     owner: str | None = None
     environment_id: str | None = None
+    share: str = "private"
+
+    def __post_init__(self):
+        if self.share not in {"private", "team"}:
+            raise CollectorError("Set share to private or team.")
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
@@ -63,6 +68,7 @@ class Config:
             "ILLO_PROJECTS": "projects",
             "ILLO_OWNER": "owner",
             "ILLO_T3_ENVIRONMENT_ID": "environment_id",
+            "ILLO_SHARE": "share",
         }
         for env, key in names.items():
             if env in os.environ:
@@ -401,6 +407,7 @@ class Collector:
             "links": [thread.link],
             "repo": self.config.projects.get(thread.project),
             "machine": self.config.machine,
+            "visibility": "team" if self.config.share == "team" else "private",
         }
         if self.config.owner:
             lane["owner"] = self.config.owner

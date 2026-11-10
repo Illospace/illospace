@@ -43,11 +43,12 @@ def clean(value: Any, limit: int = 500, secrets: tuple[str, ...] = ()) -> str:
         text,
     )
     text = re.sub(
-        r"\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{12,}|github_pat_[\w]+|AKIA[A-Z0-9]{16})\b",
+        r"\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{12,}|github_pat_[\w]+|AKIA[A-Z0-9]{16}"
+        r"|xox[bp]-[\w-]+|AIza[\w-]{35}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b",
         "[redacted]",
         text,
     )
-    text = re.sub(r"https?://[^\s<>]+", _clean_url, text)
+    text = re.sub(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>]+", _clean_url, text)
     return text[:limit]
 
 

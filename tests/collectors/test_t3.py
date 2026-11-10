@@ -429,6 +429,7 @@ def test_rule_09_payload_has_only_permitted_fields_and_no_machine_credential(set
         "links",
         "repo",
         "machine",
+        "visibility",
     }
     assert len(lane["summary"]) <= 500
     assert all(
