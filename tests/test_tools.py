@@ -30,7 +30,7 @@ def test_profile_lists_only_registered_tools(profile):
     run = authority(profile=profile)
     names = {t["name"] for t in registry.list_tools(run)}
     assert names <= registry.tools.keys()
-    assert "people_list" in names
+    assert ("people_list" in names) == (profile != "tainted")
 
 
 def test_scope_denies_missing_grant():

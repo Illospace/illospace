@@ -33,7 +33,7 @@ def register(registry) -> None:
             rules_list,
             "Read standing rules",
             profiles=frozenset(
-                {"person_dm", "team_channel", "tainted", "routine", "agent_request"}
+                {"person_dm", "team_channel", "routine", "agent_request"}
             ),
         )
     )

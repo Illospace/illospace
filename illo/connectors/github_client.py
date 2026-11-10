@@ -212,6 +212,24 @@ class GitHubClient:
             "POST", f"/repos/{repo}/issues/{number}/assignees", json={"assignees": assignees}
         )
 
+    async def ensure_label(self, repo: str, name: str) -> None:
+        path = f"/repos/{repo}/labels/{quote(name, safe='')}"
+        try:
+            await self._request("GET", path)
+            return
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+        try:
+            await self._request(
+                "POST", f"/repos/{repo}/labels", json={"name": name, "color": "ededed"}
+            )
+        except GitHubError as exc:
+            if exc.status != 422:
+                raise
+            # Another caller may have created the label. Verify that it exists.
+            await self._request("GET", path)
+
     async def add_labels(self, repo: str, number: int, labels: list[str]) -> list[dict]:
         return await self._request(
             "POST", f"/repos/{repo}/issues/{number}/labels", json={"labels": labels}

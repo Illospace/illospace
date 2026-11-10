@@ -38,7 +38,7 @@ async def test_tainted_run_hides_personal_tools_and_private_lanes(app, rpc):
     result = (await rpc(token, "tools/call", {"name": "lanes_search"})).json()["result"][
         "structuredContent"
     ]
-    assert result["result"] == []
+    assert result["decision"] == "deny"
 
 
 async def test_outsider_has_no_team_ledger_authority(app, rpc):

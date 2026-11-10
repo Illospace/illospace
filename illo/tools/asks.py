@@ -213,7 +213,7 @@ def register(registry):
                 handler,
                 name.replace("_", " "),
                 arguments,
-                profiles=profiles,
+                profiles=profiles - {"tainted"},
                 preflight=answer_preflight if name == "asks_answer" else None,
             )
         )

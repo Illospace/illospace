@@ -68,7 +68,7 @@ async def test_unknown_dm_no_authority_no_answer(replay, channel, fake_brain):
             False,
         ),
         (
-            {"channel": "slack", "kind": "message", "payload": {"channel_id": "C_ACME_ALERTS"}},
+            {"channel": "slack", "kind": "message", "sender": "U_ACME_ADA", "payload": {"channel_id": "C_ACME_ALERTS"}},
             "team",
             "team_channel",
             False,
@@ -144,7 +144,7 @@ async def test_agent_principal_comes_from_client_token(conn, workspace, ada):
 
 async def test_channel_listen_and_off(conn, workspace):
     event = InboundEvent(
-        channel="slack", kind="message", external_id="x", payload={"channel_id": "C_ACME_TEAM"}
+        channel="slack", kind="message", sender="U_ACME_ADA", external_id="x", payload={"channel_id": "C_ACME_TEAM"}
     )
     assert await resolve(conn, event, workspace) is None
     event.payload["mentioned"] = True

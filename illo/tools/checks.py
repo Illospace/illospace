@@ -51,7 +51,10 @@ INTERNAL_TOOLS = frozenset(
 GRANT_PROFILES = {
     "person_dm": READ_TOOLS | TICKET_TOOLS | PERSONAL_TOOLS | INTERNAL_TOOLS,
     "team_channel": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_read_thread"},
-    "tainted": READ_TOOLS - {"lanes_mine"} | TICKET_TOOLS,
+    "tainted": frozenset({
+        "github_search_issues", "github_get_issue", "github_create_issue", "claims_take",
+        "web_read_public_page", "connectors_list", "connectors_call", "skills_get",
+    }),
     "routine": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_send_dm"},
     "agent_request": READ_TOOLS
     | TICKET_TOOLS
@@ -88,6 +91,9 @@ def in_grant(run: dict, tool) -> bool:
 
     A tool family states `profiles` on its own tools, so two builders never edit one list.
     """
+    # Outside text has one closed grant, including tools with explicit profiles.
+    if effective_profile(run) == "tainted" and tool.name not in GRANT_PROFILES["tainted"]:
+        return False
     profiles = getattr(tool, "profiles", None)
     if profiles is not None:
         return effective_profile(run) in profiles

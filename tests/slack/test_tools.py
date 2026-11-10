@@ -42,7 +42,7 @@ async def test_read_only_configured_channel_or_current_dm(app, rpc, rpc_token, s
         ({"channel": "C_UNKNOWN", "thread_ts": "100.1"}, "deny"),
     ]:
         assert (await call(rpc, token, "slack_read_thread", args))["decision"] == decision
-    assert len(slack_client.calls) == 1
+    assert len(slack_client.calls) == 2
 
 
 async def test_current_dm_thread_access(intake, message, fake_brain, slack_client):

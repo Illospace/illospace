@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from illo.gateway.principal import Authority
 
 from illo.channels.slack import actions
+from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context
@@ -31,6 +32,7 @@ class SlackIntake:
     ):
         self.ctx, self.bot_id = ctx, bot_id
         self.bot_identity = bot_identity
+        self.team_id: str | None = None
         self.clip_timeout, self.clip_poll = clip_timeout, clip_poll
         self.adapter = SlackAdapter(ctx, self.prepare_context)
         ctx.gateway.register("slack", self.adapter)
@@ -80,7 +82,21 @@ class SlackIntake:
         )
         if not dm and not configured:
             return
+        if configured and not dm:
+            try:
+                private = await channel_private(self.ctx, channel)
+            except Exception:
+                private = True
+                log.error("Slack could not verify channel privacy")
+            if private:
+                await hide_index(self.ctx, channel)
+                return {"decision": "ignore"}
         thread = raw.get("thread_ts")
+        outside_workspace = False
+        if raw.get("user_team"):
+            if not self.team_id:
+                self.team_id = (await self.ctx.slack_client.auth_test())["team_id"]
+            outside_workspace = raw["user_team"] != self.team_id
         mentioned = kind == "app_mention" or f"<@{self.bot_id}>" in raw.get("text", "")
         if thread and not dm:
             async with self.ctx.pool.connection() as conn:
@@ -96,6 +112,7 @@ class SlackIntake:
             reply_to=thread if dm else thread or ts,
             payload={
                 "channel_id": channel,
+                "outside_workspace": outside_workspace,
                 "message_ts": ts,
                 "thread_ts": thread,
                 "mentioned": mentioned,
@@ -137,6 +154,9 @@ class SlackIntake:
     async def index(self, event: InboundEvent, channel_name: str) -> None:
         client = self.ctx.slack_client
         try:
+            if await channel_private(self.ctx, event.payload["channel_id"]):
+                await hide_index(self.ctx, event.payload["channel_id"])
+                return
             link = await client.chat_getPermalink(
                 channel=event.payload["channel_id"], message_ts=event.payload["message_ts"]
             )

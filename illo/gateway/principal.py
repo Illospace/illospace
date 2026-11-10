@@ -16,8 +16,11 @@ class Authority:
 async def resolve(conn, event, workspace) -> Authority | None:
     """Only this gateway function creates authority for an inbound event."""
     if event.channel == "slack":
+        person = (
+            None if event.payload.get("outside_workspace")
+            else await people.by_slack_id(conn, event.sender)
+        )
         if event.kind in {"dm", "message.im"}:
-            person = await people.by_slack_id(conn, event.sender)
             if not person or event.payload.get("bot") or event.payload.get("webhook"):
                 return None
             return Authority(f"person:{person['key']}", "person_dm", person["id"])
@@ -30,6 +33,8 @@ async def resolve(conn, event, workspace) -> Authority | None:
         if channel.mode == "listen" and not event.payload.get("mentioned"):
             return None
         tainted = any(event.payload.get(key) for key in ("bot", "bot_id", "webhook", "form"))
+        if not tainted and not person:
+            return None
         return Authority("team", "tainted" if tainted else "team_channel", tainted=tainted)
     if event.channel == "email":
         person = await people.by_email(conn, event.sender)

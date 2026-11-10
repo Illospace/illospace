@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import Field
 
+from illo.channels.slack.access import channel_private, require_member
+
 if TYPE_CHECKING:
     from illo.app import AppContext
 
@@ -62,7 +64,18 @@ async def post_handler(ctx: ToolContext, args: dict) -> dict:
 async def read_handler(ctx: ToolContext, args: dict) -> dict:
     if not ctx.app.slack_client:
         raise ValueError("Slack is not connected")
-    if not configured(ctx.app, args["channel"]):
+    private = True
+    if configured(ctx.app, args["channel"]):
+        private = await channel_private(ctx.app, args["channel"])
+        if private:
+            person = (
+                await people.get(ctx.conn, ctx.principal[7:])
+                if ctx.principal.startswith("person:") else None
+            )
+            if not person or not person["slack_id"] or person["id"] != ctx.run["person_id"]:
+                raise ValueError("A private channel needs a run of its member")
+            await require_member(ctx.app, args["channel"], person["slack_id"])
+    else:
         event = await one(ctx.conn, "SELECT * FROM events WHERE id=%s", (ctx.run["event_id"],))
         data = event["payload"] if event and event["channel"] == "slack" else {}
         payload = data.get("payload", {})
@@ -76,7 +89,10 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
     response = await ctx.app.slack_client.conversations_replies(
         channel=args["channel"], ts=args["thread_ts"], limit=50
     )
-    return {"messages": response.get("messages", []), "has_more": response.get("has_more", False)}
+    return {
+        "messages": response.get("messages", []), "has_more": response.get("has_more", False),
+        "visibility": "private" if private else "team",
+    }
 
 
 async def perform_dm(app: "AppContext", draft: dict) -> dict:

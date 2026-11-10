@@ -45,7 +45,7 @@ def test_taint_and_outsider_narrow_a_tool_profile():
     assert scope(_run("person_dm", tainted=True), tool).outcome == "deny"
     assert scope(_run("person_dm", principal="outsider"), tool).outcome == "deny"
     open_tool = _tool(profiles=frozenset({"tainted", "outsider"}))
-    assert scope(_run("team_channel", tainted=True, principal="team"), open_tool).outcome == "allow"
+    assert scope(_run("team_channel", tainted=True, principal="team"), open_tool).outcome == "deny"
     assert scope(_run("tainted", tainted=True, principal="outsider"), open_tool).outcome == "allow"
 
 

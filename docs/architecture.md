@@ -72,11 +72,19 @@ Each rule has a test in `tests/safety/` that names the rule number.
 9. Illo holds no credential for the machines where agents work. It starts work with a GitHub ticket. A collector pulls the answers.
 10. The brain runtime has no shell tool, no file tool, and no web tool of its own. A test lists the tools that the model really sees.
 
+A tainted run keeps the `team` principal. Its exact tool set is
+`github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`,
+`web_read_public_page`, `connectors_list`, `connectors_call`, and `skills_get`.
+It can read issues only from configured repositories, allowed connector results,
+and public pages. A connector tool must have `tainted: true` and risk `read`.
+It cannot read lanes, asks, people, rules, notes, search results, Slack, or pull requests.
+It files unassigned tickets from outside text. A person assigns them.
+
 ### The three checks of the tool server
 
 Each tool declares, in code: `name`, `family`, `risk`, `destination` (a function of the arguments), `personal` (true if it reads a personal connector), and its JSON schema.
 
-- **Check 1, scope.** The grant of the run lists the tool names that the principal may call. Profiles: `person_dm` (a person in a DM), `team_channel` (the team as principal, small set), `tainted` (starts from outside text: read tools for public data, the ticket tools, no personal tool), `routine`, `agent_request` (a request from an agent token, acts for the person who owns the token).
+- **Check 1, scope.** The grant of the run lists the tool names that the principal may call. Profiles: `person_dm` (a person in a DM), `team_channel` (the team as principal, small set), `tainted` (starts from outside text; the exact tool set below), `routine`, `agent_request` (a request from an agent token, acts for the person who owns the token).
 - **Check 2, destination.** A tool that writes names its destination: `person:<key>`, `channel:<id>`, `github:<owner>/<repo>`, `outside:<address>`, `ledger`. When the run has `personal_read = true`, each destination other than `person:<principal>` and `ledger` gives the result `draft`.
 - **Check 3, risk.** `read` → allow. `write_internal` (a ticket, a note, a lane update, a message to a team member) → allow. `send_outside` → draft. There is no tool for a destructive action.
 
