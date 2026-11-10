@@ -204,12 +204,13 @@ class Registry:
                     except Exception as exc:
                         # Keep secrets out of errors and keep the audit row after a rollback.
                         decision, reason = "deny", "The tool failed"
+                        detail = type(exc).__name__
                         if isinstance(exc, Refusal):
                             # A fixed text from the tool. The model can correct the call.
                             reason = f"The tool refused the call: {exc}"
-                        log.warning(
-                            "Tool %s failed in run %s", name, ctx.run["id"], exc_info=True
-                        )
+                            detail = f"Refusal: {exc}"
+                        # An exception text can hold a credential. Log only its type.
+                        log.warning("Tool %s failed in run %s (%s)", name, ctx.run["id"], detail)
                         if tool.on_error:
                             await tool.on_error(ctx, validated)
         await audit.write(

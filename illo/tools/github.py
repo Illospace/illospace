@@ -46,7 +46,7 @@ class CreateArgs(RepoArgs):
     signature: str = Field(
         min_length=3,
         max_length=200,
-        description="A short stable phrase. Words only: no colon, quote, or backslash.",
+        description="A short stable phrase with no colon, quote, or backslash.",
     )
     labels: list[str] = Field(default_factory=list)
     force_new_reason: str | None = Field(default=None, min_length=5, max_length=1000)
@@ -139,9 +139,9 @@ async def get_pull(ctx: ToolContext, args: dict) -> dict:
 async def create_issue(ctx: ToolContext, args: dict) -> dict:
     repo = repository(ctx.app, args["repo"])
     signature = " ".join(args["signature"].split())
-    if not signature or any(c in signature for c in '\\"\n\r') or re.search(r"\b\w+:", signature):
+    if not signature or any(c in signature for c in '\\":\n\r'):
         raise Refusal(
-            "Use a short phrase for the signature: words only, with no colon, quote, or backslash"
+            "Use a short phrase for the signature, with no colon, quote, or backslash"
         )
     await ledger.lock_repository(ctx.conn, repo.lower())
     matches = await ctx.app.github_client.search_issues(

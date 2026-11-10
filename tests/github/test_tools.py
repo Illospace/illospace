@@ -206,13 +206,27 @@ async def test_refused_signature_gives_the_reason(rpc, rpc_token, github_client,
     assert "Tool github_create_issue failed" in caplog.text
 
 
-async def test_unexpected_failure_hides_the_cause(rpc, rpc_token, github_client, monkeypatch):
+async def test_unexpected_failure_hides_the_cause(
+    rpc, rpc_token, github_client, monkeypatch, caplog
+):
     _, token = rpc_token
 
     async def broken(*args, **kwargs):
-        raise RuntimeError("secret detail")
+        raise RuntimeError("Illegal header value b'Bearer synthetic-secret-token'")
 
     monkeypatch.setattr(github_client, "search_issues", broken)
     failed = await call(rpc, token, "github_create_issue", CREATE)
     assert failed["decision"] == "deny"
     assert failed["reason"] == "The tool failed"
+    # The server log names the tool and the error type. It never has the error text.
+    assert "Tool github_create_issue failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "synthetic-secret-token" not in caplog.text
+
+
+@pytest.mark.parametrize("signature", ["generation : unreadable", ": generation", "a:b"])
+async def test_each_colon_in_a_signature_is_refused(rpc, rpc_token, github_client, signature):
+    _, token = rpc_token
+    refused = await call(rpc, token, "github_create_issue", {**CREATE, "signature": signature})
+    assert refused["decision"] == "deny"
+    assert "no colon" in refused["reason"]
