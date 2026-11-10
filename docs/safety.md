@@ -57,6 +57,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - A connector call sends its arguments to `outside:<key>`. After a personal read it is a draft, and `call_connector` in `illo/tools/connectors.py` refuses a direct call.
 - `read_page` in `illo/tools/web.py` refuses a public page after a personal read.
 - An ask without a lane is private to its owner and its requester (`get` and `list_open` in `illo/ledger/asks.py`). Its decision item is private too (`decision` in `illo/ledger/ask_workflow.py`).
+- Both ask creation tools refuse a private lane when the ask owner does not own that lane.
 - A private Slack channel starts no run and enters no index (`SlackIntake.receive` in `illo/channels/slack/intake.py`). `slack_read_thread` reads it only for a member, with a live membership check (`require_member` in `illo/channels/slack/access.py`).
 - A person routine with personal data sends its answer to another destination only as a draft (`RoutineAdapter.deliver_final` in `illo/routines/scheduler.py`).
 
@@ -100,7 +101,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `Gateway.context_authority` in `illo/gateway/dispatch.py` also marks a Slack run tainted when its thread context has a bot or an unknown user (`read_context` in `illo/channels/slack/threads.py`). An unknown author shows as `Outside user (<id>)`.
 - `GRANT_PROFILES["tainted"]` in `illo/tools/checks.py` is the exact tool set: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, `skills_get`. `in_grant` refuses every other tool, even one that names the profile.
 - `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server, not the model, sends the default owner one DM for each such ticket.
-- `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine.
+- `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine. The minute timer deletes model claims older than 24 hours.
 - `read_page` lets a tainted run read only the first URL of the event text, once.
 - `resolve` in `illo/tools/connectors.py` gives a tainted run only a remote tool with `tainted: true` and risk `read`.
 - `build` in `illo/brain/prompts.py` gives an outsider run no team rules and no skills.
@@ -116,6 +117,8 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 - `resolve` in `illo/gateway/principal.py` returns no authority for an unknown DM sender. `Gateway.receive` in `illo/gateway/dispatch.py` stops there, before any claim, direct action, or run.
 - In a configured channel, a human sender who is not in `people.yaml` starts no run. A Slack Connect user from another workspace counts as unknown, even with a mapped id.
+- Email needs an explicit trusted receiver or `topmost`; a blank setting disables email.
+- A non-ASCII sender address or a defective From header gives no email authority.
 - An email sender needs one aligned DMARC pass from the trusted receiving server (`authenticated` in `illo/channels/email/parser.py`). Any other sender is an outsider. `unknown_sender` in `illo/channels/email/__init__.py` takes an outsider's email before a run.
 
 **Tests.** `tests/safety/test_rule_07_unknown_dm.py`, `tests/safety/test_rule_07_slack_intake.py`, `tests/safety/test_rule_07_email.py`, `tests/safety/test_review_s02_slack_sender.py`, `tests/safety/test_review_s09_rule_07_email_auth.py`, `tests/test_gateway.py`.
@@ -128,9 +131,12 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - `answer_with_rule` in `illo/ledger/asks.py` and `matches` and `matching_option` in `illo/ledger/rules.py`. A card rule stores the option id, label, and detail. All three must match. An old rule matches only one option with the exact label.
+- Migration `0503_rules_remove_unscoped.sql` removes old non-file rules that lack the lane source or repository key.
 - A card rule keeps the lane source, the repository, and the requester fixed, also when they are absent (`handle` in `illo/asks/actions.py`).
 - A rule answer has no `answer_text`. The rule travels as `rule_text`.
+- An approved model answer records `answered_via=approved_draft`; the collector names the person who approved it.
 - `asks_answer` has risk `send_outside`. A model answer is always a draft for the ask owner. The card shows the question, the option, and the full text. `answer_preflight` in `illo/tools/asks.py` refuses an ask of another owner.
+- Both ask creation tools refuse hidden format controls in the question, options, and proof.
 - An ask card shows the host of each proof link, not a label from the agent. It names the token and its person (`illo/asks/cards.py`).
 - On the machine, `deliver_answer` in `collectors/t3/collector.py` refuses a rule answer with free text or with an option that the agent did not propose.
 
@@ -176,7 +182,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 - **An untainted run can read hostile text through a tool.** Examples: an issue body, a web page, a mail, a connector result. The run keeps its full grant. Only the prompt tells the model to treat that text as data. Code still turns each write to another destination into a draft after a personal or private read. Before such a read, a person DM run can file, comment on, and assign tickets in private repositories, create asks, start work, send DMs, and post in a channel, within the run caps.
 - **A model answer can be wrong.** A draft in a person's DM can say something false or something that a hostile text put there. The code shows the full text. The person must read each draft before they tap Send.
 - **Email trust depends on the receiving server.** The server must remove incoming `Authentication-Results` headers that claim its identity.
-- **Collector filters are not complete.** `clean` removes common credentials. It cannot find all private text. Use `share = "team"` only for work that the team may read.
+- **Collector filters are not complete.** `clean` removes common credentials, including Slack app and refresh tokens, Stripe, GitLab, npm, and named AWS secrets. It cannot find all private text. Use `share = "team"` only for work that the team may read.
 - **Slack posts have no hourly cap.** Each bot post in a `coordinator` channel can start a run. `run_limits.max_concurrent` limits only the runs at the same time.
 
 ## Limits
@@ -194,7 +200,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 All tool calls of one run together stop at `brain.max_turns` (default 12). The run also stops at `brain.timeout_s` (default 120 seconds).
 
 **Calls of one MCP token** (`illo/ledger/mcp.py`):
-- 20 open asks for each owner.
+- 20 open asks and 30 new asks per hour for each owner.
 - 60 new signals in one hour. A duplicate signal does not count.
 - 60 `illo_submit` requests that start a run, in one hour. A `preserve_knowledge` save and a replay do not count.
 

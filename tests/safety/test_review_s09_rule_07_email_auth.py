@@ -57,12 +57,12 @@ def test_rule_07_ambiguous_or_unaligned_results_are_not_authenticated(result):
         (
             "Authentication-Results: mx.acme.example; dmarc=pass header.from=example.com\r\n",
             None,
-            True,
+            False,
         ),
         (
             "Authentication-Results: mx.acme.example; dmarc=pass header.from=example.com\r\n",
             "",
-            True,
+            False,
         ),
         (
             "Authentication-Results: MX.ACME.EXAMPLE; DMARC=PASS HEADER.FROM=EXAMPLE.COM\r\n",

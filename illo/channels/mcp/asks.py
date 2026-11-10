@@ -40,7 +40,6 @@ async def create(ctx, args: dict) -> dict:
     if existing:
         return answer(existing)
     person = await owner(ctx, args["owner"])
-    await mcp.check_open_ask_limit(ctx.conn, ctx.token["id"], person["id"])
     lane = None
     if args["lane"]:
         ref = args["lane"]
@@ -56,7 +55,10 @@ async def create(ctx, args: dict) -> dict:
                 title=ref["external_id"],
                 owner_person_id=ctx.token["person_id"],
                 machine=ctx.token["label"],
+                visibility="private",
             )
+    if lane and lane["visibility"] == "private" and lane["owner_person_id"] != person["id"]:
+        raise ValueError("The lane is not visible to the owner")
     row = await asks.create(
         ctx.conn,
         owner_person_id=person["id"],

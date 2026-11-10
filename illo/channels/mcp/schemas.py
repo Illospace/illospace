@@ -1,6 +1,7 @@
 """Validate agent calls before they can change the ledger."""
 
 import re
+import unicodedata
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -124,6 +125,12 @@ class Option(Arguments):
     detail: str = ""
 
 
+def check_ask_text(value: str) -> None:
+    """Refuse hidden format controls before an ask can reach a card."""
+    if any(unicodedata.category(char) == "Cf" for char in value):
+        raise ValueError("Ask text cannot contain a format control")
+
+
 class AskCreate(Arguments):
     lane: LaneRef | None = None
     kind: Literal["decision", "action", "review", "reminder"] = "decision"
@@ -145,6 +152,7 @@ class AskCreate(Arguments):
 
     @model_validator(mode="after")
     def check_options(self):
+        check_ask_text(self.model_dump_json())
         ids = [o.id for o in self.options]
         if len(set(ids)) != len(ids) or (
             self.recommended is not None and self.recommended not in ids

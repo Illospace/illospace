@@ -78,7 +78,7 @@ async def test_rule_08_model_answer_waits_for_owner_approval(
     assert (await agent.call("ask_pull"))["answers"] == []
     await drafts.handle(ctx, ada, click)
     answer = (await agent.call("ask_pull"))["answers"][0]
-    assert answer["answered_via"] == "person" and answer["answer_text"] == text
+    assert answer["answered_via"] == "approved_draft" and answer["answer_text"] == text
 
 
 async def test_rule_08_model_cannot_draft_another_owners_answer(app, rpc, rpc_token):

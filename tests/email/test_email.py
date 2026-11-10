@@ -52,10 +52,11 @@ async def test_plain_sender_authentication(conn, workspace, auth, trusted):
     assert event.text.strip() == "Read the active lanes."
 
 
-def test_untrusted_receiving_server_and_topmost_default():
+def test_untrusted_receiving_server_and_explicit_topmost():
     raw = raw_mail()
     assert not parse_message(raw, authserv_id="another.example").sender
-    assert parse_message(raw, authserv_id=None).sender == "ada@example.com"
+    assert not parse_message(raw, authserv_id=None).sender
+    assert parse_message(raw, authserv_id="topmost").sender == "ada@example.com"
 
 
 @pytest.mark.parametrize(

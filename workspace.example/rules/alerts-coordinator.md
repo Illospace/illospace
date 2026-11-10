@@ -16,7 +16,7 @@ Edit this file to match your team. Keep the steps in this order.
    • Lead: the contact form sends a new prospect.
    • Noise: a duplicate post, a test, a resolved alert, or a chat between people. Do nothing else. Answer one line: "No action: <the reason>."
 
-2. Take a claim with `claims_take`. The key must be the same each time the same message comes: the alert id or the dedupe key when the message has one, else `<type>:<the first 60 characters of the message>`. If the claim is taken, stop. Another run handles this message.
+2. Take a claim with `claims_take`. The key must be the same each time the same message comes: `<YYYY-MM-DD>:<alert id or dedupe key>` when the message has one, else `<YYYY-MM-DD>:<type>:<the first 60 characters of the message>`. Use the current date. If the claim is taken, stop. Another run handles this message.
 
 3. For a customer report or a machine alert:
    • Write a stable signature: the error type, the service, and the failing step. Do not put times, ids, or counts in it. Example: `export-worker: S3 timeout on upload`.

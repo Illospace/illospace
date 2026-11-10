@@ -3,9 +3,10 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from illo.asks.service import is_live
+from illo.channels.mcp.schemas import check_ask_text
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, lanes, mcp, people
 from illo.routines.digest import build_digest, snapshot
@@ -43,6 +44,11 @@ class CreateArgs(Arguments):
     expires_at: str | None = None
     allow_rule: bool = True
     permission: bool = False
+
+    @model_validator(mode="after")
+    def visible_text(self):
+        check_ask_text(self.model_dump_json())
+        return self
 
 
 class AnswerArgs(GetArgs):
@@ -90,8 +96,11 @@ async def asks_create(ctx, args):
     if ctx.run["profile"] == "agent_request":
         requester_token_id = await mcp.requester_token_for_run(ctx.conn, ctx.run["id"])
     ask = await asks.create(
-        ctx.conn, owner_person_id=owner["id"], requester_person_id=ctx.run["person_id"],
-        requester_token_id=requester_token_id, **args
+        ctx.conn,
+        owner_person_id=owner["id"],
+        requester_person_id=ctx.run["person_id"],
+        requester_token_id=requester_token_id,
+        **args,
     )
     return {"ask_id": ask["id"], "state": ask["state"]}
 
@@ -121,17 +130,19 @@ async def asks_answer(ctx, args):
         or ask["owner_person_id"] != ctx.run["person_id"]
         or not await is_live(ctx.conn, ask)
     ):
-        return {"answered": False}
+        raise ValueError("The ask is no longer open for this owner")
     answered = await asks.answer(
         ctx.conn,
         ask["id"],
         person_id=ctx.run["person_id"],
         option=args["option"],
         text=args["text"],
+        via="approved_draft",
     )
-    if answered:
-        await ledger.decision(ctx.conn, answered)
-    return {"answered": bool(answered)}
+    if not answered:
+        raise ValueError("The ask cannot accept this answer")
+    await ledger.decision(ctx.conn, answered)
+    return {"answered": True}
 
 
 async def asks_answer_with_rule(ctx, args):

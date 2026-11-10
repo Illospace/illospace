@@ -15,6 +15,13 @@ async def take(ctx: ToolContext, args: dict) -> bool:
     return await claims.take(ctx.conn, "model:" + args["key"], ctx.run["id"], args["note"])
 
 
+async def expire_model_claims(conn) -> None:
+    """Keep a model claim for at most 24 hours. Preserve server claims."""
+    await conn.execute(
+        "DELETE FROM claims WHERE key LIKE 'model:%' AND created_at < now()-interval '24 hours'"
+    )
+
+
 def register(registry) -> None:
     # A claim writes no outside text and reads no personal data.
     registry.add(

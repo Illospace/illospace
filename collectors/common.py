@@ -44,7 +44,13 @@ def clean(value: Any, limit: int = 500, secrets: tuple[str, ...] = ()) -> str:
     )
     text = re.sub(
         r"\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{12,}|github_pat_[\w]+|AKIA[A-Z0-9]{16}"
-        r"|xox[bp]-[\w-]+|AIza[\w-]{35}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b",
+        r"|xoxe[.-][\w.-]+|xox[a-z]-[\w-]+|xapp-[\w-]+"
+        r"|[sr]k_(?:live|test)_[\w]+|glpat-[\w-]+|npm_[\w]+|AIza[\w-]{35}|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b",
+        "[redacted]",
+        text,
+    )
+    text = re.sub(
+        r"""(?i)\baws_secret_access_key["']?\s*[:=]\s*["']?[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])""",
         "[redacted]",
         text,
     )

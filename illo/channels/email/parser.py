@@ -31,7 +31,11 @@ class EmailText(PageText):
 
 def aligned(domain: str, from_domain: str) -> bool:
     """Use exact alignment. Do not guess a registrable domain without a suffix list."""
-    return domain.lower().rstrip(".") == from_domain.lower().rstrip(".")
+    return (
+        domain.isascii()
+        and from_domain.isascii()
+        and domain.lower().rstrip(".") == from_domain.lower().rstrip(".")
+    )
 
 
 def auth_results(header: str) -> list[list[str]]:
@@ -85,16 +89,23 @@ def authenticated(message, sender: str, authserv_id: str | None) -> bool:
     """Trust one aligned DMARC pass from the selected receiving server.
 
     The receiver must strip incoming results that claim its own identity.
-    Without a configured identity, use only the topmost header.
+    The explicit value topmost trusts only the first header.
     """
-    if not sender or "@" not in sender:
+    authserv_id = (authserv_id or "").strip().lower()
+    if not authserv_id or not sender or "@" not in sender:
         return False
-    for header in message.get_all("Authentication-Results", []):
+    for name, header in message.raw_items():
+        if name.lower() != "authentication-results":
+            continue
+        # RFC 8601 results use raw ASCII syntax, never RFC 2047 decoding.
+        header = re.sub(r"\r?\n[ \t]+", " ", header)
+        if "=?" in header or "\r" in header or "\n" in header:
+            return False
         try:
-            sections = auth_results(str(header))
+            sections = auth_results(header)
         except ValueError:
             return False
-        if authserv_id and sections[0] != [authserv_id.lower()]:
+        if authserv_id != "topmost" and sections[0] != [authserv_id]:
             continue
         results = [part for part in sections[1:] if part[:2] == ["dmarc", "="]]
         count = sum(
@@ -119,6 +130,8 @@ def clean_header(value: str, limit: int = 998) -> str:
 
 
 def mailbox(value: str) -> str:
+    if not value.isascii():
+        raise ValueError("Use an ASCII email address")
     clean_header(value, 320)
     addresses = getaddresses([value])
     if len(addresses) != 1 or not addresses[0][1] or "@" not in addresses[0][1]:
@@ -135,8 +148,16 @@ def parse_message(
     if len(raw) > max_bytes:
         raise ValueError("The email is too large")
     message = BytesParser(policy=policy.default).parsebytes(raw)
-    addresses = getaddresses(message.get_all("From", []))
-    sender = addresses[0][1].lower() if len(addresses) == 1 and not message.defects else ""
+    from_headers = message.get_all("From", [])
+    addresses = getaddresses(from_headers)
+    sender = (
+        addresses[0][1]
+        if len(from_headers) == 1
+        and not from_headers[0].defects
+        and len(addresses) == 1
+        and not message.defects
+        else ""
+    )
     try:
         sender = mailbox(sender)
     except ValueError:

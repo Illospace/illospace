@@ -3,7 +3,7 @@
 from psycopg.types.json import Jsonb
 
 from illo.db import Connection, all_rows, one
-from illo.ledger import rules
+from illo.ledger import mcp, rules
 
 
 async def create(
@@ -39,6 +39,10 @@ async def create(
         recommended_option is not None and recommended_option not in ids
     ):
         raise ValueError("Use unique option IDs and a valid recommended option")
+    if requester_token_id is not None:
+        # Both direct MCP calls and model tools must hold the same token lock.
+        await conn.execute("SELECT id FROM tokens WHERE id=%s FOR UPDATE", (requester_token_id,))
+        await mcp.check_open_ask_limit(conn, requester_token_id, owner_person_id)
     return await one(
         conn,
         """
@@ -109,20 +113,23 @@ async def answer(
     person_id: int,
     option: str | None = None,
     text: str | None = None,
+    via: str = "person",
 ) -> dict | None:
     """Only the owner can answer an open, unexpired ask."""
+    if via not in {"person", "approved_draft"}:
+        raise ValueError("Use a person answer or an approved draft")
     if option is None and not text:
         raise ValueError("Choose an option or give an answer")
     return await one(
         conn,
         """
         UPDATE asks SET state='answered',answer_option=%s,answer_text=%s,answered_by_person_id=%s,
-          answered_via='person',answered_at=now(),delivery_state='pending'
+          answered_via=%s,answered_at=now(),delivery_state='pending'
         WHERE id=%s AND owner_person_id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now())
           AND (%s::text IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements(options) o WHERE o->>'id'=%s))
         RETURNING *
     """,
-        (option, text, person_id, ask_id, person_id, option, option),
+        (option, text, person_id, via, ask_id, person_id, option, option),
     )
 
 
