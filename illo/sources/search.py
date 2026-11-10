@@ -93,7 +93,8 @@ async def _items(conn, principal, query, kinds, limit):
     A long question from a person or an agent must still find something.
     """
     rows = await _item_rows(conn, principal, query, kinds, limit, STRICT_QUERY, 1.0)
-    if len(rows) < limit:
+    explicit_syntax = re.search(r'(?:^|\s)-\S|"|(?:^|\s)(?:OR|or)(?=\s|$)', query)
+    if len(rows) < limit and not explicit_syntax:
         seen = {r["source_ref"] for r in rows}
         relaxed = await _item_rows(conn, principal, query, kinds, limit, RELAXED_QUERY, 0.5)
         rows += [r for r in relaxed if r["source_ref"] not in seen][: limit - len(rows)]

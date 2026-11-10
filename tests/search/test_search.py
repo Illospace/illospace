@@ -210,3 +210,18 @@ async def test_long_question_falls_back_to_any_word(app):
     refs = [h.source_ref for h in hits]
     assert "saved:relaxed-1" in refs
     assert refs.index("saved:relaxed-1") == 0
+
+
+@pytest.mark.parametrize(("query", "titles", "expected"), [
+    ("runner -deprecated", ["runner", "deprecated", "runner deprecated"], ["runner"]),
+    ('"foo bar"', ["foo bar", "foo gap bar", "foo", "bar"], ["foo bar"]),
+    ("foo OR bar", ["foo", "bar", "or"], ["bar", "foo"]),
+    ("foo or bar", ["foo", "bar", "or"], ["bar", "foo"]),
+])
+async def test_explicit_search_syntax_has_no_fallback(app, query, titles, expected):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        for index, title in enumerate(titles):
+            await items.upsert(conn, source_ref=f"saved:{index}", title=title)
+    hits = await search.search(ctx, "team", query, kinds=["saved"])
+    assert sorted(h.title for h in hits) == expected
