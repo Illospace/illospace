@@ -31,7 +31,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `stale_minutes.email` | Default: 1440. |
 | `brain.runtime` | Runtime sent to the brain service. Default: `claude`. |
 | `brain.model` | Model sent to the brain service. Default: `default`. |
-| `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–100. The brain service accepts at most 50. |
+| `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 120. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Default: false. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |

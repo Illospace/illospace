@@ -109,7 +109,7 @@ class DigestConfig(Model):
 class BrainConfig(Model):
     runtime: str = "claude"
     model: str = "default"
-    max_turns: int = Field(default=12, ge=1, le=100)
+    max_turns: int = Field(default=12, ge=1, le=50)
     timeout_s: float = Field(default=120, gt=0, le=3600)
 
 
