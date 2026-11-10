@@ -53,3 +53,18 @@ async def test_existing_rows_get_parts_index_and_runner_skips_repeat(pool, tmp_p
             await conn.execute("RESET search_path")
             await conn.execute("DROP SCHEMA IF EXISTS ranking_upgrade CASCADE")
             await conn.commit()
+
+
+async def test_the_search_function_keeps_its_own_search_path(pool):
+    """A backup restore runs with an empty search path. The index build must still work."""
+    async with pool.connection() as conn:
+        row = await (await conn.execute(
+            "SELECT proconfig FROM pg_proc WHERE proname='illo_search_vector'"
+        )).fetchone()
+        assert any(value.startswith("search_path=") for value in (row["proconfig"] or []))
+        async with conn.transaction(force_rollback=True):
+            await conn.execute("SET LOCAL search_path = pg_catalog")
+            value = await (await conn.execute(
+                "SELECT public.illo_search_vector('Title','','mira.orbit@example.com')::text AS vector"
+            )).fetchone()
+            assert "'orbit'" in value["vector"]
