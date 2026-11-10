@@ -108,8 +108,22 @@ class RunManager:
         except chatgpt.TemporaryRefresh:
             return chatgpt.TEMPORARY
         if auth is None:
-            return (
-                chatgpt.MISSING if not authority.tainted and authority.person_id is not None else ""
+            if authority.tainted or authority.profile == "tainted":
+                async with ctx.pool.connection() as conn:
+                    row = await runs.create(
+                        conn, principal=authority.principal, person_id=authority.person_id,
+                        profile=authority.profile, tainted=True, event_id=event_id,
+                        runtime=runtime, model=model,
+                    )
+                    await runs.finish(
+                        conn, row["id"], usage={"skipped": "no_model_credential"}
+                    )
+                return (
+                    "Illo did not run the model for this event. "
+                    "No model credential is allowed for tainted runs."
+                )
+            return chatgpt.MISSING if authority.person_id is not None else (
+                "Illo did not run the model for this event. No model credential is available."
             )
         async with ctx.pool.connection() as conn:
             row = await runs.create(

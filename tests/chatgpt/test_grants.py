@@ -192,3 +192,23 @@ async def test_failed_run_does_not_rollback_rotation(chatgpt_app, replay):
         row = await grants.load(conn, person["id"])
         assert json.loads(vault(ctx).decrypt(row["secret"]))["refresh_token"] == "rotated-refresh"
         assert (await one(conn, "SELECT status FROM runs"))["status"] == "failed"
+
+
+async def test_s5_skipped_tainted_run_has_text_and_a_ledger_record(
+    chatgpt_app, replay, fake_brain
+):
+    app, _ = chatgpt_app
+    result = await replay(
+        kind="channel", text="An outside alert.",
+        payload={"channel_id": "C_ACME_ALERTS", "bot": True},
+    )
+    assert result["text"] == (
+        "Illo did not run the model for this event. "
+        "No model credential is allowed for tainted runs."
+    )
+    assert not fake_brain.requests
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs WHERE event_id=%s", (result["event_id"],))
+    assert row["tainted"] and row["status"] == "completed"
+    assert row["usage"]["skipped"] == "no_model_credential"
+    assert row["ended_at"] and row["token_hash"] is None
