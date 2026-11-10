@@ -58,7 +58,6 @@ GRANT_PROFILES = {
     "routine": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_send_dm"},
     "agent_request": READ_TOOLS
     | TICKET_TOOLS
-    | PERSONAL_TOOLS
     | {"asks_create", "notes_propose", "connectors_list", "connectors_call"},
 }
 
@@ -107,7 +106,7 @@ def scope(run: dict, tool) -> Decision:
     if tool.personal and (
         run["tainted"]
         or not run["principal"].startswith("person:")
-        or run["profile"] not in {"person_dm", "agent_request"}
+        or run["profile"] != "person_dm"
     ):
         return Decision("deny", "A personal tool needs an untainted run of its owner")
     return Decision("allow", "The tool is in the run grant")
