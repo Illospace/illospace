@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Build and check a separate install. Never use a team's environment file.
 set -euo pipefail
+smoke_port=${ILLO_SMOKE_PORT:-18484}
+# A test must not inherit a team's credentials or maintenance settings.
+for variable in "${!ILLO_@}" POSTGRES_PASSWORD ANTHROPIC_API_KEY ANTHROPIC_BASE_URL OPENAI_API_KEY OPENAI_BASE_URL; do
+    unset "$variable"
+done
 # shellcheck source=deploy/common.sh
 source "$(dirname -- "$0")/common.sh"
 need docker
@@ -13,7 +18,7 @@ export ILLO_BACKUP_DIR=$tmp/backups
 export ILLO_PROJECT_NAME
 ILLO_PROJECT_NAME=illo-test-$(python3 -c 'import secrets; print(secrets.token_hex(5))')
 export ILLO_IMAGE_PREFIX=$ILLO_PROJECT_NAME
-export ILLO_PORT=${ILLO_SMOKE_PORT:-18484}
+export ILLO_PORT=$smoke_port
 export ILLO_BRAIN_RUNTIME=echo
 export ILLO_REVISION
 ILLO_REVISION=$(git -C "$ILLO_ROOT" rev-parse HEAD)

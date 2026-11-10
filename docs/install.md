@@ -4,6 +4,8 @@ Use one Linux host with Git, Bash, Python 3.9 or later, and Docker Engine.
 Give the Docker user access to Docker before you start.
 Allow at least 3 GB of memory and outbound HTTPS.
 No public address is required for Slack Socket Mode.
+Docker allows outbound traffic on the default network.
+Use a host firewall or an egress proxy if you need a strict provider allowlist.
 
 ## Install
 
