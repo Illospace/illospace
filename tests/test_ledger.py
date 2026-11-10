@@ -164,7 +164,8 @@ async def test_rule_match_use_remove(conn, ada, ben):
     assert (await rules.match_ask(conn, ask))["id"] == rule["id"]
     answer = await asks.answer_with_rule(conn, ask["id"], rule["id"])
     assert answer["answer_option"] == "ok" and answer["answered_via"] == "rule"
-    assert answer["rule_id"] == rule["id"] and answer["answer_text"] is None
+    assert answer["rule_id"] == rule["id"]
+    assert answer["answer_text"] == 'Answered by the rule "Use the cache" of Ada.'
     assert (await rules.list_rules(conn, principal="person:ada"))[0]["uses"] == 1
     assert await rules.list_rules(conn, principal="person:ben") == []
     assert not await rules.remove(conn, rule["id"], ben["id"])

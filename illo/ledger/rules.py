@@ -54,7 +54,7 @@ def matches(rule: dict, ask: dict, lane: dict | None = None) -> bool:
     for key, value in rule["match"].items():
         if key == "question_pattern":
             if not isinstance(value, str) or not fnmatchcase(
-                ask["question"].casefold(), value.casefold()
+                " ".join(ask["question"].casefold().split()), " ".join(value.casefold().split())
             ):
                 return False
         elif key not in fields or fields[key] != value:
@@ -74,7 +74,9 @@ async def match_ask(conn: Connection, ask: dict) -> dict | None:
         "SELECT * FROM rules WHERE owner_person_id=%s AND removed_at IS NULL ORDER BY id",
         (ask["owner_person_id"],),
     )
-    labels = {o["label"] for o in ask["options"]}
+    if not ask.get("allow_rule", True):
+        return None
+    labels = {value for o in ask["options"] for value in (o["label"], o["id"])}
     return next(
         (r for r in rows if matches(r, ask, lane) and r["answer_option_label"] in labels), None
     )

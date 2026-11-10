@@ -9,7 +9,7 @@ from illo.ledger import rules
 async def create(
     conn: Connection,
     *,
-    owner_person_id: int,
+    owner_person_id: int | None = None,
     question: str,
     kind: str = "decision",
     options: list[dict] | None = None,
@@ -21,6 +21,9 @@ async def create(
     due_at=None,
     expires_at=None,
     source_ref: str | None = None,
+    area: str | None = None,
+    allow_rule: bool = True,
+    permission: bool = False,
 ) -> dict:
     """Create an open ask. Option IDs must be unique and the recommendation must exist."""
     options = options or []
@@ -40,8 +43,9 @@ async def create(
         conn,
         """
         INSERT INTO asks (owner_person_id,question,kind,options,recommended_option,proof,lane_id,
-                          requester_token_id,requester_person_id,due_at,expires_at,source_ref)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
+                          requester_token_id,requester_person_id,due_at,expires_at,source_ref,
+                          area,allow_rule,permission)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
     """,
         (
             owner_person_id,
@@ -56,6 +60,9 @@ async def create(
             due_at,
             expires_at,
             source_ref,
+            area,
+            allow_rule,
+            permission,
         ),
     )
 
@@ -125,25 +132,47 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
         rule = await one(
             conn, "SELECT * FROM rules WHERE id=%s AND removed_at IS NULL FOR UPDATE", (rule_id,)
         )
-        if not ask or not rule:
+        if not ask or not rule or not ask["allow_rule"]:
             return None
         lane = (
-            await one(conn, "SELECT * FROM lanes WHERE id=%s", (ask["lane_id"],))
+            await one(conn, "SELECT * FROM lanes WHERE id=%s FOR SHARE", (ask["lane_id"],))
             if ask["lane_id"]
             else None
         )
+        if (
+            ask["source_ref"]
+            and lane
+            and (lane["state"] in {"done", "failed"} or lane["closed_at"])
+        ):
+            return None
         option = next(
-            (o["id"] for o in ask["options"] if o["label"] == rule["answer_option_label"]), None
+            (
+                o["id"]
+                for o in ask["options"]
+                if rule["answer_option_label"] in {o["label"], o["id"]}
+            ),
+            None,
         )
         if option is None or not rules.matches(rule, ask, lane):
+            return None
+        owner = await one(
+            conn, "SELECT name FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
+        )
+        if not owner:
             return None
         row = await one(
             conn,
             """
             UPDATE asks SET state='answered',answer_option=%s,answered_via='rule',rule_id=%s,
+              answer_text=%s,
               answered_at=now(),delivery_state='pending' WHERE id=%s RETURNING *
         """,
-            (option, rule_id, ask_id),
+            (
+                option,
+                rule_id,
+                f'Answered by the rule "{rule["text"]}" of {owner["name"]}.',
+                ask_id,
+            ),
         )
         await rules.count_use(conn, rule_id)
         return row
@@ -166,7 +195,8 @@ async def expire(conn: Connection) -> int:
         "UPDATE asks SET state='expired' WHERE state='open' AND expires_at<=now()"
     )
     await conn.execute("""
-        UPDATE asks SET delivery_state='failed' WHERE state='answered' AND expires_at<=now()
+        UPDATE asks SET delivery_state='failed' WHERE state='answered'
+          AND (expires_at<=now() OR answered_at<=now()-interval '30 minutes')
           AND delivery_state IN ('pending','delivered')
     """)
     return cursor.rowcount
@@ -174,6 +204,7 @@ async def expire(conn: Connection) -> int:
 
 async def pull(conn: Connection, token_id: int) -> list[dict]:
     """Give unacked answers again until the requester acknowledges them."""
+    await expire(conn)
     return await all_rows(
         conn,
         """
@@ -187,6 +218,7 @@ async def pull(conn: Connection, token_id: int) -> list[dict]:
 
 async def ack(conn: Connection, ask_id: int, token_id: int) -> bool:
     """Only the requester can acknowledge an answer."""
+    await expire(conn)
     return bool(
         await one(
             conn,

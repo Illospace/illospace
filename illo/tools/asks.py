@@ -1,9 +1,19 @@
-"""Ask read tools. The asks builder adds routing and write tools."""
+"""Ask tools use the authenticated person for answers and cancellations."""
+
+from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
-from illo.ledger import asks, people
+from illo.asks.service import is_live
+from illo.ledger import ask_workflow as ledger
+from illo.ledger import asks, lanes, people
+from illo.routines.digest import build_digest, snapshot
 from illo.tools.registry import Arguments, Tool
+
+READ_PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request"})
+PERSON_PROFILES = frozenset({"person_dm"})
+RULE_PROFILES = frozenset({"person_dm", "agent_request"})
 
 
 class ListArgs(Arguments):
@@ -14,8 +24,36 @@ class GetArgs(Arguments):
     id: int = Field(gt=0)
 
 
+class Option(Arguments):
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_.-]+$")
+    label: str = Field(min_length=1, max_length=200)
+    detail: str = Field(default="", max_length=1000)
+
+
+class CreateArgs(Arguments):
+    owner: str = Field(min_length=1)
+    question: str = Field(min_length=1, max_length=2000)
+    kind: Literal["decision", "action", "review", "reminder"] = "decision"
+    options: list[Option] = Field(default_factory=list, max_length=25)
+    recommended_option: str | None = None
+    proof: dict = Field(default_factory=dict)
+    lane_id: int | None = Field(default=None, gt=0)
+    due_at: str | None = None
+    expires_at: str | None = None
+    allow_rule: bool = True
+    permission: bool = False
+
+
+class AnswerArgs(GetArgs):
+    option: str | None = None
+    text: str | None = Field(default=None, min_length=1, max_length=10000)
+
+
+class RuleAnswerArgs(GetArgs):
+    rule_id: int = Field(gt=0)
+
+
 async def asks_list(ctx, args):
-    """List visible open asks, optionally for one owner."""
     person = await people.get(ctx.conn, args["owner"]) if args["owner"] else None
     if args["owner"] and not person:
         return []
@@ -25,25 +63,133 @@ async def asks_list(ctx, args):
 
 
 async def asks_get(ctx, args):
-    """Read one ask with the lane visibility filter."""
     return await asks.get(ctx.conn, args["id"], principal=ctx.principal)
 
 
-def register(registry) -> None:
-    """Register the foundation read tools."""
-    for name, handler, arguments in (
-        ("asks_list", asks_list, ListArgs),
-        ("asks_get", asks_get, GetArgs),
+def date(value):
+    if value is None:
+        return None
+    result = datetime.fromisoformat(value)
+    if result.tzinfo is None:
+        raise ValueError("Use a time with a time zone")
+    return result
+
+
+async def asks_create(ctx, args):
+    args = dict(args)
+    owner = await people.get(ctx.conn, args.pop("owner"))
+    if not owner:
+        raise ValueError("The owner is missing or inactive")
+    if args["lane_id"]:
+        lane = await lanes.get(ctx.conn, args["lane_id"], principal=ctx.principal)
+        if not lane or (lane["visibility"] == "private" and lane["owner_person_id"] != owner["id"]):
+            raise ValueError("The lane is not visible to the owner")
+    args["due_at"], args["expires_at"] = date(args["due_at"]), date(args["expires_at"])
+    ask = await asks.create(
+        ctx.conn, owner_person_id=owner["id"], requester_person_id=ctx.run["person_id"], **args
+    )
+    return {"ask_id": ask["id"], "state": ask["state"]}
+
+
+async def asks_answer(ctx, args):
+    ask = await ledger.lock_ask(ctx.conn, args["id"])
+    if (
+        not ask
+        or ask["owner_person_id"] != ctx.run["person_id"]
+        or not await is_live(ctx.conn, ask)
     ):
+        return {"answered": False}
+    answered = await asks.answer(
+        ctx.conn,
+        ask["id"],
+        person_id=ctx.run["person_id"],
+        option=args["option"],
+        text=args["text"],
+    )
+    if answered:
+        await ledger.decision(ctx.conn, answered)
+    return {"answered": bool(answered)}
+
+
+async def asks_answer_with_rule(ctx, args):
+    ask = await asks.get(ctx.conn, args["id"], principal=ctx.principal)
+    if not ask or not await is_live(ctx.conn, ask):
+        return {"answered": False}
+    answered = await asks.answer_with_rule(ctx.conn, args["id"], args["rule_id"])
+    if answered:
+        await ledger.decision(ctx.conn, answered)
+    return {"answered": bool(answered), "answer": answered}
+
+
+async def asks_cancel_mine(ctx, args):
+    ask = await ledger.lock_ask(ctx.conn, args["id"])
+    if not ask or ctx.run["person_id"] not in {ask["owner_person_id"], ask["requester_person_id"]}:
+        return {"cancelled": False}
+    return {"cancelled": await asks.cancel(ctx.conn, ask["id"])}
+
+
+async def asks_digest(ctx, args):
+    person = await people.get(ctx.conn, ctx.principal[7:])
+    return {"blocks": build_digest(await snapshot(ctx.conn, person, ctx.app))}
+
+
+def register(registry):
+    # Tainted reads use ctx.principal, which hides all other people's private lanes.
+    declarations = [
+        ("asks_list", asks_list, ListArgs, "read", READ_PROFILES, lambda a: "ledger"),
+        ("asks_get", asks_get, GetArgs, "read", READ_PROFILES, lambda a: "ledger"),
+        (
+            "asks_create",
+            asks_create,
+            CreateArgs,
+            "write_internal",
+            frozenset({"person_dm", "team_channel", "routine", "agent_request"}),
+            lambda a: f"person:{a['owner']}",
+        ),
+        (
+            "asks_answer",
+            asks_answer,
+            AnswerArgs,
+            "write_internal",
+            PERSON_PROFILES,
+            lambda a: "ledger",
+        ),
+        (
+            "asks_answer_with_rule",
+            asks_answer_with_rule,
+            RuleAnswerArgs,
+            "write_internal",
+            RULE_PROFILES,
+            lambda a: "ledger",
+        ),
+        (
+            "asks_cancel_mine",
+            asks_cancel_mine,
+            GetArgs,
+            "write_internal",
+            PERSON_PROFILES,
+            lambda a: "ledger",
+        ),
+        (
+            "asks_digest",
+            asks_digest,
+            Arguments,
+            "read",
+            frozenset({"person_dm"}),
+            lambda a: "ledger",
+        ),
+    ]
+    for name, handler, arguments, risk, profiles, destination in declarations:
         registry.add(
             Tool(
                 name,
                 "asks",
-                "read",
-                lambda a: "ledger",
+                risk,
+                destination,
                 False,
                 handler,
-                "Read visible asks",
+                name.replace("_", " "),
                 arguments,
+                profiles=profiles,
             )
         )

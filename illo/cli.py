@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from illo.config import Config
 from illo.db import migrate, one
-from illo.ledger import people, tokens
+from illo.ledger import ask_workflow, people, tokens
 from illo.log import configure
 from illo.vault import Vault, delete, get_names
 from illo.workspace import load_workspace
@@ -29,6 +29,7 @@ def parser() -> argparse.ArgumentParser:
     archive.add_argument("file")
     archive.add_argument("--dry-run", action="store_true")
     commands.add_parser("doctor")
+    commands.add_parser("stats")
     commands.add_parser("reload")
     commands.add_parser("routines").add_subparsers(dest="action", required=True).add_parser("list")
     serve = commands.add_parser("serve")
@@ -130,6 +131,14 @@ async def execute(args, config: Config) -> int:
                 print(
                     f"{row['name']}  {row['next_run_at'] or 'not scheduled'}  {row['last_status']}"
                 )
+        elif args.command == "stats":
+            counts = await ask_workflow.stats(conn)
+            print("Cards sent for each person and day:")
+            for row in counts["cards"]:
+                print(f"{row['person']}  {row['day']}  {row['cards_sent']}")
+            print("Asks answered by a rule:")
+            for row in counts["rules"]:
+                print(f"{row['person']}  {row['answered_by_rule']}")
         elif args.command == "token":
             if args.action == "create":
                 await load_workspace(config.workspace_dir).sync_people(conn)
