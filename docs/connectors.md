@@ -18,6 +18,9 @@ Set `ILLO_VAULT_KEY` in the main app. No connector YAML file or host sign-in fil
 5. After browser sign-in, the local callback address can fail to load. This is expected.
 6. Paste that full address into the same DM and thread. Send only that address.
 
+Illo sends `http://127.0.0.1:1455/auth/callback`, as the checked Codex source does.
+A pasted callback may use `127.0.0.1` or `localhost`. Illo accepts Slack link wrappers and escaped ampersands.
+
 Illo replies: `ChatGPT is connected as <email>. I use your subscription for your requests.`
 The device flow sends this reply without a paste.
 The account email must match an address of the person in `people.yaml`, ignoring letter case.

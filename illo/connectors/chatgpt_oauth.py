@@ -6,6 +6,7 @@ import json
 import logging
 import secrets
 import time
+from html import unescape
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import HTTPException, Request
@@ -303,14 +304,27 @@ async def poll_device(ctx, state_hash):
             pass
 
 
+def callback_address(text):
+    raw = unescape(text).strip()
+    if raw.startswith("<") and raw.endswith(">"):
+        raw = raw[1:-1].split("|", 1)[0]
+    for host in ("127.0.0.1", "localhost"):
+        address = oauth.callback_address(raw, f"http://{host}:1455/auth/callback")
+        if address:
+            return address
+    return None
+
+
 def redact_payload(payload):
-    for expected in (chatgpt.REDIRECT_URI, "http://localhost:1455/auth/callback"):
+    if isinstance(payload, str):
+        payload = unescape(payload)
+    for expected in ("http://127.0.0.1:1455/auth/callback", "http://localhost:1455/auth/callback"):
         payload = oauth.redact_payload(payload, expected, "[ChatGPT sign-in address removed]")
     return payload
 
 
 async def prepare(ctx, event, authority):
-    if is_dm(event, authority) and oauth.callback_address(event.text, chatgpt.REDIRECT_URI):
+    if is_dm(event, authority) and callback_address(event.text):
         return None
     return event.model_copy(
         update={"text": redact_payload(event.text), "payload": redact_payload(event.payload)}
@@ -320,7 +334,7 @@ async def prepare(ctx, event, authority):
 async def claim(ctx, event, authority):
     if not is_dm(event, authority):
         return None
-    pasted = oauth.callback_address(event.text, chatgpt.REDIRECT_URI)
+    pasted = callback_address(event.text)
     command = event.text.strip().lower()
     if not pasted and command not in {
         "connect my chatgpt",
