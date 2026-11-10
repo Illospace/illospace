@@ -65,6 +65,7 @@ class SlackIntake:
                 "bot_message",
                 "file_share",
                 "slack_video",
+                "thread_broadcast",
             }
         ):
             return
@@ -120,7 +121,12 @@ class SlackIntake:
                     }
                     for f in raw.get("files", [])
                 ],
-                "from_automation": bool(raw.get("bot_id") or raw.get("workflow_id")),
+                "from_automation": bool(
+                    raw.get("bot_id")
+                    or raw.get("bot_profile")
+                    or raw.get("workflow_id")
+                    or raw.get("subtype") == "bot_message"
+                ),
             },
         )
         # Search sees only configured team channels. Never index a private DM.

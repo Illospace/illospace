@@ -30,6 +30,8 @@ async def test_rule_06_slack_automation(app, fake_brain, metadata):
         }
     )
     async with app.state.ctx.pool.connection() as conn:
+        event = await one(conn, "SELECT * FROM events")
+        assert event["payload"]["payload"]["from_automation"]
         run = await one(conn, "SELECT * FROM runs")
         assert run["tainted"] and run["principal"] == "team" and run["profile"] == "tainted"
     assert len(fake_brain.requests) == 1
