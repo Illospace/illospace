@@ -1,5 +1,6 @@
 """Validate the workspace before it becomes active."""
 
+import os
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -66,6 +67,15 @@ class SlackChannel(Model):
 
 class SlackConfig(Model):
     channels: list[SlackChannel] = Field(default_factory=list)
+
+
+class VoiceConfig(Model):
+    transcription: Literal["slack", "openai"] = "slack"
+    model: str = Field(default="gpt-4o-mini-transcribe", min_length=1, max_length=200)
+    max_duration_s: float = Field(default=120, gt=0, le=3600, allow_inf_nan=False)
+    max_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=25 * 1024 * 1024)
+    timeout_s: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
+    max_per_person_per_hour: int = Field(default=20, ge=1, le=1000)
 
 
 class GitHubConfig(Model):
@@ -156,6 +166,7 @@ class TeamConfig(Model):
     timezone: str = "UTC"
     default_owner: str
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     digest: DigestConfig
@@ -343,6 +354,10 @@ def load_workspace(root: Path | str) -> Workspace:
     config = _model(
         TeamConfig, _yaml(root / "illo.yaml", _read(root / "illo.yaml")), root / "illo.yaml"
     )
+    if config.voice.transcription == "openai" and not os.environ.get("OPENAI_API_KEY", "").strip():
+        raise WorkspaceError(
+            f"{root / 'illo.yaml'}: voice.transcription: openai needs OPENAI_API_KEY"
+        )
     for field in ("key", "slack_id", "github_login", "emails"):
         seen = set()
         for person in people:

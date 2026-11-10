@@ -24,8 +24,10 @@ It edits that message with the answer. Long answers continue in the same thread.
 It reads at most 20 messages of thread context, with their authors.
 An author who is not in `people.yaml` shows as `Outside user (<id>)`.
 A bot or an unknown author in the context makes the run `tainted`.
-A transcript can wait for up to 15 seconds. A thread read can wait for up to 15 seconds.
-Illo uses only Slack's transcript. It sends no clip to another service.
+A pending Slack transcript can wait for up to 15 seconds. A thread read can wait for up to 15 seconds.
+A missing transcript or `none` status fails at once by default.
+Illo sends audio to the transcription API only with `voice.transcription: openai`.
+See [voice setup](../../../docs/workspace.md#voice-clips) for limits and privacy checks.
 Private DMs never become search items.
 Messages of a configured public channel become team search items after the gateway handles them.
 A private channel starts no run and enters no index.
