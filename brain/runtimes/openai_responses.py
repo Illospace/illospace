@@ -163,8 +163,7 @@ async def conversation(
     names = {tool.name for tool in tools}
     yield event("started", catalog=sorted(names))
     items = [{"role": "user", "content": request.user_message}]
-    # The ledger keeps the usage of each run. It shows which sign-in paid for the run.
-    usage = {"auth_kind": request.provider_auth.kind}
+    usage = {}
     fallback_notice = ""
     subscription_limit = None
     tool_calls = 0
@@ -231,7 +230,6 @@ async def conversation(
                 request = request.model_copy(
                     update={"provider_auth": ApiKeyAuth(), "api_key_fallback": False}
                 )
-                usage["auth_kind"] = "api_key"
                 # The next request checks for an API key. Failure still reports the subscription limit.
         if completed is None or completed.get("status") != "completed":
             raise RunError("runtime", "The model stream ended without a complete response")
@@ -270,7 +268,9 @@ async def conversation(
             yield event(
                 "final",
                 text=fallback_notice + answer,
-                usage=usage,
+                # The sign-in that made the last model request. After a fallback this is the
+                # API key. Add it after the provider counts, so a provider field cannot change it.
+                usage={**usage, "auth_kind": request.provider_auth.kind},
                 **({"auth_kind": request.provider_auth.kind} if request.smoke else {}),
             )
             return

@@ -158,6 +158,73 @@ async def test_limit_reply_is_clear_and_run_token_revoked(chatgpt_app, replay):
         row = await one(conn, "SELECT * FROM runs")
         assert row["status"] == "failed" and row["token_hash"] is None
         assert row["error"] == "The brain run failed: limit usage_limit_reached"
+        # A failed run also shows which sign-in it used.
+        assert row["usage"]["auth_kind"] == "chatgpt"
+
+
+@pytest.mark.parametrize(
+    "events,status,expected",
+    [
+        # A completed run on the subscription.
+        ([BrainEvent(type="final", text="Ready.", usage={"input_tokens": 5})], "completed", "chatgpt"),
+        # The brain changed to the API key and completed.
+        (
+            [BrainEvent(type="final", text="Ready.", usage={"auth_kind": "api_key"})],
+            "completed",
+            "api_key",
+        ),
+        # The brain changed to the API key, and that request failed too.
+        (
+            [
+                BrainEvent(
+                    type="error",
+                    category="limit",
+                    code="usage_limit_reached",
+                    api_key_fallback_failed=True,
+                    usage={"input_tokens": 7},
+                )
+            ],
+            "failed",
+            "api_key",
+        ),
+        # A provider failure keeps the counts that the brain sent.
+        (
+            [BrainEvent(type="error", category="runtime", usage={"input_tokens": 9})],
+            "failed",
+            "chatgpt",
+        ),
+        # The run reaches its time limit before the brain sends an event.
+        ([], "timeout", "chatgpt"),
+    ],
+)
+async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status, expected):
+    app, _ = chatgpt_app
+    ctx = app.state.ctx
+    await save_grant(ctx)
+
+    class Brain:
+        async def run(self, request):
+            for item in events:
+                yield item
+            if not events:
+                raise TimeoutError
+
+    ctx.brain_client = Brain()
+    await replay()
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs")
+    assert row["status"] == status and row["usage"]["auth_kind"] == expected
+    counts = [e.usage.get("input_tokens") for e in events if e.usage.get("input_tokens")]
+    if counts:
+        assert row["usage"]["input_tokens"] == counts[0]
+
+
+async def test_api_key_mode_and_other_runtimes_record_the_kind_correctly(app, replay, fake_brain):
+    # The default test workspace uses another runtime. Its sign-in is not a request field.
+    await replay()
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs")
+    assert "auth_kind" not in row["usage"]
 
 
 async def test_cancellation_does_not_lose_rotated_refresh(chatgpt_app):

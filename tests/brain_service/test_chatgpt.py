@@ -108,7 +108,12 @@ async def test_limit_and_api_fallback_resume_tool_results(
             + json.dumps(
                 {
                     "type": "response.completed",
-                    "response": {"status": "completed", "output": output},
+                    # A provider field with the same name cannot change the sign-in record.
+                    "response": {
+                        "status": "completed",
+                        "output": output,
+                        "usage": {"auth_kind": 1, "input_tokens": 3},
+                    },
                 }
             )
             + "\n\n",
