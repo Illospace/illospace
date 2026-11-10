@@ -23,8 +23,8 @@ def hit(row, source: str, rank: int) -> dict:
             id=int(identifier) if identifier.isdigit() else ref,
             summary=row.get("snippet", ""),
             source_at=row.get("at"),
-            # The shared search supplies a fused rank, not a lexical score.
-            scores={"lexical": None, "recency": None, "rrf": row["score"]},
+            scores={"lexical": row.get("lexical"), "recency": row.get("recency"),
+                    "rrf": row.get("rrf", row["score"])},
         )
     at = row.get("source_at") or row.get("updated_at") or row.get("created_at")
     return {

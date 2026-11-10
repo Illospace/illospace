@@ -82,7 +82,10 @@ def register(registry) -> None:
                 lambda a: "ledger",
                 False,
                 handler,
-                "Read visible team context and your own private context",
+                ("Search visible context, ranked by match and recency. Kinds: saved, decision, "
+                 "note, lane_summary, archive, slack, github, doc, lane. "
+                 "Personal mail uses kind mail. Drive files use kind doc."
+                 if name == "search_all" else "Read one visible result by source_ref"),
                 arguments,
                 profiles=READ_PROFILES,
             )
