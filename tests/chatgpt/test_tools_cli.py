@@ -10,32 +10,19 @@ from illo.db import one
 from tests.chatgpt.conftest import save_grant
 
 
-async def test_tools_bind_thread_and_never_return_link_to_model(
-    chatgpt_app, replay, fake_brain, slack_client
-):
+@pytest.mark.parametrize("name", ["chatgpt_connect", "chatgpt_disconnect"])
+async def test_model_cannot_change_signin(chatgpt_app, replay, fake_brain, slack_client, name):
     app, _ = chatgpt_app
     await save_grant(app.state.ctx)
-    fake_brain.script = [
-        {"name": name, "arguments": {}}
-        for name in (
-            "chatgpt_connect",
-            "chatgpt_status",
-            "chatgpt_disconnect",
-        )
-    ]
-    result = await replay(payload={"channel_id": "D_ADA"}, reply_to="thread-a")
-    assert "error" not in result
-    sent = [c for c in slack_client.calls if "/oauth/chatgpt/start?" in c.get("text", "")]
-    assert len(sent) == 1 and sent[0]["channel"] == "D_ADA" and sent[0]["thread_ts"] == "thread-a"
-    assert all("/oauth/chatgpt/start?" not in str(r) for r in fake_brain.results)
+    fake_brain.script = [{"name": name, "arguments": {}}]
+    await replay(payload={"channel_id": "D_ADA"}, reply_to="thread-a")
+    assert not [c for c in slack_client.calls if "/oauth/chatgpt/start?" in c.get("text", "")]
     async with app.state.ctx.pool.connection() as conn:
-        assert not await one(conn, "SELECT 1 FROM connector_grants WHERE connector_key='chatgpt'")
-        assert (
-            await one(
-                conn,
-                "SELECT count(*) AS n FROM audit WHERE tool LIKE 'chatgpt_%' AND decision='allow'",
-            )
-        )["n"] == 3
+        assert await one(conn, "SELECT 1 FROM connector_grants WHERE connector_key='chatgpt'")
+        assert not await one(conn, "SELECT 1 FROM connector_oauth_states")
+        assert not await one(
+            conn, "SELECT 1 FROM audit WHERE tool LIKE 'chatgpt_%' AND decision='allow'"
+        )
 
 
 async def test_operator_status_has_no_secret(chatgpt_app, capsys):

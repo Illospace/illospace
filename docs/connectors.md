@@ -31,6 +31,7 @@ This team list defaults to empty.
 Enable device sign-in in your ChatGPT security settings, or ask your workspace administrator to enable it.
 Only enter a device code if you asked Illo to connect your own account.
 Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
+Only these exact DM commands can change the sign-in. The model can only check its status.
 Disconnect also cancels pending links. It does not sign you out of other OpenAI clients.
 The operator can run `illo chatgpt status` to list connection states and expiry times without secrets.
 See [Workspace files](workspace.md) for team credentials and the optional API-key fallback.
