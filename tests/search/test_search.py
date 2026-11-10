@@ -28,7 +28,7 @@ async def test_title_and_recency_rank(app):
         ]:
             await items.upsert(conn, source_ref=ref, title=title, body=body, source_at=at)
     hits = await search.search(ctx, "person:ada", "orchard")
-    assert [h.source_ref for h in hits] == ["saved:new", "saved:old", "saved:body"]
+    assert [h.source_ref for h in hits] == ["saved:new", "saved:body", "saved:old"]
     assert "orchard" in hits[0].title
     assert hits[0].at
 
@@ -239,7 +239,8 @@ async def test_url_ampersands_keep_exact_fallback_rank(app):
         await items.upsert(
             conn, source_ref="saved:wrong", title="https://example.com/unrelated", source_at=now,
         )
-    hits = await search.search(ctx, "team", "missing https://example.com/a?b=c&d=e")
+    hits = await search.search(ctx, "team", "missing https://example.com/a?b=c&d=e",
+                               kinds=["saved"])
     assert [h.source_ref for h in hits] == ["saved:exact", "saved:wrong"]
 
 
@@ -290,5 +291,6 @@ async def test_merge_deduplicates_across_tiers_before_limit(app):
     assert [h.source_ref for h in hits] == ["doc:one", "doc:two"]
     assert [h.match_tier for h in hits] == ["strict", "fallback"]
     assert hits[0].title == "full match"
-    assert hits[0].score == 1 / 61
+    assert hits[0].rrf == 2 / 61
+    assert hits[0].score == hits[0].rrf
     assert hits[1].score == 1 / 62

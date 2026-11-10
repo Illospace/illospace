@@ -6,10 +6,7 @@ from illo.channels.slack.access import channel_private
 from illo.db import all_rows, one
 
 KINDS = ("message", "channel")
-VECTOR = (
-    "to_tsvector('simple',coalesce(e.payload->>'text','')) || "
-    "to_tsvector('english',coalesce(e.payload->>'text',''))"
-)
+VECTOR = "illo_search_vector('','',coalesce(e.payload->>'text',''))"
 VISIBLE = """e.channel='slack' AND e.principal='team' AND e.kind=ANY(%s)
     AND e.payload #>> '{payload,channel_id}' = ANY(%s)"""
 
@@ -32,33 +29,31 @@ def detail(row, allowed):
     }
 
 
-async def search(ctx, conn, query, kinds, limit):
-    from illo.sources.search import RELAXED_QUERY, STRICT_QUERY, Hit
+async def search(ctx, conn, query, kinds, limit, now):
+    from illo.sources.search import RANK_COLUMNS, RANK_ORDER, Hit, query_sql
 
     if kinds is not None and "slack" not in kinds:
         return []
     allowed = await channels(ctx, conn)
     if not allowed:
         return []
-
-    async def find(tsquery):
-        return await all_rows(conn, f"""
-            WITH q AS (SELECT {tsquery} AS query)
-            SELECT e.*,ts_rank(({VECTOR}),q.query) AS score,
-              ts_headline('simple',coalesce(e.payload->>'text',''),q.query,
-                'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-            FROM events e,q WHERE {VISIBLE} AND ({VECTOR}) @@ q.query
-              AND NOT EXISTS (SELECT 1 FROM items i WHERE i.source_ref='slack:'||e.external_id)
-            ORDER BY score DESC,e.created_at DESC,e.id DESC LIMIT %s
-        """, (query, query, list(KINDS), list(allowed), limit))
-
-    rows = [(row, "strict") for row in await find(STRICT_QUERY)]
-    if len(rows) < limit and not re.search(r'(?:^|\s)-\S|"|(?:^|\s)(?:OR|or)(?=\s|$)', query):
-        seen = {row["id"] for row, _ in rows}
-        rows += [(row, "fallback") for row in await find(RELAXED_QUERY) if row["id"] not in seen]
+    q, params = query_sql(query)
+    rows = await all_rows(conn, f"""
+        WITH q AS ({q}), texts AS (
+          SELECT e.*,e.created_at AS at,({VECTOR}) AS vector
+          FROM events e WHERE {VISIBLE}
+            AND NOT EXISTS (SELECT 1 FROM items i WHERE i.source_ref='slack:'||e.external_id)
+        ), ranked AS (
+          SELECT t.*, {RANK_COLUMNS},
+            ts_headline('simple',coalesce(t.payload->>'text',''),
+              CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
+              'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
+          FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
+        ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+    """, (*params, list(KINDS), list(allowed), now, limit))
     return [Hit(f"slack-event:{row['id']}", "slack", "slack", detail(row, allowed)["title"],
-                row["snippet"], at=row["created_at"], match_tier=tier)
-            for row, tier in rows[:limit]]
+                row["snippet"], at=row["created_at"], match_tier=row["match_tier"],
+                lexical=float(row["lexical"]), recency=float(row["recency"])) for row in rows]
 
 
 async def get(ctx, conn, source_ref):

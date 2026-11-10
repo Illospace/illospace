@@ -3,7 +3,7 @@
 import asyncio
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -25,6 +25,9 @@ class Hit:
     score: float = 0
     personal: bool = False
     match_tier: Literal["strict", "fallback"] = "strict"
+    lexical: float | None = None
+    recency: float | None = None
+    rrf: float = 0
 
 
 class Hits(list[Hit]):
@@ -60,110 +63,139 @@ def first_link(links) -> str | None:
     return None
 
 
-STRICT_QUERY = "websearch_to_tsquery('simple',%s) || websearch_to_tsquery('english',%s)"
-# Any word may match. Postgres ranks an item higher when it has more of the words.
+# Keep syntax in explicit queries. Plain queries also accept the parts of identifiers.
+STRICT_QUERY = "illo_search_query('simple',%s) || illo_search_query('english',%s)"
 RELAXED_QUERY = " || ".join(
     "(SELECT coalesce(string_agg(quote_literal(lexeme), ' | '), '')::tsquery "
-    f"FROM unnest(tsvector_to_array(to_tsvector('{config}',%s))) AS lexemes(lexeme))"
+    f"FROM unnest(tsvector_to_array(illo_search_tokens('{config}',%s))) AS lexemes(lexeme))"
     for config in ("simple", "english")
 )
+HALF_LIFE_DAYS = 21
 
 
-async def _item_rows(conn, principal, query, kinds, limit, tsquery, weight):
-    return await all_rows(
-        conn,
-        f"""
-        WITH q AS (SELECT {tsquery} AS query)
-        SELECT i.*,p.key AS owner,
-          ts_headline('simple',concat_ws(' ',i.summary,i.body),q.query,
-            'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet,
-          {weight} * ts_rank(i.tsv,q.query) * (1 + 0.05 / (1 + greatest(0,
-            extract(epoch FROM (now()-coalesce(i.source_at,i.created_at)))/86400))) AS score
-        FROM items i CROSS JOIN q LEFT JOIN people p ON p.id=i.owner_person_id
-        WHERE i.tsv @@ q.query AND
-          (i.visibility='team' OR i.owner_person_id=
+def utc_now():
+    return datetime.now(UTC)
+
+
+def lexical_query(query):
+    """Time words guide age ranking. Quoted text and search operators keep their meaning."""
+    if explicit_query(query):
+        return query
+    return re.sub(r"(?<![\w.@+-])(?:today|yesterday|this\s+week)(?![\w.@+-])", " ", query, flags=re.I).strip()
+
+
+def explicit_query(query):
+    return bool(re.search(r'(?:^|\s)-\S|"|(?:^|\s)(?:OR|or)(?=\s|$)', query))
+
+
+def query_sql(query):
+    relaxed = "''::tsquery" if explicit_query(query) else RELAXED_QUERY
+    params = (query, query) if explicit_query(query) else (query,) * 4
+    return f"SELECT {STRICT_QUERY} AS strict, {relaxed} AS relaxed", params
+
+
+# Rank all visible candidates before LIMIT, including partial matches. A strict match
+# gets twice the weight. Age has a 21-day half-life and a 20% floor for old decisions.
+# RRF adds only a small source-rank bonus later; it cannot erase match strength or age.
+RANK_COLUMNS = f"""
+    CASE WHEN vector @@ q.strict THEN 'strict' ELSE 'fallback' END AS match_tier,
+    ts_rank(ARRAY[0.1,0.5,0.75,1.0]::real[], vector,
+      CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,32) AS lexical,
+    0.2 + 0.8 * power(0.5, floor(greatest(0,extract(epoch FROM (%s::timestamptz-at))) /
+      86400) / {HALF_LIFE_DAYS}) AS recency
+"""
+RANK_ORDER = "lexical * recency * CASE match_tier WHEN 'strict' THEN 2 ELSE 1 END"
+
+
+async def _items(conn, principal, query, kinds, limit, now):
+    q, params = query_sql(query)
+    rows = await all_rows(conn, f"""
+        WITH q AS ({q}), texts AS (
+          SELECT i.*,p.key AS owner,coalesce(i.source_at,i.created_at) AS at,
+            illo_search_vector(i.title,i.summary,i.body) AS vector
+          FROM items i LEFT JOIN people p ON p.id=i.owner_person_id
+          WHERE (i.visibility='team' OR i.owner_person_id=
             (SELECT id FROM people WHERE 'person:'||key=%s AND active))
-          AND (%s::text[] IS NULL OR i.kind=ANY(%s))
-        ORDER BY score DESC,coalesce(i.source_at,i.created_at) DESC,i.id DESC LIMIT %s
-    """,
-        (query, query, principal, kinds, kinds, limit),
-    )
+            AND (%s::text[] IS NULL OR i.kind=ANY(%s))
+        ), ranked AS (
+          SELECT t.*, {RANK_COLUMNS},
+            ts_headline('simple',concat_ws(' ',t.summary,t.body),
+              CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
+              'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
+          FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
+        ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+    """, (*params, principal, kinds, kinds, now, limit))
+    return [Hit(
+        r["source_ref"], r["kind"], r["source_ref"].split(":", 1)[0], r["title"],
+        r["snippet"], first_link(r["links"]), r["owner"], r["at"],
+        personal=r["visibility"] == "private", match_tier=r["match_tier"],
+        lexical=float(r["lexical"]), recency=float(r["recency"]),
+    ) for r in rows]
 
 
-async def _items(conn, principal, query, kinds, limit):
-    """All words first. If that finds too little, any word, ranked below the strict hits.
-
-    A long question from a person or an agent must still find something.
-    """
-    rows = await _item_rows(conn, principal, query, kinds, limit, STRICT_QUERY, 1.0)
-    for row in rows:
-        row["match_tier"] = "strict"
-    explicit_syntax = re.search(r'(?:^|\s)-\S|"|(?:^|\s)(?:OR|or)(?=\s|$)', query)
-    if len(rows) < limit and not explicit_syntax:
-        seen = {r["source_ref"] for r in rows}
-        relaxed = await _item_rows(conn, principal, query, kinds, limit, RELAXED_QUERY, 0.5)
-        for row in relaxed:
-            row["match_tier"] = "fallback"
-        rows += [r for r in relaxed if r["source_ref"] not in seen][: limit - len(rows)]
-    return [
-        Hit(
-            r["source_ref"],
-            r["kind"],
-            r["source_ref"].split(":", 1)[0],
-            r["title"],
-            r["snippet"],
-            first_link(r["links"]),
-            r["owner"],
-            r["source_at"] or r["created_at"],
-            r["score"],
-            r["visibility"] == "private",
-            match_tier=r["match_tier"],
-        )
-        for r in rows
-    ]
-
-
-async def _lanes(conn, principal, query, kinds, limit):
+async def _lanes(conn, principal, query, kinds, limit, now):
     if kinds is not None and "lane" not in kinds:
         return []
-    rows = await all_rows(
-        conn,
-        """
-        WITH q AS (SELECT websearch_to_tsquery('simple',%s) ||
-          websearch_to_tsquery('english',%s) AS query), texts AS (
+    q, params = query_sql(query)
+    rows = await all_rows(conn, f"""
+        WITH q AS ({q}), texts AS (
           SELECT l.*,p.key AS owner,concat_ws(' ',l.summary,e.text) AS body,
-            setweight(to_tsvector('simple',l.title)||to_tsvector('english',l.title),'A') ||
-            setweight(to_tsvector('simple',concat_ws(' ',l.summary,e.text))||
-              to_tsvector('english',concat_ws(' ',l.summary,e.text)),'C') AS vector
+            l.updated_at AS at,
+            illo_search_vector(l.title,'',concat_ws(' ',l.summary,e.text)) AS vector
           FROM lanes l LEFT JOIN people p ON p.id=l.owner_person_id
           LEFT JOIN LATERAL (SELECT string_agg(recent.text,' ') AS text FROM
             (SELECT text FROM lane_events WHERE lane_id=l.id ORDER BY at DESC,id DESC LIMIT 20)
             recent) e ON true
           WHERE l.visibility='team' OR l.owner_person_id=
-            (SELECT id FROM people WHERE 'person:'||key=%s AND active))
-        SELECT t.*,ts_rank(t.vector,q.query) AS score,
-          ts_headline('simple',t.body,q.query,
-            'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-        FROM texts t,q WHERE t.vector @@ q.query ORDER BY score DESC,updated_at DESC,id DESC
-        LIMIT %s
-    """,
-        (query, query, principal, limit),
-    )
-    return [
-        Hit(
-            f"lane:{r['id']}",
-            "lane",
-            r["source"],
-            r["title"],
-            f"State: {r['state']}. {r['snippet']}",
-            first_link(r["links"]),
-            r["owner"],
-            r["updated_at"],
-            r["score"],
-            r["visibility"] == "private",
-        )
-        for r in rows
-    ]
+            (SELECT id FROM people WHERE 'person:'||key=%s AND active)
+        ), ranked AS (
+          SELECT t.*, {RANK_COLUMNS},
+            ts_headline('simple',t.body,
+              CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
+              'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
+          FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
+        ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+    """, (*params, principal, now, limit))
+    return [Hit(
+        f"lane:{r['id']}", "lane", r["source"], r["title"],
+        f"State: {r['state']}. {r['snippet']}", first_link(r["links"]), r["owner"], r["at"],
+        personal=r["visibility"] == "private", match_tier=r["match_tier"],
+        lexical=float(r["lexical"]), recency=float(r["recency"]),
+    ) for r in rows]
+
+
+async def _provider_scores(conn, group, query, now):
+    """Use the same field weights for live source text. Never trust a provider's score scale."""
+    pending = [hit for hit in group if hit.lexical is None]
+    if not pending:
+        return group
+    q, params = query_sql(query)
+    rows = await all_rows(conn, f"""
+        WITH q AS ({q}), texts AS (
+          SELECT title,body,illo_search_vector(title,'',body) AS vector
+          FROM unnest(%s::text[],%s::text[]) AS t(title,body)
+        ) SELECT ts_rank(ARRAY[0.1,0.5,0.75,1.0]::real[],vector,
+          CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,32) AS lexical
+        FROM texts,q
+    """, (*params, [h.title for h in pending], [h.snippet for h in pending]))
+    scores = iter(rows)
+    result = []
+    for hit in group:
+        if hit.lexical is not None:
+            result.append(hit)
+            continue
+        at = hit.at
+        if isinstance(at, str):
+            try:
+                at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            except ValueError:
+                at = None
+        if at is not None and at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        age_days = max(0, (now-at).total_seconds()//86400) if at else None
+        recency = 0.2 + 0.8 * 0.5 ** (age_days/HALF_LIFE_DAYS) if age_days is not None else 0.2
+        result.append(replace(hit, lexical=float(next(scores)["lexical"]), recency=recency))
+    return result
 
 
 def github_ref(issue):
@@ -209,7 +241,7 @@ async def _github(ctx, query, kinds, limit):
 async def search(
     ctx, principal, query, kinds=None, limit=10, *, conn=None, tainted=False, personal_allowed=True
 ) -> list[Hit]:
-    """Rank each source, then merge by reciprocal rank. Source failures stay partial."""
+    """Merge match strength, age, and source rank. Source failures stay partial."""
     limit = max(1, min(limit, 50))
     if not query.strip() or principal == "outsider":
         return Hits()
@@ -227,18 +259,24 @@ async def search(
                 tainted=tainted,
                 personal_allowed=personal_allowed,
             )
+    query = lexical_query(query)
+    if not query:
+        return Hits()
+    now = utc_now()
+    # A short page must not reduce the evidence available from any source.
+    candidate_limit = 50
     groups = [
-        await _items(conn, principal, query, kinds, limit),
-        await _lanes(conn, principal, query, kinds, limit),
+        await _items(conn, principal, query, kinds, candidate_limit, now),
+        await _lanes(conn, principal, query, kinds, candidate_limit, now),
     ]
     failures = []
     if not tainted:
         try:
             async with conn.transaction():
-                groups.append(await slack_index.search(ctx, conn, query, kinds, limit))
+                groups.append(await slack_index.search(ctx, conn, query, kinds, candidate_limit, now))
         except Exception:
             failures.append("slack_inbound")
-    jobs = [("github", _github(ctx, query, kinds, limit), False)]
+    jobs = [("github", _github(ctx, query, kinds, candidate_limit), False)]
     for name, (fn, personal, allow_tainted) in tuple(_providers.items()):
         if tainted and not allow_tainted:
             continue
@@ -246,7 +284,7 @@ async def search(
             continue
 
         async def call(provider=fn):
-            return await provider(ctx, principal, query, kinds, limit)
+            return await provider(ctx, principal, query, kinds, candidate_limit)
 
         jobs.append((name, call(), personal))
 
@@ -265,31 +303,35 @@ async def search(
         groups.append([hit for hit in group if kinds is None or hit.kind in kinds])
     merged = {}
     for group in groups:
-        seen = set()
-        ranks = {"strict": 0, "fallback": 0}
-        # A duplicate's strict match takes precedence in every source.
-        for hit in sorted(group, key=lambda h: h.match_tier != "strict"):
-            if hit.source_ref in seen:
-                continue
-            seen.add(hit.source_ref)
-            ranks[hit.match_tier] += 1
-            score = 1 / (60 + ranks[hit.match_tier])
-            previous, previous_score = merged.get(hit.source_ref, (hit, 0))
-            personal = previous.personal or hit.personal
-            if previous.match_tier == hit.match_tier:
-                hit, score = previous, score + previous_score
-            elif previous.match_tier == "strict":
-                hit, score = previous, previous_score
-            merged[hit.source_ref] = (replace(hit, personal=personal), score)
-    ordered = sorted(
-        merged.values(),
-        key=lambda value: (value[0].match_tier != "strict", -value[1], value[0].source_ref),
-    )
+        group = await _provider_scores(conn, group, query, now)
+        unique = {}
+        for hit in group:
+            previous = unique.get(hit.source_ref)
+            if previous:
+                best = max((previous, hit), key=lambda h: (_strength(h), h.match_tier == "strict"))
+                hit = replace(best, personal=previous.personal or hit.personal)
+            unique[hit.source_ref] = hit
+        for rank, hit in enumerate(unique.values(), 1):
+            rrf = 1 / (60 + rank)
+            previous = merged.get(hit.source_ref)
+            if previous:
+                # A duplicate keeps its strongest evidence and all privacy flags.
+                best = max((previous, hit), key=lambda h: (_strength(h), h.match_tier == "strict"))
+                hit = replace(best, personal=previous.personal or hit.personal,
+                              rrf=previous.rrf + rrf)
+            else:
+                hit = replace(hit, rrf=rrf)
+            merged[hit.source_ref] = hit
+    ordered = sorted(merged.values(), key=lambda h: (-(_strength(h) + h.rrf), h.source_ref))
     return Hits(
-        [replace(hit, score=score) for hit, score in ordered[:limit]],
+        [replace(hit, score=_strength(hit) + hit.rrf) for hit in ordered[:limit]],
         failures=failures,
         personal_read=personal_read,
     )
+
+
+def _strength(hit):
+    return (hit.lexical or 0) * (hit.recency or 0.2) * (2 if hit.match_tier == "strict" else 1)
 
 
 async def get(ctx, principal, source_ref, *, conn=None):
