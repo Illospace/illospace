@@ -1,0 +1,16 @@
+[Unit]
+Description=Update Illo from the configured branch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change this path to the dedicated Illo checkout.
+WorkingDirectory=%h/illospace
+Environment=ILLO_ENV_FILE=%h/.config/illo/env
+ExecStart=%h/illospace/deploy/update.sh --watch 300
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
