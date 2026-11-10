@@ -66,6 +66,8 @@ Each call writes one row in `audit`.
 
 ## 6. Outside text is data
 
+Model claims use the `model:` prefix and cannot reserve server routine keys. Test: `tests/safety/test_review_s13_claim_namespace.py`.
+
 Tainted tickets have an outside-text warning and label, and no assignee. Only the server tells the default owner once. Test: `tests/safety/test_review_s04_tainted_tickets.py`.
 
 Tainted runs have an exact tool grant and cannot read the team ledger. Test: `tests/safety/test_review_s03_tainted_grant.py`.

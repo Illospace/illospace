@@ -12,7 +12,7 @@ class TakeArgs(Arguments):
 
 
 async def take(ctx: ToolContext, args: dict) -> bool:
-    return await claims.take(ctx.conn, args["key"], ctx.run["id"], args["note"])
+    return await claims.take(ctx.conn, "model:" + args["key"], ctx.run["id"], args["note"])
 
 
 def register(registry) -> None:
