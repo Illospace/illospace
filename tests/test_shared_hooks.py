@@ -116,3 +116,21 @@ async def test_dm_person_opens_a_dm_and_posts(app, slack_client):
     assert await dm_person(ctx, "nobody", "Hello") is None
     ctx.slack_client = None
     assert await dm_person(ctx, "ada", "Hello") is None
+
+
+async def test_preparer_runs_before_claims_and_brain(app, replay, fake_brain):
+    seen = []
+
+    async def claim(ctx, event, authority):
+        seen.append(event.text)
+        return None
+
+    async def prepare(ctx, event, authority):
+        assert authority.principal == "person:ada"
+        return event.model_copy(update={"text": "Prepared request"})
+
+    app.state.ctx.gateway.register_claim(claim)
+    app.state.ctx.gateway.register_preparer(prepare)
+    await replay(text="Raw request")
+    assert seen == ["Prepared request"]
+    assert fake_brain.requests[0].user_message == "Prepared request"

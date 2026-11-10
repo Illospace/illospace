@@ -32,6 +32,11 @@ Audit rows redact all argument values. The digest covers the full arguments.
 - **Approved drafts.** Put `async fn(ctx, draft_row)` into `ctx.draft_performers[kind]`. The asks area calls it when the approver clicks Send.
 - **The ledger is the interface between areas.** Write a row. The area that owns the next step finds it with its own timer.
 
+Message preparation has a fixed stage before all claims, after the gateway resolves the principal.
+Use `ctx.gateway.register_preparer(fn)` with `async fn(ctx, event, authority) -> InboundEvent | None`.
+Return a changed event or `None`. Preserve the event identity and authority metadata.
+Slack reads clip transcripts here. It adds thread history only after claims pass.
+
 ## Add a migration
 
 Create a new SQL file in `illo/migrations/`. Do not edit `0001_init.sql` after it merges.

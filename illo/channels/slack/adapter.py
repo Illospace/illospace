@@ -25,8 +25,10 @@ class SlackAdapter:
         self.working: dict[str, str] = {}
         self.progress_at: dict[str, float] = {}
 
-    async def show_working(self, event: InboundEvent) -> None:
+    async def show_working(self, event: InboundEvent, *, prepare: bool = True) -> None:
         if event.external_id in self.working:
+            if prepare and self.prepare:
+                await self.prepare(event)
             return
         response = await self.ctx.slack_client.chat_postMessage(
             channel=event.payload["channel_id"],
@@ -40,7 +42,7 @@ class SlackAdapter:
         # Persist the thread marker so a restart does not lose a conversation.
         async with self.ctx.pool.connection() as conn:
             await kv.set(conn, f"slack:thread:{event.payload['channel_id']}:{root}", True)
-        if self.prepare:
+        if prepare and self.prepare:
             await self.prepare(event)
 
     async def show_progress(self, event: InboundEvent, item: BrainEvent) -> None:

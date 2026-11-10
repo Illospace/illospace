@@ -233,3 +233,34 @@ async def test_own_bot_without_user_is_ignored(intake, message, fake_brain):
         is None
     )
     assert not fake_brain.requests
+
+
+@pytest.mark.parametrize("transcript", ["Wednesday", None])
+async def test_voice_answer_after_late_slack_signin(app, message, fake_brain, slack_client, transcript):
+    from illo.channels.slack.intake import SlackIntake
+    from illo.ledger import asks, people
+
+    ctx = app.state.ctx
+    await ctx.scheduler.close()
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        ask = await asks.create(conn, owner_person_id=ada["id"], question="Which day?")
+        await conn.execute(
+            "UPDATE asks SET awaiting_text=true,slack_channel='D_ACME_ADA',"
+            "slack_ts='1700000000.000001' WHERE id=%s", (ask["id"],)
+        )
+    # Business claims already exist when Slack signs in.
+    intake = SlackIntake(ctx, "U_ACME_ILLO", clip_timeout=0.001, clip_poll=0.001)
+    slack_client.messages = {"old": {"user": "U_ACME_ADA", "text": "Unrelated thread history"}}
+    transcription = {"status": "complete", "text": transcript} if transcript else {}
+    result = await intake.receive(message(
+        text="", ts="1700000001.000001", thread_ts="1700000000.000001",
+        files=[{"id": "F_VOICE", "mimetype": "audio/mp4", "transcription": transcription}],
+    ))
+    assert result["text"] == ("Answer saved." if transcript else CLIP_ERROR)
+    assert not fake_brain.requests
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM asks WHERE id=%s", (ask["id"],))
+    assert row["answer_text"] == transcript
+    assert row["state"] == ("answered" if transcript else "open")
+    assert not [c for c in slack_client.calls if c["method"] == "conversations_replies"]

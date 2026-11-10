@@ -24,3 +24,15 @@ async def test_rule_07_unknown_slack_dm(app, slack_client, fake_brain):
     async with app.state.ctx.pool.connection() as conn:
         assert not await all_rows(conn, "SELECT * FROM runs")
         assert not await all_rows(conn, "SELECT * FROM items WHERE kind='slack'")
+
+
+async def test_rule_07_unknown_sender_never_reaches_preparers(app, replay):
+    seen = []
+
+    async def prepare(ctx, event, authority):
+        seen.append(event)
+        return None
+
+    app.state.ctx.gateway.register_preparer(prepare)
+    assert (await replay(sender="U_UNKNOWN"))["decision"] == "ignore"
+    assert not seen
