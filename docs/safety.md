@@ -24,6 +24,8 @@ Each call writes one row in `audit`.
 
 **Tests.** `tests/safety/test_rule_01_principal.py`, `tests/test_gateway.py`.
 
+Agent tokens can update only their person's lanes and cannot report GitHub lanes. `tests/safety/test_review_s05_lane_owner.py` checks these limits.
+
 ## 2. A personal connector works only for its owner
 
 **Rule.** A personal connector (mail, calendar, drive) works only in the runs of its owner.

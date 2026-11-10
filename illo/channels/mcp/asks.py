@@ -46,6 +46,8 @@ async def create(ctx, args: dict) -> dict:
         lane = await mcp.lane_by_ref(ctx.conn, **ref)
         check_visible(ctx, lane)
         if not lane:
+            if ref["source"] == "github":
+                raise ValueError("Only the GitHub poller can create GitHub lanes")
             lane = await lanes.upsert(
                 ctx.conn,
                 **ref,
