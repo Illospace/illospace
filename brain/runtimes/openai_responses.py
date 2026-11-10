@@ -268,7 +268,9 @@ async def conversation(
             yield event(
                 "final",
                 text=fallback_notice + answer,
-                usage=usage,
+                # The sign-in that made the last model request. After a fallback this is the
+                # API key. Add it after the provider counts, so a provider field cannot change it.
+                usage={**usage, "auth_kind": request.provider_auth.kind},
                 **({"auth_kind": request.provider_auth.kind} if request.smoke else {}),
             )
             return

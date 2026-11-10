@@ -155,6 +155,11 @@ class RunManager:
             api_key_fallback=config.api_key_fallback,
         )
         status, error, usage, final = "failed", None, {}, None
+        if runtime == "openai_responses":
+            # The ledger shows which sign-in the run used, also for a failed run. The brain
+            # reports "api_key" after a fallback. A run that reaches its time limit during
+            # a fallback keeps the first value.
+            usage = {"auth_kind": auth.kind}
         failure = "internal"
         try:
             async with asyncio.timeout(config.timeout_s):
@@ -192,6 +197,10 @@ class RunManager:
                                     item.category, "provider"
                                 )
                                 error = item.failure_reason()
+                                # Keep the token counts of a failed run.
+                                usage = {**usage, **item.usage}
+                                if item.api_key_fallback_failed:
+                                    usage["auth_kind"] = "api_key"
                                 if auth.kind == "chatgpt" and item.code == "usage_limit_reached":
                                     from datetime import UTC, datetime
 
@@ -213,7 +222,7 @@ class RunManager:
                             if item.type == "final":
                                 if turns > config.max_turns and item.usage.get("limited") is not True:
                                     raise RunFailure("limit")
-                                final, usage, status = item.text, item.usage, "completed"
+                                final, usage, status = item.text, {**usage, **item.usage}, "completed"
                                 break
                     if not retry:
                         break
