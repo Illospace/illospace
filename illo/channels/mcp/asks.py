@@ -40,7 +40,6 @@ async def create(ctx, args: dict) -> dict:
     if existing:
         return answer(existing)
     person = await owner(ctx, args["owner"])
-    await mcp.check_open_ask_limit(ctx.conn, ctx.token["id"], person["id"])
     lane = None
     if args["lane"]:
         ref = args["lane"]

@@ -199,7 +199,7 @@ Section 4 says which profile gets which tool.
 - `collector` (the default): `lane_report`, `lane_search`, `ask_create`, `ask_pull`, `ask_ack`, `ask_cancel`, `signal_submit`.
 - `agent`: the `collector` tools, plus `illo_submit`, `illo_read`, and `illo_get_result`.
 
-A call to a tool outside the scope fails. `tools/list` shows only the tools of the scope. Caps for each token: 20 open asks for each owner, 60 new signals in one hour, and 60 `illo_submit` requests that start a run in one hour.
+A call to a tool outside the scope fails. `tools/list` shows only the tools of the scope. Caps for each token: 20 open asks and 30 new asks per hour for each owner, 60 new signals in one hour, and 60 `illo_submit` requests that start a run in one hour.
 
 Tools. The first three keep the request and answer fields that agents use today. `tests/contracts/` holds fixtures of real calls, and these tests run on each change.
 

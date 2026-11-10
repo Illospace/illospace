@@ -6,13 +6,16 @@ from illo.db import all_rows, one
 
 
 async def check_open_ask_limit(conn, token_id: int, owner_id: int) -> None:
-    """The MCP endpoint holds the token row lock through this check and insert."""
+    """The ask ledger holds the token row lock through this check and insert."""
     row = await one(
         conn,
-        """SELECT count(*) AS n FROM asks WHERE requester_token_id=%s
-        AND owner_person_id=%s AND state='open'""",
+        """SELECT count(*) FILTER (WHERE state='open') AS n,
+        count(*) FILTER (WHERE created_at > now()-interval '1 hour') AS hourly
+        FROM asks WHERE requester_token_id=%s AND owner_person_id=%s""",
         (token_id, owner_id),
     )
+    if row["hourly"] >= 30:
+        raise ValueError("The token has reached its limit of 30 asks per hour for this owner")
     if row["n"] >= 20:
         raise ValueError("The token has reached its limit of 20 open asks for this owner")
 

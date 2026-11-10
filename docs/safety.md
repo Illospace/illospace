@@ -196,7 +196,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 All tool calls of one run together stop at `brain.max_turns` (default 12). The run also stops at `brain.timeout_s` (default 120 seconds).
 
 **Calls of one MCP token** (`illo/ledger/mcp.py`):
-- 20 open asks for each owner.
+- 20 open asks and 30 new asks per hour for each owner.
 - 60 new signals in one hour. A duplicate signal does not count.
 - 60 `illo_submit` requests that start a run, in one hour. A `preserve_knowledge` save and a replay do not count.
 

@@ -3,7 +3,7 @@
 from psycopg.types.json import Jsonb
 
 from illo.db import Connection, all_rows, one
-from illo.ledger import rules
+from illo.ledger import mcp, rules
 
 
 async def create(
@@ -39,6 +39,10 @@ async def create(
         recommended_option is not None and recommended_option not in ids
     ):
         raise ValueError("Use unique option IDs and a valid recommended option")
+    if requester_token_id is not None:
+        # Both direct MCP calls and model tools must hold the same token lock.
+        await conn.execute("SELECT id FROM tokens WHERE id=%s FOR UPDATE", (requester_token_id,))
+        await mcp.check_open_ask_limit(conn, requester_token_id, owner_person_id)
     return await one(
         conn,
         """
