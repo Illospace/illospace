@@ -259,3 +259,35 @@ async def test_fallback_empty_and_quoted_lexemes_parse(conn, query):
         assert row["query"] == "'the'"  # English is empty; simple still has this word.
     else:
         assert row["query"]
+
+
+async def test_strict_lane_precedes_fallback_item_at_limit(app):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        await items.upsert(conn, source_ref="archive:partial", kind="archive", title="orchard")
+        lane = await lanes.upsert(conn, source="manual", external_id="strict", title="orchard runner")
+    hits = await search.search(ctx, "team", "orchard runner", limit=1)
+    assert [h.source_ref for h in hits] == [f"lane:{lane['id']}"]
+    assert hits[0].match_tier == "strict"
+    all_hits = await search.search(ctx, "team", "orchard runner")
+    assert [h.match_tier for h in all_hits] == ["strict", "fallback"]
+
+
+async def test_merge_deduplicates_across_tiers_before_limit(app):
+    async def partial(ctx, principal, query, kinds, limit):
+        return [
+            Hit("doc:one", "doc", "partial", "partial", match_tier="fallback"),
+            Hit("doc:two", "doc", "partial", "partial", match_tier="fallback"),
+        ]
+
+    async def strict(ctx, principal, query, kinds, limit):
+        return [Hit("doc:one", "doc", "strict", "full match")]
+
+    search.register_provider("partial", partial)
+    search.register_provider("strict", strict)
+    hits = await search.search(app.state.ctx, "team", "orchard runner", limit=2)
+    assert [h.source_ref for h in hits] == ["doc:one", "doc:two"]
+    assert [h.match_tier for h in hits] == ["strict", "fallback"]
+    assert hits[0].title == "full match"
+    assert hits[0].score == 1 / 61
+    assert hits[1].score == 1 / 62

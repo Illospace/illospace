@@ -4,7 +4,7 @@ import asyncio
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from illo.db import all_rows
@@ -23,6 +23,7 @@ class Hit:
     at: datetime | str | None = None
     score: float = 0
     personal: bool = False
+    match_tier: Literal["strict", "fallback"] = "strict"
 
 
 class Hits(list[Hit]):
@@ -94,10 +95,14 @@ async def _items(conn, principal, query, kinds, limit):
     A long question from a person or an agent must still find something.
     """
     rows = await _item_rows(conn, principal, query, kinds, limit, STRICT_QUERY, 1.0)
+    for row in rows:
+        row["match_tier"] = "strict"
     explicit_syntax = re.search(r'(?:^|\s)-\S|"|(?:^|\s)(?:OR|or)(?=\s|$)', query)
     if len(rows) < limit and not explicit_syntax:
         seen = {r["source_ref"] for r in rows}
         relaxed = await _item_rows(conn, principal, query, kinds, limit, RELAXED_QUERY, 0.5)
+        for row in relaxed:
+            row["match_tier"] = "fallback"
         rows += [r for r in relaxed if r["source_ref"] not in seen][: limit - len(rows)]
     return [
         Hit(
@@ -111,6 +116,7 @@ async def _items(conn, principal, query, kinds, limit):
             r["source_at"] or r["created_at"],
             r["score"],
             r["visibility"] == "private",
+            match_tier=r["match_tier"],
         )
         for r in rows
     ]
@@ -252,16 +258,25 @@ async def search(
     merged = {}
     for group in groups:
         seen = set()
-        for rank, hit in enumerate(group, 1):
+        ranks = {"strict": 0, "fallback": 0}
+        # A duplicate's strict match takes precedence in every source.
+        for hit in sorted(group, key=lambda h: h.match_tier != "strict"):
             if hit.source_ref in seen:
                 continue
             seen.add(hit.source_ref)
-            previous, score = merged.get(hit.source_ref, (hit, 0))
-            merged[hit.source_ref] = (
-                replace(previous, personal=previous.personal or hit.personal),
-                score + 1 / (60 + rank),
-            )
-    ordered = sorted(merged.values(), key=lambda value: (-value[1], value[0].source_ref))
+            ranks[hit.match_tier] += 1
+            score = 1 / (60 + ranks[hit.match_tier])
+            previous, previous_score = merged.get(hit.source_ref, (hit, 0))
+            personal = previous.personal or hit.personal
+            if previous.match_tier == hit.match_tier:
+                hit, score = previous, score + previous_score
+            elif previous.match_tier == "strict":
+                hit, score = previous, previous_score
+            merged[hit.source_ref] = (replace(hit, personal=personal), score)
+    ordered = sorted(
+        merged.values(),
+        key=lambda value: (value[0].match_tier != "strict", -value[1], value[0].source_ref),
+    )
     return Hits(
         [replace(hit, score=score) for hit, score in ordered[:limit]],
         failures=failures,
