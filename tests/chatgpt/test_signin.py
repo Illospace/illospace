@@ -210,3 +210,28 @@ async def test_s3_channel_text_keeps_literal_slack_entities(app, replay, fake_br
     async with app.state.ctx.pool.connection() as conn:
         row = await one(conn, "SELECT payload FROM events WHERE id=%s", (result["event_id"],))
     assert row["payload"]["text"] == text
+
+
+async def test_n2_unverified_email_cannot_connect(chatgpt_app, replay):
+    import httpx
+
+    from tests.chatgpt.conftest import jwt, tokens
+
+    app, _ = chatgpt_app
+    state, person, _, _ = await issue_start(app.state.ctx)
+    data = tokens()
+    data["id_token"] = jwt(
+        email="ada@example.com", email_verified=False,
+        **{"https://api.openai.com/auth": {"chatgpt_account_id": "acme-account"}},
+    )
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json=data)
+
+    app.state.ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(respond))
+    assert (await replay(text=address(state)))["text"] == chatgpt_oauth.FAILED
+    async with app.state.ctx.pool.connection() as conn:
+        assert not await grants.load(conn, person["id"])
+    assert any(str(r.url) == chatgpt.REVOCATION_URL for r in requests)

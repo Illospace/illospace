@@ -166,10 +166,12 @@ class AccountMismatch(ValueError):
 async def verify_account(ctx, conn, person_id, data):
     # The ID token comes directly from the fixed HTTPS token endpoint, never the paste.
     # Decode only for this comparison. It grants no authority or tool access.
-    email = chatgpt.claims(data.get("id_token", "")).get("email")
+    identity = chatgpt.claims(data.get("id_token", ""))
+    email = identity.get("email")
     person = await one(conn, "SELECT key,emails FROM people WHERE id=%s AND active", (person_id,))
     if (
-        not isinstance(email, str)
+        identity.get("email_verified") is False
+        or not isinstance(email, str)
         or email.count("@") != 1
         or any(c.isspace() or c in "<>|&" for c in email)
     ):
