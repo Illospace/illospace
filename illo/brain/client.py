@@ -1,6 +1,7 @@
 """HTTP contract for the separate brain service."""
 
 import json
+import os
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
@@ -31,14 +32,18 @@ class BrainEvent(BaseModel):
 class BrainClient:
     """Stream JSON lines. Never log the request because it contains a run token."""
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, secret: str | None = None):
         self.url = url.rstrip("/")
+        self._secret = secret if secret is not None else os.getenv("ILLO_BRAIN_SECRET", "")
 
     async def run(self, request: RunRequest) -> AsyncIterator[BrainEvent]:
         """The outer run manager also enforces the full wall-clock timeout."""
         async with httpx.AsyncClient(timeout=request.timeout_s) as client:
             async with client.stream(
-                "POST", f"{self.url}/run", json=request.model_dump()
+                "POST",
+                f"{self.url}/run",
+                json=request.model_dump(),
+                headers={"X-Illo-Brain-Secret": self._secret},
             ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
