@@ -57,16 +57,23 @@ def first_link(links) -> str | None:
     return None
 
 
-async def _items(conn, principal, query, kinds, limit):
-    rows = await all_rows(
+STRICT_QUERY = "websearch_to_tsquery('simple',%s) || websearch_to_tsquery('english',%s)"
+# Any word may match. Postgres ranks an item higher when it has more of the words.
+RELAXED_QUERY = (
+    "replace(plainto_tsquery('simple',%s)::text,'&','|')::tsquery || "
+    "replace(plainto_tsquery('english',%s)::text,'&','|')::tsquery"
+)
+
+
+async def _item_rows(conn, principal, query, kinds, limit, tsquery, weight):
+    return await all_rows(
         conn,
-        """
-        WITH q AS (SELECT websearch_to_tsquery('simple',%s) ||
-          websearch_to_tsquery('english',%s) AS query)
+        f"""
+        WITH q AS (SELECT {tsquery} AS query)
         SELECT i.*,p.key AS owner,
           ts_headline('simple',concat_ws(' ',i.summary,i.body),q.query,
             'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet,
-          ts_rank(i.tsv,q.query) * (1 + 0.05 / (1 + greatest(0,
+          {weight} * ts_rank(i.tsv,q.query) * (1 + 0.05 / (1 + greatest(0,
             extract(epoch FROM (now()-coalesce(i.source_at,i.created_at)))/86400))) AS score
         FROM items i CROSS JOIN q LEFT JOIN people p ON p.id=i.owner_person_id
         WHERE i.tsv @@ q.query AND
@@ -77,6 +84,18 @@ async def _items(conn, principal, query, kinds, limit):
     """,
         (query, query, principal, kinds, kinds, limit),
     )
+
+
+async def _items(conn, principal, query, kinds, limit):
+    """All words first. If that finds too little, any word, ranked below the strict hits.
+
+    A long question from a person or an agent must still find something.
+    """
+    rows = await _item_rows(conn, principal, query, kinds, limit, STRICT_QUERY, 1.0)
+    if len(rows) < limit:
+        seen = {r["source_ref"] for r in rows}
+        relaxed = await _item_rows(conn, principal, query, kinds, limit, RELAXED_QUERY, 0.5)
+        rows += [r for r in relaxed if r["source_ref"] not in seen][: limit - len(rows)]
     return [
         Hit(
             r["source_ref"],

@@ -183,3 +183,30 @@ async def test_personal_read_survives_limit_and_kind_filter(app, rpc, rpc_token)
         assert (await one(conn, "SELECT personal_read FROM runs WHERE id=%s", (run["id"],)))[
             "personal_read"
         ]
+
+
+async def test_long_question_falls_back_to_any_word(app):
+    """A strict search needs every word. A long question must still find the item."""
+    from illo.ledger import items
+    from illo.sources.search import search
+
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        await items.upsert(
+            conn,
+            kind="saved",
+            source_ref="saved:relaxed-1",
+            title="Runner capacity plan",
+            body="The new runner takes the GPU jobs from Wednesday.",
+        )
+        await items.upsert(
+            conn,
+            kind="saved",
+            source_ref="saved:relaxed-2",
+            title="Office plants",
+            body="Water the plants on Monday.",
+        )
+    hits = await search(ctx, "person:ada", "what is the plan for the runner capacity next quarter")
+    refs = [h.source_ref for h in hits]
+    assert "saved:relaxed-1" in refs
+    assert refs.index("saved:relaxed-1") == 0
