@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 EMOJI = {"decision": "🔷", "action": "🔧", "review": "👀", "reminder": "⏰"}
 
@@ -41,13 +42,14 @@ def relative(time: datetime, now: datetime) -> str:
 
 def links_text(links: list) -> str:
     result = []
-    for index, link in enumerate(links[:3]):
+    for link in links[:3]:
         url = link.get("url", "") if isinstance(link, dict) else str(link)
-        if url.startswith(("https://", "http://")):
-            label = link.get("label") if isinstance(link, dict) else None
-            result.append(
-                f"<{escape(url).replace('|', '%7C')}|{escape(label or ('Thread', 'Issue', 'Pull request')[index])}>"
-            )
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme in {"https", "http"} and parsed.hostname:
+            result.append(f"<{escape(url).replace('|', '%7C')}|{escape(parsed.hostname)}>")
     return " · ".join(result)
 
 
@@ -119,6 +121,7 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
     if requester.get("label"):
         context.append(
             f"From {escape(requester['label'])}"
+            + (f" of {escape(requester['person_name'])}" if requester.get("person_name") else "")
             + (f" on {escape(lane['machine'])}" if lane.get("machine") else "")
         )
     if ask.get("due_at"):

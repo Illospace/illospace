@@ -62,7 +62,12 @@ async def card_data(conn: Connection, ask):
         conn, "SELECT * FROM people WHERE id=%s AND active", (ask["owner_person_id"],)
     )
     row["requester"] = (
-        await one(conn, "SELECT label FROM tokens WHERE id=%s", (ask["requester_token_id"],))
+        await one(
+            conn,
+            "SELECT t.label,p.name AS person_name,p.key AS person_key "
+            "FROM tokens t JOIN people p ON p.id=t.person_id WHERE t.id=%s",
+            (ask["requester_token_id"],),
+        )
         if ask["requester_token_id"]
         else None
     )
