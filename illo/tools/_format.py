@@ -57,10 +57,13 @@ def rows(values, render, *, total=None, hint="Narrow the query, or pass limit=."
 
 
 def lane(row, *, reason=True):
+    link = first_link(row.get("links")) or f"lane:{row['id']}"
+    repo = row.get("repo")
     text = line(row["state"] + (" stale" if row.get("stale") else ""),
                 short(row["title"], 90), row.get("owner"), row["source"],
+                short(repo, 100) if repo and repo.lower() not in link.lower() else None,
                 relative(row.get("last_signal_at")),
-                first_link(row.get("links")) or f"lane:{row['id']}", f"id {row['id']}")
+                link, f"id {row['id']}")
     if reason and row["state"] in {"waiting_person", "blocked", "failed", "review"}:
         why = short(row.get("last_event") or row.get("summary"), 200)
         if why:

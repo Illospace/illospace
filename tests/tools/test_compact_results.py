@@ -161,3 +161,19 @@ async def test_mail_offset_fetches_rows_before_the_page(app):
         assert "example-0" not in result["data"]
         assert ctx.google_client.calls[-1]["arguments"] == {"query": "catalog", "limit": 20}
         assert result["type"] == "outside_data" and result["trusted"] is False
+
+
+@pytest.mark.parametrize("link,expected_count", [
+    ("https://example.com/thread/1", 1),
+    ("https://github.com/acme/api/issues/1", 1),
+])
+async def test_g2_lane_row_shows_the_repository_without_a_detail_call(app, link, expected_count):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        await lanes.upsert(conn, source="t3", external_id="repo-row", title="Release work",
+                           state="working", repo="acme/api", links=[link])
+        values, _, _ = await lanes.compact_search(conn, principal="team")
+    assert values[0]["repo"] == "acme/api"
+    text = lane(values[0])
+    assert text.count("acme/api") == expected_count
+    assert link in text and len(text) < 240

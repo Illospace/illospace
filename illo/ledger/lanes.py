@@ -165,7 +165,7 @@ async def compact_search(conn, *, principal, owner=None, query="", state=None, r
           AND l.last_signal_at>=now()-interval '7 days'"""
         selected_params = ()
     rows = await all_rows(conn, """
-        SELECT l.id,l.state,l.title,p.key AS owner,l.source,l.last_signal_at,l.links,l.visibility,
+        SELECT l.id,l.state,l.title,p.key AS owner,l.source,l.repo,l.last_signal_at,l.links,l.visibility,
           left(l.summary,200) AS summary,
           (SELECT left(e.text,200) FROM lane_events e WHERE e.lane_id=l.id
             ORDER BY e.at DESC,e.id DESC LIMIT 1) AS last_event,
