@@ -150,7 +150,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - The config in `illo/config.py` and the workspace schema in `illo/workspace.py` have no field for a machine credential.
-- `work_start` in `illo/tools/work.py` creates a GitHub issue, a lane, and one Slack status message. Nothing more.
+- `work_start` in `illo/tools/work.py` creates a GitHub issue, a lane, and one Slack status message. Assignments, comments, and agent trigger labels need a draft. Without a person, tickets stay unassigned and drop model labels.
 - The collectors in `collectors/` call out to Illo with an MCP token. They open no inbound port.
 - Collector reports are private by default. `share = "team"` makes them team lanes. `clean` in `collectors/common.py` removes code blocks, URL credentials, and common tokens.
 
@@ -179,7 +179,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 - **A tainted run reads one public page.** It can fetch the first URL of the event text, once. The owner of that page sees the request.
 - **A tainted run calls connector reads.** It can call a remote tool with `tainted: true`. Its arguments go to that connector's server.
 - **A tainted run takes claims.** A `model:` claim can block another model run that wants the same key.
-- **An untainted run can read hostile text through a tool.** Examples: an issue body, a web page, a mail, a connector result. The run keeps its full grant. Only the prompt tells the model to treat that text as data. Code still turns each write to another destination into a draft after a personal or private read. Before such a read, a person DM run can file, comment on, and assign tickets in private repositories, create asks, start work, send DMs, and post in a channel, within the run caps.
+- **An untainted run can read hostile text through a tool.** Examples: an issue body, a web page, a mail, a connector result. The run keeps its full grant. Only the prompt tells the model to treat that text as data. Code still turns each write to another destination into a draft after a personal or private read. Before such a read, a person DM run can file tickets in private repositories, create asks, send DMs, and post in a channel, within the run caps. Assignments, comments, and agent trigger labels still need approval.
 - **A model answer can be wrong.** A draft in a person's DM can say something false or something that a hostile text put there. The code shows the full text. The person must read each draft before they tap Send.
 - **Email trust depends on the receiving server.** The server must remove incoming `Authentication-Results` headers that claim its identity.
 - **Collector filters are not complete.** `clean` removes common credentials, including Slack app and refresh tokens, Stripe, GitLab, npm, and named AWS secrets. It cannot find all private text. Use `share = "team"` only for work that the team may read.

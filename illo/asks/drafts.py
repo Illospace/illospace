@@ -18,6 +18,10 @@ async def sync_card(ctx, conn, draft):
             conn, "drafts:slack", "Slack is not connected. Draft cards wait in the ledger."
         )
         return
+    from illo.sources.github import WRITE_TOOLS, prepare_draft_card
+
+    if draft["kind"] in WRITE_TOOLS:
+        await prepare_draft_card(ctx, conn, draft)
     blocks = cards.draft_card(draft)
     digest = cards.digest(blocks)
     sent = {"channel": draft["slack_channel"], "ts": draft["slack_ts"]}

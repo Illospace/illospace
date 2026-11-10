@@ -87,14 +87,15 @@ async def test_rule_01_run_caps_count_audit_before_side_effect(app, rpc_token, r
         destination=lambda _: "ledger",
     )
     run, raw = rpc_token
+    expected = "draft" if name == "github_comment_issue" else "allow"
     for _ in range(limit):
         response = await rpc(raw, "tools/call", {"name": name, "arguments": {}})
-        assert response.json()["result"]["structuredContent"]["decision"] == "allow"
+        assert response.json()["result"]["structuredContent"]["decision"] == expected
     response = await rpc(raw, "tools/call", {"name": name, "arguments": {}})
     result = response.json()["result"]["structuredContent"]
     assert result["decision"] == "deny"
     assert "limit" in result["reason"]
-    assert len(called) == limit
+    assert len(called) == (0 if expected == "draft" else limit)
     async with ctx.pool.connection() as conn:
         assert (
             await one(

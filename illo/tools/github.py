@@ -79,12 +79,17 @@ async def validate_assignee(ctx: ToolContext, assignee: str) -> str:
 async def write_preflight(ctx: ToolContext, args: dict) -> Decision:
     repo = repository(ctx.app, args["repo"])
     if args.get("assignee"):
-        await validate_assignee(ctx, args["assignee"])
+        args["assignee"] = await validate_assignee(ctx, args["assignee"])
+    if "labels" in args and not ctx.run.get("person_id"):
+        args["labels"] = []
     facts = await ctx.app.github_client.get_repository(repo)
     # Missing or ambiguous visibility is not proof that a repository is private.
     if type(facts.get("private")) is not bool:
         return Decision("deny", "GitHub did not report repository visibility")
     if facts["private"]:
+        triggers = {label.casefold() for label in ctx.app.workspace.config.github.label_map}
+        if any(label.casefold() in triggers for label in args.get("labels", [])):
+            return Decision("draft", "An agent trigger label needs approval")
         return Decision("allow", "The repository is private")
     name = (
         "work_start"
@@ -150,7 +155,7 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
     if any(m.get("state") == "open" for m in matches) and not args.get("force_new_reason"):
         return {"created": False, "matches": matches}
     header = ctx.app.workspace.config.github.issue_header.strip()
-    labels = args.get("labels", [])
+    labels = args.get("labels", []) if ctx.run.get("person_id") else []
     if ctx.run["tainted"]:
         header = f"{header}\n\n{OUTSIDE_HEADER}".strip()
         labels = [OUTSIDE_LABEL]
@@ -161,11 +166,12 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         repo, args["title"], body, labels=labels
     )
     await kv.set(ctx.conn, signature_key, issue["number"])
-    if ctx.run["tainted"]:
+    if ctx.run["tainted"] or not ctx.run.get("person_id"):
         try:
+            source = " from outside text" if ctx.run["tainted"] else ""
             await dm_person(
                 ctx.app, ctx.app.workspace.config.default_owner,
-                f"New ticket from outside text, not assigned: {issue['html_url']}. "
+                f"New ticket{source}, not assigned: {issue['html_url']}. "
                 "Assign it in GitHub, or tell me in a DM.",
             )
         except Exception:
@@ -193,8 +199,8 @@ def register(registry) -> None:
         ("github_get_issue", get_issue, NumberArgs, "read"),
         ("github_get_pull", get_pull, NumberArgs, "read"),
         ("github_create_issue", create_issue, CreateArgs, "write_internal"),
-        ("github_assign_issue", assign_issue, AssignArgs, "write_internal"),
-        ("github_comment_issue", comment_issue, CommentArgs, "write_internal"),
+        ("github_assign_issue", assign_issue, AssignArgs, "send_outside"),
+        ("github_comment_issue", comment_issue, CommentArgs, "send_outside"),
     ]:
         registry.add(
             Tool(

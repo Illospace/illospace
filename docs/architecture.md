@@ -111,7 +111,7 @@ The run gets `personal_read = true` after a personal tool, and after a read resu
 
 A check returns `allow`, `draft`, or `deny`. The strictest result wins. `draft` creates a row in `drafts` and a card for the person of the run. A run with no person cannot create a draft: the result is `deny`. The tool result tells the model what happened. Each call writes `audit` with: run, principal, tool, an HMAC digest of the arguments, the redacted arguments, the decision, the reason.
 
-Risks of note: `asks_answer` and `email_draft` have risk `send_outside`, so each call is a draft. A GitHub write to a public repository becomes `send_outside` in its preflight.
+Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_comment_issue` have risk `send_outside`. Assignments through `work_start` and agent trigger labels also need approval. Without a person, tickets stay unassigned and drop model labels. A GitHub write to a public repository becomes `send_outside` in its preflight.
 
 ### Limits in one run
 
