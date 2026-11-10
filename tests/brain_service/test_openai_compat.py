@@ -24,7 +24,7 @@ class FakeProvider:
         self.requests.append(body)
 
         async def stream():
-            if len(self.requests) == 1 or self.loop:
+            if (len(self.requests) == 1 or self.loop) and body.get("tool_choice") != "none":
                 name = "shell" if self.unknown else "lanes_search"
                 values = [
                     {
@@ -130,10 +130,12 @@ async def test_turn_limit(run_request, fake_mcp, monkeypatch, tmp_path):
         run_request.mcp_url = fake_mcp.url
         run_request.max_turns = 2
         events = [item async for item in openai_compat.run(run_request, tmp_path)]
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == 4
     assert len(fake_mcp.calls) == 2
-    assert events[-1]["category"] == "limit"
-    assert not any(item["type"] == "final" for item in events)
+    assert events[-1]["type"] == "final"
+    assert events[-1]["usage"]["limited"] is True
+    assert provider.requests[-1]["tool_choice"] == "none"
+    assert "tools" not in provider.requests[-1]
 
 
 async def test_unknown_tool_cannot_execute(run_request, fake_mcp, monkeypatch, tmp_path):

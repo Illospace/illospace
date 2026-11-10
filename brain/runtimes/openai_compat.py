@@ -12,6 +12,7 @@ from mcp.types import Tool
 
 from brain.mcp_client import connect, list_tools
 from brain.models import BrainEvent, RunError, RunRequest, event
+from brain.runtimes.limits import LIMIT_INSTRUCTION, LIMIT_RESULT, NO_FINAL_ANSWER
 from brain.runtimes.provider_errors import error_body, provider_error
 from brain.runtimes.tool_results import model_text
 
@@ -67,14 +68,18 @@ async def conversation(
     usage = {}
     # Compose passes an empty value when the operator sets none. Treat empty as not set.
     base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-    for _ in range(request.max_turns):
+    tool_calls = 0
+    limited = False
+    while True:
         payload = {
             "model": request.model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if catalog:
+        if limited:
+            payload["tool_choice"] = "none"
+        elif catalog:
             payload["tools"] = catalog
         if effort := os.getenv("ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT"):
             payload["reasoning_effort"] = effort
@@ -112,6 +117,10 @@ async def conversation(
             category = "limit" if finish == "length" else "runtime"
             raise RunError(category, "The model response did not complete")
         answer = "".join(text)
+        if limited:
+            usage["limited"] = True
+            yield event("final", text=NO_FINAL_ANSWER if calls else answer, usage=usage)
+            return
         if not calls:
             if finish != "stop":
                 raise RunError("runtime", "The model returned an empty tool call")
@@ -124,6 +133,12 @@ async def conversation(
             name = call["function"]["name"]
             if name not in names or not call["id"]:
                 raise RunError("runtime", "The model requested a tool outside the run catalog")
+            if tool_calls >= request.max_turns:
+                limited = True
+                messages.append({"role": "tool", "tool_call_id": call["id"],
+                                 "content": LIMIT_RESULT})
+                continue
+            tool_calls += 1
             yield event("tool_call", name=name)
             try:
                 arguments = json.loads(call["function"]["arguments"])
@@ -148,7 +163,8 @@ async def conversation(
             messages.append(
                 {"role": "tool", "tool_call_id": call["id"], "content": model_text(result)}
             )
-    yield event("error", category="limit", message="The run reached its turn limit", usage=usage)
+        if limited:
+            messages.append({"role": "system", "content": LIMIT_INSTRUCTION})
 
 
 async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:

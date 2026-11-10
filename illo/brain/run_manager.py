@@ -162,8 +162,6 @@ class RunManager:
                             item = safe_event(item, auth)
                             if item.type == "tool_call":
                                 turns += 1
-                                if turns > config.max_turns:
-                                    raise RuntimeError("The run reached its turn limit")
                             if (
                                 item.type == "error"
                                 and item.category == "auth"
@@ -206,6 +204,8 @@ class RunManager:
                                     status = "timeout"
                                 raise RuntimeError(error)
                             if item.type == "final":
+                                if turns > config.max_turns and item.usage.get("limited") is not True:
+                                    raise RuntimeError("The run reached its turn limit")
                                 final, usage, status = item.text, item.usage, "completed"
                                 break
                     if not retry:

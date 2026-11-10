@@ -13,6 +13,7 @@ from mcp.types import Tool
 from brain.mcp_client import connect, list_tools
 from brain.models import ApiKeyAuth, BrainEvent, ChatGPTAuth, RunError, RunRequest, event
 from brain.runtimes import chatgpt
+from brain.runtimes.limits import LIMIT_INSTRUCTION, LIMIT_RESULT, NO_FINAL_ANSWER
 from brain.runtimes.openai_compat import add_usage, chunks
 from brain.runtimes.provider_errors import error_body, provider_error
 from brain.runtimes.tool_results import model_text
@@ -35,7 +36,9 @@ def function_tools(tools: list[Tool]) -> list[dict]:
     ]
 
 
-def build_request(request: RunRequest, tools: list[Tool], items: list[dict]) -> dict:
+def build_request(
+    request: RunRequest, tools: list[Tool], items: list[dict], *, tools_disabled=False
+) -> dict:
     catalog = function_tools(tools)
     names = {tool.name for tool in tools}
     assert all(tool["type"] == "function" and tool["name"] in names for tool in catalog)
@@ -53,6 +56,8 @@ def build_request(request: RunRequest, tools: list[Tool], items: list[dict]) -> 
     if request.provider_auth.kind == "chatgpt":
         del payload["max_output_tokens"]
         payload["tool_choice"] = "auto"
+    if tools_disabled:
+        payload["tools"], payload["tool_choice"] = [], "none"
     return payload
 
 
@@ -106,10 +111,10 @@ def effort_rejected(error: dict) -> bool:
     )
 
 
-async def response_chunks(request, tools, items, http):
+async def response_chunks(request, tools, items, http, *, tools_disabled=False):
     base = address(request)
     cache_key = (base, request.model)
-    payload = build_request(request, tools, items)
+    payload = build_request(request, tools, items, tools_disabled=tools_disabled)
     if cache_key not in _without_effort:
         payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or "low"}
     for attempt in range(2):
@@ -160,13 +165,16 @@ async def conversation(
     fallback_notice = ""
     subscription_limit = None
     tool_calls = 0
+    limited = False
     while True:
         completed = None
         for attempt in range(2):
             text_deltas = []
             done_items = {}
             try:
-                async for chunk in response_chunks(request, tools, items, http):
+                async for chunk in response_chunks(
+                    request, tools, items, http, tools_disabled=limited
+                ):
                     kind = chunk.get("type")
                     if kind == "response.output_text.delta":
                         text_deltas.append(chunk["delta"])
@@ -233,7 +241,7 @@ async def conversation(
         for item in output:
             check_item(item, names)
         calls = [item for item in output if item["type"] == "function_call"]
-        if not calls:
+        if not calls or limited:
             answer = "".join(
                 part.get("text", "")
                 if part.get("type") == "output_text"
@@ -243,6 +251,9 @@ async def conversation(
                 for part in item.get("content", [])
                 if part.get("type") in {"output_text", "refusal"}
             )
+            if limited:
+                usage["limited"] = True
+                answer = NO_FINAL_ANSWER if calls else answer
             yield event(
                 "final",
                 text=fallback_notice + answer,
@@ -254,10 +265,12 @@ async def conversation(
         items.extend(output)
         for call in calls:
             if tool_calls >= request.max_turns:
-                yield event(
-                    "error", category="limit", message="The run reached its turn limit", usage=usage
-                )
-                return
+                limited = True
+                if not call.get("call_id"):
+                    raise RunError("runtime", "The model returned an invalid function call")
+                items.append({"type": "function_call_output", "call_id": call["call_id"],
+                              "output": LIMIT_RESULT})
+                continue
             tool_calls += 1
             if not call.get("call_id"):
                 raise RunError("runtime", "The model returned an invalid function call")
@@ -288,6 +301,9 @@ async def conversation(
                     "output": model_text(result),
                 }
             )
+
+        if limited:
+            items.append({"role": "developer", "content": LIMIT_INSTRUCTION})
 
 
 async def run(request: RunRequest, directory: Path, *, transport=None) -> AsyncIterator[BrainEvent]:

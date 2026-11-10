@@ -124,7 +124,10 @@ Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_
 
 ### Limits in one run
 
-`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. The run stops at `brain.timeout_s`.
+`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. At the limit, a normal model request can still answer.
+If the model asks for more tools, the runtime makes one final request with tools disabled.
+The answer has `usage.limited = true`. Claude uses a separate client with no tools and the results from the run.
+The run stops at `brain.timeout_s`.
 
 Each Slack channel starts at most 30 tainted runs per hour. Owner notices have a cap of one per run and six per hour; remaining links wait for an hourly digest.
 

@@ -71,11 +71,14 @@ async def test_u08_parallel_calls_stop_at_limit(run_request):
     run_request = subscription(run_request)
     run_request.max_turns = 2
     events, session = await collect(
-        run_request, lambda wire: stream(complete([call(i) for i in range(3)]))
+        run_request, lambda wire: stream(complete(
+            [message()] if json.loads(wire.content).get("tool_choice") == "none"
+            else [call(i) for i in range(3)]
+        ))
     )
     assert len(session.calls) == 2
     assert len([e for e in events if e["type"] == "tool_call"]) == 2
-    assert events[-1]["type"] == "error" and events[-1]["category"] == "limit"
+    assert events[-1]["type"] == "final" and events[-1]["usage"]["limited"] is True
 
 
 async def test_u09_empty_arguments_call_tool(run_request):
