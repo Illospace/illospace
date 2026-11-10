@@ -60,9 +60,10 @@ def first_link(links) -> str | None:
 
 STRICT_QUERY = "websearch_to_tsquery('simple',%s) || websearch_to_tsquery('english',%s)"
 # Any word may match. Postgres ranks an item higher when it has more of the words.
-RELAXED_QUERY = (
-    "replace(plainto_tsquery('simple',%s)::text,'&','|')::tsquery || "
-    "replace(plainto_tsquery('english',%s)::text,'&','|')::tsquery"
+RELAXED_QUERY = " || ".join(
+    "(SELECT coalesce(string_agg(quote_literal(lexeme), ' | '), '')::tsquery "
+    f"FROM unnest(tsvector_to_array(to_tsvector('{config}',%s))) AS lexemes(lexeme))"
+    for config in ("simple", "english")
 )
 
 
