@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 from illo.channels.slack import actions
 from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
+from illo.channels.slack.blocks import message_text
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context
 from illo.channels.slack.voice import OpenAITranscriber
@@ -94,7 +95,7 @@ class SlackIntake:
                 private = await channel_private(self.ctx, channel)
             except Exception:
                 log.error("Slack could not verify channel privacy")
-                payload = {"text": raw.get("text", ""), "payload": {
+                payload = {"text": message_text(raw), "payload": {
                     "channel_id": channel, "message_ts": ts,
                 }}
                 for fn in self.ctx.gateway.payload_filters:
@@ -122,12 +123,13 @@ class SlackIntake:
                 mentioned = mentioned or bool(
                     await kv.get(conn, f"slack:thread:{channel}:{thread}")
                 )
+        text = message_text(raw)
         event = InboundEvent(
             channel="slack",
             external_id=f"{channel}:{ts}",
             kind="dm" if dm else "message",
             sender=raw.get("user", ""),
-            text=raw.get("text", ""),
+            text=text,
             reply_to=thread if dm else thread or ts,
             payload={
                 "channel_id": channel,
@@ -162,11 +164,14 @@ class SlackIntake:
                 ),
             },
         )
+        if dm and text != raw.get("text", ""):
+            # Claims use only what the person typed, before block or thread context.
+            event.payload["slack_typed_text"] = raw.get("text", "")
         # Search sees only configured team channels. Never index a private DM.
         result = await self.ctx.gateway.receive(event)
         if configured and not dm:
             await self.index(
-                event.model_copy(update={"text": raw.get("text", "")}), configured.name
+                event.model_copy(update={"text": text}), configured.name
             )
         return result
 
@@ -219,7 +224,13 @@ class SlackIntake:
         if clip_text is None:
             payload["clip_unreadable"] = True
             return event.model_copy(update={"payload": payload})
-        return event.model_copy(update={"text": "\n".join([event.text, *clip_text]).strip()})
+        if "slack_typed_text" in payload:
+            payload["slack_typed_text"] = "\n".join([
+                payload["slack_typed_text"], *clip_text,
+            ]).strip()
+        return event.model_copy(update={
+            "text": "\n".join([event.text, *clip_text]).strip(), "payload": payload,
+        })
 
     async def prepare_context(self, event: InboundEvent) -> None:
         """Add thread history only after claims pass."""
