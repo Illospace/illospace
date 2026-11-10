@@ -3,7 +3,9 @@
 import json
 
 import httpx
+import pytest
 
+from brain.models import RunError
 from tests.brain_service.test_chatgpt import collect, subscription
 
 
@@ -125,3 +127,18 @@ async def test_s2_exact_tool_limit_gets_a_normal_last_model_call(run_request):
     assert len(session.calls) == 1 and len(bodies) == 2
     assert events[-1]["type"] == "final" and events[-1]["text"] == "Ready."
     assert bodies[-1]["tools"] and bodies[-1].get("tool_choice") != "none"
+
+
+async def test_n4_a_new_turn_cannot_reuse_a_completed_response(run_request):
+    count = 0
+
+    def respond(wire):
+        nonlocal count
+        count += 1
+        return stream(complete([call()])) if count == 1 else stream(
+            {"type": "response.output_text.delta", "delta": "Incomplete."}
+        )
+
+    with pytest.raises(RunError, match="without a complete response"):
+        await collect(subscription(run_request), respond)
+    assert count == 2
