@@ -21,9 +21,10 @@ fi
 [ -f "$ILLO_STATE_DIR/last-good" ] || fail 'Run deploy/install.sh before the first update.'
 
 rollback() {
+    local compose_file="$ILLO_STATE_DIR/revisions/$1/deploy/compose.yaml"
     export ILLO_REVISION=$1
     export ILLO_MIGRATE_ON_START=0
-    if compose up -d --no-build --no-deps --force-recreate illo brain >/dev/null 2>&1 && wait_health; then
+    if compose up -d --no-build --remove-orphans >/dev/null 2>&1 && wait_health; then
         record "rollback $ILLO_REVISION ok"
     else
         record "rollback $ILLO_REVISION FAILED; check the services"
@@ -38,6 +39,8 @@ update_once() {
         record 'failed: the checkout has local changes'
         return 1
     fi
+    # Bootstrap the saved layout for installs made before snapshots existed.
+    save_deploy "$old" || return 1
     if ! git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
         record 'failed: git fetch'
         return 1
@@ -52,16 +55,18 @@ update_once() {
     export ILLO_MIGRATE_ON_START=0
     stage=build
     if compose build illo brain; then
-        stage=migration
-        if compose run --rm --no-deps -T illo migrate; then
-            stage=start
-            if compose up -d --no-build --no-deps --force-recreate illo brain; then
-                stage=health
-                if wait_health; then
-                    save_good
-                    record "updated $target ok"
-                    printf 'Illo now runs %s.\n' "$target"
-                    return 0
+        stage=database
+        if compose up -d --no-build --wait postgres; then
+            stage=migration
+            if compose run --rm --no-deps -T illo migrate; then
+                stage=start
+                if compose up -d --no-build --remove-orphans; then
+                    stage=health
+                    if wait_health && save_good; then
+                        record "updated $target ok"
+                        printf 'Illo now runs %s.\n' "$target"
+                        return 0
+                    fi
                 fi
             fi
         fi

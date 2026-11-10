@@ -49,7 +49,7 @@ load_config() {
 
 compose() {
     docker compose --project-name "$ILLO_PROJECT_NAME" --env-file "$ILLO_ENV_FILE" \
-        -f "$DEPLOY_DIR/compose.yaml" "$@"
+        -f "${compose_file:-$DEPLOY_DIR/compose.yaml}" "$@"
 }
 
 wait_health() {
@@ -71,7 +71,23 @@ record() {
     printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$ILLO_STATE_DIR/update.log"
 }
 
+save_deploy() {
+    local revision=$1 destination="$ILLO_STATE_DIR/revisions/$1"
+    [ -d "$destination/deploy" ] && return 0
+    local temporary
+    mkdir -p "$ILLO_STATE_DIR/revisions"
+    temporary=$(mktemp -d "$ILLO_STATE_DIR/revisions/.deploy-XXXXXXXX")
+    # Read the revision, even when the checkout still holds a failed update.
+    if git -C "$ILLO_ROOT" archive "$revision" deploy | tar -x -C "$temporary"; then
+        mv "$temporary" "$destination"
+    else
+        rm -rf "$temporary"
+        return 1
+    fi
+}
+
 save_good() {
+    save_deploy "$ILLO_REVISION" || return 1
     printf '%s\n' "$ILLO_REVISION" > "$ILLO_STATE_DIR/last-good.tmp"
     mv "$ILLO_STATE_DIR/last-good.tmp" "$ILLO_STATE_DIR/last-good"
 }

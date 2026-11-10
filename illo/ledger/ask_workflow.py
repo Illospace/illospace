@@ -173,7 +173,7 @@ async def digest_data(conn: Connection, person, now):
     person["running"] = (
         await one(
             conn,
-            "SELECT count(*) AS n FROM lanes WHERE owner_person_id=%s AND state='working' AND last_signal_at>=%s - COALESCE((%s::jsonb ->> source)::integer,30)*interval '1 minute'",
+            "SELECT count(*) AS n FROM lanes WHERE owner_person_id=%s AND (state='review' OR (state='working' AND last_signal_at>=%s - COALESCE((%s::jsonb ->> source)::integer,30)*interval '1 minute'))",
             (person["id"], now, Jsonb(person.pop("stale_minutes", {}))),
         )
     )["n"]

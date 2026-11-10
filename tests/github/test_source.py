@@ -32,7 +32,7 @@ async def test_first_poll_and_incremental_state_change(app, github_client):
     async with ctx.pool.connection() as conn:
         lane = await one(conn, "SELECT * FROM lanes")
         assert lane["external_id"] == f"{REPO}#1"
-        assert lane["state"] == "unknown"
+        assert lane["state"] == "open"
         assert lane["summary"] == "First line\nSecond line\nLast line"
         assert (
             lane["owner_person_id"]
@@ -48,7 +48,7 @@ async def test_first_poll_and_incremental_state_change(app, github_client):
         events = await all_rows(
             conn, "SELECT * FROM lane_events WHERE lane_id=%s ORDER BY id", (lane["id"],)
         )
-        assert [e["data"]["to"] for e in events] == ["unknown", "working"]
+        assert [e["data"]["to"] for e in events] == ["open", "working"]
     polls = [c for c in github_client.calls if c["method"] == "list_changed"]
     assert polls[0]["since"] is None and polls[1]["since"] is not None
 
@@ -56,6 +56,9 @@ async def test_first_poll_and_incremental_state_change(app, github_client):
 @pytest.mark.parametrize(
     ("changes", "expected"),
     [
+        ({}, "open"),
+        ({"pull_request": {}, "labels": ["unmapped"]}, "open"),
+        ({"state": None}, "unknown"),
         ({"labels": ["agent:working"]}, "working"),
         ({"labels": ["agent:needs-input"]}, "waiting_person"),
         ({"labels": ["agent:hold"]}, "blocked"),
@@ -135,3 +138,28 @@ async def test_failed_detail_read_keeps_cursor_and_finished_lanes(app, github_cl
     async with app.state.ctx.pool.connection() as conn:
         assert await kv.get(conn, f"github:cursor:{REPO}") == first
         assert await one(conn, "SELECT id FROM lanes")
+
+
+async def test_open_migration_converts_only_github_unknown(conn):
+    from pathlib import Path
+
+    for source, state in (("github", "unknown"), ("t3", "unknown"), ("github", "working")):
+        await conn.execute(
+            "INSERT INTO lanes (source,external_id,title,state) VALUES (%s,%s,'Acme',%s)",
+            (source, state, state),
+        )
+    await conn.execute("ALTER TABLE lanes DROP CONSTRAINT lanes_state_check")
+    await conn.execute(
+        "ALTER TABLE lanes ADD CONSTRAINT lanes_state_check CHECK (state IN ('working','waiting_person','blocked','review','done','failed','unknown'))"
+    )
+    migration = Path(__file__).parents[2] / "illo/migrations/0302_github_open_lanes.sql"
+    await conn.execute(migration.read_text())
+    rows = await all_rows(conn, "SELECT source,state FROM lanes ORDER BY id")
+    assert [(r["source"], r["state"]) for r in rows] == [
+        ("github", "open"),
+        ("t3", "unknown"),
+        ("github", "working"),
+    ]
+    await conn.execute(
+        "INSERT INTO lanes (source,external_id,title,state) VALUES ('manual','new','Acme','open')"
+    )

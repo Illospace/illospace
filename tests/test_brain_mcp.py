@@ -166,3 +166,36 @@ async def test_broken_destination_is_denied_and_audited(app, rpc, rpc_token):
         assert (await one(conn, "SELECT decision FROM audit WHERE run_id=%s", (run["id"],)))[
             "decision"
         ] == "deny"
+
+
+async def test_lane_tools_omit_backlog_unless_requested(app, rpc, rpc_token):
+    from illo.ledger import lanes
+
+    run, token = rpc_token
+    async with app.state.ctx.pool.connection() as conn:
+        await lanes.upsert(
+            conn,
+            source="github",
+            external_id="active",
+            title="Acme work",
+            state="working",
+            owner_person_id=run["person_id"],
+        )
+        await lanes.upsert(
+            conn,
+            source="github",
+            external_id="backlog",
+            title="Acme work",
+            state="open",
+            owner_person_id=run["person_id"],
+        )
+    for name in ("lanes_search", "lanes_mine"):
+        for args, expected in (
+            ({}, ["working"]),
+            ({"query": "Acme"}, ["working", "open"]),
+            ({"state": "open"}, ["open"]),
+        ):
+            response = await rpc(token, "tools/call", {"name": name, "arguments": args})
+            result = response.json()["result"]["structuredContent"]
+            assert result["decision"] == "allow"
+            assert [r["state"] for r in result["result"]] == expected

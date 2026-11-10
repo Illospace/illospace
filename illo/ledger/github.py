@@ -110,7 +110,7 @@ def item_state(item: dict, label_map: dict[str, str]) -> str:
             return state
     if item.get("requested_reviewers") or item.get("requested_teams"):
         return "review"
-    return "unknown"
+    return "open" if item.get("state") == "open" else "unknown"
 
 
 async def statuses(conn: Connection) -> list[dict]:
