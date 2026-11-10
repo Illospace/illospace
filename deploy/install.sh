@@ -3,6 +3,7 @@ set -euo pipefail
 # shellcheck source=deploy/common.sh
 source "$(dirname -- "$0")/common.sh"
 need python3
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || fail 'Install Python 3.9 or later.'
 need docker
 docker info >/dev/null 2>&1 || fail 'Docker is unavailable. Start Docker and give this user access.'
 if ! docker compose version >/dev/null 2>&1; then
@@ -27,7 +28,7 @@ if [ ! -e "$workspace" ]; then
     cp -R "$ILLO_ROOT/workspace.example" "$workspace"
 fi
 if [ ! -f "$ILLO_STATE_DIR/last-good" ]; then
-    [ -f "$ILLO_ROOT/brain/Dockerfile" ] || fail 'The brain image is not in this checkout yet. Read docs/install.md for the laptop smoke test.'
+    [ -f "$ILLO_ROOT/brain/Dockerfile" ] || fail 'The checkout needs brain/Dockerfile. Use the branch with the complete rebuild.'
     ILLO_REVISION=$(git -C "$ILLO_ROOT" rev-parse HEAD)
     export ILLO_REVISION
     compose build illo brain

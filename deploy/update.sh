@@ -5,7 +5,7 @@ source "$(dirname -- "$0")/common.sh"
 load_config
 need git
 need docker
-lock_deploy
+need flock
 cd "$ILLO_ROOT"
 branch=$(config_get ILLO_DEPLOY_BRANCH)
 branch=${branch:-main}
@@ -71,9 +71,18 @@ update_once() {
     return 1
 }
 
+if [ "$interval" -eq 0 ]; then
+    lock_deploy
+    update_once
+    exit $?
+fi
+
+# Release the shared lock during each wait so backups can run.
+exec 9>"$ILLO_STATE_DIR/deploy.lock"
 while :; do
-    result=0
-    update_once || result=$?
-    [ "$interval" -gt 0 ] || exit "$result"
+    if flock -n 9; then
+        update_once || true
+        flock -u 9
+    fi
     sleep "$interval"
 done

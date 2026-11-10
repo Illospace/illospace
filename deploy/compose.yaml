@@ -1,4 +1,4 @@
-name: illo
+name: ${ILLO_PROJECT_NAME:-illo}
 services:
   postgres:
     image: postgres:16

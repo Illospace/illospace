@@ -1,6 +1,6 @@
 # Install Illo
 
-Use one Linux host with Git, Bash, Python 3, and Docker Engine.
+Use one Linux host with Git, Bash, Python 3.9 or later, and Docker Engine.
 Give the Docker user access to Docker before you start.
 Allow at least 3 GB of memory and outbound HTTPS.
 No public address is required for Slack Socket Mode.
@@ -114,8 +114,6 @@ It builds both images and starts a separate Compose project with a random name.
 It uses the `echo` brain runtime, no Slack connection, and no model key.
 It checks both services, runs `illo doctor`, creates a temporary agent token, and calls MCP `initialize`.
 If the MCP route is not merged yet, it prints a skip message for that call.
-If `brain/Dockerfile` is not merged yet, it builds the test brain from `deploy/smoke-brain.Dockerfile`.
-The test brain never replaces the production brain in `deploy/compose.yaml`.
 It also checks a database backup and restore.
 The command removes its containers, networks, volume, and temporary files when it ends.
 Set `ILLO_SMOKE_PORT=18485` if port `18484` is in use.
@@ -213,7 +211,9 @@ deploy/restore.sh /absolute/path/to/backup.dump --yes
 
 The script starts Postgres, checks that the database is fresh, and stops the app and brain.
 It restores the dump in one transaction.
-Restore the workspace and its file owner, then start the services with the Compose command above.
+Restore the workspace and its file owner.
+For the original install, start the services with the Compose command above.
+For a new install, use a new `ILLO_STATE_DIR`, then run `deploy/install.sh` to build and record the images.
 Run `deploy/status.sh` and `illo doctor` after the restore.
 
 ### Uninstall

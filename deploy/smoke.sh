@@ -22,14 +22,6 @@ cp -R "$ILLO_ROOT/workspace.example" "$ILLO_WORKSPACE_DIR"
 # Make the temporary parent traversable for non-root container users.
 chmod 755 "$tmp"
 load_config
-files=(-f "$DEPLOY_DIR/compose.yaml")
-if [ ! -f "$ILLO_ROOT/brain/Dockerfile" ]; then
-    printf 'The brain image is not merged. Use the deployment test fixture.\n'
-    files+=(-f "$DEPLOY_DIR/compose.smoke.yaml")
-fi
-compose() {
-    docker compose --project-name "$ILLO_PROJECT_NAME" --env-file "$ILLO_ENV_FILE" "${files[@]}" "$@"
-}
 cleanup() {
     local result=$?
     trap - EXIT

@@ -1,6 +1,0 @@
-# Use only when brain/Dockerfile does not exist yet.
-services:
-  brain:
-    build:
-      context: ..
-      dockerfile: deploy/smoke-brain.Dockerfile

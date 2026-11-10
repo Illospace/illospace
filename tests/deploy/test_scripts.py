@@ -4,7 +4,9 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -184,6 +186,34 @@ def test_update_lock_stops_second_process(install):
         result = run(install, "update.sh")
     assert result.returncode == 1
     assert "Another install" in result.stderr
+
+
+def test_watch_releases_lock_so_backups_can_run(install):
+    init(install)
+    target = remote_commit(install)
+    root, env, _ = install
+    process = subprocess.Popen(
+        [str(root / "deploy/update.sh"), "--watch", "10"], cwd=root, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    state = Path(env["ILLO_STATE_DIR"])
+    acquired = False
+    try:
+        for _ in range(100):
+            if (state / "last-good").read_text().strip() == target:
+                with (state / "deploy.lock").open("w") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except BlockingIOError:
+                        pass
+            time.sleep(0.05)
+        assert acquired, "The update watcher blocks backups while it waits"
+        assert run(install, "backup.sh").returncode == 0
+    finally:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
 
 
 def test_update_uses_configured_branch(install):
