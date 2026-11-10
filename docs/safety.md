@@ -180,7 +180,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 - **An untainted run can read hostile text through a tool.** Examples: an issue body, a web page, a mail, a connector result. The run keeps its full grant. Only the prompt tells the model to treat that text as data. Code still turns each write to another destination into a draft after a personal or private read. Before such a read, a person DM run can file, comment on, and assign tickets in private repositories, create asks, start work, send DMs, and post in a channel, within the run caps.
 - **A model answer can be wrong.** A draft in a person's DM can say something false or something that a hostile text put there. The code shows the full text. The person must read each draft before they tap Send.
 - **Email trust depends on the receiving server.** The server must remove incoming `Authentication-Results` headers that claim its identity.
-- **Collector filters are not complete.** `clean` removes common credentials. It cannot find all private text. Use `share = "team"` only for work that the team may read.
+- **Collector filters are not complete.** `clean` removes common credentials, including Slack app and refresh tokens, Stripe, GitLab, npm, and named AWS secrets. It cannot find all private text. Use `share = "team"` only for work that the team may read.
 - **Slack posts have no hourly cap.** Each bot post in a `coordinator` channel can start a run. `run_limits.max_concurrent` limits only the runs at the same time.
 
 ## Limits
