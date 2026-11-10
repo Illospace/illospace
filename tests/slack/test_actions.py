@@ -12,7 +12,7 @@ def click(user="U_ACME_ADA"):
         "channel": {"id": "D_ACME_ADA"},
         "message": {"ts": "100.001"},
         "trigger_id": "trigger",
-        "actions": [{"action_id": "ask:answer:1", "value": "yes", "action_ts": "101.001"}],
+        "actions": [{"action_id": "test:answer:1", "value": "yes", "action_ts": "101.001"}],
     }
 
 
@@ -22,14 +22,14 @@ async def test_known_click_routes_once_unknown_does_nothing(app, intake):
     async def handler(ctx, person, action):
         seen.append((person, action))
 
-    app.state.ctx.slack_actions.register("ask:", handler)
+    app.state.ctx.slack_actions.register("test:", handler)
     await intake.receive(click())
     await intake.receive(click())
     await intake.receive(click("U_UNKNOWN"))
     assert len(seen) == 1
     assert seen[0][0]["key"] == "ada"
     assert seen[0][1] == {
-        "action_id": "ask:answer:1",
+        "action_id": "test:answer:1",
         "value": "yes",
         "channel": "D_ACME_ADA",
         "message_ts": "100.001",

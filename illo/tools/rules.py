@@ -22,6 +22,7 @@ async def rules_remove_mine(ctx, args):
 
 def register(registry) -> None:
     """Register rule handlers. A team run cannot remove a person's rule."""
+    # Tainted reads expose only team rules through the principal visibility filter.
     registry.add(
         Tool(
             "rules_list",
@@ -31,6 +32,9 @@ def register(registry) -> None:
             False,
             rules_list,
             "Read standing rules",
+            profiles=frozenset(
+                {"person_dm", "team_channel", "tainted", "routine", "agent_request"}
+            ),
         )
     )
     registry.add(
@@ -43,5 +47,6 @@ def register(registry) -> None:
             rules_remove_mine,
             "Remove one of your standing rules",
             RemoveArgs,
+            profiles=frozenset({"person_dm"}),
         )
     )
