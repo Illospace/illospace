@@ -269,6 +269,11 @@ async def draft_owner(conn: Connection, draft):
     )
 
 
+async def requester_name(conn: Connection, person_id: int | None) -> str:
+    row = await one(conn, "SELECT name FROM people WHERE id=%s", (person_id,))
+    return row["name"] if row else "none"
+
+
 async def save_draft_card(conn: Connection, draft_id, sent, card_digest):
     await conn.execute(
         "UPDATE drafts SET slack_channel=%s,slack_ts=%s,card_digest=%s,card_state=state,card_send_error=send_error WHERE id=%s",

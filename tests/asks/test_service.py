@@ -164,6 +164,7 @@ async def test_always_rule_has_exact_normalized_question_and_owner(app, seed):
     async with ctx.pool.connection() as conn:
         saved = (await rules.list_rules(conn, principal="person:ada"))[0]
         assert saved["origin"] == "card" and saved["answer_option_label"] == "Continue"
+        row = {**row, "requester_person_id": await rules.requester_person_id(conn, row)}
         assert rules.matches(
             saved, {**row, "question": "ALLOW the [safe]* plan?"}, {"source": "t3", "repo": None}
         )

@@ -64,6 +64,7 @@ def matches(rule: dict, ask: dict, lane: dict | None = None) -> bool:
         "ask_kind": ask["kind"],
         "lane_source": lane.get("source"),
         "repository": lane.get("repo"),
+        "requester_person_id": ask.get("requester_person_id"),
     }
     for key, value in rule["match"].items():
         if key == "question_pattern":
@@ -74,6 +75,16 @@ def matches(rule: dict, ask: dict, lane: dict | None = None) -> bool:
         elif key not in fields or fields[key] != value:
             return False
     return True
+
+
+async def requester_person_id(conn: Connection, ask: dict) -> int | None:
+    """Use the token's owner for agent asks, including rows without a requester person."""
+    if ask.get("requester_token_id"):
+        token = await one(
+            conn, "SELECT person_id FROM tokens WHERE id=%s", (ask["requester_token_id"],)
+        )
+        return token["person_id"] if token else None
+    return ask.get("requester_person_id")
 
 
 def matching_option(rule: dict, options: list[dict]) -> dict | None:
@@ -91,6 +102,7 @@ def matching_option(rule: dict, options: list[dict]) -> dict | None:
 
 async def match_ask(conn: Connection, ask: dict) -> dict | None:
     """Find the first active rule that matches an option proposed by the agent."""
+    ask = {**ask, "requester_person_id": await requester_person_id(conn, ask)}
     lane = (
         await one(conn, "SELECT * FROM lanes WHERE id = %s", (ask["lane_id"],))
         if ask.get("lane_id")

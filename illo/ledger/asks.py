@@ -139,6 +139,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
         )
         if not ask or not rule or not ask["allow_rule"]:
             return None
+        ask = {**ask, "requester_person_id": await rules.requester_person_id(conn, ask)}
         lane = (
             await one(conn, "SELECT * FROM lanes WHERE id=%s FOR SHARE", (ask["lane_id"],))
             if ask["lane_id"]
