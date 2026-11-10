@@ -68,16 +68,17 @@ async def create(
 
 
 async def get(conn: Connection, ask_id: int, *, principal: str = "team") -> dict | None:
-    """Hide asks attached to another person's private lane."""
+    """Hide private lanes. Without a lane, only the ask's participants can read it."""
     return await one(
         conn,
         """
         SELECT a.*,COALESCE(l.visibility,'private') AS visibility
-        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.id=%s
-          AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=
-            (SELECT id FROM people WHERE 'person:' || key=%s AND active))
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
+        WHERE a.id=%s AND (l.visibility='team' OR l.owner_person_id=me.id
+          OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
     """,
-        (ask_id, principal),
+        (principal, ask_id),
     )
 
 
@@ -89,13 +90,15 @@ async def list_open(
         conn,
         """
         SELECT a.*,COALESCE(l.visibility,'private') AS visibility
-        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id WHERE a.state='open'
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
+        WHERE a.state='open'
           AND (%s::bigint IS NULL OR a.owner_person_id=%s)
-          AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=
-            (SELECT id FROM people WHERE 'person:' || key=%s AND active))
+          AND (l.visibility='team' OR l.owner_person_id=me.id
+            OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
         ORDER BY a.due_at NULLS LAST,a.id
     """,
-        (owner_person_id, owner_person_id, principal),
+        (principal, owner_person_id, owner_person_id),
     )
 
 

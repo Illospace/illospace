@@ -134,8 +134,8 @@ async def test_ask_person_answer_delivery_ack(conn, ada, ben):
         options=[{"id": "yes", "label": "Yes", "detail": "Use it"}],
         recommended_option="yes",
     )
-    assert (await asks.get(conn, ask["id"]))["state"] == "open"
-    assert len(await asks.list_open(conn, owner_person_id=ada["id"])) == 1
+    assert (await asks.get(conn, ask["id"], principal="person:ada"))["state"] == "open"
+    assert len(await asks.list_open(conn, owner_person_id=ada["id"], principal="person:ada")) == 1
     assert await asks.answer(conn, ask["id"], person_id=ben["id"], option="yes") is None
     assert await asks.answer(conn, ask["id"], person_id=ada["id"], option="invented") is None
     answer = await asks.answer(conn, ask["id"], person_id=ada["id"], option="yes")
@@ -202,7 +202,7 @@ async def test_ask_cancel_and_expire(conn, ada):
         expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     assert await asks.expire(conn) == 1
-    assert (await asks.get(conn, old["id"]))["state"] == "expired"
+    assert (await asks.get(conn, old["id"], principal="person:ada"))["state"] == "expired"
 
 
 async def test_items_full_text_upsert_and_visibility(conn, ada, ben):
@@ -317,7 +317,7 @@ async def test_answer_delivery_stops_after_expiry(conn, ada):
     )
     await asks.expire(conn)
     assert await asks.pull(conn, token_id) == []
-    assert (await asks.get(conn, ask["id"]))["delivery_state"] == "failed"
+    assert (await asks.get(conn, ask["id"], principal="person:ada"))["delivery_state"] == "failed"
 
 
 async def test_claim_is_atomic_across_connections(pool):

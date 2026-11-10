@@ -83,4 +83,4 @@ async def test_rule_08_agent_token_cannot_answer_with_free_instructions(app, rpc
     )
     assert result.json()["result"]["structuredContent"]["decision"] == "deny"
     async with ctx.pool.connection() as conn:
-        assert (await asks.get(conn, ask["id"]))["state"] == "open"
+        assert (await asks.get(conn, ask["id"], principal="person:ada"))["state"] == "open"

@@ -117,8 +117,10 @@ async def decision(conn: Connection, ask):
         kind="decision",
         body=body,
         summary=f"{option} {ask['answer_text'] or ''}".strip(),
-        owner_person_id=lane.get("owner_person_id") or ask["owner_person_id"],
-        visibility=lane.get("visibility", "team"),
+        owner_person_id=(lane.get("owner_person_id") or ask["owner_person_id"])
+        if lane
+        else (ask["requester_person_id"] or ask["owner_person_id"]),
+        visibility=lane.get("visibility", "private"),
         links=lane.get("links", []),
         source_at=ask["answered_at"],
         meta={"ask_id": ask["id"], "via": ask["answered_via"], "rule_id": ask["rule_id"]},

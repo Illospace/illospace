@@ -40,7 +40,7 @@ Each call writes one row in `audit`.
 
 **Bad case.** Ada asks for a summary of her calendar. The model then posts it to the team channel. Without the rule, her private meetings are public.
 
-**Code.** The `destination` check in `illo/tools/checks.py`. `illo/ledger/drafts.py` stores the draft. Private ask and rule reads set `personal_read`; the personal digest does too (`tests/safety/test_review_s07_rule_03_private_asks.py`).
+**Code.** The `destination` check in `illo/tools/checks.py`. `illo/ledger/drafts.py` stores the draft. An ask without a lane is private to its participants; its decision item is private to the requester or owner (`tests/safety/test_review_s08_rule_03_ask_privacy.py`). Private ask and rule reads set `personal_read`; the personal digest does too (`tests/safety/test_review_s07_rule_03_private_asks.py`).
 
 **Tests.** `tests/safety/test_rule_03_personal_destination.py`, `tests/test_tools.py`.
 
