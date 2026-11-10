@@ -380,10 +380,10 @@ async def claim(ctx, event, authority):
                     "Paste that full address here, in this same DM and thread."
                 )
             )
+        if command == "disconnect my chatgpt":
+            await chatgpt.disconnect(ctx, authority.person_id)
+            return "ChatGPT is disconnected from Illo."
         async with ctx.pool.connection() as conn:
-            if command == "disconnect my chatgpt":
-                await grants.disconnect(conn, authority.person_id)
-                return "ChatGPT is disconnected from Illo."
             rows = await grants.status(conn, authority.person_id)
             return status_text(rows[0])
     except AccountMismatch as error:

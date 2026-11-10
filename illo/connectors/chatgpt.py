@@ -238,6 +238,20 @@ async def access(ctx, person, *, force=False, rejected_token=None):
     return auth
 
 
+async def disconnect(ctx, person_id):
+    """Try issuer revocation before local deletion. A provider failure must not block deletion."""
+    async with ctx.pool.connection() as conn:
+        await conn.execute("SELECT id FROM people WHERE id=%s FOR UPDATE", (person_id,))
+        row = await grants.load(conn, person_id, lock=True)
+        if row:
+            try:
+                token = json.loads(vault(ctx).decrypt(row["secret"]))
+                await ctx.chatgpt_client.revoke(token)
+            except Exception:
+                pass
+        await grants.disconnect(conn, person_id)
+
+
 async def notify_broken(ctx, person):
     # The row lock and notified_at prevent duplicate DMs, including concurrent runs.
     async with ctx.pool.connection() as conn:

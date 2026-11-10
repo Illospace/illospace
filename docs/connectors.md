@@ -34,7 +34,11 @@ Enable device sign-in in your ChatGPT security settings, or ask your workspace a
 Only enter a device code if you asked Illo to connect your own account.
 Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
 Only these exact DM commands can change the sign-in. The model can only check its status.
-Disconnect also cancels pending links. It does not sign you out of other OpenAI clients.
+Disconnect attempts OpenAI token revocation before it deletes the grant and cancels pending links.
+A provider error does not block local deletion.
+If revocation fails, an old database backup plus the vault key can still hold a usable token.
+Use the ChatGPT account security settings to revoke it in that case.
+Disconnect does not sign you out of other OpenAI clients.
 A crash during a token refresh can need one new sign-in.
 The provider can rotate the token before Illo commits it to the database.
 Illo cannot recover that new token after a crash.
