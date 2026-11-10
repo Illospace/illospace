@@ -14,6 +14,7 @@ from illo.db import all_rows, one
 from illo.ledger import items, people
 from illo.notes import gitstore
 from illo.workspace import WorkspaceError, load_workspace
+from tests.tool_results import read_result
 
 
 async def click(ctx, row, choice, person="ada", **changes):
@@ -56,7 +57,7 @@ async def test_propose_card_keep_indexes_file(note_ctx, proposal, slack_client, 
     response = await rpc(
         token, "tools/call", {"name": "notes_search", "arguments": {"query": "Tuesday"}}
     )
-    assert "Acme ships on Tuesday." in response.json()["result"]["structuredContent"]["result"]
+    assert "Acme ships on Tuesday." in read_result(response.json()["result"])["result"]
     await click(note_ctx, row, "keep")
     assert len(list(note_ctx.workspace.root.glob("notes/*launch*"))) == 1
 
@@ -225,7 +226,7 @@ async def test_failed_card_keeps_pending_proposal(note_ctx, rpc, rpc_token, monk
             "arguments": {"title": "A new note", "text": "Keep this pending.", "about": "A test"},
         },
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow" and not result["result"]["card_sent"]
     async with note_ctx.pool.connection() as conn:
         assert await one(conn, "SELECT id FROM note_proposals WHERE state='pending'")
@@ -248,7 +249,7 @@ async def test_approved_personal_draft_starts_proposal_once(note_ctx, rpc, rpc_t
             },
         },
     )
-    draft_id = response.json()["result"]["structuredContent"]["result"]["draft_id"]
+    draft_id = read_result(response.json()["result"])["result"]["draft_id"]
     async with note_ctx.pool.connection() as conn:
         draft = await one(conn, "SELECT * FROM drafts WHERE id=%s", (draft_id,))
     performer = note_ctx.draft_performers["notes_propose"]

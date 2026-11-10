@@ -78,3 +78,28 @@ tool. Do not expose ledger data through an outside reply.
 A tainted run has an exact tool set in `GRANT_PROFILES["tainted"]`. A new tool
 that names `tainted` in `profiles` stays refused. Only a reviewed safety change
 adds a tool to that set.
+
+## Keep brain tool results small
+
+List tools use the row helpers in `illo/tools/_format.py`. A handler can return
+`Compact(text, private=True)`. The registry reads this flag before it removes it.
+SQL must still filter every private row by the principal. Counts need the same
+filter and private flag, including rows beyond the page.
+
+The registry caps the encoded result at 12,000 characters, including JSON escapes.
+The brain MCP endpoint puts data only in `content`. Its `structuredContent` has
+only `decision` and `reason`. The agent MCP endpoint keeps its existing contract.
+The OpenAI runtimes forward only text content. Claude uses the MCP result through
+the Agent SDK. Outside text must keep its data marker after a format change.
+Google list offsets select rows from one source page. Mail reads at most 50 rows.
+Narrow the query or the date range when the source has more results.
+
+`lanes_attention` reads the principal's open asks and lanes that need attention.
+It has risk `read` and profiles `person_dm` and `routine`. It requires a person
+principal. A team routine gets no personal list. The registry marks a private read
+from the result, as it does for the other lane and ask reads.
+
+Run `scripts/test-db.sh`, then `.venv/bin/python scripts/measure_tool_results.py`.
+The script creates and deletes its own database. It uses invented text and fakes.
+Use `--output before.json`, then `--before before.json` after a change to compare.
+Estimates use characters / 4. They measure tool results, not model billing.

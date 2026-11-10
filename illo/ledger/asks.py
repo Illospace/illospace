@@ -76,8 +76,10 @@ async def get(conn: Connection, ask_id: int, *, principal: str = "team") -> dict
     return await one(
         conn,
         """
-        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility,
+          p.key AS owner,l.title AS lane_title,l.links AS lane_links
         FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
         LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
         WHERE a.id=%s AND (l.visibility='team' OR l.owner_person_id=me.id
           OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
@@ -93,8 +95,10 @@ async def list_open(
     return await all_rows(
         conn,
         """
-        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility,
+          p.key AS owner,l.title AS lane_title,l.links AS lane_links
         FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
         LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
         WHERE a.state='open'
           AND (%s::bigint IS NULL OR a.owner_person_id=%s)
@@ -230,3 +234,20 @@ async def ack(conn: Connection, ask_id: int, token_id: int) -> bool:
             (ask_id, token_id),
         )
     )
+
+
+async def compact_list(conn, *, principal, owner=None, limit=15):
+    """Limit ask rows in SQL and preserve the private-read signal."""
+    return await all_rows(conn, """
+        SELECT a.id,a.kind,left(a.question,160) AS question,a.due_at,p.key AS owner,
+          left(l.title,60) AS lane_title,l.links AS lane_links,
+          COALESCE(l.visibility,'private') AS visibility,count(*) OVER () AS total,
+          bool_or(COALESCE(l.visibility,'private')='private') OVER () AS _private
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
+        LEFT JOIN people me ON 'person:'||me.key=%s AND me.active
+        WHERE a.state='open' AND (%s::text IS NULL OR p.key=%s)
+          AND (l.visibility='team' OR l.owner_person_id=me.id
+            OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
+        ORDER BY a.due_at NULLS LAST,a.id LIMIT %s
+    """, (principal, owner, owner, max(1,min(limit,40))))

@@ -3,11 +3,12 @@
 from illo.db import one
 from illo.ledger import people, runs
 from illo.tools.registry import ToolContext
+from tests.tool_results import read_result
 
 
 async def call(rpc, token, name, args):
     response = await rpc(token, "tools/call", {"name": name, "arguments": args})
-    return response.json()["result"]["structuredContent"]
+    return read_result(response.json()["result"])
 
 
 async def test_send_dm_and_only_configured_channel(app, rpc, rpc_token, slack_client):

@@ -5,22 +5,28 @@ from datetime import datetime
 from pydantic import Field, model_validator
 
 from illo.connectors.google import personal_call, shared_call
+from illo.tools._format import external_list
 from illo.tools.registry import Arguments, Tool
 
 
-class Query(Arguments):
+class Page(Arguments):
+    limit: int = Field(default=15, ge=1, le=40)
+    offset: int = Field(default=0, ge=0)
+
+
+class Query(Page):
     query: str = Field(min_length=1, max_length=2000)
 
 
 class MailQuery(Query):
-    limit: int = Field(default=10, ge=1, le=50)
+    limit: int = Field(default=10, ge=1, le=40)
 
 
 class File(Arguments):
     id: str = Field(min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
 
 
-class Calendar(Arguments):
+class Calendar(Page):
     from_: str = Field(alias="from")
     to: str
 
@@ -45,7 +51,12 @@ def register(registry) -> None:
         async def handler(ctx, args, name=name):
             if "from_" in args:
                 args["from"] = args.pop("from_")
-            return await personal_call(ctx, name, args)
+            page = {key: args.pop(key) for key in ("offset", "limit") if key in args}
+            if name == "mail_search":
+                # Fetch the rows before the page too. Keep the source request bounded.
+                args["limit"] = min(page["offset"] + page["limit"], 50)
+            value = await personal_call(ctx, name, args)
+            return external_list(value, **page) if page else value
 
         registry.add(
             Tool(
@@ -64,7 +75,9 @@ def register(registry) -> None:
     for name, schema in (("drive_shared_search", Query), ("drive_shared_get", File)):
 
         async def shared(ctx, args, name=name):
-            return await shared_call(ctx, name.replace("drive_shared_", "drive_"), args)
+            page = {key: args.pop(key) for key in ("offset", "limit") if key in args}
+            value = await shared_call(ctx, name.replace("drive_shared_", "drive_"), args)
+            return external_list(value, **page) if page else value
 
         registry.add(
             Tool(

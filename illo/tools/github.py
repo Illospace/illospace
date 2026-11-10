@@ -10,6 +10,8 @@ from illo.channels.slack.limits import notify_unassigned
 from illo.connectors.github_client import GitHubError
 from illo.ledger import github as ledger
 from illo.ledger import kv, people
+from illo.tools._format import data_text, github, github_detail
+from illo.tools._format import rows as format_rows
 from illo.tools.checks import Decision, check
 from illo.tools.registry import Arguments, Tool, ToolContext
 
@@ -35,6 +37,7 @@ class SearchArgs(Arguments):
     query: str = Field(min_length=1, max_length=1000)
     repo: str | None = Field(default=None, pattern=REPO_PATTERN)
     state: str = Field(default="all", pattern=r"^(all|open|closed)$")
+    limit: int = Field(default=15, ge=1, le=40)
 
 
 class CreateArgs(RepoArgs):
@@ -102,7 +105,7 @@ async def write_preflight(ctx: ToolContext, args: dict) -> Decision:
     return check(ctx.run, replace(tool, risk="send_outside"), args)
 
 
-async def search(ctx: ToolContext, args: dict) -> list[dict]:
+async def search(ctx: ToolContext, args: dict):
     # GitHub combines repeated repo qualifiers with OR. Reject scope overrides.
     if re.search(r"\b(?:repo|org|user):", args["query"], re.I):
         raise ValueError("Use the repository argument to select a repository")
@@ -113,18 +116,20 @@ async def search(ctx: ToolContext, args: dict) -> list[dict]:
     )
     rows = []
     for repo in repos:
-        rows.extend(
-            await ctx.app.github_client.search_issues(args["query"], repo=repo, state=args["state"])
-        )
-    return rows
+        found = await ctx.app.github_client.search_issues(args["query"], repo=repo, state=args["state"])
+        rows.extend({**row, "repo": repo} for row in found)
+    values = sorted(rows, key=lambda r: r.get("updated_at", ""), reverse=True)
+    return data_text("github", format_rows(
+        values[:args["limit"]], github, total=len(values),
+        hint="Narrow the query, or pass state= / repo= / limit=. Use github_get_issue for detail.").text)
 
 
 async def get_issue(ctx: ToolContext, args: dict) -> dict:
-    return await ctx.app.github_client.get_issue(repository(ctx.app, args["repo"]), args["number"])
+    return github_detail(await ctx.app.github_client.get_issue(repository(ctx.app, args["repo"]), args["number"]), args["repo"])
 
 
 async def get_pull(ctx: ToolContext, args: dict) -> dict:
-    return await ctx.app.github_client.get_pull(repository(ctx.app, args["repo"]), args["number"])
+    return github_detail(await ctx.app.github_client.get_pull(repository(ctx.app, args["repo"]), args["number"]), args["repo"])
 
 
 async def create_issue(ctx: ToolContext, args: dict) -> dict:

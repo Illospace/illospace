@@ -100,11 +100,27 @@ async def test_stream_tool_result_and_usage(
         "is ready.",
     ]
     assert len(fake_mcp.calls) == (0 if malformed else 1)
-    assert json.loads(provider.requests[1]["messages"][-1]["content"])["isError"] == (
-        tool_error or malformed
-    )
+    output = provider.requests[1]["messages"][-1]["content"]
+    assert output.startswith("Tool error.") == (tool_error or malformed)
+    if not malformed:
+        assert output.removeprefix("Tool error.\n") == "Acme release is ready"
     assert all(tool["type"] == "function" for tool in provider.requests[0]["tools"])
     assert "fake-run-token" not in json.dumps(provider.requests)
+
+
+async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp, monkeypatch):
+    fake_mcp.result_override = {
+        "content": [{"type": "text", "text": "Acme release is ready"}],
+        "structuredContent": {"result": "duplicate payload must stay out"},
+    }
+    provider = FakeProvider()
+    async with serve(provider.app) as base:
+        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
+        run_request.mcp_url = fake_mcp.url
+        events = [item async for item in openai_compat.run(run_request, None)]
+    assert events[-1]["type"] == "final"
+    assert provider.requests[1]["messages"][-1]["content"] == "Acme release is ready"
+    assert "duplicate payload" not in json.dumps(provider.requests)
 
 
 async def test_turn_limit(run_request, fake_mcp, monkeypatch, tmp_path):

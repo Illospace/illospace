@@ -8,6 +8,7 @@ from illo.db import all_rows, one
 from illo.ledger import claims
 from illo.sources.github import perform_draft, poll
 from illo.tools.work import refresh_statuses
+from tests.tool_results import read_result
 
 REPO = "acme-example/engine"
 CREATE = {
@@ -19,9 +20,7 @@ CREATE = {
 
 
 async def call(rpc, token, name, args):
-    return (await rpc(token, "tools/call", {"name": name, "arguments": args})).json()["result"][
-        "structuredContent"
-    ]
+    return read_result((await rpc(token, "tools/call", {"name": name, "arguments": args})).json()["result"])
 
 
 async def test_duplicate_checks_open_and_closed_and_force(rpc, rpc_token, github_client):

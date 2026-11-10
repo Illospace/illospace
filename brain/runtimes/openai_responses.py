@@ -15,6 +15,7 @@ from brain.models import ApiKeyAuth, BrainEvent, ChatGPTAuth, RunError, RunReque
 from brain.runtimes import chatgpt
 from brain.runtimes.openai_compat import add_usage, chunks
 from brain.runtimes.provider_errors import error_body, provider_error
+from brain.runtimes.tool_results import model_text
 
 # Workers have one run. This cache lasts only as long as the worker process.
 _without_effort: set[tuple[str, str]] = set()
@@ -244,7 +245,7 @@ async def conversation(
                 {
                     "type": "function_call_output",
                     "call_id": call["call_id"],
-                    "output": json.dumps(result),
+                    "output": model_text(result),
                 }
             )
     yield event("error", category="limit", message="The run reached its turn limit", usage=usage)

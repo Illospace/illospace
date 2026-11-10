@@ -1,8 +1,37 @@
 """Exercise the JSON-RPC boundary with a real database and HTTP requests."""
 
+import pytest
+
 from illo.db import all_rows, one
 from illo.ledger import people, runs, tokens
 from illo.tools.registry import Tool
+from tests.tool_results import read_result
+
+
+@pytest.mark.parametrize("text", ["a" * 50_000, '"\\\n😀' * 15_000])
+async def test_sdk_result_has_one_payload_and_caps_private_text(app, rpc, rpc_token, text):
+    from mcp.types import CallToolResult
+
+    from illo.tools._format import Compact
+    from illo.tools.registry import MAX_RESULT_CHARS
+
+    async def huge(ctx, args):
+        return Compact(text, private=True)
+
+    app.state.ctx.registry.tools["people_list"] = Tool(
+        "people_list", "people", "read", lambda a: "ledger", False, huge
+    )
+    run, token = rpc_token
+    envelope = (await rpc(token, "tools/call", {"name": "people_list"})).json()["result"]
+    # Claude reads this MCP result directly. OpenAI reads the same content text.
+    parsed = CallToolResult.model_validate(envelope)
+    assert len(parsed.content) == 1 and len(parsed.content[0].text) <= MAX_RESULT_CHARS
+    result = read_result(envelope)
+    assert result["decision"] == "allow"
+    assert "Result cut at 12000 characters" in result["result"]
+    assert parsed.structuredContent == {"decision": result["decision"], "reason": result["reason"]}
+    async with app.state.ctx.pool.connection() as conn:
+        assert (await runs.get(conn, run["id"]))["personal_read"]
 
 
 async def test_auth_unknown_missing_and_expired(http, app, rpc, rpc_token):
@@ -192,10 +221,10 @@ async def test_lane_tools_omit_backlog_unless_requested(app, rpc, rpc_token):
     for name in ("lanes_search", "lanes_mine"):
         for args, expected in (
             ({}, ["working"]),
-            ({"query": "Acme"}, ["working", "open"]),
+            ({"query": "Acme"}, ["open", "working"]),
             ({"state": "open"}, ["open"]),
         ):
             response = await rpc(token, "tools/call", {"name": name, "arguments": args})
-            result = response.json()["result"]["structuredContent"]
+            result = read_result(response.json()["result"])
             assert result["decision"] == "allow"
-            assert [r["state"] for r in result["result"]] == expected
+            assert [line.split(" · ", 1)[0] for line in result["result"].splitlines()[2:]] == expected

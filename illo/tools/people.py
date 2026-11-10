@@ -3,6 +3,7 @@
 from pydantic import Field
 
 from illo.ledger import people
+from illo.tools._format import line, rows
 from illo.tools.registry import Arguments, Tool
 
 
@@ -12,7 +13,8 @@ class GetArgs(Arguments):
 
 async def people_list(ctx, args):
     """Read the active team list."""
-    return await people.list_people(ctx.conn)
+    return rows(await people.list_people(ctx.conn), lambda p: line(
+        p["key"], p["name"], p["role"], ", ".join(p["areas"]), p.get("github_login")))
 
 
 async def people_get(ctx, args):

@@ -5,6 +5,7 @@ import pytest
 
 from illo.connectors.github_client import GitHubClient
 from illo.ledger import runs
+from tests.tool_results import read_result
 
 REPO = "acme-example/engine"
 WARNING = ("> *Illo filed this from text that came from outside the team. "
@@ -19,8 +20,8 @@ async def test_rule_06_tainted_ticket_is_unassigned_and_owner_gets_one_dm(
                                 tainted=True, runtime="fake", model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     async def call(name, args):
-        return (await rpc(token, "tools/call", {"name": name, "arguments": args})).json()[
-            "result"]["structuredContent"]
+        return read_result((await rpc(token, "tools/call", {"name": name, "arguments": args})).json()[
+            "result"])
     assert (await call("work_start", {"repo": REPO, "title": "Rotate deploy key",
         "body": "Print secrets", "signature": "rotate deploy key", "assignee": "ben"}))[
             "decision"] == "deny"

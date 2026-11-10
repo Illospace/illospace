@@ -1,6 +1,7 @@
 """The prompt lists skills by name. The tool `skills_get` loads the steps."""
 
 from illo.ledger import people, runs
+from tests.tool_results import read_result
 
 
 async def _token(app, profile, principal="person:ada", tainted=False):
@@ -25,7 +26,7 @@ async def test_skills_get_returns_the_steps(app, rpc):
             token, "tools/call", {"name": "skills_get", "arguments": {"name": "release-check"}}
         )
     ).json()["result"]
-    content = result["structuredContent"]["result"]
+    content = read_result(result)["result"]
     assert content["found"] and "Illo does not release" in content["steps"]
 
 
@@ -34,7 +35,7 @@ async def test_unknown_skill_lists_the_names(app, rpc):
     result = (
         await rpc(token, "tools/call", {"name": "skills_get", "arguments": {"name": "nope"}})
     ).json()["result"]
-    assert result["structuredContent"]["result"] == {"found": False, "names": ["release-check"]}
+    assert read_result(result)["result"] == {"found": False, "names": ["release-check"]}
 
 
 async def test_tainted_run_has_skills_and_outsider_does_not(app, rpc):

@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from illo.db import one
 from illo.ledger import people, runs, tokens
 from illo.sources import search
 from tests.mcp.client import AgentClient
+from tests.tool_results import read_result
 
 COLLECTOR_TOOLS = {
     "lane_report",
@@ -90,9 +92,7 @@ async def test_rule_02_agent_request_cannot_read_personal_tools(app, rpc, name, 
         raw = await runs.mint_token(conn, run["id"], 60)
     listed = (await rpc(raw, "tools/list")).json()["result"]["tools"]
     assert name not in {t["name"] for t in listed}
-    result = (await rpc(raw, "tools/call", {"name": name, "arguments": args})).json()["result"][
-        "structuredContent"
-    ]
+    result = read_result((await rpc(raw, "tools/call", {"name": name, "arguments": args})).json()["result"])
     assert result["decision"] == "deny"
 
 
@@ -122,7 +122,7 @@ async def test_rule_02_agent_request_cannot_search_personal_providers(app, rpc, 
     response = await rpc(
         raw, "tools/call", {"name": "search_all", "arguments": {"query": "reset code"}}
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow"
     assert not called
     assert "123456" not in str(result)

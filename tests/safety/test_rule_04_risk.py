@@ -1,6 +1,7 @@
 """Rule 4: outside messages are drafts. Destructive tools are absent."""
 
 from illo.tools.registry import Tool
+from tests.tool_results import read_result
 
 
 async def test_outside_send_does_not_run_handler(app, rpc, rpc_token):
@@ -21,9 +22,7 @@ async def test_outside_send_does_not_run_handler(app, rpc, rpc_token):
             profiles=frozenset({"person_dm"}),
         )
     )
-    result = (await rpc(token, "tools/call", {"name": "test_outside_send"})).json()["result"][
-        "structuredContent"
-    ]
+    result = read_result((await rpc(token, "tools/call", {"name": "test_outside_send"})).json()["result"])
     assert result["decision"] == "draft" and result["result"]["draft_id"]
     assert not sent
     names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}

@@ -3,11 +3,12 @@
 import pytest
 
 from illo.ledger import asks, people, rules, runs
+from tests.tool_results import read_result
 
 
 async def call(rpc, token, name, arguments=None):
     response = await rpc(token, "tools/call", {"name": name, "arguments": arguments or {}})
-    return response.json()["result"]["structuredContent"]
+    return read_result(response.json()["result"])
 
 
 async def test_create_answer_cancel_and_digest(app, rpc, rpc_token):
@@ -26,11 +27,11 @@ async def test_create_answer_cancel_and_digest(app, rpc, rpc_token):
     assert result["decision"] == "allow"
     ask_id = result["result"]["ask_id"]
     listed = await call(rpc, token, "asks_list", {"owner": "ada"})
-    assert listed["result"][0]["id"] == ask_id
+    assert f"id {ask_id}" in listed["result"]
     got = await call(rpc, token, "asks_get", {"id": ask_id})
-    assert got["result"]["question"] == "Review Acme plan?"
+    assert "Review Acme plan?" in got["result"]
     digest = await call(rpc, token, "asks_digest")
-    assert "1 need you" in str(digest["result"])
+    assert "Open asks: Showing 1 of 1" in digest["result"]
     result = await call(rpc, token, "asks_answer", {"id": ask_id, "text": "Use the reviewed plan."})
     assert result["decision"] == "draft"
     result = await call(rpc, token, "asks_answer", {"id": ask_id, "option": "yes"})
@@ -91,7 +92,7 @@ async def test_owner_can_list_and_remove_rule_in_dm(app, rpc, rpc_token):
             answer_option_label="Proceed",
         )
     listed = await call(rpc, token, "rules_list")
-    assert listed["result"][0]["id"] == rule["id"]
+    assert f"id {rule['id']}" in listed["result"]
     removed = await call(rpc, token, "rules_remove_mine", {"id": rule["id"]})
     assert removed["result"]["removed"]
 

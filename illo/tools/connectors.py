@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import Field
 
 from illo.ledger import sensors
+from illo.tools._format import data_text, json_text, line, rows
 from illo.tools.registry import Arguments, Tool
 
 PROFILES = frozenset({"person_dm", "team_channel", "agent_request", "routine", "tainted"})
@@ -65,7 +66,9 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
                 ],
             }
         )
-    return results
+    values = [{"connector": c["connector"], **t} for c in results for t in c["tools"]]
+    return data_text("connector catalog", rows(values, lambda t: line(
+        t["connector"], t["name"], t["risk"], json_text(t["inputSchema"]))).text)
 
 
 async def call_connector(ctx, args: dict) -> dict:
