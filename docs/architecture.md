@@ -93,15 +93,21 @@ The gateway gives each run one profile. The profile decides the tool list. `illo
 | Profile | When | Principal | Tools |
 |---|---|---|---|
 | `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | all tools |
-| `team_channel` | a team member in a configured channel | `team` | team reads, tickets, `work_start`, `asks_create`, `slack_read_thread` |
-| `routine` | a team routine | `team` | team reads, tickets, `work_start`, `asks_create`, `slack_send_dm` |
-| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, tickets, `work_start`, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
-| `tainted` | a bot, webhook, or form post; a forwarded email; a signal; a Slack thread with outside text | `team`, or the person of a forwarded email | exactly 8 tools (below) |
+| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `work_start`, `asks_create`, `slack_read_thread` |
+| `routine` | a team routine | `team` | team reads, create an unassigned issue, `work_start`, `asks_create`, `slack_send_dm` |
+| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, create an unassigned issue, `work_start`, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
+| `tainted` | a bot, webhook, or form post; a forwarded email; a signal; a Slack thread with outside text | `team`, or the person of a forwarded email | up to 8 tools (below) |
 | `outsider` | an email from an unknown or unauthenticated sender | `outsider` | `web_read_public_page` |
+
+A run with no person does not list a tool with risk `send_outside`.
+Google tools need a configured connector and a current grant, or a team service account.
+Connector tools need a configured team MCP service. Tainted runs also need an allowed read tool.
+These checks narrow the tool list. Each call still passes all authority checks.
+The old names `asks_digest` and `lanes_attention` stay callable but are absent from the tool list.
 
 "Team reads" are the lane, ask, rule, people, search, notes, skills, shared Drive, GitHub read, connector, and public web tools. The personal tools work only in `person_dm`. `asks_answer`, `asks_cancel_mine`, `rules_remove_mine`, `asks_digest`, `digest_snapshot`, `lanes_attention`, and `slack_post_channel` also work only in `person_dm`.
 
-The `tainted` profile has exactly these tools: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, and `skills_get`. A tool that names `tainted` but is not in this set is still refused. With these tools a tainted run reads only issues of the configured repositories, connector results, and public pages. It cannot read lanes, asks, people, rules, notes, search results, Slack, or pull requests. Its tickets have no assignee and the label `from-outside-text`. A person assigns them. A connector tool needs `tainted: true` and risk `read`. A tainted run reads one public page: the first URL of its event text, once.
+The `tainted` grant permits these tools: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, and `skills_get`. A tool that names `tainted` but is not in this set is still refused. With these tools a tainted run reads only issues of the configured repositories, connector results, and public pages. It cannot read lanes, asks, people, rules, notes, search results, Slack, or pull requests. Its tickets have no assignee and the label `from-outside-text`. A person assigns them. A connector tool needs `tainted: true` and risk `read`. A tainted run reads one public page: the first URL of its event text, once.
 
 In a tainted run, `ToolContext.principal` is `team`. So a tainted run never reads private ledger rows, even for a forwarded email of a person. Drafts of that run still go to that person.
 

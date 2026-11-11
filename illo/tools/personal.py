@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import Field, model_validator
 
-from illo.connectors.google import personal_call, shared_call
+from illo.connectors.google import google_ready, personal_call, shared_call
 from illo.tools._format import external_list
 from illo.tools.registry import Arguments, Tool
 
@@ -37,6 +37,14 @@ class Calendar(Page):
         if not start.tzinfo or not end.tzinfo or end <= start:
             raise ValueError("Use ordered dates with time zones")
         return self
+
+
+async def personal_available(ctx):
+    return await google_ready(ctx.conn, ctx.app, "personal", ctx.run.get("person_id"))
+
+
+async def shared_available(ctx):
+    return await google_ready(ctx.conn, ctx.app, "team", None)
 
 
 DESCRIPTIONS = {
@@ -80,6 +88,7 @@ def register(registry) -> None:
                 description=DESCRIPTIONS[name],
                 arguments=schema,
                 profiles=frozenset({"person_dm"}),
+                available=personal_available,
             )
         )
     # Separate tools preserve personal=True on every personal Drive read.
@@ -101,5 +110,6 @@ def register(registry) -> None:
                 description=DESCRIPTIONS[name],
                 arguments=schema,
                 profiles=frozenset({"person_dm", "agent_request", "team_channel", "routine"}),
+                available=shared_available,
             )
         )

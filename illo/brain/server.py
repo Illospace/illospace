@@ -79,7 +79,7 @@ async def endpoint(request: Request):
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
-                result = {"tools": ctx.registry.list_tools(run)}
+                result = {"tools": await ctx.registry.list_tools_for(ToolContext(conn, run, ctx))}
             elif method == "tools/call":
                 name, args = params.get("name"), params.get("arguments", {})
                 if not isinstance(name, str) or not isinstance(args, dict):

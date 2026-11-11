@@ -107,6 +107,15 @@ async def call_failed(ctx, args: dict) -> None:
     await sensors.error(ctx.conn, f"connector:{args['connector']}", "The connector call failed")
 
 
+async def connector_available(ctx):
+    """Show connector tools only when the run has a configured service to call."""
+    return any(
+        config.kind == "mcp" and config.scope == "team"
+        and (not ctx.run["tainted"] or any(t.tainted and t.risk == "read" for t in config.tools))
+        for config in ctx.app.workspace.connectors
+    )
+
+
 def register(registry) -> None:
     # Listing exposes only configured names and risks. It does not read remote data.
     registry.add(
@@ -119,6 +128,7 @@ def register(registry) -> None:
             list_connectors,
             description="List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.",
             profiles=PROFILES,
+            available=connector_available,
         )
     )
     registry.add(
@@ -132,6 +142,7 @@ def register(registry) -> None:
             description="Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.",
             arguments=Call,
             profiles=PROFILES,
+            available=connector_available,
             resolve=resolve,
             on_error=call_failed,
         )

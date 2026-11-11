@@ -10,6 +10,8 @@ SAFE = {
 
 
 async def test_rule_06_tainted_grant_is_exact(app, rpc):
+    app.state.ctx.workspace = app.state.ctx.workspace.model_copy(deep=True)
+    app.state.ctx.workspace.connectors[0].tools[0].tainted = True
     async with app.state.ctx.pool.connection() as conn:
         run = await runs.create(conn, principal="team", person_id=None, profile="tainted", tainted=True,
                                 runtime="fake", model="fake")
