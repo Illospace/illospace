@@ -123,6 +123,7 @@ class BrainConfig(Model):
     timeout_s: float = Field(default=120, gt=0, le=3600)
     auth: Literal["chatgpt", "api_key"] = "api_key"
     team_credential: str | None = None
+    person_credential: Literal["own", "team"] = "own"
     tainted_credential: Literal["none", "team", "api_key"] = "none"
     chatgpt_allowed_accounts: list[str] = Field(default_factory=list)
     api_key_fallback: bool = False
@@ -370,6 +371,10 @@ def load_workspace(root: Path | str) -> Workspace:
     keys = {p.key for p in people if p.active}
     if config.default_owner not in keys:
         raise WorkspaceError(f"{root / 'illo.yaml'}: default_owner: unknown or inactive person")
+    if config.brain.person_credential == "team" and config.brain.auth != "chatgpt":
+        raise WorkspaceError(
+            f"{root / 'illo.yaml'}: brain.person_credential: team needs auth: chatgpt"
+        )
     if config.brain.auth == "chatgpt" and config.brain.team_credential is None:
         raise WorkspaceError(
             f"{root / 'illo.yaml'}: brain.team_credential: ChatGPT needs an explicit person"

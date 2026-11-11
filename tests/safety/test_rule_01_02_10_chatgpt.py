@@ -56,6 +56,50 @@ async def test_rule_01_02_team_only_uses_configured_person(subscription_app):
     assert auth.access_token.get_secret_value() == "ben-only-token"
 
 
+async def test_rule_01_02_team_model_grant_keeps_bens_personal_data(
+    subscription_app, replay, fake_brain
+):
+    import httpx
+
+    from illo.connectors import store
+    from illo.connectors.config import Connector
+    from illo.connectors.google import GoogleClient
+    from illo.connectors.http import BoundedHTTP
+    from illo.ledger import people
+    from tests.tool_results import read_result
+
+    ctx = subscription_app.state.ctx
+    ctx.workspace.config.brain.person_credential = "team"
+    ctx.workspace.config.brain.team_credential = "ada"
+    ctx.workspace.connectors = [Connector(key="google", kind="google", scope="personal")]
+    await save_grant(ctx, "ada", access="ada-model-token")
+    async with ctx.pool.connection() as conn:
+        ben = await people.get(conn, "ben")
+        for key in ("ada", "ben"):
+            person = await people.get(conn, key)
+            await store.save(conn, ctx, "google", person["id"], {
+                "access_token": key + "-mail-token", "expires_in": 3600,
+            }, [])
+    requests = []
+
+    def mail(request):
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer ben-mail-token"
+        return httpx.Response(200, json={"messages": [{"id": "bens-message"}]})
+
+    ctx.google_client = GoogleClient(BoundedHTTP(httpx.MockTransport(mail)))
+    fake_brain.script = [{"name": "mail_search", "arguments": {"query": "plan"}}]
+    await replay(sender="U_ACME_BEN")
+    assert len(requests) == 1
+    assert fake_brain.requests[0].provider_auth.access_token.get_secret_value() == "ada-model-token"
+    result = read_result(fake_brain.results[0])
+    assert result["decision"] == "allow" and "bens-message" in str(result["result"])
+    async with ctx.pool.connection() as conn:
+        run = await one(conn, "SELECT * FROM runs")
+    assert run["person_id"] == ben["id"] and run["principal"] == "person:ben"
+    assert run["personal_read"] and run["usage"]["credential_person"] == "ada"
+
+
 async def test_rule_02_tokens_never_enter_database_or_logs(subscription_app, replay, caplog):
     ctx = subscription_app.state.ctx
     marker = "fake-token-marker-do-not-record"

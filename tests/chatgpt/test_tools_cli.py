@@ -38,6 +38,7 @@ async def test_operator_status_has_no_secret(chatgpt_app, capsys):
     )
     assert await execute(parser().parse_args(["chatgpt", "status"]), ctx.config) == 0
     output = capsys.readouterr().out
+    assert output.splitlines()[0] == "Person credential: own; team credential: none"
     assert "ada  connected" in output and "ben  missing" in output
     assert "secret-cli-marker" not in output and "fake-refresh" not in output
 

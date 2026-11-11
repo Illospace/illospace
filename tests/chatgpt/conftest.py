@@ -108,6 +108,14 @@ async def chatgpt_app(app):
     return app, backend
 
 
+@pytest.fixture
+async def team_chatgpt_app(chatgpt_app):
+    ctx = chatgpt_app[0].state.ctx
+    ctx.workspace.config.brain.person_credential = "team"
+    ctx.workspace.config.brain.team_credential = "ada"
+    return chatgpt_app
+
+
 async def save_grant(ctx, key="ada", *, expires=3600, access="fake-access"):
     async with ctx.pool.connection() as conn:
         person = await people.get(conn, key)

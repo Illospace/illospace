@@ -160,6 +160,7 @@ async def test_limit_reply_is_clear_and_run_token_revoked(chatgpt_app, replay):
         assert row["error"] == "The brain run failed: limit usage_limit_reached"
         # A failed run also shows which sign-in it used.
         assert row["usage"]["auth_kind"] == "chatgpt"
+        assert row["usage"]["credential_person"] == "ada"
 
 
 @pytest.mark.parametrize(
@@ -214,6 +215,7 @@ async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status,
     async with ctx.pool.connection() as conn:
         row = await one(conn, "SELECT * FROM runs")
     assert row["status"] == status and row["usage"]["auth_kind"] == expected
+    assert row["usage"].get("credential_person") == ("ada" if expected == "chatgpt" else None)
     counts = [e.usage.get("input_tokens") for e in events if e.usage.get("input_tokens")]
     if counts:
         assert row["usage"]["input_tokens"] == counts[0]

@@ -24,6 +24,7 @@ stale_minutes:
   manual: 1440
   email: 1440
 brain:
+  # person_credential: team  # Needs auth: chatgpt and an active team_credential.
   runtime: claude
   model: default
   max_turns: 12

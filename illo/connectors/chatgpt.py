@@ -32,6 +32,24 @@ BROKEN = 'Your ChatGPT sign-in for Illo stopped working. Say "connect my ChatGPT
 TEMPORARY = "I could not reach the model sign-in service. Try again in a minute."
 
 
+def team_person(workspace):
+    return next(
+        person for person in workspace.people
+        if person.key == workspace.config.brain.team_credential and person.active
+    )
+
+
+def team_missing(workspace):
+    return (
+        f'Illo has no model sign-in now. {team_person(workspace).name} must send '
+        '"connect my ChatGPT" in a DM with Illo.'
+    )
+
+
+def team_signin(workspace):
+    return f"Illo uses the sign-in of {team_person(workspace).name} for all runs."
+
+
 class TemporaryRefresh(ValueError):
     pass
 
@@ -289,6 +307,8 @@ async def notify_team_missing(ctx, *, tainted=False):
         if tainted
         else "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
     )
+    if not tainted and ctx.workspace.config.brain.person_credential == "team":
+        message = team_missing(ctx.workspace)
     async with ctx.pool.connection() as conn:
         await sensors.error(conn, key, message)
         # An atomic ledger write also caps notices across app processes.

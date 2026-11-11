@@ -132,6 +132,43 @@ async def test_oversized_workspace_reload_keeps_active_workspace(app, example):
     assert ctx.workspace is previous
 
 
+@pytest.mark.parametrize("brain,error", [
+    ({"auth": "api_key", "team_credential": "ada"}, "brain.person_credential"),
+    ({"auth": "chatgpt"}, "brain.team_credential"),
+    ({"auth": "chatgpt", "team_credential": "missing"}, "brain.team_credential"),
+    ({"auth": "chatgpt", "team_credential": "ben"}, "brain.team_credential"),
+])
+async def test_team_person_credential_rejects_bad_config_and_reload(app, example, brain, error):
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["brain"].update(runtime="openai_responses", person_credential="team", **brain)
+    path.write_text(yaml.safe_dump(data))
+    if brain.get("team_credential") == "ben":
+        path = example / "people.yaml"
+        data = yaml.safe_load(path.read_text())
+        next(person for person in data["people"] if person["key"] == "ben")["active"] = False
+        path.write_text(yaml.safe_dump(data))
+    with pytest.raises(WorkspaceError, match=error):
+        load_workspace(example)
+    ctx = app.state.ctx
+    previous = ctx.workspace
+    ctx.config.workspace_dir = example
+    with pytest.raises(WorkspaceError, match=error):
+        await ctx.reload()
+    assert ctx.workspace is previous
+
+
+def test_person_credential_defaults_to_own_and_accepts_explicit_team(example):
+    assert load_workspace(example).config.brain.person_credential == "own"
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["brain"].update(
+        auth="chatgpt", runtime="openai_responses", person_credential="team", team_credential="ada",
+    )
+    path.write_text(yaml.safe_dump(data))
+    assert load_workspace(example).config.brain.person_credential == "team"
+
+
 def test_fixed_prompt_size_names_config_file(example):
     path = example / "illo.yaml"
     data = yaml.safe_load(path.read_text())

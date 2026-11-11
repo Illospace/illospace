@@ -9,6 +9,11 @@ The model sign-in below has a separate, per-run credential path.
 ## The model sign-in
 
 Each member can use their own ChatGPT subscription with `brain.auth: chatgpt` and `brain.runtime: openai_responses`.
+This is the default `brain.person_credential: own` mode.
+The workspace owner can choose `brain.person_credential: team` to use the sign-in of `brain.team_credential` for untainted person runs.
+That key must name an active person. Only that person needs to connect ChatGPT.
+This changes only who pays for the model. Personal tools keep the requester's grants and data.
+The requester's messages then pass through the selected person's ChatGPT account.
 Set `ILLO_VAULT_KEY` in the main app. No connector YAML file or host sign-in file is needed.
 
 ChatGPT sign-in needs no public Illo address or inbound HTTP request.
@@ -41,6 +46,10 @@ This team list defaults to empty.
 Enable device sign-in in your ChatGPT security settings, or ask your workspace administrator to enable it.
 Only enter a device code if you asked Illo to connect your own account.
 Send `ChatGPT status` to check the grant. Send `disconnect my ChatGPT` to delete it from Illo.
+In `team` mode, `ChatGPT status` names the shared sign-in and shows whether it is connected.
+Both connect commands tell other members that they do not need to connect. They start no sign-in for those members.
+The team person can connect as before. Their disconnect reply warns that all members lose the model sign-in.
+Another member can disconnect only their own unused grant. The team grant stays connected.
 Only these exact DM commands can change the sign-in. The model can only check its status.
 Disconnect attempts OpenAI token revocation before it deletes the grant and cancels pending sign-in attempts.
 A provider error does not block local deletion.
@@ -51,6 +60,7 @@ A crash during a token refresh can need one new sign-in.
 The provider can rotate the token before Illo commits it to the database.
 Illo cannot recover that new token after a crash.
 The operator can run `illo chatgpt status` to list connection states and expiry times without secrets.
+Its first line shows the person credential mode and the team person key.
 See [Workspace files](workspace.md) for team credentials and the optional API-key fallback.
 Check that the provider's terms allow this use. An API key is the alternative.
 

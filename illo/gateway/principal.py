@@ -71,7 +71,7 @@ async def resolve(conn, event, workspace) -> Authority | None:
 
 
 async def person_authority(conn, principal):
-    """Person routines and briefs use the same personal grant."""
+    """Person routines and briefs keep the person's authority."""
     if not principal.startswith("person:"):
         return None
     person = await people.get(conn, principal[7:])
