@@ -418,6 +418,8 @@ def fingerprint(root: Path) -> str:
     import hashlib
 
     digest = hashlib.sha256()
+    # An absent lists folder has a built-in list. An empty folder has no lists.
+    digest.update(b"lists-present" if (root / "lists").exists() else b"lists-absent")
     for pattern in (
         "people.yaml",
         "agents.yaml",

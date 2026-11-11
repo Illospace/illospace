@@ -10,7 +10,7 @@ async def token_viewer(conn, workspace, token):
     if key and not any(a.key == key and a.owner == person for a in workspace.agents):
         raise TaskError("The agent is missing or has a different owner. Create a new token.")
     held = () if key else tuple(["person:" + person, *["agent:" + a.key for a in workspace.agents if a.owner == person]])
-    return Viewer(person, "agent:" + (key or f"unnamed-{token['id']}"), holder_refs=held)
+    return Viewer(person, "agent:" + (key or f"unnamed:{token['id']}"), holder_refs=held)
 
 
 async def run_viewer(ctx):

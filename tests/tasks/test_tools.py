@@ -173,7 +173,7 @@ async def test_unnamed_token_writes_for_its_persons_holders(app, http):
     row = await operator(app, "task_create", list="launches", title="For Ada", holder="person:ada")
     changed = await unnamed.call("task_write", {"id": row["id"], "append": "A result", "message": "The result needs review.", "returned": True})
     assert changed["state"] == "review" and changed["done_by"] is None
-    assert changed["events"][-2]["actor"].startswith("agent:unnamed-")
+    assert changed["events"][-2]["actor"].startswith("agent:unnamed:")
 
 
 async def test_team_channel_task_tools_use_verified_sender(app, replay, fake_brain):
@@ -214,3 +214,18 @@ async def test_profile_task_grants(app, profile, expected):
     names = {tool["name"] for tool in app.state.ctx.registry.list_tools({"principal": "person:ada",
         "profile": profile, "tainted": False, "person_id": 1, "personal_read": False})}
     assert {name for name in names if name == "lists" or name.startswith("task_")} == expected
+
+
+async def test_unnamed_actor_cannot_match_another_persons_named_agent(app, http):
+    from illo.workspace import Agent
+
+    unnamed = await AgentClient.create(app, http)
+    ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    key = f"unnamed-{unnamed.token_id}"
+    ctx.workspace.agents.append(Agent(key=key, name="Another agent", owner="ben"))
+    entry = next(entry for entry in ctx.workspace.lists if entry.key == "launches")
+    entry.holders.append("agent:" + key)
+    row = await operator(app, "task_create", list="launches", title="Ben's task", holder="agent:" + key)
+    result = await unnamed.call("task_write", {"id": row["id"], "append": "No", "message": "No"}, error=True)
+    assert "handed to someone else" in result["error"]["message"]

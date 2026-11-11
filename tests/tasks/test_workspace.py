@@ -117,3 +117,11 @@ async def test_doctor_prints_task_reference_warnings(pool, root, capsys):
     output = capsys.readouterr().out
     assert "lists/warn.md: unknown holder agent:missing" in output
     assert "unknown check fake:missing" in output
+
+
+def test_empty_lists_folder_changes_fingerprint(root):
+    shutil.rmtree(root / "lists")
+    absent = fingerprint(root)
+    (root / "lists").mkdir()
+    assert fingerprint(root) != absent
+    assert not load_workspace(root).lists
