@@ -126,7 +126,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `Gateway.context_authority` in `illo/gateway/dispatch.py` also marks a Slack run tainted when its thread context has a bot or an unknown user (`read_context` in `illo/channels/slack/threads.py`). An unknown author shows as `Outside user (<id>)`.
 - An Illo reply taints a follow-up only when the thread has the stored `slack:thread-tainted:` marker. Normal DM follow-ups keep `person_dm`.
 - `GRANT_PROFILES["tainted"]` in `illo/tools/checks.py` is the exact tool set: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, `skills_get`. `in_grant` refuses every other tool, even one that names the profile.
-- `create_issue` in `illo/tools/github.py` files a tainted ticket with no assignee, the label `from-outside-text`, and a warning line. The server sends at most one owner notice per run and six per hour. The remaining links wait for one digest at the end of the hour.
+- `create_issue` in `illo/tools/github.py` files a tainted ticket with the label `from-outside-text`, and a warning line. Code assigns trusted monitors to the default owner within the hourly triage limit. Other sources need an owner card. The server sends at most one owner card per run and six per hour. The remaining links wait for one digest at the end of the hour.
 - `take` in `illo/tools/claims.py` adds the prefix `model:`, so a model claim cannot block a routine. The minute timer deletes model claims older than 24 hours.
 - `read_page` lets a tainted run read only the first URL of the event text, once.
 - `resolve` in `illo/tools/connectors.py` gives a tainted run only a remote tool with `tainted: true` and risk `read`.
@@ -226,7 +226,7 @@ See [workspace.md](workspace.md#voice-clips) for defaults and setup.
 The rules limit damage. They do not make hostile text harmless. These risks remain:
 
 - **A tainted run reads team GitHub issues.** It can search and read issues of the configured repositories, private ones too. In Slack, its final answer goes to the thread of the hostile post. So that thread can show issue text.
-- **A tainted run files tickets.** It can file up to 3 tickets in one run in a configured private repository. Each ticket has no assignee, the label `from-outside-text`, and a warning line. A public repository needs a draft, so a signal run cannot write there. Owner notices have the caps below.
+- **A tainted run files tickets.** It can file up to 3 tickets in one run in a configured private repository. Each ticket has the label `from-outside-text`, and a warning line. A public repository needs a draft, so a signal run cannot write there. Owner notices have the caps below.
 - **A tainted run reads one public page.** It can fetch the first URL of the event text, once. The owner of that page sees the request.
 - **A tainted run calls connector reads.** It can call a remote tool with `tainted: true`. Its arguments go to that connector's server.
 - **A tainted run takes claims.** A `model:` claim can block another model run that wants the same key.

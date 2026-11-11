@@ -159,8 +159,50 @@ def draft_preview(draft: dict) -> str | None:
     return escaped if len(escaped.replace("\n", "\n> ")) <= 120000 else None
 
 
+def visible_escape(value):
+    text = "".join(
+        (f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\U{ord(c):08x}")
+        if unicodedata.category(c) == "Cf" else c for c in str(value)
+    )
+    return escape(text)
+
+
+def outside_ticket_card(draft):
+    content = draft["content"]
+    issue, args, notice = content["github_issue"], content["arguments"], content["outside_ticket"]
+    url = visible_escape(issue["link"]).replace("|", "%7C")
+    label = visible_escape(f"{args['repo'].split('/')[-1]}#{args['number']}")
+    source = notice["source"]
+    if source["kind"] == "slack":
+        where = f"a message in #{visible_escape(source['name'])} by {visible_escape(source['author'])}"
+        if source.get("link"):
+            where = f"<{visible_escape(source['link']).replace('|', '%7C')}|{where}>"
+    elif source["kind"] == "signal":
+        where = f"the signal source {visible_escape(source['name'])}"
+    else:
+        where = "outside text"
+    blocks = [section(f"New ticket from outside text: <{url}|{label}>"),
+              section("> " + visible_escape(issue["title"]).replace("\n", "\n> ")),
+              section(f"From {where}. Nobody is assigned.")]
+    if draft["state"] == "pending":
+        blocks.append({"type": "actions", "elements": [
+            button(f"Assign to {notice['owner']}", f"draft:{draft['id']}:approve", True),
+            button("Leave it", f"draft:{draft['id']}:reject")]})
+    elif draft["state"] == "sent":
+        blocks.append(section(f"Assigned to {visible_escape(notice['owner'])}."))
+    elif draft["state"] == "rejected":
+        blocks.append(section("Left unassigned."))
+    elif draft["state"] == "expired":
+        blocks.append(section("This card expired. The ticket stays unassigned."))
+    else:
+        blocks.append(section("Delivery could not be confirmed. Check the ticket."))
+    return blocks
+
+
 def draft_card(draft: dict) -> list[dict]:
     text = draft_preview(draft)
+    if text is not None and draft["content"].get("outside_ticket"):
+        return outside_ticket_card(draft)
     blocks = [section(f"Draft for {escape(draft['destination'])}")]
     if text is None:
         blocks.append(section("This draft is too long to review in Slack. It stays unsent."))

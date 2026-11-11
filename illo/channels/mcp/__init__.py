@@ -126,7 +126,7 @@ TOOLS = {
             schemas.Signal,
             signal_submit,
             "write_internal",
-            "Submit a machine signal (`source`, `dedupe_key`, `severity`, `title`, `body`). A repeated `source` and `dedupe_key` returns the first receipt. Each new signal starts one Illo run that treats its text as outside data and can file one unassigned ticket.",
+            "Submit a machine signal (`source`, `dedupe_key`, `severity`, `title`, `body`). A repeated `source` and `dedupe_key` returns the first receipt. Each new signal starts one Illo run that treats its text as outside data and can file one ticket. Code assigns trusted signal sources to the default owner within the hourly triage limit. Other tickets need an owner card.",
         ),
     )
 }

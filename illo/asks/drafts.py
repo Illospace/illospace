@@ -43,6 +43,7 @@ async def sync_card(ctx, conn, draft):
     if sent:
         await ledger.save_draft_card(conn, draft["id"], sent, digest)
         await sensors.ok(conn, "drafts:slack")
+    return sent
 
 
 async def tick(ctx):

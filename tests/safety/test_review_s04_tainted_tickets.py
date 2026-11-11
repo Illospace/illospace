@@ -41,8 +41,9 @@ async def test_rule_06_tainted_ticket_is_unassigned_and_owner_gets_one_dm(
     assert not (await call("github_create_issue", args))["result"]["created"]
     posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
     assert len(posts) == 1
-    assert posts[0]["text"] == (f"New ticket from outside text, not assigned: {issue['html_url']}. "
-                                "Assign it in GitHub, or tell me in a DM.")
+    assert posts[0]["blocks"][0]["text"]["text"] == (
+        f"New ticket from outside text: <{issue['html_url']}|engine#{issue['number']}>")
+    assert "Nobody is assigned." in str(posts[0]["blocks"])
     assert next(c for c in slack_client.calls if c["method"] == "conversations_open")[
         "users"] == "U_ACME_ADA"
 

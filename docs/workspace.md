@@ -320,3 +320,11 @@ A person principal with no channel destination also uses that person's time zone
 A channel destination uses the team time zone. This rule takes priority over the principal.
 Reload recalculates the next run after a time zone change.
 It suppresses another person run on the last run's local day after that change.
+
+## Triage of outside text
+
+`triage.auto_assign.slack_bots` lists trusted Slack monitor `bot_id` values.
+Each id must be a non-empty string without spaces.
+`triage.auto_assign.signal_sources` lists trusted machine signal source names.
+Both lists default to empty. `triage.max_per_hour` defaults to 6 and accepts 1–100.
+See [GitHub triage](github.md#triage-of-outside-text) for the assignment and card rules.

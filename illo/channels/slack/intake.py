@@ -143,6 +143,7 @@ class SlackIntake:
                 "mentioned": mentioned,
                 "bot": bool(raw.get("bot_id") or raw.get("bot_profile") or raw.get("workflow_id")),
                 "bot_id": raw.get("bot_id"),
+                "author_slack_id": raw.get("user"),
                 "webhook": raw.get("subtype") == "bot_message",
                 "form": bool(raw.get("workflow_id")),
                 "files": [
