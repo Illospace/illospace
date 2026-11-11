@@ -28,7 +28,7 @@ async def test_explicit_team_credential(chatgpt_app, slack_client, fallback):
         for c in slack_client.calls
         if c.get("text")
         == (
-            "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+            "I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
         )
     ]
     assert len(notices) == (0 if fallback else 1)

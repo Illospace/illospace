@@ -93,10 +93,10 @@ def in_grant(run: dict, tool) -> bool:
     # Outside text has one closed grant, including tools with explicit profiles.
     if effective_profile(run) == "tainted" and tool.name not in GRANT_PROFILES["tainted"]:
         return False
-    if run.get("event_channel") == "digest" and tool.name != "digest_snapshot":
-        return False
-    if run.get("event_channel") == "team_digest" and tool.name != "team_snapshot":
-        return False
+    if run.get("event_channel") in {"digest", "team_digest"}:
+        allowed = "team_snapshot" if run["principal"] == "team" else "digest_snapshot"
+        if tool.name != allowed:
+            return False
     profiles = getattr(tool, "profiles", None)
     if profiles is not None:
         return effective_profile(run) in profiles

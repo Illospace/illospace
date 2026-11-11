@@ -12,6 +12,7 @@ from illo.connectors import chatgpt
 from illo.db import one
 from illo.gateway.replies import RunFailure, failure_category
 from illo.ledger import runs, sensors
+from illo.tools._format import data_text
 
 
 def credential_person(authority, workspace):
@@ -127,13 +128,12 @@ class RunManager:
                         conn, row["id"], usage={"skipped": "no_model_credential"}
                     )
                 return (
-                    "Illo did not run the model for this event. "
-                    "No model credential is allowed for tainted runs."
+                    'I did not answer this message. No model sign-in is allowed for messages from outside the team.'
                 )
             if config.person_credential == "team":
                 return chatgpt.team_missing(ctx.workspace)
             return chatgpt.MISSING if authority.person_id is not None else (
-                "Illo did not run the model for this event. No model credential is available."
+                'I did not answer this message. I have no model sign-in for it.'
             )
         async with ctx.pool.connection() as conn:
             row = await runs.create(
@@ -151,7 +151,9 @@ class RunManager:
         request = RunRequest(
             run_id=row["id"],
             system_prompt=system_prompt,
-            user_message=event.text,
+            user_message=(data_text("inbound-message", event.text)
+                          if authority.tainted or authority.profile in {"tainted", "outsider"}
+                          or authority.principal == "outsider" else event.text),
             mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
             mcp_token=token,
             runtime=runtime,

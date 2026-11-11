@@ -1,13 +1,11 @@
 """Bound model inputs on the measured archive shape and retain useful detail."""
 
-import json
-
 import pytest
 
 from illo.brain.server import tool_result
 from illo.db import one
 from illo.ledger import items, lanes, people, runs
-from illo.tools._format import ask, github, hit, lane, short
+from illo.tools._format import ask, data_text, github, hit, lane, short
 from illo.tools.registry import MAX_RESULT_CHARS, Tool, ToolContext
 from scripts.measure_tool_results import LIST_TOOLS, TYPICAL_ARGS, configure_fakes, measure, seed
 
@@ -22,7 +20,7 @@ async def test_default_read_results_on_live_shape(app, monkeypatch):
         assert (await one(conn, "SELECT count(*) n FROM items WHERE source_ref LIKE 'archive:%'"))["n"] == 4650
         assert (await one(conn, "SELECT count(*) n FROM asks"))["n"] == 30
     async def page(*args, **kwargs):
-        return "<public-page>Outside data.</public-page>"
+        return data_text("web", "Outside data.")
     monkeypatch.setattr("illo.tools.web.fetch_page", page)
     measured = await measure(ctx)
     for name, result in measured.items():
@@ -112,10 +110,9 @@ async def test_github_details_keep_evidence_and_bound_comments(app):
         for name in ("github_get_issue", "github_get_pull"):
             text = await call(ctx,conn,run,name,TYPICAL_ARGS[name])
             assert "Comments: showing 5 of 20" in text and "characters omitted" in text
-            value = json.loads(text)
-            assert value["type"] == "outside_data" and value["trusted"] is False
-            assert value["data"].count("API evidence and decision.") < 110
-        assert "APPROVED" in text and "success" in text and '"merged":false' in json.loads(text)["data"]
+            assert text.startswith('<outside_data source="github">\n') and text.endswith("\n</outside_data>")
+            assert text.count("API evidence and decision.") < 110
+        assert "APPROVED" in text and "success" in text and '"merged":false' in text
 
 
 @pytest.mark.parametrize("text", ["a"*50_000, '"\\\n😀'*15_000])
@@ -158,11 +155,11 @@ async def test_mail_offset_fetches_rows_before_the_page(app):
                                 profile="person_dm", runtime="fake", model="fake")
         result = await call(ctx, conn, run, "mail_search",
                             {"query": "catalog", "offset": 10, "limit": 10})
-        assert "Showing 10 of 20" in result["data"]
-        assert "example-10" in result["data"] and "example-19" in result["data"]
-        assert "example-0" not in result["data"]
+        assert "Showing 10 of 20" in result
+        assert "example-10" in result and "example-19" in result
+        assert "example-0" not in result
         assert ctx.google_client.calls[-1]["arguments"] == {"query": "catalog", "limit": 20}
-        assert result["type"] == "outside_data" and result["trusted"] is False
+        assert result.startswith('<outside_data source="google">\n') and result.endswith("\n</outside_data>")
 
 
 @pytest.mark.parametrize("link,expected_count", [

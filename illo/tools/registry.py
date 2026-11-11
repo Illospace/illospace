@@ -75,6 +75,7 @@ class Tool:
     # Resolve a configured remote tool before any authority check or draft.
     resolve: Callable[[ToolContext, dict], "Tool"] | None = None
     on_error: Callable[[ToolContext, dict], Awaitable[None]] | None = None
+    available: Callable[[ToolContext], Awaitable[bool]] | None = None
 
     @property
     def json_schema(self) -> dict:
@@ -140,8 +141,19 @@ class Registry:
         return [
             tool.declaration()
             for _, tool in sorted(self.tools.items())
-            if scope(run, tool).outcome == "allow"
+            if tool.name not in {"asks_digest", "lanes_attention"}
+            and not (tool.risk == "send_outside" and run.get("person_id") is None)
+            and scope(run, tool).outcome == "allow"
         ]
+
+    async def list_tools_for(self, ctx: ToolContext) -> list[dict]:
+        """Hide tools whose connector or grant is absent. Call checks still apply."""
+        result = []
+        for declaration in self.list_tools(ctx.run):
+            tool = self.tools[declaration["name"]]
+            if tool.available is None or await tool.available(ctx):
+                result.append(declaration)
+        return result
 
     async def call(self, ctx: ToolContext, name: str, args: dict) -> dict:
         """Call under the run row lock. The HTTP layer owns the transaction."""
@@ -230,16 +242,24 @@ class Registry:
         text = result if isinstance(result, str) else json_text(result)
         envelope = {"decision": decision, "reason": reason, "result": result}
         # Personal snapshots keep complete JSON across all attention aliases.
-        if name not in {"digest_snapshot", "team_snapshot", "asks_digest", "lanes_attention"} and len(json_text(envelope)) > MAX_RESULT_CHARS:
+        if (
+            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "lanes_attention"}
+            and len(json_text(envelope)) > MAX_RESULT_CHARS
+        ):
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."
+            def closed_prefix(length):
+                prefix = text[:length]
+                count = prefix.count("<outside_data source=") - prefix.count("</outside_data>")
+                return prefix + "\n</outside_data>" * max(0, count)
+
             # Count JSON escapes too. The model receives this encoded content.
             low, high = 0, min(len(text), MAX_RESULT_CHARS)
             while low < high:
                 middle = (low + high + 1) // 2
-                candidate = {**envelope, "result": text[:middle] + note}
+                candidate = {**envelope, "result": closed_prefix(middle) + note}
                 if len(json_text(candidate)) <= MAX_RESULT_CHARS:
                     low = middle
                 else:
                     high = middle - 1
-            result = text[:low] + note
+            result = closed_prefix(low) + note
         return {"decision": decision, "reason": reason, "result": result}

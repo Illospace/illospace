@@ -1,6 +1,8 @@
 """Shared compact rows. Privacy metadata stays inside the tool server."""
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -104,10 +106,38 @@ def github(row, repo=None):
                 row.get("html_url"))
 
 
-def data_text(source, text):
-    """JSON quoting keeps hostile text inside a data field, even after a result is cut."""
-    return json.dumps({"type": "outside_data", "source": source, "trusted": False,
-                       "data": text}, ensure_ascii=False, separators=(",", ":"))
+DATA_SOURCE = re.compile(r"^[a-z0-9][a-z0-9:._-]{0,80}$")
+# "<", the full-width "＜", and the small "﹤", then an optional "/", then "outside data"
+# with any space, underscore, or hyphen, in any case.
+DATA_MARKER = re.compile(r"[<＜﹤]\s*/?\s*outside[\s_\-]*data", re.IGNORECASE)
+
+
+def _visible(text: str) -> str:
+    """Show format controls (zero-width, bidi) as text, so they cannot hide a marker."""
+    return "".join(
+        f"[U+{ord(c):04X}]" if unicodedata.category(c) == "Cf" else c for c in text
+    )
+
+
+def data_text(source: str, text) -> str:
+    """Mark data for the model. Only this function writes the outside-data markers."""
+    if not DATA_SOURCE.fullmatch(source):
+        raise ValueError("The data source name is invalid")
+    text = str(text or "")
+    probe = unicodedata.normalize(
+        "NFKC", "".join(c for c in text if unicodedata.category(c) != "Cf")
+    )
+    if DATA_MARKER.search(probe):
+        # Hostile or nested text only: make every look-alike visible, then break each marker.
+        text = unicodedata.normalize("NFKC", _visible(text))
+        text = DATA_MARKER.sub(lambda m: "‹" + m.group(0)[1:], text)
+    return f'<outside_data source="{source}">\n{text}\n</outside_data>'
+
+
+def outside_result(value):
+    """Convert a connector result to the format that the model reads."""
+    text = value["data"] if isinstance(value["data"], str) else json_text(value["data"])
+    return data_text(value["source"], text)
 
 
 def body(value, limit=3000):

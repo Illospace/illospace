@@ -148,9 +148,9 @@ def texts(slack_client, method):
         (
             GitHubError(403, rate_limited=True),
             None,
-            "The ticket was created. Illo could not confirm the assignment.",
+            "The ticket was created. I could not confirm the assignment.",
         ),
-        (GitHubError(422), None, "The ticket was created. Illo could not confirm the assignment."),
+        (GitHubError(422), None, "The ticket was created. I could not confirm the assignment."),
     ],
 )
 async def test_work_keeps_the_ticket_when_the_assignment_fails(
@@ -193,7 +193,7 @@ async def test_work_shows_the_owner_when_a_server_error_hid_the_assignment(
     result = await approved_start(ctx, rpc, token)
     assert result["assigned"] is None
     assert texts(slack_client, "chat_postMessage")[0].endswith(
-        "The ticket was created. Illo could not confirm the assignment."
+        "The ticket was created. I could not confirm the assignment."
     )
     # GitHub did the assignment before the error. The poll finds the owner.
     await poll(ctx)

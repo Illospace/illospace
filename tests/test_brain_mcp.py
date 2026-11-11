@@ -227,4 +227,4 @@ async def test_lane_tools_omit_backlog_unless_requested(app, rpc, rpc_token):
             response = await rpc(token, "tools/call", {"name": name, "arguments": args})
             result = read_result(response.json()["result"])
             assert result["decision"] == "allow"
-            assert [line.split(" · ", 1)[0] for line in result["result"].splitlines()[2:]] == expected
+            assert [line.split(" · ", 1)[0] for line in result["result"].splitlines()[3:-1]] == expected

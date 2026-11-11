@@ -32,6 +32,7 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             take,
+            description="Lock an item so that only one run handles it, for example an alert that arrives twice. `key` must be identical for each copy; use the format of a team rule if one gives it. Returns true when this run has the claim; false means that another run has it, so stop. A claim lasts 24 hours.",
             arguments=TakeArgs,
             profiles=frozenset(
                 {"person_dm", "team_channel", "tainted", "routine", "agent_request"}

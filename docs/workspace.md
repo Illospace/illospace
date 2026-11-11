@@ -11,6 +11,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | Key | Meaning |
 | --- | --- |
 | `team_name` | Team name. Required. |
+| `language` | Optional team language for the team brief, for example `French`. Default: the language of the run message. |
 | `timezone` | IANA time zone for schedules. Default: `UTC`. |
 | `default_owner` | Active person key from `people.yaml`. Required. |
 | `slack.channels` | List of channel mappings. Default: empty. |
@@ -181,14 +182,21 @@ The transcript then follows the same path as the person's typed text, including 
 Model and endpoint references: [OpenAI speech to text](https://developers.openai.com/api/docs/guides/speech-to-text)
 and [GPT-4o Mini Transcribe](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe).
 
+## Person language
+
+| Key | Meaning |
+| --- | --- |
+| `language` | Optional. The language of the morning brief and of routine messages to this person, for example `French`. Default: the language of the run message. |
+
 ## Other files
 
 - `people.yaml`: a mapping with `people`, a list of people. Each person has `key` and `name`.
-  Optional fields: `slack_id`, `github_login`, `emails`, `role`, `timezone`, `areas`, `active`.
+  Optional fields: `slack_id`, `github_login`, `emails`, `role`, `timezone`, `language`, `areas`, `active`.
   The role is `owner` or `member`. The default role is `member`. The default time zone is `UTC`.
   The default `active` is true. All identities must be unique, including inactive entries.
 - `rules/*.md`: YAML front matter with `name`, optional `description`, `channels`, `profiles`, and `principals`.
-  Empty filters match all runs. The Markdown body supplies the rule text.
+  Profile names: `person_dm`, `team_channel`, `tainted`, `routine`, `agent_request`, `digest`, and `team_digest`.
+  Empty filters match all runs. Briefs get only rules that name `digest` or `team_digest`. The Markdown body supplies the rule text.
 - `skills/<name>/SKILL.md`: front matter with `name` and `description`. The body holds the steps.
 - `routines/*.md`: front matter with `name`, `schedule`, `destination`, and `principal`.
   The principal is `team` or `person:<key>`. The body is the prompt.
@@ -248,7 +256,13 @@ They include open asks, failed answer deliveries, and lanes that need review.
 They also include blocked work, stale work, finished work, and real service faults.
 A working lane becomes stale only after its source's configured `stale_minutes` limit.
 The snapshot keeps full titles. It returns up to 20 finished lanes and the full finished count.
-The personal snapshot tools bypass the generic text limit to keep the JSON complete.
+The snapshot tools bypass the generic text limit to keep the JSON complete inside the data markers.
+Only lanes in state `done` count as finished or shipped.
+`closed_not_done` counts lanes in state `failed`, including agent steps, without listing them.
+A linked issue and merged pull request count once, with the issue title and the pull request link.
+Both snapshots include `recent_openings`: the first line of the last five completed briefs, newest first.
+Each line has at most 160 characters. Personal openings belong only to that person.
+The event stores these openings with the rest of the snapshot before the model runs.
 
 Event sensors can stay idle without a fault. A sensor error after the last success is a fault.
 Timer sensors record `expected_every_s` when they report.

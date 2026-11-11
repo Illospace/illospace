@@ -14,7 +14,7 @@ from illo.routines.team_digest import DEFAULT_INSTRUCTIONS, fallback_text, send_
 from illo.tools.checks import in_grant
 from illo.workspace import Routine, TeamDigestConfig
 from tests.asks.test_digest import NOW, posts
-from tests.tool_results import read_result
+from tests.tool_results import read_result, snapshot_data
 
 
 def configure(ctx):
@@ -92,8 +92,9 @@ async def test_team_snapshot_visibility_waiting_stale_steps_and_faults(conn, ada
     await sensors.ok(conn, "asks:slack")
     data = await team_snapshot(conn, config, NOW)
     assert "Private" not in str(data) and "question" not in str(data)
-    assert data["shipped_total"] == 2 and data["shipped_steps"] == 2
-    assert {r["state"] for r in data["shipped"]} == {"done", "failed"}
+    assert data["shipped_total"] == 1 and data["shipped_steps"] == 1
+    assert data["closed_not_done"] == 2
+    assert {r["state"] for r in data["shipped"]} == {"done"}
     assert all(
         r["owner"] == "Ada" and r["source"] == "t3" and r["link"].startswith("https:")
         for r in data["shipped"]
@@ -306,7 +307,7 @@ async def test_team_retry_uses_frozen_snapshot_text_and_delivery_key(
     assert len(posts(slack_client)) == 1
     if model:
         assert len(fake_brain.requests) == 1
-        assert read_result(fake_brain.results[0])["result"]["stuck"][0]["title"] == "Check-plan"
+        assert snapshot_data(read_result(fake_brain.results[0])["result"])["stuck"][0]["title"] == "Check-plan"
 
 
 async def test_team_instruction_file_and_no_separate_routine(app, fake_brain, tmp_path):
@@ -396,6 +397,15 @@ async def test_team_tool_list_and_denials_use_actual_http(app, fake_brain, monke
     monkeypatch.setattr(fake_brain, "run", check_tools)
     await send_team_due(ctx, NOW + timedelta(hours=5))
     assert listed == ["team_snapshot"]
+    from illo.brain.prompts import PROFILE_TEXTS
+
+    prompt = fake_brain.requests[-1].system_prompt
+    assert PROFILE_TEXTS["team_digest"] in prompt
+    assert "• Channel: Slack channel #software (`C_ACME_TEAM`), mode listen" in prompt
+    assert "Open asks" not in prompt
+    data = read_result(fake_brain.results[0])["result"]
+    assert data.startswith('<outside_data source="team-snapshot">\n')
+    assert data.endswith("\n</outside_data>")
     assert [read_result(r)["decision"] for r in fake_brain.results] == [
         "allow",
         "deny",
@@ -423,9 +433,10 @@ async def test_team_tool_keeps_complete_large_snapshot(app, rpc, rpc_token, monk
             "result"
         ]
     )
-    assert result["decision"] == "allow" and isinstance(result["result"], dict)
-    assert len(result["result"]["shipped"]) == 20
-    assert all(len(r["title"]) > 700 for r in result["result"]["shipped"])
+    assert result["decision"] == "allow"
+    data = snapshot_data(result["result"])
+    assert len(data["shipped"]) == 20
+    assert all(len(r["title"]) > 700 for r in data["shipped"])
 
 
 async def test_team_channel_delivery_uses_mrkdwn_chunks_and_stable_part_keys(

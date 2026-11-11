@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import Field
 
 from illo.ledger import sensors
-from illo.tools._format import data_text, json_text, line, rows
+from illo.tools._format import data_text, json_text, line, outside_result, rows
 from illo.tools.registry import Arguments, Tool
 
 PROFILES = frozenset({"person_dm", "team_channel", "agent_request", "routine", "tainted"})
@@ -67,8 +67,13 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
             }
         )
     values = [{"connector": c["connector"], **t} for c in results for t in c["tools"]]
-    return data_text("connector catalog", rows(values, lambda t: line(
-        t["connector"], t["name"], t["risk"], json_text(t["inputSchema"]))).text)
+    return data_text(
+        "connector-catalog",
+        rows(
+            values,
+            lambda t: line(t["connector"], t["name"], t["risk"], json_text(t["inputSchema"])),
+        ).text,
+    )
 
 
 async def call_connector(ctx, args: dict) -> dict:
@@ -80,7 +85,7 @@ async def call_connector(ctx, args: dict) -> dict:
         ctx.run["tainted"] and not (remote.tainted and remote.risk == "read")
     ):
         raise ValueError("This connector tool does not allow a tainted run")
-    return await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"])
+    return outside_result(await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"]))
 
 
 def resolve(ctx, args: dict) -> Tool:
@@ -102,6 +107,15 @@ async def call_failed(ctx, args: dict) -> None:
     await sensors.error(ctx.conn, f"connector:{args['connector']}", "The connector call failed")
 
 
+async def connector_available(ctx):
+    """Show connector tools only when the run has a configured service to call."""
+    return any(
+        config.kind == "mcp" and config.scope == "team"
+        and (not ctx.run["tainted"] or any(t.tainted and t.risk == "read" for t in config.tools))
+        for config in ctx.app.workspace.connectors
+    )
+
+
 def register(registry) -> None:
     # Listing exposes only configured names and risks. It does not read remote data.
     registry.add(
@@ -112,7 +126,9 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             list_connectors,
+            description="List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.",
             profiles=PROFILES,
+            available=connector_available,
         )
     )
     registry.add(
@@ -123,8 +139,10 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             call_connector,
+            description="Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.",
             arguments=Call,
             profiles=PROFILES,
+            available=connector_available,
             resolve=resolve,
             on_error=call_failed,
         )

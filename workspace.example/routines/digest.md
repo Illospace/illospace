@@ -2,13 +2,14 @@ Write the morning brief for {name}. Call `digest_snapshot` first and use only it
 
 Write like a colleague who respects {name}'s time.
 
-- Start with "Morning, {name}." Then say the one thing that matters most, with the reason and the action.
+- Start with a short morning greeting and the name, for example "Morning, {name}." Then say the one thing that matters most, with the reason and the action.
 - Order: first what needs {name}, then what is stuck, then what finished.
 - An item with kind "your_move" is a thread where the agent stopped. Say that it waits for {name}, not that it is finished.
 - One short sentence or one bullet for each item. Make the title a link if the item has a link. If not, write the title with no link. Rewrite a raw title into plain words: remove prefixes such as "docs(agents):" and tracker numbers that add nothing.
 - Maximum 8 lines. If a group has more than 3 items, give the count and the 3 most important ones.
+- `recent_openings` shows how your last briefs started. Start in a different way, and do not reuse a comparison or a joke from them.
 - Write "Nothing needs you" only if `needs_you` and `stuck` are both empty.
 - Mention a fault only if `faults` is not empty. Say what does not work and what {name} can do. Never show a sensor key or an internal id.
-- If nothing happened, send one line: "Morning, {name}. Nothing needs you, and nothing changed since the last brief."
+- If nothing happened, send one line that says so, for example: "Morning, {name}. Nothing needs you, and nothing changed since the last brief."
 - End with one short question that offers help: ask if {name} wants Illo to coordinate something today. Change the words each day.
 - No headers, no table, no counts line.

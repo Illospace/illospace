@@ -52,7 +52,7 @@ async def test_team_reply_has_context_and_expires_after_24_hours(
         run = await one(conn, "SELECT * FROM runs ORDER BY id DESC LIMIT 1")
         assert not await kv.get(conn, f"slack:thread:C_ACME_TEAM:{event['thread_ts']}")
     assert run["profile"] == "team_channel" and run["principal"] == "team" and not run["tainted"]
-    assert "Thread context (data):" in fake_brain.requests[-1].user_message
+    assert '<outside_data source="thread">' in fake_brain.requests[-1].user_message
     assert "The lane is working." in fake_brain.requests[-1].user_message
     count = len(fake_brain.requests)
     clock["now"] = due + timedelta(hours=24)

@@ -106,7 +106,7 @@ async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
                 c
                 for c in slack_client.calls
                 if c.get("text")
-                == "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+                == "I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
             ]
         )
         == 1
@@ -123,7 +123,7 @@ async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
                 c
                 for c in slack_client.calls
                 if c.get("text")
-                == "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+                == "I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
             ]
         )
         == 2
@@ -272,8 +272,7 @@ async def test_s5_skipped_tainted_run_has_text_and_a_ledger_record(
         payload={"channel_id": "C_ACME_ALERTS", "bot": True},
     )
     assert result["text"] == (
-        "Illo did not run the model for this event. "
-        "No model credential is allowed for tainted runs."
+        "I did not answer this message. No model sign-in is allowed for messages from outside the team."
     )
     assert not fake_brain.requests
     async with app.state.ctx.pool.connection() as conn:

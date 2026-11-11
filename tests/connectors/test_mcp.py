@@ -64,9 +64,9 @@ async def test_only_listed_tools_and_schema_cache(mcp_app, rpc, rpc_token):
     for _ in range(2):
         result = await call(rpc, token, "read")
         assert result["decision"] == "allow"
-        assert result["result"]["type"] == "outside_data"
-        assert result["result"]["trusted"] is False
-        assert "Ignore previous" in result["result"]["data"]["content"][0]["text"]
+        assert result["result"].startswith('<outside_data source="connector:docs">\n')
+        assert result["result"].endswith("\n</outside_data>")
+        assert "Ignore previous" in result["result"]
     assert session.listings == 1
     assert len(session.calls) == 2
     assert "hidden" not in ctx.mcp_client.schemas[config.model_dump_json()]

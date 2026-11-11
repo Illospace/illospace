@@ -26,6 +26,11 @@ async def status(ctx, args):
     return {"message": await chatgpt_oauth.signin_status(ctx.conn, ctx.app.workspace, person["id"])}
 
 
+DESCRIPTIONS = {
+    "chatgpt_status": "Check the ChatGPT sign-in that pays for this person's runs. Returns one status sentence that you can pass on. Use it when the person asks about their sign-in.",
+}
+
+
 def register(registry):
     for name, risk, handler in (("chatgpt_status", "read", status),):
         tool = Tool(
@@ -35,7 +40,7 @@ def register(registry):
             lambda a: "person:<self>",
             False,
             handler,
-            description="Check the ChatGPT sign-in used for this DM.",
+            description=DESCRIPTIONS[name],
             profiles=frozenset({"person_dm"}),
         )
 

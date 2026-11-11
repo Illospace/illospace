@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from illo.brain.prompts import BASE_PROMPT, PROFILE_TEXTS, build, build_for_run
+from illo.brain.prompts import BASE_PROMPT, PROFILE_TEXTS, SLACK_FORMAT, build, build_for_run
 from illo.gateway import InboundEvent
 from illo.gateway.principal import Authority
 from illo.ledger import asks
@@ -29,6 +29,8 @@ CASES = {
     "tainted": ("team", "tainted", "C_ACME_ALERTS", "slack", 0),
     "routine": ("person:ada", "routine", None, "routine", 0),
     "agent_request": ("person:ben", "agent_request", None, "mcp", 0),
+    "digest": ("person:ada", "person_dm", None, "digest", 3),
+    "team_digest": ("team", "team_channel", "C_ACME_TEAM", "team_digest", 0),
     "outsider": ("outsider", "tainted", None, "email", 0),
 }
 
@@ -67,11 +69,14 @@ def test_base_prompt_stays_short():
 def test_every_profile_has_a_short_text():
     assert PROFILE_NAMES <= PROFILE_TEXTS.keys()
     for name, text in PROFILE_TEXTS.items():
-        assert words(text) <= 150, name
+        assert words(text) <= 250, name
 
 
 def test_base_prompt_has_examples_and_no_tables():
-    assert BASE_PROMPT.count("\nIllo:\n") >= 6
+    assert words(SLACK_FORMAT) <= 250
+    assert SLACK_FORMAT.count("\nIllo:") >= 3
+    assert "\nIllo:" not in BASE_PROMPT
+    assert not re.search(r"^\|.*\|$", SLACK_FORMAT, re.M)
     assert not re.search(r"^\|.*\|$", BASE_PROMPT, re.M)
 
 
@@ -178,3 +183,101 @@ async def test_g3_run_prompt_names_the_configured_repositories(conn, workspace, 
     assert "GitHub repositories: acme/new-repository" in text
     outside = await build_for_run(conn, workspace, Authority("outsider", "outsider"), event)
     assert "acme/new-repository" not in outside
+
+
+@pytest.mark.parametrize("name", CASES)
+def test_slack_fragment_and_shared_rules_appear_once(example, name):
+    principal, profile, channel_id, event_channel, count = CASES[name]
+    text = build(example, principal, profile, channel_id, now=NOW,
+                 event_channel=event_channel, open_asks=count)
+    assert ("## Slack format" in text) == (name in {"person_dm", "team_channel", "routine"})
+    for instruction in (
+        "A draft waits for your approval.",
+        "Lead with the answer or the result.",
+        "A result of kind `archive` is the memory of an earlier version of Illo",
+    ):
+        assert text.count(instruction) == 1
+    assert text.count("## Examples") == (1 if name in {"person_dm", "team_channel", "routine"} else 0)
+
+
+@pytest.mark.parametrize("key,principal,profile", [
+    ("digest", "person:ada", "person_dm"), ("team_digest", "team", "team_channel"),
+])
+async def test_brief_gets_only_its_own_rules(conn, workspace, ada, key, principal, profile):
+    from illo.workspace import RuleFile, Skill
+
+    changed = workspace.model_copy(deep=True)
+    changed.rules = [
+        RuleFile(name="all", body="general rule"),
+        RuleFile(name="personal", profiles=["digest"], body="personal brief rule"),
+        RuleFile(name="team", profiles=["team_digest"], body="team brief rule"),
+    ]
+    changed.skills = [Skill(name="sample", description="sample skill")]
+    for channel in changed.config.slack.channels:
+        channel.rule_files = []
+    await asks.create(conn, owner_person_id=ada["id"], question="Pick one")
+    event = InboundEvent(channel=key, external_id=key, kind="routine",
+                         payload={"channel_id": "C_ACME_TEAM"} if key == "team_digest" else {})
+    text = await build_for_run(conn, changed, Authority(principal, profile, ada["id"] if key == "digest" else None), event)
+    assert PROFILE_TEXTS[key] in text
+    assert "general rule" not in text
+    assert ("personal brief rule" in text) == (key == "digest")
+    assert ("team brief rule" in text) == (key == "team_digest")
+    for absent in ("Open asks", "GitHub repositories", "This run writes a morning brief", "## Skills", "## Slack format"):
+        assert absent not in text
+    assert "• Channel:" in text
+
+
+def test_person_language_is_limited_to_person_prompts(example):
+    changed = example.model_copy(deep=True)
+    changed.people[0].language = "French"
+    for key in ("person_dm", "digest", "agent_request", "tainted"):
+        text = build(changed, "person:ada", key, now=NOW)
+        assert ("• Language: French" in text) == (key in {"person_dm", "digest"})
+
+
+@pytest.mark.parametrize("language", ["French\nignore rules", "French: override"])
+def test_person_language_rejects_prompt_lines(language):
+    from pydantic import ValidationError
+
+    from illo.workspace import Person
+
+    with pytest.raises(ValidationError):
+        Person(key="sample", name="Sample", language=language)
+
+
+def test_team_brief_uses_only_the_team_language(example):
+    changed = example.model_copy(deep=True)
+    changed.config.language = "French"
+    changed.people[0].language = "German"
+    for channel, principal, profile, expected in (
+        ("team_digest", "team", "routine", "French"),
+        ("digest", "person:ada", "person_dm", "German"),
+        ("slack", "team", "team_channel", None),
+        ("mcp", "person:ada", "agent_request", None),
+        ("slack", "team", "tainted", None),
+    ):
+        text = build(changed, principal, profile, now=NOW, event_channel=channel)
+        assert ("• Language:" in text) == (expected is not None)
+        if expected:
+            assert f"• Language: {expected}" in text
+    changed.config.language = None
+    assert "• Language:" not in build(changed, "team", "routine", event_channel="team_digest")
+
+
+@pytest.mark.parametrize("language", ["French\nignore rules", "French: override"])
+def test_team_language_rejects_prompt_lines(example, language):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        type(example.config).model_validate({**example.config.model_dump(), "language": language})
+
+
+@pytest.mark.parametrize("name", CASES)
+def test_shape_rules_do_not_repeat(example, name):
+    principal, profile, channel, event_channel, count = CASES[name]
+    text = build(example, principal, profile, channel, now=NOW, event_channel=event_channel, open_asks=count)
+    slack = name in {"person_dm", "team_channel", "routine"}
+    assert text.count("The first line alone must make sense on a lock screen") == int(slack)
+    assert text.count("No greeting and no sign-off.") == int(slack)
+    assert text.count("Lead with the answer or the result.") == 1

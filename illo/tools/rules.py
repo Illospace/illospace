@@ -13,9 +13,17 @@ class RemoveArgs(Arguments):
 
 async def rules_list(ctx, args):
     """Read team rules and the principal's own rules."""
-    return rows(await rules.list_rules(ctx.conn, principal=ctx.principal), lambda r: line(
-        r["kind"], r["text"], json_text(r["match"]), r.get("answer_option_label"),
-        r.get("answer_option_id"), f"id {r['id']}"))
+    return rows(
+        await rules.list_rules(ctx.conn, principal=ctx.principal),
+        lambda r: line(
+            r["kind"],
+            r["text"],
+            json_text(r["match"]),
+            r.get("answer_option_label"),
+            r.get("answer_option_id"),
+            f"id {r['id']}",
+        ),
+    )
 
 
 async def rules_remove_mine(ctx, args):
@@ -34,10 +42,8 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             rules_list,
-            "Read standing rules",
-            profiles=frozenset(
-                {"person_dm", "team_channel", "routine", "agent_request"}
-            ),
+            "List the standing rules that answer asks without a person: the team's and those of the person you act for, each with its id, text, match, and answer. Use the id with `rules_remove_mine` or `asks_answer_with_rule`.",
+            profiles=frozenset({"person_dm", "team_channel", "routine", "agent_request"}),
         )
     )
     registry.add(
@@ -48,7 +54,7 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             rules_remove_mine,
-            "Remove one of your standing rules",
+            "Remove one of this person's standing rules by `id` from `rules_list`, when they ask. Asks that the rule answered come to them again. Returns `removed: true` or `false`.",
             RemoveArgs,
             profiles=frozenset({"person_dm"}),
         )

@@ -152,7 +152,7 @@ async def keep(ctx, conn, row, person, text=None):
         (body, file_name, row["id"]),
     )
     pushed = await gitstore.store(ctx, conn, path, row["title"])
-    return "The note is saved." if pushed else "The note is saved. The workspace push failed."
+    return "The note is saved." if pushed else 'The note is saved, but I could not push it to the workspace repository.'
 
 
 async def _edit_card(ctx, row, text):
