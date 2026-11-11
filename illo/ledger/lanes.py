@@ -38,7 +38,11 @@ async def upsert(
         ON CONFLICT (source,external_id) DO UPDATE SET title=EXCLUDED.title,state=EXCLUDED.state,
           owner_person_id=EXCLUDED.owner_person_id,summary=EXCLUDED.summary,links=EXCLUDED.links,
           repo=EXCLUDED.repo,machine=EXCLUDED.machine,visibility=EXCLUDED.visibility,
-          end_summary=EXCLUDED.end_summary,closed_at=EXCLUDED.closed_at,last_signal_at=now(),updated_at=now()
+          end_summary=EXCLUDED.end_summary,
+          -- A repeated report of a closed lane keeps its first closing time.
+          closed_at=CASE WHEN lanes.state IN ('done','failed') AND lanes.closed_at IS NOT NULL
+            AND EXCLUDED.closed_at IS NOT NULL THEN lanes.closed_at ELSE EXCLUDED.closed_at END,
+          last_signal_at=now(),updated_at=now()
         RETURNING *
     """,
         (
@@ -137,8 +141,18 @@ async def search(
     )
 
 
-async def compact_search(conn, *, principal, owner=None, query="", state=None, repo=None,
-                         limit=15, stale_minutes=None, attention=False):
+async def compact_search(
+    conn,
+    *,
+    principal,
+    owner=None,
+    query="",
+    state=None,
+    repo=None,
+    limit=15,
+    stale_minutes=None,
+    attention=False,
+):
     """Filter visible rows and counts in SQL before any compact text reaches the model."""
     params = (principal, owner, owner, repo, repo, query, f"%{query}%", f"%{query}%")
     visible = """
@@ -150,7 +164,13 @@ async def compact_search(conn, *, principal, owner=None, query="", state=None, r
           AND (%s='' OR concat_ws(' ',l.title,l.summary) ILIKE %s OR EXISTS
             (SELECT 1 FROM lane_events e WHERE e.lane_id=l.id AND e.text ILIKE %s))
     """
-    counts = await all_rows(conn, "SELECT l.state,count(*) AS n,bool_or(l.visibility='private') AS private " + visible + " GROUP BY l.state", params)
+    counts = await all_rows(
+        conn,
+        "SELECT l.state,count(*) AS n,bool_or(l.visibility='private') AS private "
+        + visible
+        + " GROUP BY l.state",
+        params,
+    )
     if attention:
         selection = """AND (l.state IN ('waiting_person','blocked','failed') OR
           (l.state='working' AND l.last_signal_at<now()-
@@ -164,7 +184,9 @@ async def compact_search(conn, *, principal, owner=None, query="", state=None, r
         selection = """AND l.state IN ('working','waiting_person','blocked','review','failed')
           AND l.last_signal_at>=now()-interval '7 days'"""
         selected_params = ()
-    rows = await all_rows(conn, """
+    rows = await all_rows(
+        conn,
+        """
         SELECT l.id,l.state,l.title,p.key AS owner,l.source,l.repo,l.last_signal_at,l.links,l.visibility,
           left(l.summary,200) AS summary,
           (SELECT left(e.text,200) FROM lane_events e WHERE e.lane_id=l.id
@@ -172,6 +194,15 @@ async def compact_search(conn, *, principal, owner=None, query="", state=None, r
           (l.state='working' AND l.last_signal_at<now()-
             COALESCE((%s::jsonb->>l.source)::integer,30)*interval '1 minute') AS stale,
           count(*) OVER () AS total
-    """ + visible + selection + " ORDER BY l.last_signal_at DESC,l.id DESC LIMIT %s",
-        (Jsonb(stale_minutes or DEFAULT_STALE_MINUTES), *params, *selected_params, max(1,min(limit,40))))
-    return rows, {r['state']: r['n'] for r in counts}, any(r['private'] for r in counts)
+    """
+        + visible
+        + selection
+        + " ORDER BY l.last_signal_at DESC,l.id DESC LIMIT %s",
+        (
+            Jsonb(stale_minutes or DEFAULT_STALE_MINUTES),
+            *params,
+            *selected_params,
+            max(1, min(limit, 40)),
+        ),
+    )
+    return rows, {r["state"]: r["n"] for r in counts}, any(r["private"] for r in counts)

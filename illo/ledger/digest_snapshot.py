@@ -6,14 +6,22 @@ from psycopg.types.json import Jsonb
 
 from illo.db import all_rows, one
 from illo.ledger.lanes import DEFAULT_STALE_MINUTES
-from illo.sources.search import first_link
+
+
+def web_link(links):
+    """Slack shows only a web address as a link. Prefer it to an app address."""
+    values = [
+        link.get("url") or link.get("href") if isinstance(link, dict) else link
+        for link in links or []
+    ]
+    return next((v for v in values if isinstance(v, str) and v.startswith(("http://", "https://"))), "")
 
 
 def card_link(row):
     if row.get("slack_channel") and row.get("slack_ts"):
         # Slack documents this address. It opens the conversation that holds the card.
         return f"https://slack.com/app_redirect?channel={row['slack_channel']}"
-    return first_link(row.get("lane_links")) or ""
+    return web_link(row.get("lane_links"))
 
 
 def fault_text(key, *, silent=False, names=None):
@@ -102,7 +110,7 @@ async def build(conn, person, now, stale_minutes=None):
         age = max(0, (now - lane["last_signal_at"]).total_seconds() / 3600)
         item = {
             "title": lane["title"],
-            "link": first_link(lane["links"]) or "",
+            "link": web_link(lane["links"]),
             "state": lane["state"],
             "hours_since_signal": age,
             "last_event": lane["last_event"] or "",
@@ -143,7 +151,7 @@ async def build(conn, person, now, stale_minutes=None):
         "in_progress": running,
         "finished_total": finished[0]["total"] if finished else 0,
         "finished": [
-            {"title": row["title"], "link": first_link(row["links"]) or "", "state": row["state"]}
+            {"title": row["title"], "link": web_link(row["links"]), "state": row["state"]}
             for row in finished
         ],
         "faults": faults,
