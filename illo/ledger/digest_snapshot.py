@@ -11,7 +11,8 @@ from illo.sources.search import first_link
 
 def card_link(row):
     if row.get("slack_channel") and row.get("slack_ts"):
-        return f"https://app.slack.com/archives/{row['slack_channel']}/p{row['slack_ts'].replace('.', '')}"
+        # Slack documents this address. It opens the conversation that holds the card.
+        return f"https://slack.com/app_redirect?channel={row['slack_channel']}"
     return first_link(row.get("lane_links")) or ""
 
 
@@ -41,10 +42,13 @@ def fault_text(key, *, silent=False, names=None):
     }.get(family, "An Illo service failed its last check.")
 
 
-def sensor_fault(row, now, names=None):
+def sensor_fault(row, now, names=None, since=None):
     ok, error = row["last_ok_at"], row["last_error_at"]
     failed = error is not None and (ok is None or error > ok)
     interval = row.get("expected_every_s")
+    # Report an event failure one time. A timer sensor stays a fault until it recovers.
+    if failed and not interval and since and error <= since:
+        failed = False
     last = max((value for value in (ok, error) if value is not None), default=None)
     silent = bool(interval and last and now - last > timedelta(seconds=max(1800, 3 * interval)))
     if not failed and not silent:
@@ -121,6 +125,7 @@ async def build(conn, person, now, stale_minutes=None):
     """,
         (person["id"], state["last_run_at"] if state else None, now),
     )
+    last_brief = (state["last_run_at"] if state else None) or now - timedelta(days=1)
     names = {
         row["key"]: row["name"]
         for row in await all_rows(conn, "SELECT key,name FROM people WHERE active")
@@ -129,7 +134,7 @@ async def build(conn, person, now, stale_minutes=None):
     for row in await all_rows(conn, "SELECT * FROM sensors ORDER BY key"):
         if row["key"].startswith("chatgpt:") and row["key"] != "chatgpt:" + person["key"]:
             continue
-        if fault := sensor_fault(row, now, names):
+        if fault := sensor_fault(row, now, names, last_brief):
             faults.append(fault)
     return {
         "name": person["name"],

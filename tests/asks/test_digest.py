@@ -39,7 +39,13 @@ def test_sensor_fault_rules():
     assert "asks:slack" not in failed["what"]
     assert "ask card" in failed["what"]
     assert sensor_fault({**base, "last_error_at": NOW - timedelta(days=3)}, NOW) is None
+    # An event failure appears in one brief only.
+    old = {**base, "last_error_at": NOW - timedelta(hours=30)}
+    assert sensor_fault(old, NOW, since=NOW - timedelta(hours=24)) is None
+    assert sensor_fault(old, NOW, since=NOW - timedelta(hours=48))["since"] == old["last_error_at"]
     timer = {**base, "key": "job:example", "expected_every_s": 60}
+    stopped = {**timer, "last_error_at": NOW - timedelta(hours=30)}
+    assert sensor_fault(stopped, NOW, since=NOW - timedelta(hours=24)) is not None
     assert sensor_fault(timer, NOW)["what"] == "A background job of Illo stopped."
     assert sensor_fault({**timer, "last_ok_at": NOW - timedelta(minutes=29)}, NOW) is None
     assert sensor_fault({**timer, "expected_every_s": 86400}, NOW) is None
