@@ -123,6 +123,16 @@ A token writes only the lanes of its own person. A report on a lane of another p
 Only the GitHub poller writes lanes with the source `github`.
 A report updates the same lane. Omitted fields keep their stored values.
 Use `state: "done"` or `state: "failed"` with `end_summary` to save a searchable lane summary.
+When a lane leaves these states, Illo clears its closing time and end summary. It deletes the saved summary item.
+Set `is_step: true` for a lane that is one agent step of other work.
+Set `parent_ref` to the parent thread ID when the source supplies it. A step can have no known parent.
+Both fields are optional. Old reports keep their stored values. New lanes default to `is_step: false`.
+The brief leaves steps out of `finished` and `finished_total`. It reports their count as `finished_steps`.
+For T3, `review` means the agent stopped and waits for the person. An agent that stops is not a proof.
+The snapshot calls this `kind: "your_move"`. It includes the last agent text in `summary` and `hours_since_signal`.
+It lists at most 10 such threads, newest first, after asks, failed answers, and other reviews.
+`your_move_total` counts all such threads. GitHub reviews keep `kind: "review"`.
+See [T3 state rules](collectors.md#reports-and-asks) for settlement evidence and step fields.
 Set `visibility: "private"` for a lane that only its owner may read. A private lane must belong to the calling person.
 
 Collectors can report a batch and their health:

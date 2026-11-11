@@ -25,6 +25,7 @@ class APIs:
             "title": "Acme task",
             "status": "running",
             "updatedAt": "2026-01-01T00:00:00Z",
+            "createdBy": "user",
         }
         self.projection = {
             "messages": [
@@ -173,21 +174,143 @@ def setup(tmp_path):
         ("waiting_input", "waiting_person"),
         ("waiting_approval", "waiting_person"),
         ("failed", "failed"),
-        ("finished", "done"),
-        ("settled", "done"),
-        ("completed", "done"),
+        ("finished", "review"),
+        ("settled", "unknown"),
+        ("completed", "review"),
         ("idle", "unknown"),
         ("cancelled", "unknown"),
         ("future-state", "unknown"),
     ],
 )
 def test_state_mapping(status, state):
-    assert lane_state(status) == state
+    assert lane_state(status, person_created=True) == state
 
 
-def test_pending_overrides_settlement_and_running():
-    assert lane_state("running", waiting=True, settled=True) == "waiting_person"
-    assert lane_state("idle", settled=True) == "done"
+def test_running_then_pending_then_failure_override_settlement():
+    assert lane_state("running", waiting=True, person_settled=True) == "working"
+    assert lane_state("completed", waiting=True, person_settled=True) == "waiting_person"
+    assert lane_state("failed", archived=True) == "failed"
+    assert lane_state("idle", settled=True) == "unknown"
+
+
+@pytest.mark.parametrize("changes,state,step,parent", [
+    ({"status": "completed"}, "review", False, None),
+    ({"status": "finished", "settledOverride": "settled"}, "review", False, None),
+    ({"status": "completed", "archivedAt": "2026-01-02T00:00:00Z"}, "done", False, None),
+    ({"status": "failed", "archivedAt": "2026-01-02T00:00:00Z"}, "failed", False, None),
+    ({"status": "completed", "lineage": {"relationshipToParent": "subagent",
+      "parentThreadId": "parent-a"}}, "done", True, "parent-a"),
+    ({"status": "completed", "createdBy": "agent"}, "done", True, None),
+    ({"status": "idle", "createdBy": "agent", "settledOverride": "settled"}, "done", True, None),
+    ({"status": "completed", "lineage": {"relationshipToParent": "fork",
+      "parentThreadId": "parent-a"}}, "review", False, None),
+    ({"status": "completed", "createdBy": None}, "unknown", False, None),
+    ({"status": "cancelled"}, "unknown", False, None),
+])
+def test_thread_state_and_step_fields(setup, changes, state, step, parent):
+    collector, api, _ = setup
+    api.shell.update(changes)
+    thread = collector.source.list_threads()[0]
+    assert (thread.state, thread.is_step, thread.parent_ref) == (state, step, parent)
+    lane = collector.lane(thread)
+    assert (lane["is_step"], lane["parent_ref"]) == (step, parent)
+
+
+@pytest.mark.parametrize("status,state", [
+    ("running", "working"), ("completed", "waiting_person"), ("failed", "waiting_person"),
+])
+def test_thread_keeps_pending_requests_when_state_priority_changes(setup, status, state):
+    collector, api, _ = setup
+    api.wait()
+    api.shell.update(status=status, archivedAt="2026-01-02T00:00:00Z")
+    thread = collector.source.list_threads()[0]
+    assert thread.state == state
+    assert thread.pending[0].id == "request-a"
+
+
+def test_http_projection_supplies_thread_origin_without_settle_proof(setup):
+    collector, api, _ = setup
+    api.shell.update(status="completed")
+    del api.shell["createdBy"]
+    api.projection["thread"] = {"createdBy": "user", "settledOverride": "settled"}
+    assert collector.source.list_threads()[0].state == "review"
+
+
+@pytest.mark.parametrize("command_type,command_id,state", [
+    ("thread.auto-settle", "server:auto-settle:example", "review"),
+    ("thread.settle", "server:settle-after-run:example", "review"),
+    ("thread.settle", "mcp:example", "review"),
+    ("thread.settle", "00000000-0000-4000-8000-000000000001", "done"),
+    ("thread.auto-settle", "00000000-0000-4000-8000-000000000001", "review"),
+])
+def test_sqlite_reads_settle_sender(setup, tmp_path, command_type, command_id, state):
+    collector, api, now = setup
+    api.shell.update(status="completed", settledOverride="settled", settledAt="2026-01-02T00:00:00Z")
+    database = tmp_path / "state.sqlite"
+    t3_database(database, api)
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO orchestration_command_receipts VALUES (?,?,'accepted')",
+                           (command_id, command_type))
+        # T3 records the server as the actor, also for a command from the app.
+        connection.execute("INSERT INTO orchestration_events VALUES (1,'thread','thread-a','thread.settled','server',?)",
+                           (command_id,))
+    collector.config.data_path = database
+    before = database.read_bytes()
+    collector.poll()
+    assert database.read_bytes() == before
+    assert api.calls[0][1]["lanes"][0]["state"] == state
+    # Only the sender changes. The thread projection and run stay the same.
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO orchestration_command_receipts VALUES ('server:auto-settle:later','thread.auto-settle','accepted')")
+        connection.execute("INSERT INTO orchestration_events VALUES (2,'thread','thread-a','thread.settled','server','server:auto-settle:later')")
+    api.calls.clear()
+    now[0] += 30
+    collector.poll()
+    reported = api.calls[0][1]["lanes"]
+    assert bool(reported) == (state == "done")
+    if reported:
+        assert reported[0]["state"] == "review"
+    now[0] += 600
+    collector.poll()
+    assert [args for name, args in api.calls if name == "lane_report"][-1]["lanes"][0]["state"] == "review"
+
+
+def test_sqlite_unsettled_event_revokes_person_settlement(setup, tmp_path):
+    collector, api, _ = setup
+    api.shell.update(status="completed", settledOverride="settled", settledAt="2026-01-02T00:00:00Z")
+    database = tmp_path / "state.sqlite"
+    t3_database(database, api)
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+        INSERT INTO orchestration_command_receipts VALUES
+          ('00000000-0000-4000-8000-000000000001','thread.settle','accepted');
+        INSERT INTO orchestration_events VALUES
+          (1,'thread','thread-a','thread.settled','user','00000000-0000-4000-8000-000000000001'),
+          (2,'thread','thread-a','thread.unsettled','user',NULL);
+        """)
+    collector.config.data_path = database
+    assert collector.source.list_threads()[0].state == "review"
+    api.shell.update(settledOverride="active", unsettledAt="2026-01-03T00:00:00Z")
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE orchestration_v2_projection_threads SET payload_json=?",
+                           (json.dumps(api.shell),))
+    assert collector.source.list_threads()[0].state == "review"
+
+
+def test_old_done_report_is_corrected_on_next_poll(setup):
+    import hashlib
+
+    collector, api, now = setup
+    api.shell.update(status="completed", settledOverride="settled")
+    old_lane = collector.lane(collector.source.list_threads()[0])
+    old_lane["state"] = "done"
+    del old_lane["is_step"], old_lane["parent_ref"]
+    collector.state["lanes"]["thread-a"] = hashlib.sha256(
+        json.dumps(old_lane, sort_keys=True).encode()
+    ).hexdigest()
+    collector.state["refreshed_at"] = now[0]
+    collector.poll()
+    assert api.calls[0][1]["lanes"][0]["state"] == "review"
 
 
 def test_changed_lanes_heartbeat_refresh_and_restart(setup):
@@ -431,6 +554,8 @@ def test_rule_09_payload_has_only_permitted_fields_and_no_machine_credential(set
         "repo",
         "machine",
         "visibility",
+        "is_step",
+        "parent_ref",
     }
     assert len(lane["summary"]) <= 500
     assert all(
@@ -501,10 +626,7 @@ def test_project_filter(setup):
     assert api.calls[0][1]["lanes"] == []
 
 
-def test_sqlite_snapshot_is_read_only_and_joins_pending_request(setup, tmp_path):
-    collector, api, _ = setup
-    api.wait()
-    database = tmp_path / "state.sqlite"
+def t3_database(database, api):
     with sqlite3.connect(database) as connection:
         connection.executescript("""
         CREATE TABLE orchestration_v2_projection_threads (thread_id, payload_json, deleted_at);
@@ -512,32 +634,55 @@ def test_sqlite_snapshot_is_read_only_and_joins_pending_request(setup, tmp_path)
         CREATE TABLE orchestration_v2_projection_runtime_requests (thread_id, status, payload_json);
         CREATE TABLE orchestration_v2_projection_messages (thread_id, role, updated_at, payload_json);
         CREATE TABLE orchestration_v2_projection_turn_items (thread_id, type, payload_json);
+        CREATE TABLE orchestration_command_receipts (
+          command_id TEXT PRIMARY KEY, command_type, status);
+        CREATE TABLE orchestration_events (
+          sequence INTEGER PRIMARY KEY, aggregate_kind, stream_id, event_type, actor_kind, command_id);
+        CREATE INDEX events_stream ON orchestration_events(aggregate_kind,stream_id,sequence);
         """)
         connection.execute(
             "INSERT INTO orchestration_v2_projection_threads VALUES (?, ?, NULL)",
             ("thread-a", json.dumps(api.shell)),
         )
         connection.execute(
-            "INSERT INTO orchestration_v2_projection_runs VALUES ('thread-a', 1, 'running')"
+            "INSERT INTO orchestration_v2_projection_runs VALUES ('thread-a', 1, ?)",
+            (api.shell["status"],),
         )
-        connection.execute(
-            "INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?, ?, ?)",
-            ("thread-a", "pending", json.dumps(api.projection["runtimeRequests"][0])),
-        )
-        connection.execute(
-            "INSERT INTO orchestration_v2_projection_turn_items VALUES (?, ?, ?)",
-            (
-                "thread-a",
-                "user_input_request",
-                json.dumps(api.projection["turnItems"][0]),
-            ),
-        )
+        for request in api.projection["runtimeRequests"]:
+            connection.execute(
+                "INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?, ?, ?)",
+                ("thread-a", "pending", json.dumps(request)),
+            )
+        for item in api.projection["turnItems"]:
+            connection.execute(
+                "INSERT INTO orchestration_v2_projection_turn_items VALUES (?, ?, ?)",
+                ("thread-a", item["type"], json.dumps(item)),
+            )
+
+
+def test_sqlite_snapshot_is_read_only_and_joins_pending_request(setup, tmp_path):
+    collector, api, _ = setup
+    api.wait()
+    database = tmp_path / "state.sqlite"
+    t3_database(database, api)
     before = database.read_bytes()
     collector.config.data_path = database
     threads = collector.source.list_threads()
     assert threads[0].state == "waiting_person"
     assert threads[0].pending[0].question == "Which check comes first?"
     assert database.read_bytes() == before
+
+
+def test_sqlite_running_run_precedes_a_later_terminal_run(setup, tmp_path):
+    collector, api, _ = setup
+    database = tmp_path / "state.sqlite"
+    t3_database(database, api)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO orchestration_v2_projection_runs VALUES ('thread-a',2,'completed')"
+        )
+    collector.config.data_path = database
+    assert collector.source.list_threads()[0].state == "working"
 
 
 def test_config_environment_overrides_toml(tmp_path, monkeypatch):

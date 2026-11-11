@@ -138,7 +138,7 @@ async def record_decisions(conn: Connection):
         await decision(conn, ask)
     for lane in await all_rows(
         conn,
-        "SELECT l.* FROM lanes l LEFT JOIN items i ON i.source_ref='lane:' || l.id || ':end' WHERE l.end_summary IS NOT NULL AND (l.closed_at IS NOT NULL OR l.state IN ('done','failed')) AND i.id IS NULL",
+        "SELECT l.* FROM lanes l LEFT JOIN items i ON i.source_ref='lane:' || l.id || ':end' WHERE l.end_summary IS NOT NULL AND l.state IN ('done','failed') AND i.id IS NULL",
     ):
         await items.upsert(
             conn,

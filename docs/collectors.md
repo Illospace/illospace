@@ -109,16 +109,48 @@ Reports use private visibility by default. Set `share = "team"` only for session
 The next report also changes an existing lane to the configured visibility.
 Use the token owner's person for private reports. Another owner requires `share = "team"`.
 
-| T3 state | Lane state |
+| T3 state, in priority order | Lane state |
 | --- | --- |
 | Running | `working` |
 | Pending question or approval | `waiting_person` |
-| Failed | `failed` |
-| Completed, finished, or settled | `done` |
+| Last run failed | `failed` |
+| Archived, or a person settled it with no later unsettlement | `done` |
+| Person-created thread, last run completed or finished | `review` |
+| Agent step, last run completed or thread settled | `done`, with `is_step: true` |
 | Other state | `unknown` |
 
-A pending request takes priority over a completed run. A running run takes priority over an old settlement.
+A run is one agent turn. An agent that stops is not a proof that the work finished.
+A `review` thread waits for the person's next move. Server and agent settlements do not close a person's work.
+A running run takes priority over a pending request and an old settlement. The collector still reports each pending ask.
 T3 can wait on another agent without a person request. The collector does not invent a question for that wait.
+It reports `unknown` for `blockedOnThreadWait` when no request waits for a person.
+
+T3 can settle a thread in three ways:
+
+- `thread.auto-settle`, with a `server:auto-settle:` command ID: the server applies its own rule.
+- `thread.settle`, with a `server:settle-after-run:` command ID: an agent asks to settle after its turn.
+- `thread.settle`, with a plain UUID: the T3 app sends the command. This is the person's decision.
+
+An MCP tool sends a settlement with an `mcp:` command ID. An agent sends it, so it does not close a person's work.
+T3 records the actor of each event as the server. Thus the command ID is the only evidence of the sender.
+The read-only SQLite source joins the latest settle or unsettle event to its command receipt.
+A person settlement needs `command_type: thread.settle`, an accepted receipt, and a plain UUID.
+The collector reads this evidence only for a thread that a person created.
+A later unsettle event or `unsettledAt` revokes that proof.
+The HTTP source has no verified actor evidence. It uses `review` for a person's completed thread, even when settled.
+An archive still counts as `done` on both sources.
+
+`createdBy: agent` marks an agent-launched thread.
+`lineage.relationshipToParent: subagent` marks a delegated child thread.
+Both become steps. The collector reports `is_step` and the parent thread ID as `parent_ref`, when T3 supplies it.
+A person-created fork is not an agent step. A launched step can have no parent ID.
+Unknown thread origins do not count as proof of completion.
+
+The next report corrects old `done` lanes and clears their `closed_at` and saved end summaries when they reopen.
+New state and step fields change the report hash, so the next poll normally sends this correction.
+The full refresh sends all selected lanes every 600 seconds, plus at most one poll interval.
+SQLite reads settle evidence on each poll. A change of the sender that changes the lane state changes the report hash.
+No manual data repair is needed. Apply the lane migration before you update the collector.
 
 One question with 2–5 options becomes an ask with those options.
 The collector keeps a marked recommendation. Each source reference has this form:

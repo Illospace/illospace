@@ -28,17 +28,21 @@ async def upsert(
     machine: str | None = None,
     visibility: str = "team",
     end_summary: str | None = None,
+    is_step: bool = False,
+    parent_ref: str | None = None,
 ) -> dict:
     """Refresh the source snapshot and its last signal time."""
-    return await one(
+    lane = await one(
         conn,
         """
-        INSERT INTO lanes (source,external_id,title,state,owner_person_id,summary,links,repo,machine,visibility,end_summary,closed_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s IN ('done','failed') THEN now() END)
+        INSERT INTO lanes (source,external_id,title,state,owner_person_id,summary,links,repo,machine,visibility,end_summary,is_step,parent_ref,closed_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s IN ('done','failed') THEN %s END,%s,%s,
+          CASE WHEN %s IN ('done','failed') THEN now() END)
         ON CONFLICT (source,external_id) DO UPDATE SET title=EXCLUDED.title,state=EXCLUDED.state,
           owner_person_id=EXCLUDED.owner_person_id,summary=EXCLUDED.summary,links=EXCLUDED.links,
           repo=EXCLUDED.repo,machine=EXCLUDED.machine,visibility=EXCLUDED.visibility,
           end_summary=EXCLUDED.end_summary,
+          is_step=EXCLUDED.is_step,parent_ref=EXCLUDED.parent_ref,
           -- A repeated report of a closed lane keeps its first closing time.
           closed_at=CASE WHEN lanes.state IN ('done','failed') AND lanes.closed_at IS NOT NULL
             AND EXCLUDED.closed_at IS NOT NULL THEN lanes.closed_at ELSE EXCLUDED.closed_at END,
@@ -56,10 +60,16 @@ async def upsert(
             repo,
             machine,
             visibility,
+            state,
             end_summary,
+            is_step,
+            parent_ref,
             state,
         ),
     )
+    if lane["state"] not in {"done", "failed"}:
+        await conn.execute("DELETE FROM items WHERE source_ref=%s", (f"lane:{lane['id']}:end",))
+    return lane
 
 
 async def add_event(
@@ -172,7 +182,7 @@ async def compact_search(
         params,
     )
     if attention:
-        selection = """AND (l.state IN ('waiting_person','blocked','failed') OR
+        selection = """AND (l.state IN ('waiting_person','blocked','failed','review') OR
           (l.state='working' AND l.last_signal_at<now()-
           COALESCE((%s::jsonb->>l.source)::integer,30)*interval '1 minute'))"""
         selected_params = (Jsonb(stale_minutes or DEFAULT_STALE_MINUTES),)
@@ -187,7 +197,7 @@ async def compact_search(
     rows = await all_rows(
         conn,
         """
-        SELECT l.id,l.state,l.title,p.key AS owner,l.source,l.repo,l.last_signal_at,l.links,l.visibility,
+        SELECT l.id,l.state,l.title,p.key AS owner,l.source,l.repo,l.last_signal_at,l.links,l.visibility,l.is_step,l.parent_ref,
           left(l.summary,200) AS summary,
           (SELECT left(e.text,200) FROM lane_events e WHERE e.lane_id=l.id
             ORDER BY e.at DESC,e.id DESC LIMIT 1) AS last_event,

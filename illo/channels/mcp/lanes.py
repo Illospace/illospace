@@ -59,6 +59,8 @@ async def report_one(ctx, args: dict) -> dict:
                 "machine",
                 "visibility",
                 "end_summary",
+                "is_step",
+                "parent_ref",
                 "owner_person_id",
             )
         }

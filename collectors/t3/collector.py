@@ -108,19 +108,27 @@ class Thread:
     project: str
     updated_at: str = ""
     pending: list[Pending] = field(default_factory=list)
+    is_step: bool = False
+    parent_ref: str | None = None
 
 
-def lane_state(status: str, waiting: bool = False, settled: bool = False) -> str:
-    if waiting:
-        return "waiting_person"
+def lane_state(
+    status: str, waiting: bool = False, settled: bool = False, *,
+    archived: bool = False, person_settled: bool = False,
+    person_created: bool = False, is_step: bool = False,
+) -> str:
     if status == "running":
         return "working"
+    if waiting or status in {"waiting", "waiting_input", "waiting_approval"}:
+        return "waiting_person"
     if status == "failed":
         return "failed"
-    if status in {"completed", "finished", "settled"} or settled:
+    if archived or person_settled:
         return "done"
-    if status in {"waiting", "waiting_input", "waiting_approval"}:
-        return "waiting_person"
+    if status in {"completed", "finished"} and person_created and not is_step:
+        return "review"
+    if is_step and (status in {"completed", "finished", "settled"} or settled):
+        return "done"
     return "unknown"
 
 
@@ -208,6 +216,7 @@ class T3Source:
         return not self.config.projects or row["projectId"] in self.config.projects
 
     def _thread(self, row: dict, projection: dict) -> Thread:
+        row = {**row, **projection.get("thread", {})}
         thread_id = row["id"]
         prefix = (
             f"v2/{quote(self.config.environment_id, safe='')}/"
@@ -284,7 +293,30 @@ class T3Source:
         ]
         latest = max(messages, key=lambda msg: msg.get("updatedAt", ""), default={})
         status = row.get("activityRunStatus") or row.get("status", "unknown")
-        state = lane_state(status, bool(pending), row.get("settledOverride") == "settled")
+        lineage = row.get("lineage") or {}
+        is_step = row.get("createdBy") == "agent" or lineage.get("relationshipToParent") == "subagent"
+        settled = row.get("settledOverride") == "settled"
+        evidence = projection.get("settlement", {})
+        # T3 records each actor as the server. The command ID shows the sender:
+        # the app sends a plain UUID, the server rules use "server:", and MCP tools use "mcp:".
+        person_settled = (
+            settled
+            and evidence.get("event_type") == "thread.settled"
+            and evidence.get("command_type") == "thread.settle"
+            and evidence.get("status") == "accepted"
+            and bool(re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                evidence.get("command_id") or "",
+            ))
+            and not (row.get("unsettledAt") and (
+                not row.get("settledAt") or row["unsettledAt"] >= row["settledAt"]
+            ))
+        )
+        state = lane_state(
+            status, bool(pending), settled,
+            archived=bool(row.get("archivedAt")), person_settled=person_settled,
+            person_created=row.get("createdBy") == "user", is_step=is_step,
+        )
         if row.get("blockedOnThreadWait") and not pending:
             state = "unknown"
         if state == "waiting_person" and not pending:
@@ -301,6 +333,8 @@ class T3Source:
             row["projectId"],
             row.get("updatedAt", ""),
             pending,
+            is_step,
+            lineage.get("parentThreadId") if is_step else None,
         )
 
     def _sqlite_threads(self) -> list[Thread]:
@@ -320,7 +354,8 @@ class T3Source:
                 runs = dict(
                     connection.execute(
                         "SELECT thread_id, status FROM (SELECT thread_id, status, "
-                        "row_number() OVER (PARTITION BY thread_id ORDER BY ordinal DESC) AS position "
+                        "row_number() OVER (PARTITION BY thread_id "
+                        "ORDER BY (status='running') DESC,ordinal DESC) AS position "
                         "FROM orchestration_v2_projection_runs) WHERE position=1"
                     )
                 )
@@ -349,7 +384,28 @@ class T3Source:
                         continue
                     thread_id = row["id"]
                     row["status"] = runs.get(thread_id, "unknown")
-                    result.append(self._thread(row, projections.get(thread_id, {})))
+                    projection = projections.setdefault(thread_id, {})
+                    lineage = row.get("lineage") or {}
+                    personal = (
+                        row.get("createdBy") == "user"
+                        and lineage.get("relationshipToParent") != "subagent"
+                    )
+                    if personal and row.get("settledOverride") == "settled":
+                        # Only a person's thread needs this proof. The stream index limits the read.
+                        evidence = connection.execute(
+                            "SELECT e.event_type,c.command_type,c.command_id,c.status "
+                            "FROM orchestration_events e LEFT JOIN orchestration_command_receipts c "
+                            "ON c.command_id=e.command_id "
+                            "WHERE e.aggregate_kind='thread' AND e.stream_id=? "
+                            "AND e.event_type IN ('thread.settled','thread.unsettled') "
+                            "ORDER BY e.sequence DESC LIMIT 1", (thread_id,),
+                        ).fetchone()
+                        if evidence:
+                            projection["settlement"] = dict(zip(
+                                ("event_type", "command_type", "command_id", "status"),
+                                evidence,
+                            ))
+                    result.append(self._thread(row, projection))
                 return result
         except (sqlite3.Error, ValueError, KeyError) as error:
             raise CollectorError(
@@ -408,6 +464,8 @@ class Collector:
             "repo": self.config.projects.get(thread.project),
             "machine": self.config.machine,
             "visibility": "team" if self.config.share == "team" else "private",
+            "is_step": thread.is_step,
+            "parent_ref": thread.parent_ref,
         }
         if self.config.owner:
             lane["owner"] = self.config.owner
