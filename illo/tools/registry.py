@@ -230,7 +230,7 @@ class Registry:
         text = result if isinstance(result, str) else json_text(result)
         envelope = {"decision": decision, "reason": reason, "result": result}
         # Personal snapshots keep complete JSON across all attention aliases.
-        if name not in {"digest_snapshot", "asks_digest", "lanes_attention"} and len(json_text(envelope)) > MAX_RESULT_CHARS:
+        if name not in {"digest_snapshot", "team_snapshot", "asks_digest", "lanes_attention"} and len(json_text(envelope)) > MAX_RESULT_CHARS:
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."
             # Count JSON escapes too. The model receives this encoded content.
             low, high = 0, min(len(text), MAX_RESULT_CHARS)

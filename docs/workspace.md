@@ -21,6 +21,9 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `slack.channels[].rule_files` | Rule paths relative to the workspace. Default: all matching rules. |
 | `github.repositories` | List of `owner/repository` names to follow. Default: empty. |
 | `digest.schedule` | Five-field cron expression in each person's time zone. Default: `0 9 * * 1-5`. |
+| `digest.personal` | `always` (default) sends each morning. `needs` sends only when work waits or a fault exists. |
+| `digest.team.channel` | Optional team brief. Use the name of an enabled channel with `visibility: team`. |
+| `digest.team.schedule` | Five-field cron expression in the team time zone. Default: `0 9 * * 1-5`. |
 | `digest.destination` | Legacy destination setting. Required. The morning brief goes to each active person. |
 | `stale_minutes` | Source limits in minutes. All values must be positive. |
 | `stale_minutes.t3` | Default: 30. |
@@ -204,7 +207,25 @@ File paths in channel rules must match a loaded rule. Destinations must name a c
 
 ## Morning brief and routine time zones
 
-The built-in digest sends one morning brief per person per local day.
+The personal brief sends at most once per person per local day.
+With `digest.personal: always`, it sends each scheduled morning.
+With `digest.personal: needs`, it sends only for `needs_you`, `stuck`, or `faults`.
+Finished work alone does not send a DM in `needs` mode. Illo records a skipped day.
+The brief ends with an offer to help coordinate work.
+The first brief also explains how to change the time or turn it off.
+
+Each person can change their brief in their own DM:
+
+- "Send my brief at 8:30" sets the local time. Use five-minute steps.
+- "Stop the morning brief" turns it off.
+- "Turn my brief back on" turns it on.
+- "When do you send my brief?" reads the current settings.
+
+The `brief_settings` tool acts only for the person of the DM run.
+Tainted runs and agent requests cannot use it.
+Illo stores these settings in `brief_preferences`. A workspace reload keeps them.
+A time override keeps the configured days. A time change cannot send twice on the same local day.
+When no override exists, Illo uses the workspace schedule.
 It uses the person's `timezone` in `people.yaml` and `digest.schedule` in `illo.yaml`.
 A time zone change takes effect after reload. It does not repeat a brief on the same local day.
 
@@ -235,6 +256,50 @@ A timer sensor becomes silent after three intervals, with a minimum of 30 minute
 Scheduled jobs record their actual interval. Collector reports default to 300 seconds and can set another interval.
 After an upgrade, a timer records its interval on its next report.
 The snapshot keeps raw sensor keys for operators. The brief uses plain fault sentences.
+
+To add a team brief, configure one team-visible channel by name:
+
+```yaml
+digest:
+  schedule: '0 9 * * 1-5'
+  destination: person:ada
+  personal: always
+  team:
+    channel: software
+    schedule: '0 9 * * 1-5'
+```
+
+Add `software` to `slack.channels` with `visibility: team` and a mode other than `off`.
+An absent `digest.team` block disables the team brief. A bad channel blocks reload.
+A failed reload keeps the last valid workspace.
+The team brief runs in the team time zone, at most once per local day.
+It sends nothing when shipped work, stuck work, waiting work, and faults are all empty.
+Illo records that day as done. Work in progress alone does not cause a post.
+
+`routines/team-digest.md` supplies the instructions. Front matter is optional; Illo uses only the body.
+Use `{team}` for the team name. Without that file, Illo uses the default instructions.
+The scheduler never runs this instruction file as a separate routine.
+The run has principal `team`, profile `routine`, and the normal team model credential.
+It can call only `team_snapshot`. It has no personal connector access and cannot send through a tool.
+The event stores the snapshot so a delivery retry uses the same data.
+A model failure or timeout sends a plain brief from that snapshot.
+The normal channel path converts links to Slack format and splits long text into thread replies.
+Each part has a stable delivery key.
+
+The team snapshot reads only lanes with `visibility: team`.
+It counts open asks only when their lane is team-visible. It never reads ask question text.
+It groups waiting decisions, GitHub reviews, and T3 threads by person, with the oldest age.
+It lists full titles, web links, owners, sources, and states for up to 20 closed lanes.
+It also returns the full closed count. Closed steps appear only as a count.
+The first brief uses a 24-hour window. Later briefs use the separate `digest-team` state.
+Blocked lanes and stale working lanes use each source's configured stale limit.
+Faults use the personal snapshot rules. ChatGPT faults include only the team credential.
+No link is invented when a source has no web link.
+
+A known team member can reply in the team brief's thread without a mention for 24 hours.
+This starts a normal `team_channel` run with the thread as context.
+After 24 hours, a `listen` channel needs a mention again.
+Bot and outside text keep the normal taint checks. An `off` or private channel starts no run.
 
 Other routines use the destination person's time zone for a person destination.
 A person principal with no channel destination also uses that person's time zone.

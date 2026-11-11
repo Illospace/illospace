@@ -43,7 +43,8 @@ class SlackAdapter:
         root = event.reply_to or response["ts"]
         # Persist the thread marker so a restart does not lose a conversation.
         async with self.ctx.pool.connection() as conn:
-            await kv.set(conn, f"slack:thread:{event.payload['channel_id']}:{root}", True)
+            if not await kv.get(conn, f"slack:team-brief:{event.payload['channel_id']}:{root}"):
+                await kv.set(conn, f"slack:thread:{event.payload['channel_id']}:{root}", True)
         if prepare and self.prepare:
             await self.prepare(event)
 

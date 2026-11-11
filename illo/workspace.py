@@ -104,9 +104,23 @@ class GitHubConfig(Model):
         return values
 
 
+class TeamDigestConfig(Model):
+    channel: str
+    schedule: str = "0 9 * * 1-5"
+
+    @field_validator("schedule")
+    @classmethod
+    def valid_cron(cls, value):
+        if len(value.split()) != 5 or not croniter.is_valid(value):
+            raise ValueError("Use a five-field cron schedule")
+        return value
+
+
 class DigestConfig(Model):
     schedule: str = "0 9 * * 1-5"
     destination: str
+    personal: Literal["always", "needs"] = "always"
+    team: TeamDigestConfig | None = None
 
     @field_validator("schedule")
     @classmethod
@@ -241,6 +255,7 @@ class Workspace(Model):
     notes: list[Note]
     fingerprint: str = ""
     digest_instructions: str | None = None
+    team_digest_instructions: str | None = None
 
     def matching_rules(
         self, principal: str, profile: str, channel_id: str | None
@@ -394,7 +409,7 @@ def load_workspace(root: Path | str) -> Workspace:
         ("routines/*.md", Routine, routines),
     ):
         for path in sorted(root.glob(pattern)):
-            if model is Routine and path.name == "digest.md":
+            if model is Routine and path.name in {"digest.md", "team-digest.md"}:
                 continue
             target.append(
                 _model(
@@ -462,6 +477,12 @@ def load_workspace(root: Path | str) -> Workspace:
         raise WorkspaceError(f"{path}: destination: use a configured person or channel")
 
     check_destination(config.digest.destination, root / "illo.yaml")
+    if config.digest.team:
+        channel = next((c for c in config.slack.channels if c.name == config.digest.team.channel), None)
+        if not channel or channel.visibility != "team" or channel.mode == "off":
+            raise WorkspaceError(
+                f"{root / 'illo.yaml'}: digest.team.channel: use an enabled team-visible channel name"
+            )
     for routine in routines:
         if routine.principal != "team" and not (
             routine.principal.startswith("person:") and routine.principal[7:] in keys
@@ -485,9 +506,15 @@ def load_workspace(root: Path | str) -> Workspace:
         digest_instructions = _front(digest_path)["body"] if text.startswith("---\n") else text.strip()
     if digest_instructions is None:
         digest_instructions = next((r.body for r in routines if r.name == "daily-digest"), None)
+    team_path = root / "routines/team-digest.md"
+    team_instructions = None
+    if team_path.exists():
+        text = _read(team_path)
+        team_instructions = _front(team_path)["body"] if text.startswith("---\n") else text.strip()
     workspace = Workspace(
         root=root,
         digest_instructions=digest_instructions,
+        team_digest_instructions=team_instructions,
         people=people,
         config=config,
         rules=rules,

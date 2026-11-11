@@ -10,7 +10,13 @@ from illo.db import one
 from illo.gateway.principal import Authority
 from illo.ledger import lanes, people, sensors
 from illo.ledger.digest_snapshot import sensor_fault
-from illo.routines.digest import DEFAULT_INSTRUCTIONS, fallback_text, send_due, snapshot
+from illo.routines.digest import (
+    DEFAULT_INSTRUCTIONS,
+    FIRST_BRIEF,
+    fallback_text,
+    send_due,
+    snapshot,
+)
 from illo.routines.scheduler import tick_routines
 from illo.tools._format import short
 from illo.workspace import Routine
@@ -88,7 +94,10 @@ def test_fallback_groups_limits_and_escaping():
     assert "Finished: 23." in text and "Full title 3" not in text
     assert "A &amp; B" in text and "&lt;Ada&gt;" in text
     assert "Not working:\nThe last GitHub request failed." in text
-    assert fallback_text(empty()) == "Morning, Ada. Nothing needs you."
+    assert fallback_text(empty()) == (
+        "Morning, Ada. Nothing needs you.\n"
+        "Do you want me to coordinate something today? Tell me here."
+    )
     assert short("one two three four", 12) == "one two…"
     assert short("abcdefghijk", 8) == "…"
 
@@ -219,7 +228,7 @@ async def test_one_model_brief_with_digest_file_and_person_credentials(
     assert len(posts(slack_client)) == 1
     assert (
         posts(slack_client)[0]["text"]
-        == "Morning, Ada. Please <https://example.com/plan|review the plan>."
+        == "Morning, Ada. Please <https://example.com/plan|review the plan>.\n\n" + FIRST_BRIEF
     )
     async with ctx.pool.connection() as conn:
         run = await one(conn, "SELECT * FROM runs WHERE id=%s", (request.run_id,))
@@ -255,7 +264,7 @@ async def test_fallback_on_model_failure_once(app, fake_brain, slack_client, mon
     await send_due(ctx, NOW)
     await send_due(ctx, NOW)
     assert len(posts(slack_client)) == 1
-    assert posts(slack_client)[0]["text"] == "Morning, Ada. Nothing needs you."
+    assert posts(slack_client)[0]["text"] == fallback_text(empty()) + "\n\n" + FIRST_BRIEF
 
 
 async def test_brief_queue_timeout_uses_fallback(app, slack_client, monkeypatch):
@@ -271,7 +280,7 @@ async def test_brief_queue_timeout_uses_fallback(app, slack_client, monkeypatch)
     await send_due(ctx, NOW)
     await send_due(ctx, NOW)
     assert len(posts(slack_client)) == 1
-    assert posts(slack_client)[0]["text"] == "Morning, Ada. Nothing needs you."
+    assert posts(slack_client)[0]["text"] == fallback_text(empty()) + "\n\n" + FIRST_BRIEF
 
 
 async def test_snapshot_full_titles_limits_reviews_and_source_staleness(app, seed):

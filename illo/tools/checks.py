@@ -95,6 +95,8 @@ def in_grant(run: dict, tool) -> bool:
         return False
     if run.get("event_channel") == "digest" and tool.name != "digest_snapshot":
         return False
+    if run.get("event_channel") == "team_digest" and tool.name != "team_snapshot":
+        return False
     profiles = getattr(tool, "profiles", None)
     if profiles is not None:
         return effective_profile(run) in profiles

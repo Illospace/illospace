@@ -120,9 +120,12 @@ class SlackIntake:
         mentioned = kind == "app_mention" or f"<@{self.bot_id}>" in raw.get("text", "")
         if thread and not dm:
             async with self.ctx.pool.connection() as conn:
-                mentioned = mentioned or bool(
-                    await kv.get(conn, f"slack:thread:{channel}:{thread}")
+                expires = await kv.get(conn, f"slack:team-brief:{channel}:{thread}")
+                follows = (
+                    datetime.now(UTC) < datetime.fromisoformat(expires) if expires else
+                    bool(await kv.get(conn, f"slack:thread:{channel}:{thread}"))
                 )
+                mentioned = mentioned or follows
         text = message_text(raw)
         event = InboundEvent(
             channel="slack",

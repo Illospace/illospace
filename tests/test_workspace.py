@@ -184,3 +184,44 @@ def test_combined_rule_size_names_last_file(example):
         path.write_text(f"---\nname: {name}\n---\n" + "x" * 30_000)
     with pytest.raises(WorkspaceError, match="rules/large-b.md.*60,000"):
         load_workspace(example)
+
+
+@pytest.mark.parametrize("front", ["", "---\nname: ignored\nschedule: ignored\n---\n"])
+def test_team_digest_body_and_no_routine(example, front):
+    (example / "routines/team-digest.md").write_text(front + "Write for {team}.")
+    loaded = load_workspace(example)
+    assert loaded.team_digest_instructions == "Write for {team}."
+    assert all(r.path != "routines/team-digest.md" for r in loaded.routines)
+
+
+@pytest.mark.parametrize("channel,visibility,mode,schedule", [
+    ("missing", "team", "listen", "0 9 * * 1-5"),
+    ("software", "private", "listen", "0 9 * * 1-5"),
+    ("software", "team", "off", "0 9 * * 1-5"),
+    ("software", "team", "listen", "0 0 9 * * 1-5"),
+    ("C_ACME_TEAM", "team", "listen", "0 9 * * 1-5"),
+])
+async def test_team_digest_bad_config_keeps_last_workspace(app, example, channel, visibility, mode, schedule):
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["slack"]["channels"][0].update(name="software", visibility=visibility, mode=mode)
+    data["digest"]["team"] = {"channel": channel, "schedule": schedule}
+    path.write_text(yaml.safe_dump(data))
+    ctx = app.state.ctx
+    previous = ctx.workspace
+    ctx.config.workspace_dir = example
+    with pytest.raises(WorkspaceError, match="digest.team"):
+        await ctx.reload()
+    assert ctx.workspace is previous
+
+
+def test_team_digest_optional_and_personal_default(example):
+    config = load_workspace(example).config
+    assert config.digest.team is None and config.digest.personal == "always"
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["slack"]["channels"][0]["name"] = "software"
+    data["digest"].update(team={"channel": "software", "schedule": "30 8 * * 1-5"}, personal="needs")
+    path.write_text(yaml.safe_dump(data))
+    config = load_workspace(example).config
+    assert config.digest.team.channel == "software" and config.digest.personal == "needs"
