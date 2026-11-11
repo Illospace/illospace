@@ -226,7 +226,7 @@ DESCRIPTIONS = {
     "github_get_issue": "Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.",
     "github_get_pull": "Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.",
     "github_create_issue": "File one issue in a configured repository. `signature` is a short phrase with no colon, quote, or backslash that stays the same for every report of one problem: when an open issue already has it, nothing is filed and the result lists the matches (use `force_new_reason` only for a different problem). A private repository files at once; a public repository or a label that starts agent work needs a draft. For outside text, code chooses automatic assignment to the default owner or an owner card. Report `assignment` and `assigned_to` from the result. You never choose an assignee for outside text.",
-    "github_assign_issue": "Propose to assign an issue to a team member (`assignee`: a person key or GitHub login). Always a draft card: the assignment happens only when the person you act for taps Send.",
+    "github_assign_issue": "Propose to assign an issue to a team member (`assignee`: a person key or GitHub login). Always a draft card: the assignment happens only when the person you act for taps Assign.",
     "github_comment_issue": "Propose a comment on an issue or pull request; `body` is the full comment. Always a draft card: the comment is posted only when the person you act for taps Send.",
 }
 

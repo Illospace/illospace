@@ -30,13 +30,13 @@ async def sync_card(ctx, conn, draft):
             await ctx.slack_client.chat_update(
                 channel=draft["slack_channel"],
                 ts=draft["slack_ts"],
-                text=f"Draft for {draft['destination']}",
+                text=cards.draft_fallback(draft),
                 blocks=blocks,
             )
     elif draft["state"] == "pending":
         person = await ledger.draft_owner(conn, draft)
         sent = await post_dm(
-            ctx, person, f"Draft for {draft['destination']}", blocks, "draft", draft["id"]
+            ctx, person, cards.draft_fallback(draft), blocks, "draft", draft["id"]
         )
     else:
         return

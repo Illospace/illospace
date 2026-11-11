@@ -85,6 +85,9 @@ and `work_start` once.
 The registry marks reads of private ledger results with the same limit.
 Read handlers must retain `visibility: private` on private results.
 Only the approved draft performer executes a saved write.
+Assignment and comment cards show the repository, issue title, link, and current assignees.
+Assignment cards show the proposed login. Comment cards show the full comment as quoted text.
+Hidden format characters appear as escapes. A card that cannot show the full action offers no approval button.
 
 Issue creation and `work_start` require a short `signature` phrase.
 Illo searches open and closed issues before creation. An open match stops
