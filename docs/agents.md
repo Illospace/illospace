@@ -197,5 +197,5 @@ Source references belong to the calling token. Ask ids also permit a new token o
 
 The same source and dedupe key return the first signal id with `duplicate: true`.
 Illo treats the signal as outside data. The run has the team principal and the tainted profile.
-It can read issues, file an unassigned ticket, and read the first URL of the signal text. It gets no personal connector. A signal has no reply destination.
+It can read issues, file a ticket, and read the first URL of the signal text. Code decides the owner under the [outside-text triage rules](github.md#triage-of-outside-text). It gets no personal connector. A signal has no reply destination.
 A token can send 60 new signals in one hour. A duplicate does not count.

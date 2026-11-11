@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 from illo.asks.cards import escape
+from illo.channels.slack.access import channel_private
 from illo.db import one
 from illo.ledger import ask_workflow, kv
 from illo.ledger.digest_snapshot import TEAM_STATE_KEY, team_snapshot
@@ -73,6 +74,8 @@ async def send_team_due(ctx, now=None):
         return
     channel = next(c for c in config.slack.channels if c.name == team.channel)
     async with ctx.pool.connection() as conn:
+        if await channel_private(ctx, channel.id, conn=conn):
+            return
         await ask_workflow.lock_digest(conn, TEAM_STATE_KEY)
         state = await one(
             conn, "SELECT last_run_at FROM routine_state WHERE key=%s", (TEAM_STATE_KEY,)

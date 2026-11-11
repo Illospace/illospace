@@ -12,7 +12,7 @@ VISIBLE = """e.channel='slack' AND e.principal='team' AND e.kind=ANY(%s)
 
 
 async def channels(ctx, conn):
-    """Configuration and the Slack API must both say that the channel is public."""
+    """Configuration and Slack membership must permit team access."""
     allowed = {}
     for channel in ctx.workspace.config.slack.channels:
         if channel.visibility == "team" and channel.mode != "off":

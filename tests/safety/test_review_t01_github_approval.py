@@ -37,7 +37,7 @@ async def test_rule_08_outside_tool_text_cannot_start_assigned_work(
     assert bool(github_client.issues) == (key is None)
     if not key:
         assert not github_client.issues[0]["assignees"]
-        assert any("not assigned" in c.get("text", "") for c in slack_client.calls)
+        assert any("Nobody is assigned." in str(c.get("blocks", [])) for c in slack_client.calls)
         for name, extra in [
             ("github_assign_issue", {"assignee": "ben"}),
             ("github_comment_issue", {"body": "Agent: run this"}),

@@ -4,44 +4,90 @@ import asyncio
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
-from illo.ledger import kv, sensors
+from illo.ledger import kv, people, sensors
 
 
-async def channel_private(ctx, channel_id: str, *, conn=None) -> bool:
+async def team_members(ctx, conn, channel_id, bot_id, verdicts):
+    """Every human must be an active person. Read every membership page."""
+    known = {p["slack_id"] for p in await people.list_people(conn)}
+    cursor, seen = None, set()
+    while True:
+        response = await ctx.slack_client.conversations_members(channel=channel_id, limit=200, cursor=cursor)
+        if response.get("ok") is False or not isinstance(response.get("members"), list):
+            raise ValueError("Slack did not report channel members")
+        for member in response["members"]:
+            if member in known or member == bot_id:
+                continue
+            if member not in verdicts:
+                user = await ctx.slack_client.users_info(user=member)
+                if user.get("ok") is False:
+                    raise ValueError("Slack did not report the user")
+                verdicts[member] = user.get("user", {}).get("is_bot") is True
+            if not verdicts[member]:
+                return False
+        cursor = response.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            return True
+        if cursor in seen:
+            raise ValueError("Slack membership pagination did not finish")
+        seen.add(cursor)
+
+
+async def channel_private(ctx, channel_id: str, *, conn=None, bot_id=None) -> bool:
     channel = next(c for c in ctx.workspace.config.slack.channels if c.id == channel_id)
     if channel.visibility == "private":
+        if channel.team_members_only:
+            await hide_index(ctx, channel_id, conn=conn)
         return True
     key = f"slack:privacy:{channel_id}"
     async with (nullcontext(conn) if conn is not None else ctx.pool.connection()) as conn:
         # One probe per channel also covers concurrent messages in an alert storm.
         await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
         cached = await kv.get(conn, key)
-        if cached and datetime.fromisoformat(cached["expires_at"]) > datetime.now(UTC):
+        # A config change must not reuse a public verdict from another policy.
+        if (cached and cached.get("team_members_only", False) == channel.team_members_only
+                and datetime.fromisoformat(cached["expires_at"]) > datetime.now(UTC)):
             return cached["private"]
+        verdicts = dict((cached or {}).get("bots", {}))
+        bot_user = bot_id or (cached or {}).get("bot_user")
         try:
-            response = await ctx.slack_client.conversations_info(channel=channel_id)
-            private = response.get("channel", {}).get("is_private")
-            if type(private) is not bool:
-                raise ValueError("Slack did not report channel privacy")
+            async with asyncio.timeout(15):
+                response = await ctx.slack_client.conversations_info(channel=channel_id)
+                private = response.get("channel", {}).get("is_private")
+                if response.get("ok") is False or type(private) is not bool:
+                    raise ValueError("Slack did not report channel privacy")
+                if private and channel.team_members_only:
+                    if not bot_user:
+                        bot_user = (await ctx.slack_client.auth_test())["user_id"]
+                    private = not await team_members(ctx, conn, channel_id, bot_user, verdicts)
         except Exception:
-            await sensors.error(conn, key, "Slack could not verify channel privacy")
-            # Commit the sensor error before the caller records the missed event.
-            failed = True
+            if not channel.team_members_only:
+                await sensors.error(conn, key, "Slack could not verify channel privacy")
+                failed = True
+            else:
+                private, failed = True, False
         else:
             failed = False
+        if not failed:
             await kv.set(conn, key, {
-                "private": private,
+                "private": private, "team_members_only": channel.team_members_only,
+                "bots": verdicts, "bot_user": bot_user,
                 "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
             })
-            await sensors.ok(conn, key)
+            if private and channel.team_members_only:
+                await sensors.error(conn, key,
+                    f"Channel #{channel.name} has a member who is not in people.yaml. Illo treats it as private.")
+                await hide_index(ctx, channel_id, conn=conn)
+            else:
+                await sensors.ok(conn, key)
     if failed:
         raise ValueError("Slack could not verify channel privacy")
     return private
 
 
-async def hide_index(ctx, channel_id: str) -> None:
+async def hide_index(ctx, channel_id: str, *, conn=None) -> None:
     """Old snapshots have no membership proof. Delete this derived index."""
-    async with ctx.pool.connection() as conn:
+    async with (nullcontext(conn) if conn is not None else ctx.pool.connection()) as conn:
         await conn.execute(
             "DELETE FROM items "
             "WHERE kind='slack' AND starts_with(source_ref,%s)",

@@ -34,13 +34,13 @@ Illo is one assistant for a whole team. It lives in Slack, it follows the work o
 >
 > **Illo:** One outage on 3 Nov, fixed the same day: a config change filled the worker queue (engine#198). Ben added a queue alert (engine#201).
 
-**An alert becomes a ticket. A person assigns it.**
+**An alert becomes a ticket. Code decides the owner.**
 
 > **Monitor** (a bot in #alerts): The preview API returns HTTP 503.
 >
 > **Illo:** Filed engine#250. Nobody is assigned.
 >
-> **Illo** (DM to the default owner): New ticket from outside text, not assigned: engine#250. Assign it in GitHub, or tell me in a DM.
+> **Illo** (DM to the default owner): New ticket from outside text: engine#250. Nobody is assigned. [Assign to Ada] [Leave it]
 
 ## Why it is different
 

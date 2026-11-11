@@ -63,6 +63,7 @@ class SlackChannel(Model):
     id: str = Field(min_length=1)
     mode: Literal["coordinator", "listen", "off"] = "listen"
     visibility: Literal["team", "private"] = "team"
+    team_members_only: bool = False
     rule_files: list[str] = Field(default_factory=list)
 
 
@@ -177,6 +178,23 @@ class HeartbeatConfig(Model):
     seconds: float = Field(default=180, gt=0, le=300)
 
 
+class AutoAssignConfig(Model):
+    slack_bots: list[str] = Field(default_factory=list)
+    signal_sources: list[str] = Field(default_factory=list)
+
+    @field_validator("slack_bots")
+    @classmethod
+    def valid_bot_ids(cls, values):
+        if any(not v or any(c.isspace() for c in v) for v in values):
+            raise ValueError("Use non-empty Slack bot ids without spaces")
+        return values
+
+
+class TriageConfig(Model):
+    auto_assign: AutoAssignConfig = Field(default_factory=AutoAssignConfig)
+    max_per_hour: int = Field(default=6, ge=1, le=100)
+
+
 class TeamConfig(Model):
     language: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ()-]{1,39}$")
     team_name: str = Field(min_length=1)
@@ -185,6 +203,7 @@ class TeamConfig(Model):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
+    triage: TriageConfig = Field(default_factory=TriageConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     digest: DigestConfig
     stale_minutes: StaleLimits = Field(default_factory=StaleLimits)

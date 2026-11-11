@@ -15,7 +15,7 @@ from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.blocks import message_text
 from illo.channels.slack.clips import read_clips
-from illo.channels.slack.threads import read_context
+from illo.channels.slack.threads import read_context, read_dm_history
 from illo.channels.slack.voice import OpenAITranscriber
 from illo.db import one
 from illo.gateway import InboundEvent
@@ -93,7 +93,7 @@ class SlackIntake:
             return
         if configured and not dm:
             try:
-                private = await channel_private(self.ctx, channel)
+                private = await channel_private(self.ctx, channel, bot_id=self.bot_id)
             except Exception:
                 log.error("Slack could not verify channel privacy")
                 payload = {"text": message_text(raw), "payload": {
@@ -143,6 +143,7 @@ class SlackIntake:
                 "mentioned": mentioned,
                 "bot": bool(raw.get("bot_id") or raw.get("bot_profile") or raw.get("workflow_id")),
                 "bot_id": raw.get("bot_id"),
+                "author_slack_id": raw.get("user"),
                 "webhook": raw.get("subtype") == "bot_message",
                 "form": bool(raw.get("workflow_id")),
                 "files": [
@@ -182,7 +183,7 @@ class SlackIntake:
     async def index(self, event: InboundEvent, channel_name: str) -> None:
         client = self.ctx.slack_client
         try:
-            if await channel_private(self.ctx, event.payload["channel_id"]):
+            if await channel_private(self.ctx, event.payload["channel_id"], bot_id=self.bot_id):
                 await hide_index(self.ctx, event.payload["channel_id"])
                 return
             link = await client.chat_getPermalink(
@@ -237,10 +238,12 @@ class SlackIntake:
         })
 
     async def prepare_context(self, event: InboundEvent) -> None:
-        """Add thread history only after claims pass."""
+        """Add conversation history only after claims pass."""
         limit = self.ctx.workspace.config.run_limits.max_message_chars
         if len(event.text) > limit:
             raise ValueError("The message is too long")
+        source = "thread"
+        context = []
         if event.payload.get("thread_ts"):
             context = await read_context(
                 self.ctx,
@@ -248,10 +251,17 @@ class SlackIntake:
                 self.bot_id,
                 self.adapter.working.get(event.external_id),
             )
-            budget = limit - len(event.text) - len(data_text("thread", "")) - len("\n\nRequest:\n")
-            if context and budget > 0:
-                event.text = (
-                    data_text("thread", "\n".join(context)[-budget:])
-                    + "\n\nRequest:\n"
-                    + event.text
-                )
+        elif event.kind == "dm":
+            source = "dm-history"
+            context = await read_dm_history(
+                self.ctx, event, self.bot_id,
+                self.adapter.working.get(event.external_id), bot_identity=self.bot_identity,
+            )
+        budget = limit - len(event.text) - len(data_text(source, "")) - len("\n\nRequest:\n")
+        if context and budget > 0:
+            history = "\n".join(context)[-budget:]
+            # Escaping nested markers can expand the text. Keep the final block in budget.
+            while history and len(data_text(source, history)) > budget + len(data_text(source, "")):
+                history = history[1:]
+            if history:
+                event.text = data_text(source, history) + "\n\nRequest:\n" + event.text

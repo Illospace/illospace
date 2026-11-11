@@ -12,6 +12,7 @@ from illo.ledger import github as ledger
 from illo.ledger import kv, people
 from illo.tools._format import data_text, github, github_detail, short
 from illo.tools._format import rows as format_rows
+from illo.tools._triage import auto_assign, source_event
 from illo.tools.checks import Decision, check
 from illo.tools.registry import Arguments, Refusal, Tool, ToolContext
 
@@ -195,9 +196,16 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
     body = f"{header}\n\n{args['body']}\n\nSignature: {signature}\n\n{marker}".strip()
     issue = await ctx.app.github_client.create_issue(repo, args["title"], body, labels=labels)
     await kv.set(ctx.conn, signature_key, issue["number"])
+    result = {"created": True, "issue": issue, "matches": matches}
     if ctx.run["tainted"] or not ctx.run.get("person_id"):
-        await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue["html_url"])
-    return {"created": True, "issue": issue, "matches": matches}
+        event = await source_event(ctx)
+        login = await auto_assign(ctx, event, repo, issue["number"])
+        result.update(assigned_to=login, assignment="automatic" if login else "waits_for_owner")
+        if login:
+            issue["assignees"] = [{"login": login}]
+        if not login:
+            await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue, repo, event)
+    return result
 
 
 async def assign_issue(ctx: ToolContext, args: dict) -> dict:
@@ -217,8 +225,8 @@ DESCRIPTIONS = {
     "github_search_issues": "Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.",
     "github_get_issue": "Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.",
     "github_get_pull": "Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.",
-    "github_create_issue": "File one issue in a configured repository. `signature` is a short phrase with no colon, quote, or backslash that stays the same for every report of one problem: when an open issue already has it, nothing is filed and the result lists the matches (use `force_new_reason` only for a different problem). A private repository files at once, unassigned; a public repository or a label that starts agent work needs a draft.",
-    "github_assign_issue": "Propose to assign an issue to a team member (`assignee`: a person key or GitHub login). Always a draft card: the assignment happens only when the person you act for taps Send.",
+    "github_create_issue": "File one issue in a configured repository. `signature` is a short phrase with no colon, quote, or backslash that stays the same for every report of one problem: when an open issue already has it, nothing is filed and the result lists the matches (use `force_new_reason` only for a different problem). A private repository files at once; a public repository or a label that starts agent work needs a draft. For outside text, code chooses automatic assignment to the default owner or an owner card. Report `assignment` and `assigned_to` from the result. You never choose an assignee for outside text.",
+    "github_assign_issue": "Propose to assign an issue to a team member (`assignee`: a person key or GitHub login). Always a draft card: the assignment happens only when the person you act for taps Assign.",
     "github_comment_issue": "Propose a comment on an issue or pull request; `body` is the full comment. Always a draft card: the comment is posted only when the person you act for taps Send.",
 }
 

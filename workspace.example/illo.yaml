@@ -6,6 +6,7 @@ slack:
     - name: team
       id: C_ACME_TEAM
       mode: listen
+      # team_members_only: true  # Accept Slack-private channels with team humans only.
       rule_files: [rules/team.md]
     - name: alerts
       id: C_ACME_ALERTS
@@ -36,3 +37,9 @@ brain:
 run_limits:
   max_concurrent: 4
   max_message_chars: 20000
+
+# triage:
+#   auto_assign:
+#     slack_bots: []  # Trusted monitor bot_id values from Slack.
+#     signal_sources: []  # Trusted machine signal source names.
+#   max_per_hour: 6  # Automatic assignments per hour, from 1 to 100.

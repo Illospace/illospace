@@ -45,12 +45,14 @@ async def start_preflight(ctx: ToolContext, args: dict) -> Decision:
         return verdict
     if ctx.run.get("person_id"):
         return Decision("draft", "An assignment needs approval")
-    # The assignment is refused. Filing an unassigned ticket remains allowed.
+    # Refuse the model assignment. Code can still file and triage the ticket.
     if ctx.run["personal_read"]:
         return Decision("deny", "Personal data cannot enter an unassigned ticket")
     result = await start(ctx, {**args, "assignee": None})
     link = (result.get("issue") or {}).get("html_url", "")
-    return Decision("deny", f"The assignment needs approval. The ticket stays unassigned. {link}")
+    ownership = (f"Code assigned it to {result['assigned_to']}."
+                 if result.get("assignment") == "automatic" else "The ticket stays unassigned.")
+    return Decision("deny", f"The assignment needs approval. {ownership} {link}")
 
 
 def status_text(lane: dict) -> str:
@@ -161,7 +163,7 @@ def register(registry) -> None:
             lambda a: f"github:{a['repo']}",
             False,
             start,
-            description="Start work through a GitHub issue: file it in a configured repository, track it as a lane, and post a status message. With `assignee` (a person key or GitHub login) in a person's run, the result is a draft card, and the issue is filed and assigned only when the person taps Send. Without a person to approve, the issue is filed unassigned and the result is `deny` with its link: say that a person must assign it. `signature` works as in `github_create_issue`; once per run.",
+            description="Start work through a GitHub issue: file it in a configured repository, track it as a lane, and post a status message. With `assignee` (a person key or GitHub login) in a person's run, the result is a draft card, and the issue is filed and assigned only when the person taps Send. Without a person, code decides ticket ownership under the outside-text triage rules. A model assignment is refused with `deny` and the ticket link. `signature` works as in `github_create_issue`; once per run.",
             arguments=StartArgs,
             profiles=PROFILES - {"tainted"},
             preflight=start_preflight,

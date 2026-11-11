@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 from illo.db import all_rows, one
-from illo.ledger import kv, people, sensors
+from illo.ledger import drafts, kv, people, runs, sensors
 
 NOTICE_PREFIX = "slack:owner-notices:"
 
@@ -63,35 +63,89 @@ def fresh_state(state, timestamp):
     return state
 
 
-async def notify_unassigned(ctx, conn, run, url):
-    """Send one immediate notice per run, with at most six notices per hour."""
+async def owner_draft(ctx, conn, run, issue, repo, event):
+    """Code proposes one fixed assignment. The owner still approves the stored action."""
+    from illo.asks.drafts import sync_card
+
+    person = await people.get(conn, ctx.workspace.config.default_owner)
+    if not person or not person.get("github_login"):
+        raise ValueError("The default owner needs a GitHub login")
+    source = {"kind": "unknown"}
+    if event and event["channel"] == "signals":
+        source = {"kind": "signal", "name": event["payload"]["payload"].get("source", "unknown")}
+    elif event and event["channel"] == "slack":
+        payload = event["payload"]["payload"]
+        channel = next((c for c in ctx.workspace.config.slack.channels
+                        if c.id == payload.get("channel_id")), None)
+        author = await people.by_slack_id(conn, payload.get("author_slack_id", ""))
+        if not author and event.get("person_id"):
+            author = await one(conn, "SELECT name FROM people WHERE id=%s AND active", (event["person_id"],))
+        source = {"kind": "slack", "name": channel.name if channel else "DM",
+                  "author": author["name"] if author and not payload.get("from_automation") else "Automation"}
+        try:
+            link = await ctx.slack_client.chat_getPermalink(
+                channel=payload["channel_id"], message_ts=payload["message_ts"])
+            source["link"] = link["permalink"]
+        except Exception:
+            pass
+    # A separate, tokenless run keeps every existing requester/approver check intact.
+    owner_run = await runs.create(conn, principal=f"person:{person['key']}",
+                                  person_id=person["id"], profile="person_dm",
+                                  runtime="code", model="code", event_id=run.get("event_id"))
+    await runs.finish(conn, owner_run["id"])
+    draft = await drafts.create(
+        conn, run_id=owner_run["id"], approver_person_id=person["id"],
+        kind="github_assign_issue", destination=f"github:{repo}",
+        content={"tool": "github_assign_issue", "arguments": {
+            "repo": repo, "number": issue["number"], "assignee": person["github_login"]},
+            "github_issue": {"title": issue["title"], "link": issue["html_url"],
+                             "assignees": [p["login"] for p in issue.get("assignees", [])]},
+            "outside_ticket": {"owner": person["name"], "source": source, "run_id": run["id"]}},
+    )
+    if not await sync_card(ctx, conn, draft):
+        raise ValueError("Slack is not connected to the owner")
+    return draft
+
+
+async def notify_unassigned(ctx, conn, run, issue, repo, event=None):
+    """Send one immediate card per run, with at most six cards per hour."""
     owner = ctx.workspace.config.default_owner
     key = NOTICE_PREFIX + owner
     await lock(conn, key)
     timestamp = now().timestamp()
     state = fresh_state(await kv.get(conn, key), timestamp)
+    ticket = {"url": issue["html_url"], "title": issue["title"],
+              "repo": repo, "number": issue["number"]}
     run_key = f"slack:owner-notified-run:{run['id']}"
-    if await kv.get(conn, run_key) or len(state["sent"]) >= 6:
-        if url not in state["pending"]:
-            state["pending"].append(url)
-        if state["due_at"] is None:
-            state["due_at"] = min(state["sent"], default=timestamp) + 3600
-    else:
-        # Record the attempt before Slack. An uncertain delivery must not repeat.
+    deferred = bool(await kv.get(conn, run_key)) or len(state["sent"]) >= 6
+    if not deferred:
         await kv.set(conn, run_key, True)
         state["sent"].append(timestamp)
         await kv.set(conn, key, state)
-        source = " from outside text" if run["tainted"] else ""
         try:
-            sent = await send_owner(ctx, conn, owner, f"New ticket{source}, not assigned: {url}. "
-                                   "Assign it in GitHub, or tell me in a DM.")
-            if not sent:
+            await owner_draft(ctx, conn, run, issue, repo, event)
+            if not ctx.slack_client:
                 raise ValueError("Slack is not connected")
         except Exception:
-            await sensors.error(conn, "github:owner-notice", "The owner notice could not be sent")
-            state["pending"].append(url)
-            state["due_at"] = state["due_at"] or timestamp + 3600
+            await sensors.error(conn, "github:owner-notice", "The owner card could not be sent")
+            deferred = True
+    if deferred:
+        if not any((p if isinstance(p, str) else p["url"]) == ticket["url"] for p in state["pending"]):
+            state["pending"].append(ticket)
+        if state["due_at"] is None:
+            state["due_at"] = min(state["sent"], default=timestamp) + 3600
     await kv.set(conn, key, state)
+
+
+def pending_line(ticket):
+    from illo.asks.cards import escape
+
+    if isinstance(ticket, str):
+        parts = ticket.rstrip("/").split("/")
+        ticket = {"url": ticket, "repo": parts[-3] if len(parts) >= 4 else "ticket",
+                  "number": parts[-1], "title": ""}
+    label = f"{ticket['repo'].split('/')[-1]}#{ticket['number']}"
+    return f"• <{escape(ticket['url']).replace('|', '%7C')}|{escape(label)}> {escape(ticket['title'])}".rstrip()
 
 
 async def flush_owner_notices(ctx):
@@ -109,7 +163,9 @@ async def flush_owner_notices(ctx):
             state["sent"].append(timestamp)
             try:
                 sent = await send_owner(ctx, conn, key[len(NOTICE_PREFIX):],
-                                       "Tickets not assigned:\n" + "\n".join(state["pending"]))
+                                       "Tickets that wait for an owner:\n"
+                                       + "\n".join(pending_line(t) for t in state["pending"])
+                                       + "\nTell me here which ones to assign.")
                 if not sent:
                     raise ValueError("Slack is not connected")
             except Exception:

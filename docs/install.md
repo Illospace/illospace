@@ -65,6 +65,10 @@ Direct Compose commands must pass the same file with `--env-file`.
 
 ## Set up the team
 
+DM context uses the Slack `im:history` scope in `deploy/slack/manifest.yaml`.
+Illo reads up to 20 earlier messages, with a 6,000-character history limit.
+If Slack refuses the read, Illo answers without history. Check the `slack:dm-history` sensor.
+
 1. Create a Slack app from `deploy/slack/manifest.yaml`.
    Enable Socket Mode and install the app in your Slack workspace.
    Add its bot token and app token to the environment file.
@@ -263,3 +267,14 @@ ILLO_ENV_FILE="$HOME/.config/illo/env" docker compose --env-file "$HOME/.config/
 docker volume rm illo_postgres
 rm -rf illospace
 ```
+
+## Private team channels
+
+Set `team_members_only: true` on a channel in `slack.channels` to use a Slack-private team channel.
+Keep `visibility: team`. Every human member must be active in `people.yaml`.
+Illo accepts its own bot and other bot users. A bot in the channel can read what Illo posts there.
+Illo checks all member pages and caches the result for 10 minutes.
+An unknown human or a Slack error makes the channel private and removes its indexed messages.
+The channel sensor reports the failure without member ids.
+`visibility: private` always wins. Without the flag, Slack-private channels stay private.
+A verified channel supports normal intake, search, thread reads, channel posts, and team briefs.

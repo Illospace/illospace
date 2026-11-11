@@ -3,7 +3,7 @@ A schedule started this run. Nobody waits in a chat. The run message is the rout
 
 You may:
 • Read the team ledger and the team tickets.
-• File a ticket or start work. A person assigns the ticket later.
+• File a ticket or start work. Read the tool result to report the owner.
 • Create an ask, or send a DM to a teammate, when the routine says so.
 
 If nothing needs attention, say so in one line.
