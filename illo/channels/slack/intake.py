@@ -257,6 +257,11 @@ class SlackIntake:
                 self.ctx, event, self.bot_id,
                 self.adapter.working.get(event.external_id), bot_identity=self.bot_identity,
             )
+        from illo.channels.slack.tasks import context as task_context
+
+        task = await task_context(self.ctx, event)
+        if task:
+            context.append(task)
         budget = limit - len(event.text) - len(data_text(source, "")) - len("\n\nRequest:\n")
         if context and budget > 0:
             history = "\n".join(context)[-budget:]

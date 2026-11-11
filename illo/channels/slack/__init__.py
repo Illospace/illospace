@@ -7,4 +7,7 @@ async def setup(ctx) -> None:
 
     ctx.draft_performers["slack_send_dm"] = perform_dm
     ctx.draft_performers["slack_post_channel"] = perform_post
+    from illo.channels.slack.tasks import setup as task_setup
+
+    await task_setup(ctx)
     await connect(ctx)
