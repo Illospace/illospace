@@ -7,6 +7,7 @@ from pydantic import Field
 
 from illo.db import one
 from illo.ledger import ask_workflow, briefs, digest_snapshot, people
+from illo.tools._format import data_text, json_text
 from illo.tools.registry import Arguments, Refusal, Tool
 
 
@@ -18,13 +19,14 @@ async def digest_snapshot_read(ctx, args):
         ctx.conn, "SELECT channel,payload FROM events WHERE id=%s", (ctx.run.get("event_id"),)
     )
     if event and event["channel"] == "digest":
-        return event["payload"]["payload"]["digest_snapshot"]
-    return await digest_snapshot.build(
-        ctx.conn,
-        person,
-        datetime.now(UTC),
-        ctx.app.workspace.config.stale_minutes.model_dump(by_alias=True),
-    )
+        snapshot = event["payload"]["payload"]["digest_snapshot"]
+    else:
+        snapshot = await digest_snapshot.build(
+            ctx.conn, person, datetime.now(UTC),
+            ctx.app.workspace.config.stale_minutes.model_dump(by_alias=True),
+        )
+    return data_text("snapshot", json_text(snapshot))
+
 
 
 async def team_snapshot_read(ctx, args):

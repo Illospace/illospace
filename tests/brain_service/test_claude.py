@@ -110,7 +110,7 @@ async def test_tool_limit_uses_one_separate_client_without_tools(run_request, tm
     assert final.options.tools == [] and final.options.strict_mcp_config
     assert final.options.system_prompt == normal.options.system_prompt == run_request.system_prompt
     assert "Answer now" in final.queries[0] and "The release is ready." in final.queries[0]
-    assert '"trusted": false' in final.queries[0]
+    assert '<outside_data source="transcript">' in final.queries[0]
     assert "fake-run-token" not in json.dumps(final.queries)
     assert not [e for e in events if e["type"] == "error"]
     assert events[-1]["usage"] == {"input_tokens": 5, "limited": True}

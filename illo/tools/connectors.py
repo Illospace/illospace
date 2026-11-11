@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import Field
 
 from illo.ledger import sensors
-from illo.tools._format import data_text, json_text, line, rows
+from illo.tools._format import data_text, json_text, line, outside_result, rows
 from illo.tools.registry import Arguments, Tool
 
 PROFILES = frozenset({"person_dm", "team_channel", "agent_request", "routine", "tainted"})
@@ -68,7 +68,7 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
         )
     values = [{"connector": c["connector"], **t} for c in results for t in c["tools"]]
     return data_text(
-        "connector catalog",
+        "connector-catalog",
         rows(
             values,
             lambda t: line(t["connector"], t["name"], t["risk"], json_text(t["inputSchema"])),
@@ -85,7 +85,7 @@ async def call_connector(ctx, args: dict) -> dict:
         ctx.run["tainted"] and not (remote.tainted and remote.risk == "read")
     ):
         raise ValueError("This connector tool does not allow a tainted run")
-    return await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"])
+    return outside_result(await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"]))
 
 
 def resolve(ctx, args: dict) -> Tool:

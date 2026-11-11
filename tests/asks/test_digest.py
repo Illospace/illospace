@@ -20,6 +20,7 @@ from illo.routines.digest import (
 from illo.routines.scheduler import tick_routines
 from illo.tools._format import short
 from illo.workspace import Routine
+from tests.tool_results import snapshot_data
 
 NOW = datetime(2026, 11, 10, 9, tzinfo=UTC)
 
@@ -221,10 +222,10 @@ async def test_one_model_brief_with_digest_file_and_person_credentials(
     assert request.user_message == DEFAULT_INSTRUCTIONS.replace("{name}", "Ada")
     assert request.provider_auth.kind == "chatgpt"
     assert "Morning, Ada." in request.user_message and "{name}" not in request.user_message
-    from tests.tool_results import read_result
+    from tests.tool_results import read_result, snapshot_data
 
     result = read_result(fake_brain.results[0])
-    assert result["decision"] == "allow" and result["result"]["needs_you"] == []
+    assert result["decision"] == "allow" and snapshot_data(result["result"])["needs_you"] == []
     assert len(posts(slack_client)) == 1
     assert (
         posts(slack_client)[0]["text"]
@@ -376,7 +377,7 @@ async def test_brief_cannot_send_through_a_tool(app, fake_brain, slack_client):
 
 
 async def test_tool_scope_and_snapshot_agree(app, rpc, rpc_token, monkeypatch):
-    from tests.tool_results import read_result
+    from tests.tool_results import read_result, snapshot_data
 
     class Clock:
         @staticmethod
@@ -404,7 +405,7 @@ async def test_tool_scope_and_snapshot_agree(app, rpc, rpc_token, monkeypatch):
         response = await rpc(token, "tools/call", {"name": name, "arguments": {}})
         result = read_result(response.json()["result"])
         assert result["decision"] == "allow"
-        results.append(result["result"])
+        results.append(snapshot_data(result["result"]))
     assert results[0] == results[1] == results[2]
     assert len(results[0]["finished"]) == 20 and results[0]["finished_total"] == 21
     assert results[0]["your_move_total"] == 1
@@ -479,9 +480,9 @@ async def test_custom_instructions_name_and_frozen_snapshot(
 
     monkeypatch.setattr(fake_brain, "run", change_after_snapshot)
     await send_due(ctx, NOW)
-    from tests.tool_results import read_result
+    from tests.tool_results import read_result, snapshot_data
 
-    assert read_result(fake_brain.results[0])["result"]["needs_you"] == []
+    assert snapshot_data(read_result(fake_brain.results[0])["result"])["needs_you"] == []
     assert fake_brain.requests[0].user_message == "Write a brief for Ada. Call digest_snapshot."
     assert len(posts(slack_client)) == 1
 
@@ -545,13 +546,13 @@ async def test_model_lane_tools_use_github_stale_config(app):
             result = await ctx.registry.call(tool_ctx, name, args)
             assert result["decision"] == "allow" and "working stale" not in result["result"]
         for name in ("asks_digest", "lanes_attention", "digest_snapshot"):
-            assert (await ctx.registry.call(tool_ctx, name, {}))["result"]["stuck"] == []
+            assert snapshot_data((await ctx.registry.call(tool_ctx, name, {}))["result"])["stuck"] == []
         ctx.workspace = ctx.workspace.model_copy(deep=True)
         ctx.workspace.config.stale_minutes.github = 600
         result = await ctx.registry.call(tool_ctx, "lanes_search", {})
         assert "working stale" in result["result"]
         assert (
-            len((await ctx.registry.call(tool_ctx, "digest_snapshot", {}))["result"]["stuck"]) == 1
+            len(snapshot_data((await ctx.registry.call(tool_ctx, "digest_snapshot", {}))["result"])["stuck"]) == 1
         )
 
 

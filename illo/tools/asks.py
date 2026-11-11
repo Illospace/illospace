@@ -9,7 +9,7 @@ from illo.asks.service import is_live
 from illo.channels.mcp.schemas import check_ask_text
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, lanes, mcp, people
-from illo.tools._format import Compact, ask, body, json_text, rows
+from illo.tools._format import Compact, ask, body, data_text, json_text, rows
 from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Tool
 
@@ -63,12 +63,13 @@ class RuleAnswerArgs(GetArgs):
 
 async def asks_list(ctx, args):
     values = await asks.compact_list(ctx.conn, principal=ctx.principal, **args)
-    return rows(
+    result = rows(
         values,
         ask,
         total=values[0]["total"] if values else 0,
         hint="Pass owner= or limit= to read more asks.",
     )
+    return Compact(data_text("asks", result.text), result.private)
 
 
 async def asks_get(ctx, args):
@@ -82,7 +83,7 @@ async def asks_get(ctx, args):
         "Recommended: " + str(row["recommended_option"] or "none"),
         "Proof: " + body(json_text(row["proof"])),
     ]
-    return Compact("\n".join(text), row["visibility"] == "private")
+    return Compact(data_text("asks", "\n".join(text)), row["visibility"] == "private")
 
 
 def date(value):

@@ -12,6 +12,7 @@ from illo.connectors import chatgpt
 from illo.db import one
 from illo.gateway.replies import RunFailure, failure_category
 from illo.ledger import runs, sensors
+from illo.tools._format import data_text
 
 
 def credential_person(authority, workspace):
@@ -151,7 +152,9 @@ class RunManager:
         request = RunRequest(
             run_id=row["id"],
             system_prompt=system_prompt,
-            user_message=event.text,
+            user_message=(data_text("inbound-message", event.text)
+                          if authority.tainted or authority.profile in {"tainted", "outsider"}
+                          or authority.principal == "outsider" else event.text),
             mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
             mcp_token=token,
             runtime=runtime,

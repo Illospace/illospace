@@ -4,7 +4,7 @@ from pydantic import Field
 
 from illo.db import all_rows
 from illo.ledger import lanes
-from illo.tools._format import Compact, body, lane, line, relative, rows
+from illo.tools._format import Compact, body, data_text, lane, line, relative, rows
 from illo.tools.registry import Arguments, Tool
 
 
@@ -43,7 +43,7 @@ async def listing(ctx, args, *, owner=None, attention=False):
         hint="Narrow the query, or pass state= / repo= / limit=.",
     )
     count_line = "Counts: " + ", ".join(f"{state} {n}" for state, n in sorted(counts.items()))
-    return Compact(count_line + "\n" + formatted.text, formatted.private or private)
+    return Compact(data_text("lanes", count_line + "\n" + formatted.text), formatted.private or private)
 
 
 async def lanes_search(ctx, args):
@@ -73,7 +73,7 @@ async def lanes_get(ctx, args):
     text.extend(str(link) for link in value["links"])
     text.append(f"Events: showing {len(events)} of {events[0]['total'] if events else 0}.")
     text.extend(line(relative(e["at"]), e["kind"], e["text"]) for e in events)
-    return Compact("\n".join(text), value["visibility"] == "private")
+    return Compact(data_text("lanes", "\n".join(text)), value["visibility"] == "private")
 
 
 async def lanes_mine(ctx, args):

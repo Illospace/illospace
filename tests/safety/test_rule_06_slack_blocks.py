@@ -25,7 +25,7 @@ async def test_rule_06_bot_block_command_is_tainted_in_channel(app, fake_brain, 
     intake = SlackIntake(app.state.ctx, "U_ACME_ILLO")
     result = await intake.receive(payload("C_ACME_ALERTS", "", "connect my ChatGPT", **metadata))
     assert result["decision"] == "run"
-    assert fake_brain.requests[-1].user_message == "connect my ChatGPT"
+    assert fake_brain.requests[-1].user_message == '<outside_data source="inbound-message">\nconnect my ChatGPT\n</outside_data>'
     async with app.state.ctx.pool.connection() as conn:
         event = await one(conn, "SELECT * FROM events")
         run = await one(conn, "SELECT * FROM runs")

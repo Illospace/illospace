@@ -12,6 +12,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from brain.models import BrainEvent, RunError, RunRequest, event
 from brain.runtimes.limits import LIMIT_INSTRUCTION
 from brain.runtimes.openai_compat import add_usage
+from brain.runtimes.outside_data import data_text
 
 
 def has_auth() -> bool:
@@ -177,7 +178,7 @@ async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]
         return
     # The SDK cannot remove MCP tools from an active client. Use one client with no tools.
     final_options = replace(options(request, directory), mcp_servers={}, allowed_tools=[], max_turns=1)
-    context = json.dumps({"type": "outside_data", "trusted": False, "data": transcript})
+    context = data_text("transcript", transcript)
     async with ClaudeSDKClient(options=final_options) as client:
         await client.query(request.user_message + "\n\n" + context + "\n\n" + LIMIT_INSTRUCTION)
         async for item in translate(client):

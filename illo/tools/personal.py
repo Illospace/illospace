@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import Field, model_validator
 
 from illo.connectors.google import google_ready, personal_call, shared_call
-from illo.tools._format import external_list
+from illo.tools._format import external_list, outside_result
 from illo.tools.registry import Arguments, Tool
 
 
@@ -75,7 +75,7 @@ def register(registry) -> None:
                 # Fetch the rows before the page too. Keep the source request bounded.
                 args["limit"] = min(page["offset"] + page["limit"], 50)
             value = await personal_call(ctx, name, args)
-            return external_list(value, **page) if page else value
+            return outside_result(external_list(value, **page) if page else value)
 
         registry.add(
             Tool(
@@ -97,7 +97,7 @@ def register(registry) -> None:
         async def shared(ctx, args, name=name):
             page = {key: args.pop(key) for key in ("offset", "limit") if key in args}
             value = await shared_call(ctx, name.replace("drive_shared_", "drive_"), args)
-            return external_list(value, **page) if page else value
+            return outside_result(external_list(value, **page) if page else value)
 
         registry.add(
             Tool(

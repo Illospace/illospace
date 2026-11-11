@@ -20,6 +20,7 @@ from illo.channels.slack.voice import OpenAITranscriber
 from illo.db import one
 from illo.gateway import InboundEvent
 from illo.ledger import items, kv, people
+from illo.tools._format import data_text
 
 log = logging.getLogger(__name__)
 CLIP_ERROR = (
@@ -247,11 +248,10 @@ class SlackIntake:
                 self.bot_id,
                 self.adapter.working.get(event.external_id),
             )
-            budget = limit - len(event.text) - 50
+            budget = limit - len(event.text) - len(data_text("thread", "")) - len("\n\nRequest:\n")
             if context and budget > 0:
                 event.text = (
-                    "Thread context (data):\n"
-                    + "\n".join(context)[-budget:]
+                    data_text("thread", "\n".join(context)[-budget:])
                     + "\n\nRequest:\n"
                     + event.text
                 )

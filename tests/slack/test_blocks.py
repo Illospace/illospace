@@ -170,7 +170,7 @@ async def test_alert_event_run_and_search_item_have_full_text(intake, message, a
     expected = message_text(alert)
     await intake.receive(message(channel="C_ACME_ALERTS", channel_type="channel",
                                  bot_id="B_ACME_FORM", subtype="bot_message", **alert))
-    assert fake_brain.requests[-1].user_message == expected
+    assert fake_brain.requests[-1].user_message == f'<outside_data source="inbound-message">\n{expected}\n</outside_data>'
     async with app.state.ctx.pool.connection() as conn:
         event = await one(conn, "SELECT * FROM events")
         item = await one(conn, "SELECT * FROM items WHERE kind='slack'")

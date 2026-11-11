@@ -247,14 +247,19 @@ class Registry:
             and len(json_text(envelope)) > MAX_RESULT_CHARS
         ):
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."
+            def closed_prefix(length):
+                prefix = text[:length]
+                count = prefix.count("<outside_data source=") - prefix.count("</outside_data>")
+                return prefix + "\n</outside_data>" * max(0, count)
+
             # Count JSON escapes too. The model receives this encoded content.
             low, high = 0, min(len(text), MAX_RESULT_CHARS)
             while low < high:
                 middle = (low + high + 1) // 2
-                candidate = {**envelope, "result": text[:middle] + note}
+                candidate = {**envelope, "result": closed_prefix(middle) + note}
                 if len(json_text(candidate)) <= MAX_RESULT_CHARS:
                     low = middle
                 else:
                     high = middle - 1
-            result = text[:low] + note
+            result = closed_prefix(low) + note
         return {"decision": decision, "reason": reason, "result": result}
