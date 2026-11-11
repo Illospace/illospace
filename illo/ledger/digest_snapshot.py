@@ -125,7 +125,7 @@ async def build(conn, person, now, stale_minutes=None):
     your_moves.sort(key=lambda item: item["hours_since_signal"])
     needs.extend(your_moves[:10])
     last_brief = await brief_window(conn, f"digest:{person['key']}", now)
-    finished, finished_total, finished_steps = await closed_work(
+    finished, finished_total, finished_steps, closed_not_done = await closed_work(
         conn, last_brief, owner=person["id"]
     )
     faults = await read_faults(conn, now, last_brief, person["key"])
@@ -137,6 +137,8 @@ async def build(conn, person, now, stale_minutes=None):
         "in_progress": running,
         "finished_total": finished_total,
         "finished_steps": finished_steps,
+        "closed_not_done": closed_not_done,
+        "recent_openings": await recent_openings(conn, "digest", person["id"]),
         "finished": [
             {"title": row["title"], "link": web_link(row["links"]), "state": row["state"]}
             for row in finished
@@ -167,24 +169,59 @@ async def active_lanes(conn, now, limits, *, owner=None, team_only=False):
 
 
 async def closed_work(conn, since, *, owner=None, team_only=False):
+    """Count finished work once. Use an issue title with its closing pull request link."""
     rows = await all_rows(
         conn,
         """
-        SELECT title,links,state,source,owner_person_id,count(*) OVER () AS total FROM lanes
-        WHERE (%s::bigint IS NULL OR owner_person_id=%s) AND (NOT %s OR visibility='team')
-          AND state IN ('done','failed') AND NOT is_step AND closed_at>%s
-        ORDER BY closed_at DESC,id DESC LIMIT 20
+        WITH completed AS (
+          SELECT * FROM lanes
+          WHERE (%s::bigint IS NULL OR owner_person_id=%s OR visibility='team')
+            AND (NOT %s OR visibility='team') AND state='done' AND NOT is_step
+        ), edges AS (
+          SELECT issue.id AS issue_id, pull.id AS pull_id, pull.links,
+            pull.owner_person_id AS pull_owner,
+            GREATEST(issue.closed_at,pull.closed_at) AS closed_at
+          FROM completed pull CROSS JOIN LATERAL jsonb_array_elements(pull.links) link
+          JOIN completed issue ON issue.source='github' AND issue.id<>pull.id
+            AND (issue.id::text=link->>'lane_id' OR issue.external_id=link->>'external_id')
+          WHERE pull.source='github' AND link->>'kind'='closes'
+        ), preferred AS (
+          SELECT DISTINCT ON (issue_id) * FROM edges ORDER BY issue_id,closed_at DESC,pull_id DESC
+        )
+        SELECT c.title,COALESCE(p.links,c.links) AS links,c.state,c.source,c.owner_person_id,
+          count(*) OVER () AS total
+        FROM completed c LEFT JOIN preferred p ON p.issue_id=c.id
+        WHERE GREATEST(c.closed_at,p.closed_at)>%s
+          AND (%s::bigint IS NULL OR c.owner_person_id=%s OR EXISTS
+            (SELECT 1 FROM edges e WHERE e.issue_id=c.id AND e.pull_owner=%s))
+          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.pull_id=c.id)
+        ORDER BY GREATEST(c.closed_at,p.closed_at) DESC,c.id DESC LIMIT 20
         """,
-        (owner, owner, team_only, since),
+        (owner, owner, team_only, since, owner, owner, owner),
     )
-    steps = await one(
+    counts = await one(
         conn,
-        """SELECT count(*) AS total FROM lanes
+        """SELECT count(*) FILTER (WHERE state='done' AND is_step) AS steps,
+          count(*) FILTER (WHERE state='failed') AS closed_not_done FROM lanes
         WHERE (%s::bigint IS NULL OR owner_person_id=%s) AND (NOT %s OR visibility='team')
-          AND is_step AND state IN ('done','failed') AND closed_at>%s""",
+          AND state IN ('done','failed') AND closed_at>%s""",
         (owner, owner, team_only, since),
     )
-    return rows, rows[0]["total"] if rows else 0, steps["total"]
+    return rows, rows[0]["total"] if rows else 0, counts["steps"], counts["closed_not_done"]
+
+
+async def recent_openings(conn, channel, person_id=None):
+    """Read the first line of at most five completed briefs, newest first."""
+    person_filter = "person_id=%s" if person_id is not None else "person_id IS NULL"
+    rows = await all_rows(
+        conn,
+        f"""SELECT left(split_part(payload->>'final_answer',E'\\n',1),160) AS opening
+        FROM events WHERE channel=%s AND {person_filter} AND status='handled'
+          AND jsonb_typeof(payload->'final_answer')='string' AND payload->>'final_answer'<>''
+        ORDER BY id DESC LIMIT 5""",
+        (channel, person_id) if person_id is not None else (channel,),
+    )
+    return [row["opening"] for row in rows]
 
 
 async def read_faults(conn, now, since, credential_key):
@@ -206,7 +243,7 @@ async def team_snapshot(conn, config, now):
     members = await all_rows(conn, "SELECT id,key,name,slack_id FROM people ORDER BY key")
     owners = {p["id"]: p for p in members}
     since = await brief_window(conn, TEAM_STATE_KEY, now)
-    shipped, total, steps = await closed_work(conn, since, team_only=True)
+    shipped, total, steps, closed_not_done = await closed_work(conn, since, team_only=True)
     waiting = {}
 
     def person_waits(person_id, since):
@@ -263,6 +300,8 @@ async def team_snapshot(conn, config, now):
             "owner": owners.get(r["owner_person_id"], {}).get("name", "Unassigned"),
         } for r in shipped],
         "shipped_total": total, "shipped_steps": steps,
+        "closed_not_done": closed_not_done,
+        "recent_openings": await recent_openings(conn, "team_digest"),
         "stuck": stuck,
         "waiting": sorted(waiting.values(), key=lambda r: (-r["oldest_hours"], r["key"])),
         "in_progress": running,

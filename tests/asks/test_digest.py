@@ -138,7 +138,8 @@ async def test_snapshot_separates_steps_and_orders_your_move(conn, ada):
         await conn.execute("UPDATE lanes SET closed_at=%s WHERE id=%s",
                            (NOW - timedelta(hours=1), lane["id"]))
     data = await digest_snapshot.build(conn, ada, NOW)
-    assert data["finished_steps"] == 2
+    assert data["finished_steps"] == 1
+    assert data["closed_not_done"] == 1
     assert data["finished_total"] == 1
     assert [item["title"] for item in data["finished"]] == ["Closed 2"]
     assert data["your_move_total"] == 13
@@ -336,7 +337,8 @@ async def test_snapshot_full_titles_limits_reviews_and_source_staleness(app, see
         assert data["needs_you"][1]["title"] == full
         assert len(data["stuck"]) == 2 and data["in_progress"] == 1
         assert any(item["last_event"] == "The agent waits for access." for item in data["stuck"])
-        assert len(data["finished"]) == 20 and data["finished_total"] == 23
+        assert len(data["finished"]) == 11 and data["finished_total"] == 11
+        assert data["closed_not_done"] == 12
         assert all(item["title"] == full and item["link"] for item in data["finished"])
         assert [item["key"] for item in data["faults"]] == ["brain"]
         await conn.execute(

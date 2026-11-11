@@ -149,6 +149,8 @@ def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks)
         lines.append(detail)
         if person.language and key in {"person_dm", "digest"}:
             lines.append(f"• Language: {person.language}")
+    if key == "team_digest" and config.language:
+        lines.append(f"• Language: {config.language}")
     if key in {"person_dm", "team_channel", "tainted", "routine", "agent_request"}:
         lines.append("• GitHub repositories: " + (", ".join(config.github.repositories) or "none"))
     timezone = person.timezone if person else config.timezone

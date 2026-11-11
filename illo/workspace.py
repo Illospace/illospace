@@ -178,6 +178,7 @@ class HeartbeatConfig(Model):
 
 
 class TeamConfig(Model):
+    language: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ()-]{1,39}$")
     team_name: str = Field(min_length=1)
     timezone: str = "UTC"
     default_owner: str

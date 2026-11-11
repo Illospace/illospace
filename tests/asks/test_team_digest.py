@@ -92,8 +92,9 @@ async def test_team_snapshot_visibility_waiting_stale_steps_and_faults(conn, ada
     await sensors.ok(conn, "asks:slack")
     data = await team_snapshot(conn, config, NOW)
     assert "Private" not in str(data) and "question" not in str(data)
-    assert data["shipped_total"] == 2 and data["shipped_steps"] == 2
-    assert {r["state"] for r in data["shipped"]} == {"done", "failed"}
+    assert data["shipped_total"] == 1 and data["shipped_steps"] == 1
+    assert data["closed_not_done"] == 2
+    assert {r["state"] for r in data["shipped"]} == {"done"}
     assert all(
         r["owner"] == "Ada" and r["source"] == "t3" and r["link"].startswith("https:")
         for r in data["shipped"]

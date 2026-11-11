@@ -11,6 +11,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | Key | Meaning |
 | --- | --- |
 | `team_name` | Team name. Required. |
+| `language` | Optional team language for the team brief, for example `French`. Default: the language of the run message. |
 | `timezone` | IANA time zone for schedules. Default: `UTC`. |
 | `default_owner` | Active person key from `people.yaml`. Required. |
 | `slack.channels` | List of channel mappings. Default: empty. |
@@ -255,7 +256,13 @@ They include open asks, failed answer deliveries, and lanes that need review.
 They also include blocked work, stale work, finished work, and real service faults.
 A working lane becomes stale only after its source's configured `stale_minutes` limit.
 The snapshot keeps full titles. It returns up to 20 finished lanes and the full finished count.
-The personal snapshot tools bypass the generic text limit to keep the JSON complete.
+The snapshot tools bypass the generic text limit to keep the JSON complete inside the data markers.
+Only lanes in state `done` count as finished or shipped.
+`closed_not_done` counts lanes in state `failed`, including agent steps, without listing them.
+A linked issue and merged pull request count once, with the issue title and the pull request link.
+Both snapshots include `recent_openings`: the first line of the last five completed briefs, newest first.
+Each line has at most 160 characters. Personal openings belong only to that person.
+The event stores these openings with the rest of the snapshot before the model runs.
 
 Event sensors can stay idle without a fault. A sensor error after the last success is a fault.
 Timer sensors record `expected_every_s` when they report.
