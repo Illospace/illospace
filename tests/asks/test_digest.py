@@ -473,3 +473,50 @@ async def test_model_lane_tools_use_github_stale_config(app):
         assert (
             len((await ctx.registry.call(tool_ctx, "digest_snapshot", {}))["result"]["stuck"]) == 1
         )
+
+
+async def test_repeated_report_keeps_the_first_closing_time(app, seed):
+    """A restart reports each closed thread again. The brief must not count it as new."""
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        base = {
+            "source": "t3",
+            "external_id": "closed-1",
+            "title": "Example",
+            "owner_person_id": ada["id"],
+        }
+        first = await lanes.upsert(conn, **base, state="done")
+        await conn.execute(
+            "UPDATE lanes SET closed_at=%s WHERE id=%s", (NOW - timedelta(days=2), first["id"])
+        )
+        again = await lanes.upsert(conn, **base, state="done")
+        assert again["closed_at"] == NOW - timedelta(days=2)
+        failed = await lanes.upsert(conn, **base, state="failed")
+        assert failed["closed_at"] == NOW - timedelta(days=2)
+        opened = await lanes.upsert(conn, **base, state="working")
+        assert opened["closed_at"] is None
+        closed = await lanes.upsert(conn, **base, state="done")
+        assert closed["closed_at"] > NOW - timedelta(days=2)
+
+
+async def test_snapshot_links_are_web_addresses(app, seed):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        for name, links in (
+            ("app-only", ["example-app://thread/1"]),
+            ("both", [{"url": "example-app://thread/2"}, {"url": "https://example.com/pull/2"}]),
+        ):
+            await lanes.upsert(
+                conn,
+                source="t3",
+                external_id=name,
+                title=name,
+                state="done",
+                owner_person_id=ada["id"],
+                links=links,
+            )
+        data = await snapshot(conn, ada, ctx, datetime.now(UTC))
+    found = {item["title"]: item["link"] for item in data["finished"]}
+    assert found == {"app-only": "", "both": "https://example.com/pull/2"}
