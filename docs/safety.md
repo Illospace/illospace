@@ -81,7 +81,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `read_page` in `illo/tools/web.py` refuses a public page after a personal read.
 - An ask without a lane is private to its owner and its requester (`get` and `list_open` in `illo/ledger/asks.py`). Its decision item is private too (`decision` in `illo/ledger/ask_workflow.py`).
 - Both ask creation tools refuse a private lane when the ask owner does not own that lane.
-- A private Slack channel starts no run and enters no index (`SlackIntake.receive` in `illo/channels/slack/intake.py`). `slack_read_thread` reads it only for a member, with a live membership check (`require_member` in `illo/channels/slack/access.py`).
+- A private Slack channel starts no run and enters no index unless `team_members_only` verifies all humans as active people (`SlackIntake.receive` in `illo/channels/slack/intake.py`). `slack_read_thread` reads it only for a member, with a live membership check (`require_member` in `illo/channels/slack/access.py`).
 - Slack caches channel privacy for 10 minutes. A failed probe keeps the index and records a failed event and a sensor error.
 - A person routine with personal data sends its answer to another destination only as a draft (`RoutineAdapter.deliver_final` in `illo/routines/scheduler.py`).
 

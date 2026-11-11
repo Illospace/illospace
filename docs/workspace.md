@@ -328,3 +328,7 @@ Each id must be a non-empty string without spaces.
 `triage.auto_assign.signal_sources` lists trusted machine signal source names.
 Both lists default to empty. `triage.max_per_hour` defaults to 6 and accepts 1–100.
 See [GitHub triage](github.md#triage-of-outside-text) for the assignment and card rules.
+
+`slack.channels[].team_members_only` defaults to `false`.
+Set it to `true` only with `visibility: team` to verify the members of a Slack-private channel.
+See [private team channels](install.md#private-team-channels) for the checks and risks.

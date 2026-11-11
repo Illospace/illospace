@@ -93,7 +93,7 @@ class SlackIntake:
             return
         if configured and not dm:
             try:
-                private = await channel_private(self.ctx, channel)
+                private = await channel_private(self.ctx, channel, bot_id=self.bot_id)
             except Exception:
                 log.error("Slack could not verify channel privacy")
                 payload = {"text": message_text(raw), "payload": {
@@ -183,7 +183,7 @@ class SlackIntake:
     async def index(self, event: InboundEvent, channel_name: str) -> None:
         client = self.ctx.slack_client
         try:
-            if await channel_private(self.ctx, event.payload["channel_id"]):
+            if await channel_private(self.ctx, event.payload["channel_id"], bot_id=self.bot_id):
                 await hide_index(self.ctx, event.payload["channel_id"])
                 return
             link = await client.chat_getPermalink(

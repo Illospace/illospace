@@ -265,6 +265,12 @@ async def search(
     now = utc_now()
     # A short page must not reduce the evidence available from any source.
     candidate_limit = 50
+    # Refresh opt-in channel membership before reading its derived index.
+    for channel in ctx.workspace.config.slack.channels:
+        if channel.team_members_only:
+            from illo.channels.slack.access import channel_private
+
+            await channel_private(ctx, channel.id, conn=conn)
     groups = [
         await _items(conn, principal, query, kinds, candidate_limit, now),
         await _lanes(conn, principal, query, kinds, candidate_limit, now),
@@ -343,6 +349,14 @@ async def get(ctx, principal, source_ref, *, conn=None):
             return await get(ctx, principal, source_ref, conn=connection)
     if source_ref.startswith("slack-event:"):
         return await slack_index.get(ctx, conn, source_ref)
+    if source_ref.startswith("slack:"):
+        channel_id = source_ref.split(":", 2)[1]
+        channel = next((c for c in ctx.workspace.config.slack.channels if c.id == channel_id), None)
+        if channel and channel.team_members_only:
+            from illo.channels.slack.access import channel_private
+
+            if await channel_private(ctx, channel_id, conn=conn):
+                return None
     item = await items.get(conn, source_ref, principal=principal)
     if item:
         return item

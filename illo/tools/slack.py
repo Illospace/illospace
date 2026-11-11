@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 from illo.db import Connection, one
 from illo.ledger import people
 from illo.tools._format import data_text, header, line
+from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Registry, Tool, ToolContext
 
 
@@ -50,9 +51,11 @@ async def send_dm(conn: Connection, app: "AppContext", args: dict) -> dict:
     return {"channel": channel, "ts": sent["ts"]}
 
 
-async def post(app: "AppContext", args: dict) -> dict:
+async def post(app: "AppContext", args: dict, *, conn=None) -> dict:
     if not configured(app, args["channel"]) or not app.slack_client:
         raise ValueError("The channel is not configured")
+    if await channel_private(app, args["channel"], conn=conn):
+        raise ValueError("The channel is private")
     sent = await app.slack_client.chat_postMessage(**args, unfurl_links=False, unfurl_media=False)
     return {"channel": args["channel"], "ts": sent["ts"]}
 
@@ -61,8 +64,19 @@ async def dm_handler(ctx: ToolContext, args: dict) -> dict:
     return await send_dm(ctx.conn, ctx.app, args)
 
 
+async def post_preflight(ctx: ToolContext, args: dict) -> Decision:
+    # A draft does not contact Slack. Approval rechecks the channel.
+    if ctx.run.get("personal_read"):
+        return Decision("allow", "The approved send checks channel visibility")
+    if not configured(ctx.app, args["channel"]) or not ctx.app.slack_client:
+        return Decision("deny", "The channel is not configured")
+    if await channel_private(ctx.app, args["channel"], conn=ctx.conn):
+        return Decision("deny", "The channel is private")
+    return Decision("allow", "The channel is visible to the team")
+
+
 async def post_handler(ctx: ToolContext, args: dict) -> dict:
-    return await post(ctx.app, args)
+    return await post(ctx.app, args, conn=ctx.conn)
 
 
 async def read_handler(ctx: ToolContext, args: dict) -> dict:
@@ -147,6 +161,7 @@ def register(registry: Registry) -> None:
             "Post in a configured team channel (`channel`: its id; `thread_ts` to answer in a thread). It becomes a draft card after a personal or private read.",
             PostChannel,
             profiles=frozenset({"person_dm"}),
+            preflight=post_preflight,
         )
     )
     registry.add(

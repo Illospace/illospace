@@ -63,6 +63,7 @@ class SlackChannel(Model):
     id: str = Field(min_length=1)
     mode: Literal["coordinator", "listen", "off"] = "listen"
     visibility: Literal["team", "private"] = "team"
+    team_members_only: bool = False
     rule_files: list[str] = Field(default_factory=list)
 
 

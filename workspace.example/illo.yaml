@@ -6,6 +6,7 @@ slack:
     - name: team
       id: C_ACME_TEAM
       mode: listen
+      # team_members_only: true  # Accept Slack-private channels with team humans only.
       rule_files: [rules/team.md]
     - name: alerts
       id: C_ACME_ALERTS
