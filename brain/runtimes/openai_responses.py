@@ -118,7 +118,7 @@ async def response_chunks(request, tools, items, http, *, tools_disabled=False):
     cache_key = (base, request.model)
     payload = build_request(request, tools, items, tools_disabled=tools_disabled)
     if cache_key not in _without_effort:
-        payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or "low"}
+        payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or request.effort}
     for attempt in range(2):
         async with http.stream(
             "POST", base + "/responses", json=payload, headers=auth_headers(request)

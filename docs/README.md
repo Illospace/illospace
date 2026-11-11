@@ -17,3 +17,5 @@ Read the pages in this order.
 13. [../illo/channels/email/README.md](../illo/channels/email/README.md): the mailbox, routines, and public pages.
 14. [../brain/README.md](../brain/README.md): the brain service and its runtimes.
 15. [builders.md](builders.md): how to add a tool, a migration, a channel, or a test.
+
+Read [tasks.md](tasks.md) for lists, tasks, agent work, proof, and task threads.

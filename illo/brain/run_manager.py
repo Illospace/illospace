@@ -160,6 +160,7 @@ class RunManager:
             model=model,
             max_turns=config.max_turns,
             timeout_s=config.timeout_s,
+            effort=config.effort_for(authority.profile),
             provider_auth=auth,
             api_key_fallback=config.api_key_fallback,
         )
@@ -281,4 +282,9 @@ class RunManager:
                     await sensors.error(conn, "brain", error or "The brain run failed")
         if event.channel in {"digest", "team_digest"} and status != "completed":
             raise RunFailure(failure)
+        if event.channel in {"slack", "email", "routine", "digest", "team_digest"}:
+            from illo.brain.final_text import guard
+
+            async with ctx.pool.connection() as conn:
+                final = await guard(conn, row["id"], final)
         return final

@@ -47,6 +47,7 @@ class RunRequest(BaseModel):
     max_turns: int
     timeout_s: float
     provider_auth: ProviderAuth = Field(default_factory=ProviderAuth, repr=False)
+    effort: Literal["low", "medium", "high"] = "low"
     api_key_fallback: bool = False
     smoke: bool = False
 

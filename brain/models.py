@@ -35,10 +35,11 @@ class RunRequest(BaseModel):
         max_length=128,
     )
     max_turns: int = Field(default=8, ge=1, le=50)
-    timeout_s: float = Field(default=120, gt=0, le=3600)
+    timeout_s: float = Field(default=300, gt=0, le=3600)
     provider_auth: ApiKeyAuth | ChatGPTAuth = Field(
         default_factory=ApiKeyAuth, discriminator="kind", repr=False
     )
+    effort: Literal["low", "medium", "high"] = "low"
     api_key_fallback: bool = False
     smoke: bool = False
 

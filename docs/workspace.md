@@ -40,8 +40,9 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs and needs `auth: chatgpt`. |
 | `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
 | `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
+| `brain.effort` | Optional profile-to-effort map: `low`, `medium`, or `high`. Person DM, team channel, and agent request default to `medium`; others default to `low`. `ILLO_BRAIN_EFFORT` overrides it in the Responses runtime. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
-| `brain.timeout_s` | Run timeout in seconds. Default: 120. Maximum: 3600. |
+| `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Default: false. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |
 | `run_limits.max_message_chars` | Maximum inbound text length. Default: 20000. |
@@ -332,3 +333,12 @@ See [GitHub triage](github.md#triage-of-outside-text) for the assignment and car
 `slack.channels[].team_members_only` defaults to `false`.
 Set it to `true` only with `visibility: team` to verify the members of a Slack-private channel.
 See [private team channels](install.md#private-team-channels) for the checks and risks.
+
+## Lists and agents
+
+`lists/<key>.md` defines a task list with YAML front matter and Markdown instructions.
+`agents.yaml` defines named agents and their person owners.
+Both files reload with the rules. `illo doctor` names bad files and warns about unknown references.
+Without a `lists/` folder, Illo supplies the `tasks` list with a person confirmation rule.
+The example workspace includes `bugs` and `launches` and needs no code change for either workflow.
+See [Lists and tasks](tasks.md#workspace-files) for every field, defaults, and the token setup.

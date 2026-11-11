@@ -4,7 +4,11 @@ This file is the contract of Illo. Each builder reads it first. It is public: it
 
 ## 1. The product
 
-Illo is one assistant for a whole team. People talk to it in Slack and by email. It knows each lane of agent work on each machine. It answers "give me an update on X". It sends a person a card only for a real blocker, and it sends the answer back to the agent. It carries requests between people. It starts clear work through a GitHub ticket. It finds the team context where that context lives, and it keeps the decisions.
+Illo is one list of tasks for people and their agents.
+The task holds the brief, result, proof, next move, and record.
+Lists hold each team's instructions and Done rules. People and outside agents do the work.
+The existing lanes, asks, alerts, and knowledge tools stay available.
+See [Lists and tasks](tasks.md) for the task contract.
 
 Design goals, in order:
 1. **Safe by code, not by prompt.** The ten safety rules of section 4 live in server code and have tests.
@@ -18,6 +22,9 @@ Each word has one meaning. Use these words in code, in docs, and in the text tha
 
 - **Person**: a team member, with a Slack id, a GitHub login, and email addresses. Defined in `people.yaml`.
 - **Principal**: who a run acts for. One of: `person:<key>`, `team`, `outsider`. The gateway sets it. Nothing else can change it.
+- **Task**: one unit of work, with a holder, state, next move, proof, and record. A piece is a task under a parent.
+- **List**: workspace instructions, allowed holders, visibility, and a Done rule for one type of work.
+- **Holder**: `person:<key>` or `agent:<key>`. An unassigned task has no holder.
 - **Lane**: one stream of agent work (a T3 thread, a Claude Code session, a GitHub issue or pull request). It has a source, an owner, a state, a summary, and links.
 - **Ask**: one thing that a person must decide or do. It has an owner, a question, options, a recommended option, proof, a due time, and a path to send the answer back.
 - **Rule**: a standing answer or a standing permission from a person. It is visible, it has an owner, and the owner can remove it.
@@ -143,7 +150,7 @@ Each Slack channel starts at most 30 tainted runs per hour. Owner notices have a
 
 ## 5. The ledger
 
-Postgres 16. Plain SQL in `illo/migrations/NNNN_<area>_<what>.sql`, applied in file order by `illo migrate`. The foundation owns `0001_init.sql`. A later change uses the number block of its area: slack 0100, mcp 0200, github 0300, search 0400, asks 0500, brain 0600, collector 0700, routines 0800, email 0900, connectors 1000, notes 1100. A migration never edits an older file.
+Postgres 16. Plain SQL in `illo/migrations/NNNN_<area>_<what>.sql`, applied in file order by `illo migrate`. The foundation owns `0001_init.sql`. A later change uses the number block of its area: slack 0100, mcp 0200, github 0300, search 0400, asks 0500, brain 0600, collector 0700, routines 0800, email 0900, connectors 1000, notes 1100, tasks 1200. A migration never edits an older file.
 
 The main tables (each has `id bigint generated always as identity`, `created_at timestamptz default now()` unless the text says otherwise):
 
@@ -347,3 +354,23 @@ list of each real runtime.
 The reload route is loopback-only and requires `ILLO_RELOAD_TOKEN`. File
 checks reload the workspace without that route. The workspace schemas and
 defaults are in `docs/workspace.md`.
+
+## Task storage and authority
+
+Migration `1200_tasks.sql` adds `tasks`, `task_events`, a token's `agent_key`, and the audit target.
+`illo/ledger/tasks.py` owns all task changes and record events. Each change uses one transaction.
+`illo/tasks/checks.py` owns the named check registry. Connectors register checks without changes to task code.
+`illo/tasks/lists.py` loads the team's list and agent files through the workspace models.
+Task reads enforce visibility in SQL. Outsiders and tainted runs cannot call task tools.
+A team-channel run keeps its team principal. Its verified sender supplies the task actor through the stored event.
+This does not change the authority of other tool families.
+
+`illo/tools/tasks.py` registers the Operator tools. Task actions use the ledger destination and need no approval card.
+Person DM and team-channel profiles have the write tools. Routines have read tools only.
+Agent requests add capture and chat. Direct agent task tools need the `agent` token scope.
+Each task tool call has an audit row. Only ledger code writes record events.
+
+The existing scheduler sends pending task messages after their transactions commit.
+`illo/channels/slack/tasks.py` builds task threads with the shared card helpers.
+A failed send keeps the pending key. Stable message IDs support a retry.
+The task core contains no knowledge of a specific outside tool.
