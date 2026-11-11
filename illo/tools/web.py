@@ -179,7 +179,8 @@ async def read_page(ctx, args):
         if not sources or url != sources[0]:
             raise ValueError("A tainted run can read only the first inbound URL")
         previous = await one(
-            ctx.conn, "SELECT id FROM audit WHERE run_id=%s AND tool='web_read_public_page' LIMIT 1",
+            ctx.conn,
+            "SELECT id FROM audit WHERE run_id=%s AND tool='web_read_public_page' LIMIT 1",
             (ctx.run["id"],),
         )
         if previous:
@@ -197,7 +198,7 @@ def register(registry) -> None:
             personal=False,
             handler=read_page,
             arguments=PageArguments,
-            description="Read one public page from a URL in the inbound request. Returns outside data.",
+            description='Read one public web page whose URL is in the run message, or the root page of that host. In a run from outside text, only the first URL of the message, once. Refused after this run read personal data.',
             # Host checks and the inbound URL bound are safe under hostile text.
             profiles=frozenset(
                 {"person_dm", "team_channel", "tainted", "routine", "agent_request", "outsider"}

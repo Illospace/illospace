@@ -29,10 +29,19 @@ def limits(ctx):
 
 async def listing(ctx, args, *, owner=None, attention=False):
     values, counts, private = await lanes.compact_search(
-        ctx.conn, principal=ctx.principal, stale_minutes=limits(ctx),
-        owner=owner, attention=attention, **args)
-    formatted = rows(values, (lambda row: lane(row).replace("\n  ", " · ")) if attention else lane, total=values[0]["total"] if values else 0,
-                     hint="Narrow the query, or pass state= / repo= / limit=.")
+        ctx.conn,
+        principal=ctx.principal,
+        stale_minutes=limits(ctx),
+        owner=owner,
+        attention=attention,
+        **args,
+    )
+    formatted = rows(
+        values,
+        (lambda row: lane(row).replace("\n  ", " · ")) if attention else lane,
+        total=values[0]["total"] if values else 0,
+        hint="Narrow the query, or pass state= / repo= / limit=.",
+    )
     count_line = "Counts: " + ", ".join(f"{state} {n}" for state, n in sorted(counts.items()))
     return Compact(count_line + "\n" + formatted.text, formatted.private or private)
 
@@ -43,14 +52,22 @@ async def lanes_search(ctx, args):
 
 
 async def lanes_get(ctx, args):
-    value = await lanes.get(ctx.conn, args["id"], principal=ctx.principal, stale_minutes=limits(ctx))
+    value = await lanes.get(
+        ctx.conn, args["id"], principal=ctx.principal, stale_minutes=limits(ctx)
+    )
     if not value:
         return None
-    events = await all_rows(ctx.conn, """
+    events = await all_rows(
+        ctx.conn,
+        """
         SELECT at,kind,left(text,300) AS text,count(*) OVER () AS total
         FROM lane_events WHERE lane_id=%s ORDER BY at DESC,id DESC LIMIT 5
-    """, (value["id"],))
-    owners = await all_rows(ctx.conn, "SELECT key FROM people WHERE id=%s", (value["owner_person_id"],))
+    """,
+        (value["id"],),
+    )
+    owners = await all_rows(
+        ctx.conn, "SELECT key FROM people WHERE id=%s", (value["owner_person_id"],)
+    )
     value["owner"] = owners[0]["key"] if owners else None
     text = [lane(value), body(value["summary"], 3000)]
     text.extend(str(link) for link in value["links"])
@@ -71,11 +88,28 @@ async def lanes_attention(ctx, args):
     return await digest_snapshot_read(ctx, args)
 
 
+DESCRIPTIONS = {
+    "lanes_search": "Search the lanes that this run can see: agent or ticket work with a state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.",
+    "lanes_get": "Read one lane by `id`: its summary, links, and last 5 events.",
+    "lanes_mine": "Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.",
+    "lanes_attention": "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
+}
+
+
 def register(registry) -> None:
     """Register the real lane handlers."""
-    registry.add(Tool("lanes_attention", "lanes", "read", lambda a: "ledger", True,
-                      lanes_attention, "Read your open asks and lanes that need attention",
-                      profiles=frozenset({"person_dm"})))
+    registry.add(
+        Tool(
+            "lanes_attention",
+            "lanes",
+            "read",
+            lambda a: "ledger",
+            True,
+            lanes_attention,
+            "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
+            profiles=frozenset({"person_dm"}),
+        )
+    )
     for name, handler, arguments in (
         ("lanes_search", lanes_search, SearchArgs),
         ("lanes_get", lanes_get, GetArgs),
@@ -89,7 +123,7 @@ def register(registry) -> None:
                 lambda a: "ledger",
                 False,
                 handler,
-                "Read visible agent lanes",
+                DESCRIPTIONS[name],
                 arguments,
             )
         )

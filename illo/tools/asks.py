@@ -63,17 +63,25 @@ class RuleAnswerArgs(GetArgs):
 
 async def asks_list(ctx, args):
     values = await asks.compact_list(ctx.conn, principal=ctx.principal, **args)
-    return rows(values, ask, total=values[0]["total"] if values else 0,
-                hint="Pass owner= or limit= to read more asks.")
+    return rows(
+        values,
+        ask,
+        total=values[0]["total"] if values else 0,
+        hint="Pass owner= or limit= to read more asks.",
+    )
 
 
 async def asks_get(ctx, args):
     row = await asks.get(ctx.conn, args["id"], principal=ctx.principal)
     if not row:
         return None
-    text = [ask(row), body(row["question"]), "Options: " + json_text(row["options"]),
-            "Recommended: " + str(row["recommended_option"] or "none"),
-            "Proof: " + body(json_text(row["proof"]))]
+    text = [
+        ask(row),
+        body(row["question"]),
+        "Options: " + json_text(row["options"]),
+        "Recommended: " + str(row["recommended_option"] or "none"),
+        "Proof: " + body(json_text(row["proof"])),
+    ]
     return Compact("\n".join(text), row["visibility"] == "private")
 
 
@@ -172,6 +180,17 @@ async def asks_digest(ctx, args):
     return await digest_snapshot_read(ctx, args)
 
 
+DESCRIPTIONS = {
+    "asks_list": "List the open asks that this run can see; `owner` (a person key) limits the list to one person. One line per ask with its id, kind, question, owner, due time, and link.",
+    "asks_get": "Read one ask by `id`: the question, its options, the recommended option, and the proof that the asker gave.",
+    "asks_create": "Ask one teammate for a decision, an action, a review, or a reminder; they get a card. Then tell the requester whom you asked and what. `owner` is a person key from `people_list`; put the reason and a link in `question` or `proof`, and `options` when the answer is a choice. At most 3 per run.",
+    "asks_answer": "Answer an open ask of this person with an option id in `option`, or with `text`. Always a draft card: the answer goes out only when the person taps Send. An ask of another person is refused.",
+    "asks_answer_with_rule": "Answer an open ask with a standing rule of its owner: the ask `id` and the `rule_id` from `rules_list`. Code answers only when the rule matches one of the ask's options; else the result is `answered: false`. Never use it to decide yourself.",
+    "asks_cancel_mine": "Cancel an open ask that this person owns or asked, when they say it is no longer needed. Returns `cancelled: true` or `false`.",
+    "asks_digest": "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
+}
+
+
 def register(registry):
     # Tainted reads use ctx.principal, which hides all other people's private lanes.
     declarations = [
@@ -227,7 +246,7 @@ def register(registry):
                 destination,
                 name == "asks_digest",
                 handler,
-                name.replace("_", " "),
+                DESCRIPTIONS[name],
                 arguments,
                 profiles=profiles - {"tainted"},
                 preflight=answer_preflight if name == "asks_answer" else None,

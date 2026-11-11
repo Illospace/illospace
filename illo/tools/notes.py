@@ -45,7 +45,7 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             notes_search,
-            "Search team notes",
+            "Search the team notes only. For anything else, use `search_all`.",
             SearchArgs,
             profiles=READ_PROFILES,
         )
@@ -58,7 +58,7 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             notes_propose,
-            "Propose a team note for your approval",
+            "Propose a team note with `title` and `text`. The person you act for gets a card, and the note is saved only when they tap Keep; until then the result is pending, so say that the note waits for their approval.",
             ProposeArgs,
             profiles=frozenset({"person_dm", "agent_request"}),
             team_visible=True,

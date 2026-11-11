@@ -23,8 +23,13 @@ class GetArgs(Arguments):
 
 
 def format_hits(hits):
-    blocks = [header(len(hits), f"at least {len(hits)}",
-                     "Narrow the query, or pass limit=. Use search_get with source_ref= for detail.")]
+    blocks = [
+        header(
+            len(hits),
+            f"at least {len(hits)}",
+            "Narrow the query, or pass limit=. Use search_get with source_ref= for detail.",
+        )
+    ]
     blocks.extend(hit(value) for value in hits)
     if hits.partial:
         blocks.append("Some sources are unavailable: " + ", ".join(hits.failures))
@@ -55,18 +60,31 @@ async def search_get(ctx, args):
     if not isinstance(text, str):
         text = str(text)
     offset = args["offset"]
-    page = text[offset:offset+6000]
-    remaining = max(0, len(text)-offset-len(page))
-    lines = [line(row.get("kind"), row.get("title"), args["source_ref"],
-                  iso_date(row.get("source_at") or row.get("created_at"))), page]
+    page = text[offset : offset + 6000]
+    remaining = max(0, len(text) - offset - len(page))
+    lines = [
+        line(
+            row.get("kind"),
+            row.get("title"),
+            args["source_ref"],
+            iso_date(row.get("source_at") or row.get("created_at")),
+        ),
+        page,
+    ]
     if remaining:
-        lines.append(f"{remaining} characters omitted. Read on with offset={offset+len(page)}.")
+        lines.append(f"{remaining} characters omitted. Read on with offset={offset + len(page)}.")
     lines.extend(str(link) for link in row.get("links", []))
     if row.get("events"):
-        lines.extend(body(event.get("text"),300) for event in row["events"][-5:])
+        lines.extend(body(event.get("text"), 300) for event in row["events"][-5:])
     if row.get("error"):
         lines.append(row["error"])
     return Compact(data_text("search", "\n".join(lines)), row.get("visibility") == "private")
+
+
+DESCRIPTIONS = {
+    "search_all": "Search everything this run can see, ranked by match and recency. Optional `kinds`: saved, decision, note, lane_summary, archive, slack, github, doc, lane, and mail (this person's mail, DM only). Read one result in full with `search_get` and its `source_ref`.",
+    "search_get": "Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.",
+}
 
 
 def register(registry) -> None:
@@ -82,10 +100,7 @@ def register(registry) -> None:
                 lambda a: "ledger",
                 False,
                 handler,
-                ("Search visible context, ranked by match and recency. Kinds: saved, decision, "
-                 "note, lane_summary, archive, slack, github, doc, lane. "
-                 "Personal mail uses kind mail. Drive files use kind doc."
-                 if name == "search_all" else "Read one visible result by source_ref"),
+                (DESCRIPTIONS[name]),
                 arguments,
                 profiles=READ_PROFILES,
             )

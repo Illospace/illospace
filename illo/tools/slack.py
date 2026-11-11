@@ -74,7 +74,8 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
         if private:
             person = (
                 await people.get(ctx.conn, ctx.principal[7:])
-                if ctx.principal.startswith("person:") else None
+                if ctx.principal.startswith("person:")
+                else None
             )
             if not person or not person["slack_id"] or person["id"] != ctx.run["person_id"]:
                 raise ValueError("A private channel needs a run of its member")
@@ -94,14 +95,16 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
         channel=args["channel"], ts=args["thread_ts"], limit=50
     )
     messages = response.get("messages", [])
-    page = messages[args["offset"]:args["offset"]+args["limit"]]
+    page = messages[args["offset"] : args["offset"] + args["limit"]]
     text = [header(len(page), len(messages), "Pass offset= / limit= to read more messages.")]
     text.extend(line(m.get("user"), m.get("ts"), message_text(m)) for m in page)
     if response.get("has_more"):
         text.append("The thread has more messages at the source.")
-    return {"text": data_text("slack", "\n".join(text)),
-            "has_more": response.get("has_more", False),
-            "visibility": "private" if private else "team"}
+    return {
+        "text": data_text("slack", "\n".join(text)),
+        "has_more": response.get("has_more", False),
+        "visibility": "private" if private else "team",
+    }
 
 
 async def perform_dm(app: "AppContext", draft: dict) -> dict:
@@ -128,7 +131,7 @@ def register(registry: Registry) -> None:
             lambda a: f"person:{a['person']}",
             False,
             dm_handler,
-            "Send a DM to a team member.",
+            "Send a Slack DM to one team member (`person`: a person key). For a question that needs an answer, use `asks_create` instead. It becomes a draft card after a personal or private read. At most 3 per run.",
             SendDM,
             profiles=frozenset({"person_dm", "routine"}),
         )
@@ -141,7 +144,7 @@ def register(registry: Registry) -> None:
             lambda a: f"channel:{a['channel']}",
             False,
             post_handler,
-            "Post to a configured team channel.",
+            "Post in a configured team channel (`channel`: its id; `thread_ts` to answer in a thread). It becomes a draft card after a personal or private read.",
             PostChannel,
             profiles=frozenset({"person_dm"}),
         )
@@ -154,7 +157,7 @@ def register(registry: Registry) -> None:
             lambda a: "ledger",
             False,
             read_handler,
-            "Read a configured channel thread or the current conversation.",
+            "Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.",
             ReadThread,
             profiles=frozenset({"person_dm", "team_channel"}),
         )

@@ -66,11 +66,17 @@ def repository(app, repo: str) -> str:
         (r for r in app.workspace.config.github.repositories if r.lower() == repo.lower()), None
     )
     if not found or not re.fullmatch(REPO_PATTERN, found):
-        allowed = ", ".join(
-            name for name in app.workspace.config.github.repositories
-            if re.fullmatch(REPO_PATTERN, name)
-        ) or "none"
-        raise Refusal("The repository is not allowed. Allowed repositories: " + short(allowed, 1000))
+        allowed = (
+            ", ".join(
+                name
+                for name in app.workspace.config.github.repositories
+                if re.fullmatch(REPO_PATTERN, name)
+            )
+            or "none"
+        )
+        raise Refusal(
+            "The repository is not allowed. Allowed repositories: " + short(allowed, 1000)
+        )
     if app.github_client is None:
         raise ValueError("GitHub is not configured")
     return found
@@ -124,29 +130,41 @@ async def search(ctx: ToolContext, args: dict):
     )
     rows = []
     for repo in repos:
-        found = await ctx.app.github_client.search_issues(args["query"], repo=repo, state=args["state"])
+        found = await ctx.app.github_client.search_issues(
+            args["query"], repo=repo, state=args["state"]
+        )
         rows.extend({**row, "repo": repo} for row in found)
     values = sorted(rows, key=lambda r: r.get("updated_at", ""), reverse=True)
-    return data_text("github", format_rows(
-        values[:args["limit"]], github, total=len(values),
-        hint="Narrow the query, or pass state= / repo= / limit=. Use github_get_issue for detail.").text)
+    return data_text(
+        "github",
+        format_rows(
+            values[: args["limit"]],
+            github,
+            total=len(values),
+            hint="Narrow the query, or pass state= / repo= / limit=. Use github_get_issue for detail.",
+        ).text,
+    )
 
 
 async def get_issue(ctx: ToolContext, args: dict) -> dict:
-    return github_detail(await ctx.app.github_client.get_issue(repository(ctx.app, args["repo"]), args["number"]), args["repo"])
+    return github_detail(
+        await ctx.app.github_client.get_issue(repository(ctx.app, args["repo"]), args["number"]),
+        args["repo"],
+    )
 
 
 async def get_pull(ctx: ToolContext, args: dict) -> dict:
-    return github_detail(await ctx.app.github_client.get_pull(repository(ctx.app, args["repo"]), args["number"]), args["repo"])
+    return github_detail(
+        await ctx.app.github_client.get_pull(repository(ctx.app, args["repo"]), args["number"]),
+        args["repo"],
+    )
 
 
 async def create_issue(ctx: ToolContext, args: dict) -> dict:
     repo = repository(ctx.app, args["repo"])
     signature = " ".join(args["signature"].split())
     if not signature or any(c in signature for c in '\\":\n\r'):
-        raise Refusal(
-            "Use a short phrase for the signature, with no colon, quote, or backslash"
-        )
+        raise Refusal("Use a short phrase for the signature, with no colon, quote, or backslash")
     await ledger.lock_repository(ctx.conn, repo.lower())
     matches = await ctx.app.github_client.search_issues(
         f'"{signature}" is:issue', repo=repo, state="all"
@@ -175,9 +193,7 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         await ctx.app.github_client.ensure_label(repo, OUTSIDE_LABEL)
     marker = f"<!-- illo:run:{ctx.run['id']} -->"
     body = f"{header}\n\n{args['body']}\n\nSignature: {signature}\n\n{marker}".strip()
-    issue = await ctx.app.github_client.create_issue(
-        repo, args["title"], body, labels=labels
-    )
+    issue = await ctx.app.github_client.create_issue(repo, args["title"], body, labels=labels)
     await kv.set(ctx.conn, signature_key, issue["number"])
     if ctx.run["tainted"] or not ctx.run.get("person_id"):
         await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue["html_url"])
@@ -197,6 +213,16 @@ async def comment_issue(ctx: ToolContext, args: dict) -> dict:
     )
 
 
+DESCRIPTIONS = {
+    "github_search_issues": "Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.",
+    "github_get_issue": "Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.",
+    "github_get_pull": "Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.",
+    "github_create_issue": "File one issue in a configured repository. `signature` is a short phrase with no colon, quote, or backslash that stays the same for every report of one problem: when an open issue already has it, nothing is filed and the result lists the matches (use `force_new_reason` only for a different problem). A private repository files at once, unassigned; a public repository or a label that starts agent work needs a draft.",
+    "github_assign_issue": "Propose to assign an issue to a team member (`assignee`: a person key or GitHub login). Always a draft card: the assignment happens only when the person you act for taps Send.",
+    "github_comment_issue": "Propose a comment on an issue or pull request; `body` is the full comment. Always a draft card: the comment is posted only when the person you act for taps Send.",
+}
+
+
 def register(registry) -> None:
     for name, handler, model, risk in [
         ("github_search_issues", search, SearchArgs, "read"),
@@ -214,10 +240,13 @@ def register(registry) -> None:
                 lambda a: f"github:{a.get('repo', '')}",
                 False,
                 handler,
+                description=DESCRIPTIONS[name],
                 arguments=model,
-                profiles=(PROFILES if name in {
-                    "github_search_issues", "github_get_issue", "github_create_issue"
-                } else PROFILES - {"tainted"}),
+                profiles=(
+                    PROFILES
+                    if name in {"github_search_issues", "github_get_issue", "github_create_issue"}
+                    else PROFILES - {"tainted"}
+                ),
                 preflight=write_preflight if risk != "read" else None,
             )
         )

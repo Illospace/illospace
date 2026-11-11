@@ -67,8 +67,13 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
             }
         )
     values = [{"connector": c["connector"], **t} for c in results for t in c["tools"]]
-    return data_text("connector catalog", rows(values, lambda t: line(
-        t["connector"], t["name"], t["risk"], json_text(t["inputSchema"]))).text)
+    return data_text(
+        "connector catalog",
+        rows(
+            values,
+            lambda t: line(t["connector"], t["name"], t["risk"], json_text(t["inputSchema"])),
+        ).text,
+    )
 
 
 async def call_connector(ctx, args: dict) -> dict:
@@ -112,6 +117,7 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             list_connectors,
+            description="List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.",
             profiles=PROFILES,
         )
     )
@@ -123,6 +129,7 @@ def register(registry) -> None:
             lambda a: "ledger",
             False,
             call_connector,
+            description="Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.",
             arguments=Call,
             profiles=PROFILES,
             resolve=resolve,

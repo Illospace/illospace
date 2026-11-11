@@ -161,6 +161,7 @@ def register(registry) -> None:
             lambda a: f"github:{a['repo']}",
             False,
             start,
+            description="Start work through a GitHub issue: file it in a configured repository, track it as a lane, and post a status message. With `assignee` (a person key or GitHub login) in a person's run, the result is a draft card, and the issue is filed and assigned only when the person taps Send. Without a person to approve, the issue is filed unassigned and the result is `deny` with its link: say that a person must assign it. `signature` works as in `github_create_issue`; once per run.",
             arguments=StartArgs,
             profiles=PROFILES - {"tainted"},
             preflight=start_preflight,
