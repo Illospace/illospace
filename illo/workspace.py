@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from illo.connectors.config import Connector
 from illo.db import Connection
 
-Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request"]
+Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request", "digest", "team_digest"]
 Risk = Literal["read", "write_internal", "send_outside"]
 
 
@@ -28,6 +28,7 @@ class Person(Model):
     emails: list[str] = Field(default_factory=list)
     role: Literal["owner", "member"] = "member"
     timezone: str = "UTC"
+    language: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ()-]{1,39}$")
     areas: list[str] = Field(default_factory=list)
     active: bool = True
 

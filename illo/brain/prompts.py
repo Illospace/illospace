@@ -16,6 +16,9 @@ HERE = Path(__file__).parent
 BASE_PROMPT = (HERE / "base_prompt.md").read_text().strip()
 PROFILE_TEXTS = {p.stem: p.read_text().strip() for p in sorted((HERE / "prompts").glob("*.md"))}
 
+SLACK_FORMAT = (HERE / "slack_format.md").read_text().strip()
+SLACK_KEYS = {"person_dm", "team_channel", "routine"}
+
 MAX_PROMPT_CHARS = 60_000
 # Allow for changing dates and the count of open asks after a workspace loads.
 RUN_FACTS_RESERVE = 128
@@ -25,12 +28,19 @@ CHANNEL_NAMES = {
     "mcp": "the MCP endpoint for agents",
     "signals": "the signal intake",
     "routine": "a routine",
+    "digest": "the morning brief, sent to the person's DM",
 }
 
 
-def prompt_profile(principal: str, profile: str) -> str:
-    """An outsider always gets the outsider text, as in the tool grant."""
-    return "outsider" if principal == "outsider" else profile
+def prompt_profile(principal: str, profile: str, event_channel: str | None = None) -> str:
+    """Choose the prompt text without changing the run grant."""
+    if principal == "outsider":
+        return "outsider"
+    if event_channel == "team_digest" or (event_channel == "digest" and principal == "team"):
+        return "team_digest"
+    if event_channel == "digest":
+        return "digest"
+    return profile
 
 
 def build(
@@ -45,8 +55,10 @@ def build(
     _fact_reserve: int = 0,
 ) -> str:
     """Return base text, profile text, run facts, matching rules, and the skill list."""
-    key = prompt_profile(principal, profile)
+    key = prompt_profile(principal, profile, event_channel)
     parts = [BASE_PROMPT, PROFILE_TEXTS.get(key, "")]
+    if key in SLACK_KEYS:
+        parts.append(SLACK_FORMAT)
     parts.append(_facts(workspace, principal, key, channel_id, now, event_channel, open_asks))
     text = "\n\n".join(parts)
     limit = MAX_PROMPT_CHARS - max(0, _fact_reserve)
@@ -59,7 +71,9 @@ def build(
             )
 
     check_size(f"{workspace.root / 'illo.yaml'} or {workspace.root / 'people.yaml'}")
-    rules = workspace.matching_rules(principal, profile, channel_id)
+    rules = workspace.matching_rules(principal, key, channel_id)
+    if key in {"digest", "team_digest"}:
+        rules = [r for r in rules if key in r.profiles]
     if key == "outsider":
         # An outsider answer can reach the sender. Team rules name people and owners,
         # so an outsider run gets only a rule that names the outsider principal.
@@ -68,7 +82,7 @@ def build(
         heading = "## Team rules\nThe team wrote these rules. They apply to this run.\n\n"
         text += "\n\n" + (heading if index == 0 else "") + f"### {rule.name}\n{rule.body}"
         check_size(workspace.root / rule.path)
-    if key != "outsider":
+    if key not in {"outsider", "digest", "team_digest"}:
         for index, skill in enumerate(workspace.skills):
             if index == 0:
                 text += (
@@ -103,7 +117,8 @@ def validate_workspace_prompts(workspace) -> None:
 async def build_for_run(conn, workspace, authority, event, *, now: datetime | None = None) -> str:
     """Read the facts that need the ledger, then build. The run manager calls this."""
     open_asks = 0
-    if authority.profile == "person_dm" and authority.person_id:
+    key = prompt_profile(authority.principal, authority.profile, event.channel)
+    if key == "person_dm" and authority.person_id:
         rows = await asks.list_open(
             conn, owner_person_id=authority.person_id, principal=authority.principal
         )
@@ -117,16 +132,6 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
         event_channel=event.channel,
         open_asks=open_asks,
     )
-    if event.channel == "digest":
-        prompt += (
-            "\n\nThis run writes a morning brief. Follow its greeting and format instructions. "
-            "Call digest_snapshot. Use only that snapshot. Return the message as final text."
-        )
-    if event.channel == "team_digest":
-        prompt += (
-            "\n\nThis run writes the team brief. Follow its greeting and format instructions. "
-            "Call team_snapshot. Use only that snapshot. Return the message as final text."
-        )
     return prompt
 
 
@@ -142,6 +147,8 @@ def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks)
         if person.areas:
             detail += ", areas " + ", ".join(person.areas)
         lines.append(detail)
+        if person.language and key in {"person_dm", "digest"}:
+            lines.append(f"• Language: {person.language}")
     if key in {"person_dm", "team_channel", "tainted", "routine", "agent_request"}:
         lines.append("• GitHub repositories: " + (", ".join(config.github.repositories) or "none"))
     timezone = person.timezone if person else config.timezone

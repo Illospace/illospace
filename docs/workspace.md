@@ -181,14 +181,21 @@ The transcript then follows the same path as the person's typed text, including 
 Model and endpoint references: [OpenAI speech to text](https://developers.openai.com/api/docs/guides/speech-to-text)
 and [GPT-4o Mini Transcribe](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe).
 
+## Person language
+
+| Key | Meaning |
+| --- | --- |
+| `language` | Optional. The language of the morning brief and of routine messages to this person, for example `French`. Default: the language of the run message. |
+
 ## Other files
 
 - `people.yaml`: a mapping with `people`, a list of people. Each person has `key` and `name`.
-  Optional fields: `slack_id`, `github_login`, `emails`, `role`, `timezone`, `areas`, `active`.
+  Optional fields: `slack_id`, `github_login`, `emails`, `role`, `timezone`, `language`, `areas`, `active`.
   The role is `owner` or `member`. The default role is `member`. The default time zone is `UTC`.
   The default `active` is true. All identities must be unique, including inactive entries.
 - `rules/*.md`: YAML front matter with `name`, optional `description`, `channels`, `profiles`, and `principals`.
-  Empty filters match all runs. The Markdown body supplies the rule text.
+  Profile names: `person_dm`, `team_channel`, `tainted`, `routine`, `agent_request`, `digest`, and `team_digest`.
+  Empty filters match all runs. Briefs get only rules that name `digest` or `team_digest`. The Markdown body supplies the rule text.
 - `skills/<name>/SKILL.md`: front matter with `name` and `description`. The body holds the steps.
 - `routines/*.md`: front matter with `name`, `schedule`, `destination`, and `principal`.
   The principal is `team` or `person:<key>`. The body is the prompt.
