@@ -248,7 +248,7 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 | `github_comment_issue` | 5 |
 | `work_start` | 1 |
 
-All tool calls of one run together stop at `brain.max_turns` (default 12). The run also stops at `brain.timeout_s` (default 120 seconds).
+All tool calls of one run together stop at `brain.max_turns` (default 12). The run also stops at `brain.timeout_s` (default 300 seconds).
 
 **Calls of one MCP token** (`illo/ledger/mcp.py`):
 - 20 open asks and 30 new asks per hour for each owner.
@@ -260,6 +260,32 @@ All tool calls of one run together stop at `brain.max_turns` (default 12). The r
 | Scope | MCP tools |
 |---|---|
 | `collector` | `lane_report`, `lane_search`, `ask_create`, `ask_pull`, `ask_ack`, `ask_cancel`, `signal_submit` |
-| `agent` | the `collector` tools, plus `illo_submit`, `illo_read`, `illo_get_result` |
+| `agent` | the `collector` tools, plus `illo_submit`, `illo_read`, `illo_get_result`, and the direct task tools |
 
 A run that comes from an `agent` token has the profile `agent_request`. It acts for the person of the token. It has no personal connector.
+
+## Task authority
+
+Actions inside the task list need no approval card in an identified person's DM or team-channel run.
+They use the ledger destination and an audit row. Other tool families keep their current approval rules.
+A person's request can confirm Done. An agent result cannot count as a person's confirmation.
+A routine gets read tools only. An agent request gets read tools, task capture, and chat.
+Tainted runs and outsiders get no task tools, including through a direct call by name.
+
+Task reads enforce visibility in SQL. Only the owner and that owner's agents read a private task.
+A team-channel run reads team tasks only. The verified sender supplies its actor; the principal stays `team`.
+An active person's token with the `agent` scope can use the six direct task tools.
+Named agent tokens must still match the workspace agent and its owner on each call.
+Agents cannot mark Done or hand over an existing task. A stale holder cannot write or ask a question.
+Full result replacements need the version that the caller read.
+
+Task results, agent messages, titles, and link titles are data for the model.
+The shared `data_text` helper wraps them and neutralises nested markers.
+Only ledger code writes record kinds. A tool can post a message or question, not invent a state event.
+A connector registers a named proof check. An unknown or failed check cannot mark Done.
+A forced person confirmation needs a reason in the record.
+
+The final answer guard replaces a broken person-facing answer with a plain sentence.
+It lists drafts and task changes from that run's audit rows, using tool names and safe target IDs.
+Its sensor records the run ID without the private answer text.
+Tests in `tests/tasks/` cover these boundaries, both example workflows, and Slack retries.

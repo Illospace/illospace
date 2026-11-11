@@ -313,3 +313,20 @@ def draft_card(draft: dict) -> list[dict]:
     else:
         blocks.append(section("Not sent"))
     return blocks
+
+
+def task_return_card(task, message, checks, *, final=None):
+    """Use the same card parts for a task and its final confirmation."""
+    blocks = [section("Returned: " + escape(task["title"])),
+              section("> " + escape(message[:300]).replace("\n", "\n> "))]
+    if checks:
+        blocks.append(section("\n".join(
+            ("Pass: " if check["ok"] else "Wait: ") + escape(check["name"]) + " — " + escape(check["text"])
+            for check in checks)))
+    if final:
+        blocks.append(section(escape(final)))
+    else:
+        blocks.append({"type": "actions", "elements": [
+            button("Done", f"task:{task['id']}:done", True),
+            button("Send back", f"task:{task['id']}:back")]})
+    return blocks

@@ -1,6 +1,8 @@
 # Illo
 
-Illo is one assistant for a whole team. It lives in Slack, it follows the work of your coding agents, and it answers from facts.
+Illo is one list of tasks for people and their agents. It gives each task to a holder and keeps the record. People and outside agents do the work.
+
+Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools, proof, and Slack cards.
 
 ## What it does
 

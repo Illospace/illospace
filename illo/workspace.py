@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -136,13 +136,20 @@ class BrainConfig(Model):
     runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] = "claude"
     model: str = "default"
     max_turns: int = Field(default=12, ge=1, le=50)
-    timeout_s: float = Field(default=120, gt=0, le=3600)
+    timeout_s: float = Field(default=300, gt=0, le=3600)
+    effort: dict[Profile | Literal["outsider"], Literal["low", "medium", "high"]] = Field(
+        default_factory=lambda: {"person_dm": "medium", "team_channel": "medium", "agent_request": "medium"}
+    )
     auth: Literal["chatgpt", "api_key"] = "api_key"
     team_credential: str | None = None
     person_credential: Literal["own", "team"] = "own"
     tainted_credential: Literal["none", "team", "api_key"] = "none"
     chatgpt_allowed_accounts: list[str] = Field(default_factory=list)
     api_key_fallback: bool = False
+
+    def effort_for(self, profile):
+        default = "medium" if profile in {"person_dm", "team_channel", "agent_request"} else "low"
+        return self.effort.get(profile, default)
 
     def check_runtime(self, override=None):
         if self.auth == "chatgpt" and (override or self.runtime) != "openai_responses":
@@ -265,6 +272,46 @@ class Note(Model):
         return value
 
 
+Holder = Annotated[str, Field(pattern=r"^(person|agent):[a-z][a-z0-9_-]*$")]
+
+
+class Wake(Model):
+    type: Literal["none", "poll"] = "none"
+
+
+class Agent(Model):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
+    name: str = Field(min_length=1)
+    owner: str
+    kind: str = "other"
+    good_at: str = ""
+    wake: Wake = Field(default_factory=Wake)
+
+
+class AgentsFile(Model):
+    agents: list[Agent] = Field(default_factory=list)
+
+
+class Silence(Model):
+    agent_hours: float = Field(default=4, gt=0, allow_inf_nan=False)
+    person_hours: float = Field(default=24, gt=0, allow_inf_nan=False)
+
+
+class TaskList(Model):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
+    name: str = Field(min_length=1)
+    description: str = ""
+    holders: list[Holder] = Field(default_factory=list)
+    default_holder: Holder | None = None
+    done: Literal["person"] | list[Annotated[str, Field(min_length=1)]] = "person"
+    reviewer: Annotated[str, Field(pattern=r"^person:[a-z][a-z0-9_-]*$")] | None = None
+    silence: Silence = Field(default_factory=Silence)
+    slack_channel: str | None = None
+    owner: str | None = None
+    body: str = ""
+    path: str = ""
+
+
 class Workspace(Model):
     root: Path
     people: list[Person]
@@ -274,6 +321,9 @@ class Workspace(Model):
     routines: list[Routine]
     connectors: list[Connector]
     notes: list[Note]
+    lists: list[TaskList] = Field(default_factory=lambda: [TaskList(key="tasks", name="Tasks")])
+    agents: list[Agent] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     fingerprint: str = ""
     digest_instructions: str | None = None
     team_digest_instructions: str | None = None
@@ -368,8 +418,12 @@ def fingerprint(root: Path) -> str:
     import hashlib
 
     digest = hashlib.sha256()
+    # An absent lists folder has a built-in list. An empty folder has no lists.
+    digest.update(b"lists-present" if (root / "lists").exists() else b"lists-absent")
     for pattern in (
         "people.yaml",
+        "agents.yaml",
+        "lists/*.md",
         "illo.yaml",
         "rules/*.md",
         "skills/*/SKILL.md",
@@ -423,6 +477,9 @@ def load_workspace(root: Path | str) -> Workspace:
         config.brain.check_runtime()
     except ValueError as error:
         raise WorkspaceError(f"{root / 'illo.yaml'}: brain.auth: {error}") from None
+    from illo.tasks.lists import load_task_files
+
+    agents, lists, warnings = load_task_files(root, keys, config)
     rules, skills, routines, connectors, notes = [], [], [], [], []
     for pattern, model, target in (
         ("rules/*.md", RuleFile, rules),
@@ -534,6 +591,9 @@ def load_workspace(root: Path | str) -> Workspace:
         team_instructions = _front(team_path)["body"] if text.startswith("---\n") else text.strip()
     workspace = Workspace(
         root=root,
+        lists=lists,
+        agents=agents,
+        warnings=warnings,
         digest_instructions=digest_instructions,
         team_digest_instructions=team_instructions,
         people=people,

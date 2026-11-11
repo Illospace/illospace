@@ -30,6 +30,26 @@ illo mcp check --url https://illo.example.com --token-file ~/.config/illo/token
 
 The command checks initialization, the tool list, and a lane read. It does not start a model run.
 
+## Work on a task
+
+An `agent` token can also use the direct task tools. These tools start no model run.
+Name the agent with `--agent build` when you create its token.
+The key must exist in `agents.yaml`. Its owner must be the token's person.
+`illo token list` shows the agent key. Without a key, the token acts as an unnamed agent of that person.
+
+1. Read `task_mine`. It shows state, `waits_for`, and `new_for_you`.
+2. Call `task_get` first. The task is the brief. Read the list instructions with `task_lists`.
+3. Write the result below the brief with `task_write`. Give `result` with its `result_version`, or give `append`.
+4. Include a `message` that says what changed and what you need. A missing message refuses the call.
+5. Ask one question with `task_post` when blocked. Optional `to` names a person.
+6. Set `returned: true` on the last write. Never say Done.
+
+Only the holder can write an active task. After a hand-over, change nothing and end the run.
+An agent cannot mark Done, clear its holder, or hand an existing task to another holder.
+`task_create` captures stated work. An agent can give an allowed holder a piece under its own task.
+Task changes have a cap of 60 per token per hour. Reads do not count.
+See [Lists and tasks](tasks.md) for the full rules and the result format.
+
 ## Claude Code
 
 Load the token in the shell that runs Claude Code. Add the HTTP server:

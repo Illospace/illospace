@@ -86,6 +86,11 @@ class Gateway:
             if not authority:
                 await conn.execute("UPDATE events SET status='ignored' WHERE id=%s", (row["id"],))
                 return {"decision": "ignore", "event_id": row["id"]}
+            if event.channel == "slack" and authority.profile == "team_channel":
+                actor = await one(conn, "SELECT key FROM people WHERE slack_id=%s AND active", (event.sender,))
+                if actor:
+                    await conn.execute("UPDATE events SET payload=payload || %s WHERE id=%s",
+                                       (Jsonb({"task_actor": actor["key"]}), row["id"]))
             await conn.execute(
                 "UPDATE events SET principal=%s,person_id=%s,tainted=%s WHERE id=%s",
                 (authority.principal, authority.person_id, authority.tainted, row["id"]),

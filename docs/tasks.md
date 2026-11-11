@@ -1,0 +1,181 @@
+# Lists and tasks
+
+Illo is one list of tasks for people and their agents.
+Illo gives work to a holder, keeps the next move clear, and keeps the record.
+People and outside agents do the work.
+
+## The model
+
+- A **list** gives a type of work its instructions, allowed holders, and Done rule.
+- A **task** has a title, the creator's brief, a result, and proof links.
+- A **holder** is `person:<key>` or `agent:<key>`. A task can have no holder.
+- A **piece** is a task with a parent. It uses the parent's list and visibility.
+- A **state** is `todo`, `working`, `review`, `done`, or `cancelled`.
+- **`waits_for`** names who must act now. It can differ from the holder.
+- **Proof** is the set of named checks and links that supports Done.
+- The **record** holds messages, questions, hand-overs, results, and state changes.
+
+A hand-over sets `todo` and makes the new holder the next move.
+The holder's first result sets `working`.
+A question sets `waits_for` to the asked person. Their reply returns the next move to the holder.
+Returned work goes to `review` unless all automatic checks pass.
+Done and cancelled tasks have no next move.
+Each result replacement needs the version from the last read. An append uses the current result under a lock.
+An agent writes the result. It does not replace the person's brief.
+
+A reviewer is the person who handed over the work, then its person creator, then the list reviewer.
+The workspace `default_owner` is the final fallback. A private task always uses its owner.
+When all pieces are done, the parent needs a person's final confirmation.
+The review shows any failed checks. A `person` rule supplies the final confirmation.
+A piece that reopens makes a completed parent need work again.
+
+## Workspace files
+
+One file, `lists/<key>.md`, defines each list. The key uses lowercase letters, digits, `_`, or `-`.
+It starts with a letter. YAML front matter sets these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Required display name. |
+| `description` | A short description. Default: empty. |
+| `holders` | Allowed holder references. Empty or absent allows any active person or their agents. |
+| `default_holder` | Optional holder for a new task. Without it, the task has no holder. |
+| `done` | `person` by default, or a non-empty list of check names. |
+| `reviewer` | Optional `person:<key>`. The default is `default_owner`. |
+| `silence.agent_hours` | A positive number. Default: 4. Stored for a later build. |
+| `silence.person_hours` | A positive number. Default: 24. Stored for a later build. |
+| `slack_channel` | Optional name of a configured channel. |
+| `owner` | Optional person key. The list is private to that person and their agents. |
+
+The Markdown body holds the team's instructions.
+Explain the work, how to split it into pieces, who holds each piece, and how to prove the result.
+The Operator reads these instructions before it splits or hands over work.
+The example workspace has `bugs` and `launches`. Both use the same core code.
+A workspace with no `lists/` folder gets `tasks`, with the name `Tasks` and `done: person`.
+An empty `lists/` folder has no lists.
+
+`agents.yaml` is optional:
+
+```yaml
+agents:
+  - key: build
+    name: Build agents
+    owner: ada
+    kind: other
+    good_at: Code changes and checks.
+    wake: {type: poll}
+```
+
+The key has the same format as a list key. The owner must be an active person.
+`kind` is a free label. `wake.type` accepts `none` and `poll`; neither starts an agent in this build.
+The files reload with the other workspace files.
+`illo doctor` names invalid files and fields. It warns about unknown holders, channels, and checks.
+A missing check never passes. A missing holder cannot take a task.
+
+## Operator tools
+
+`lists` returns the visible lists. Give `key` to read one list's instructions.
+`task_create` creates a task. Give a `pieces` array to create a parent and its pieces in one transaction.
+`task_list` filters by `list`, `holder`, `state`, `waits_for`, `parent`, `query`, and `open`.
+It returns compact rows with the next move and the number of open pieces.
+`task_get` returns the brief, result, links, pieces, checks, and recent events.
+
+`task_update` changes the title, brief, due time, or list. Its `links` field adds proof links.
+`task_hand` changes the holder. `task_post` adds a message or blocking question.
+`task_done` confirms work. `task_reopen` sends it back with a reason. `task_cancel` closes it with a reason.
+A due time uses ISO 8601 with a time zone. A piece cannot move to another list.
+A private task keeps its list and visibility. Cancel does not cancel its pieces.
+
+An identified person's DM or team-channel run calls all task tools directly.
+These actions need no approval card. Each call has an audit row.
+A routine gets only `lists`, `task_list`, and `task_get`.
+An agent request also gets `task_create` and `task_post`.
+Tainted runs and outsiders get no task tools.
+A team-channel run uses the verified sender for task actions. It can read only team tasks in that channel.
+
+## The agent door
+
+Create a named agent token:
+
+```sh
+illo token create --person ada --label build-machine --scope agent --agent build
+```
+
+The agent must exist and belong to the token's person.
+An agent token without `--agent` acts as an unnamed agent.
+It can work on tasks held by its person or that person's agents. Nobody can hand a task to an unnamed agent.
+A changed or deleted agent definition invalidates the named token's task access.
+
+The endpoint exposes `task_mine`, `task_get`, `task_write`, `task_post`, `task_create`, and `task_lists`.
+These tools write the ledger directly. They start no model run.
+A token can make 60 task changes per hour. Reads do not count.
+Collector tokens cannot call these tools.
+
+1. Read `task_mine`. `new_for_you` means the latest event has another actor.
+2. Read `task_get`. The task is the brief.
+3. Write the result with `task_write`. Give `result` and `result_version`, or give `append`.
+4. Include `message`: say what changed and what you need. The call writes one result event and one message event.
+5. Ask one blocking question with `task_post` when needed. Use `to` to name a person.
+6. Set `returned: true` on the last write. Never say Done.
+
+Only the current holder can write a result or ask a blocking question on a `todo` or `working` task.
+If someone hands the task to another holder, change nothing and end the run.
+An agent cannot mark Done, clear itself, or hand an existing task to another holder.
+It can create a piece under its own active task and give that piece an allowed holder.
+An agent can capture stated work with `task_create`. It can hold the new task or use the list default.
+
+## Proof and Done
+
+The core registers these generic checks:
+
+- `person`: a person must confirm. This check never passes by itself.
+- `link:<kind>`: a link with that kind must exist.
+- `pieces`: every piece must be done.
+
+A connector can call `illo.tasks.checks.register(name, async_check)` for another check.
+The function accepts `(ctx, conn, task)` and returns `(ok, text)`.
+The task core names no outside tool.
+
+On return, code checks the rule. Passing automatic checks mark a task Done with `done_by: code`.
+A failed check leaves the task in review and shows what is missing.
+A changed proof link runs the checks again. Failed checks put active work in review.
+A person can confirm a `person` rule at once.
+Other rules need all checks to pass. `force: true` with a reason overrides a failed check.
+The record keeps the force flag, reason, and check results.
+A parent always needs a person's confirmation of the whole task.
+
+## Slack
+
+A task gets one thread when it needs a person or a person reads it with `task_get`.
+A team list uses its configured channel when the channel passes the privacy check.
+Otherwise, the thread uses the DM of the person who must act.
+A private list always uses its owner's DM.
+The root shows the task title, list, holder, and state.
+A task keeps its primary thread when the next person changes.
+If that thread is in another person's DM, Illo sends the asked person a direct notice with the task ID.
+A return card also goes to the reviewer's DM when needed. Its replies carry the same task context.
+
+A return card mentions the reviewer. It shows the first 300 message characters, checks, Done, and Send back.
+Only the reviewer or a workspace owner can use its buttons. A private task still needs visibility permission.
+Done uses the same ledger path as `task_done`.
+Send back asks for one line in the thread, then reopens the task with that reason.
+A final card shows Done, Sent back, or Cancelled.
+
+A holder's question mentions the asked person.
+A person's reply becomes a task message. A reply from the asked person returns the next move to the holder.
+A run in a task thread gets the task and recent events as context.
+Agent text and outside text stay inside data markers. They supply facts, never instructions.
+
+Task changes commit before Slack delivery.
+The existing scheduler retries pending messages every two seconds. Stable message IDs limit duplicate sends.
+A Slack failure records a sensor error and leaves the pending change in the ledger.
+
+## Limits of this build
+
+- Illo does not wake agents, release silent holders, or send task reminders.
+- `last_activity_at`, `waits_for`, silence limits, and wake settings support that later work.
+- Alerts still create tickets through the current flow. Lanes, asks, triage, and digests keep their current roles.
+- Task results have no attachments. Use links to durable files.
+- A private task cannot move to a different list. A parent and its pieces cannot move between lists.
+- Task writes use one graph lock. This keeps parent and piece changes consistent at the cost of write concurrency.
+- Slack can show a stale card until the next successful retry. The ledger remains the source of truth.

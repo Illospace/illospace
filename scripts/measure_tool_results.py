@@ -49,12 +49,13 @@ TYPICAL_ARGS = {
     "drive_shared_search": {"query": "mobile app"}, "drive_shared_get": {"id": "one"},
     "calendar_list": {"from": "2026-11-10T00:00:00Z", "to": "2026-11-11T00:00:00Z"},
     "chatgpt_status": {},
+    "lists": {}, "task_list": {}, "task_get": {"id": 1},
     "connectors_call": {"connector": "docs", "tool": "read"},
 }
 LIST_TOOLS = {
     "lanes_search", "lanes_mine", "lanes_attention", "asks_list", "asks_digest",
     "search_all", "notes_search", "github_search_issues", "people_list", "rules_list",
-    "connectors_list", "mail_search", "drive_search", "drive_shared_search", "calendar_list",
+    "lists", "task_list", "connectors_list", "mail_search", "drive_search", "drive_shared_search", "calendar_list",
 }
 
 
@@ -92,6 +93,18 @@ async def seed(conn):
           'review','Review the mobile app catalog release '||n||'?',
           jsonb_build_object('text',repeat('Check the API evidence. ',100)),now()+n*interval '1 hour'
         FROM generate_series(1,30) n
+    """)
+    await conn.execute("""
+        INSERT INTO tasks (list_key,title,brief,result,holder,waits_for,created_by,state)
+        SELECT 'launches','Mobile app launch '||n,
+          repeat('Show the mobile app and its page. ',30),
+          repeat('The result has a script, a video, and a page link. ',60),
+          'person:ada','person:ada','person:ada','working'
+        FROM generate_series(1,120) n
+    """)
+    await conn.execute("""
+        INSERT INTO task_events (task_id,actor,kind,text)
+        SELECT id,'person:ada','message','Check the launch evidence.' FROM tasks
     """)
     person = await people.get(conn, "ada")
     await rules.create(conn, owner_person_id=person["id"], text="Review the mobile app release evidence.")

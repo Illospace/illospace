@@ -19,6 +19,7 @@ async def test_default_read_results_on_live_shape(app, monkeypatch):
         assert (await one(conn, "SELECT count(*) n FROM lanes"))["n"] == 1200
         assert (await one(conn, "SELECT count(*) n FROM items WHERE source_ref LIKE 'archive:%'"))["n"] == 4650
         assert (await one(conn, "SELECT count(*) n FROM asks"))["n"] == 30
+        assert (await one(conn, "SELECT count(*) n FROM tasks"))["n"] == 120
     async def page(*args, **kwargs):
         return data_text("web", "Outside data.")
     monkeypatch.setattr("illo.tools.web.fetch_page", page)

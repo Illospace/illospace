@@ -12,20 +12,26 @@ def digest(token: str) -> str:
 
 
 async def create(
-    conn: Connection, person_id: int, label: str, scopes: list[str] | None = None
+    conn: Connection, person_id: int, label: str, scopes: list[str] | None = None,
+    *, agent_key: str | None = None, workspace=None,
 ) -> str:
     """Create a client token for an active person."""
     scopes = ["collector"] if scopes is None else scopes
     if scopes not in (["collector"], ["agent"]):
         raise ValueError("Choose one token scope: collector or agent")
+    if agent_key:
+        person = await one(conn, "SELECT key FROM people WHERE id=%s AND active", (person_id,))
+        agent = next((a for a in workspace.agents if a.key == agent_key), None) if workspace else None
+        if scopes != ["agent"] or not person or not agent or agent.owner != person["key"]:
+            raise ValueError("The agent must exist, use the agent scope, and belong to the token's person")
     token = secrets.token_urlsafe(32)
     row = await one(
         conn,
         """
-        INSERT INTO tokens (person_id,label,token_hash,scopes)
-        SELECT id,%s,%s,%s FROM people WHERE id = %s AND active RETURNING id
+        INSERT INTO tokens (person_id,label,token_hash,scopes,agent_key)
+        SELECT id,%s,%s,%s,%s FROM people WHERE id = %s AND active RETURNING id
     """,
-        (label, digest(token), scopes, person_id),
+        (label, digest(token), scopes, agent_key, person_id),
     )
     if not row:
         raise ValueError("The person is missing or inactive")
@@ -39,7 +45,7 @@ async def verify(conn: Connection, token: str) -> dict | None:
         """
         UPDATE tokens t SET last_used_at = now() FROM people p
         WHERE t.token_hash = %s AND t.revoked_at IS NULL AND p.id = t.person_id AND p.active
-        RETURNING t.id,t.person_id,t.label,t.scopes,p.key AS person_key
+        RETURNING t.id,t.person_id,t.label,t.scopes,t.agent_key,p.key AS person_key
     """,
         (digest(token),),
     )
@@ -50,7 +56,7 @@ async def list_tokens(conn: Connection, person_id: int | None = None) -> list[di
     return await all_rows(
         conn,
         """
-        SELECT id,person_id,label,scopes,created_at,last_used_at,revoked_at FROM tokens
+        SELECT id,person_id,label,scopes,agent_key,created_at,last_used_at,revoked_at FROM tokens
         WHERE (%s::bigint IS NULL OR person_id = %s) ORDER BY id
     """,
         (person_id, person_id),

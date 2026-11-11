@@ -76,6 +76,8 @@ class Tool:
     resolve: Callable[[ToolContext, dict], "Tool"] | None = None
     on_error: Callable[[ToolContext, dict], Awaitable[None]] | None = None
     available: Callable[[ToolContext], Awaitable[bool]] | None = None
+    # Patch tools need to distinguish an omitted field from an explicit null.
+    exclude_unset: bool = False
 
     @property
     def json_schema(self) -> dict:
@@ -170,7 +172,7 @@ class Registry:
                 reason = f"The run has reached the {name} call limit of {RUN_LIMITS[name]}"
         if tool:
             try:
-                validated = tool.arguments.model_validate(args).model_dump()
+                validated = tool.arguments.model_validate(args).model_dump(exclude_unset=tool.exclude_unset)
             except ValidationError:
                 reason = "The tool arguments do not match its schema"
             else:
@@ -235,6 +237,9 @@ class Registry:
             args=args,
             decision=decision,
             reason=reason,
+            target=(f"draft {result['draft_id']}" if isinstance(result, dict) and result.get("draft_id")
+                    else f"task {result['id']}" if tool and tool.family == "tasks"
+                    and isinstance(result, dict) and isinstance(result.get("id"), int) else None),
         )
         if isinstance(result, Compact):
             result = result.text

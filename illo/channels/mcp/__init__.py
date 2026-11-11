@@ -16,7 +16,7 @@ from illo.ledger import audit, tokens
 from illo.ledger import mcp as ledger
 from illo.tools.registry import Tool
 
-from . import asks, lanes, reads, schemas, submissions
+from . import asks, lanes, reads, schemas, submissions, tasks
 
 PROFILES = frozenset({"agent_request"})
 COLLECTOR_TOOLS = frozenset(
@@ -30,7 +30,7 @@ COLLECTOR_TOOLS = frozenset(
         "signal_submit",
     }
 )
-AGENT_TOOLS = COLLECTOR_TOOLS | {"illo_submit", "illo_read", "illo_get_result"}
+AGENT_TOOLS = COLLECTOR_TOOLS | {"illo_submit", "illo_read", "illo_get_result"} | tasks.NAMES
 
 
 def allowed_tools(token: dict) -> frozenset[str]:
@@ -130,6 +130,8 @@ TOOLS = {
         ),
     )
 }
+
+TOOLS.update({tool.name: tool for tool in tasks.tools(agent_tool)})
 
 
 @dataclass
