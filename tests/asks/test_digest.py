@@ -506,6 +506,7 @@ async def test_snapshot_links_are_web_addresses(app, seed):
         ada = await people.get(conn, "ada")
         for name, links in (
             ("app-only", ["example-app://thread/1"]),
+            ("plain", ["http://example.com/review"]),
             ("both", [{"url": "example-app://thread/2"}, {"url": "https://example.com/pull/2"}]),
         ):
             await lanes.upsert(
@@ -519,4 +520,8 @@ async def test_snapshot_links_are_web_addresses(app, seed):
             )
         data = await snapshot(conn, ada, ctx, datetime.now(UTC))
     found = {item["title"]: item["link"] for item in data["finished"]}
-    assert found == {"app-only": "", "both": "https://example.com/pull/2"}
+    assert found == {
+        "app-only": "",
+        "plain": "http://example.com/review",
+        "both": "https://example.com/pull/2",
+    }

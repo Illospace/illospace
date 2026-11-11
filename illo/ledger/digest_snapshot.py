@@ -14,7 +14,7 @@ def web_link(links):
         link.get("url") or link.get("href") if isinstance(link, dict) else link
         for link in links or []
     ]
-    return next((v for v in values if isinstance(v, str) and v.startswith("https://")), "")
+    return next((v for v in values if isinstance(v, str) and v.startswith(("http://", "https://"))), "")
 
 
 def card_link(row):
