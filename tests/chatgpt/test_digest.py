@@ -5,8 +5,8 @@ import pytest
 from illo.brain.client import BrainEvent
 from illo.db import one
 from illo.ledger import chatgpt as grants
-from illo.routines.digest import send_due
-from tests.asks.test_digest import NOW, only_ada, posts
+from illo.routines.digest import FIRST_BRIEF, fallback_text, send_due
+from tests.asks.test_digest import NOW, empty, only_ada, posts
 from tests.chatgpt.conftest import save_grant
 
 
@@ -33,7 +33,7 @@ async def test_failed_personal_credential_gives_only_fallback(chatgpt_app, slack
     await send_due(ctx, NOW)
     await send_due(ctx, NOW)
     assert len(posts(slack_client)) == 1
-    assert posts(slack_client)[0]["text"] == "Morning, Ada. Nothing needs you."
+    assert posts(slack_client)[0]["text"] == fallback_text(empty()) + "\n\n" + FIRST_BRIEF
     if mode in {"broken", "auth_retry"}:
         async with ctx.pool.connection() as conn:
             grant = await grants.load(conn, person["id"])

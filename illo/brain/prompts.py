@@ -122,6 +122,11 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
             "\n\nThis run writes a morning brief. Follow its greeting and format instructions. "
             "Call digest_snapshot. Use only that snapshot. Return the message as final text."
         )
+    if event.channel == "team_digest":
+        prompt += (
+            "\n\nThis run writes the team brief. Follow its greeting and format instructions. "
+            "Call team_snapshot. Use only that snapshot. Return the message as final text."
+        )
     return prompt
 
 

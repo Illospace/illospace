@@ -108,13 +108,13 @@ class RunManager:
         runtime = ctx.config.brain_runtime or config.runtime
         model = ctx.config.brain_model or config.model
         try:
-            auth = await provider_auth(ctx, authority, runtime, notify=event.channel != "digest")
+            auth = await provider_auth(ctx, authority, runtime, notify=event.channel not in {"digest", "team_digest"})
         except chatgpt.TemporaryRefresh:
-            if event.channel == "digest":
+            if event.channel in {"digest", "team_digest"}:
                 raise RunFailure("provider") from None
             return chatgpt.TEMPORARY
         if auth is None:
-            if event.channel == "digest":
+            if event.channel in {"digest", "team_digest"}:
                 raise RunFailure("provider")
             if authority.tainted or authority.profile == "tainted":
                 async with ctx.pool.connection() as conn:
@@ -193,7 +193,7 @@ class RunManager:
                                     runtime,
                                     force=True,
                                     rejected_token=auth.access_token.get_secret_value(),
-                                    notify=event.channel != "digest",
+                                    notify=event.channel not in {"digest", "team_digest"},
                                 )
                                 if fresh is not None:
                                     auth = fresh
@@ -251,7 +251,7 @@ class RunManager:
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
         except chatgpt.TemporaryRefresh:
-            if event.channel == "digest":
+            if event.channel in {"digest", "team_digest"}:
                 error = "The model sign-in service is unavailable"
                 failure = "provider"
                 raise RunFailure("provider") from None
@@ -277,6 +277,6 @@ class RunManager:
                     await sensors.ok(conn, "brain")
                 else:
                     await sensors.error(conn, "brain", error or "The brain run failed")
-        if event.channel == "digest" and status != "completed":
+        if event.channel in {"digest", "team_digest"} and status != "completed":
             raise RunFailure(failure)
         return final

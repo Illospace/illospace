@@ -10,9 +10,10 @@ from fastapi.encoders import jsonable_encoder
 from illo.asks.cards import escape, section
 from illo.asks.service import post_dm
 from illo.channels.slack.formatting import mrkdwn
+from illo.db import one
 from illo.gateway.events import InboundEvent
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import people
+from illo.ledger import briefs, people
 
 DEFAULT_INSTRUCTIONS = """Write the morning brief for {name}. Call `digest_snapshot` first and use only its data.
 
@@ -26,7 +27,13 @@ Write like a colleague who respects {name}'s time.
 - Write "Nothing needs you" only if `needs_you` and `stuck` are both empty.
 - Mention a fault only if `faults` is not empty. Say what does not work and what {name} can do. Never show a sensor key or an internal id.
 - If nothing happened, send one line: "Morning, {name}. Nothing needs you, and nothing changed since the last brief."
+- End with one short question that offers help: ask if {name} wants Illo to coordinate something today. Change the words each day.
 - No headers, no table, no counts line."""
+
+
+FIRST_BRIEF = (
+    "I send you a short brief each morning. You can change the time, or turn it off: tell me here."
+)
 
 
 def linked(item):
@@ -73,6 +80,7 @@ def fallback_text(data):
     if data.get("faults"):
         lines.append("Not working:")
         lines.extend(escape(item["what"]) for item in data["faults"])
+    lines.append("Do you want me to coordinate something today? Tell me here.")
     return "\n".join(lines)
 
 
@@ -110,72 +118,102 @@ class BriefAdapter:
 
 
 async def brief_text(ctx, person, data, due):
-    adapter = BriefAdapter()
     instructions = ctx.workspace.digest_instructions
     if instructions is None:
-        instructions = next((r.body for r in ctx.workspace.routines if is_digest(r)), None)
+        instructions = next((r.body for r in ctx.workspace.routines if r.name == "daily-digest"), None)
     prompt = (instructions or DEFAULT_INSTRUCTIONS).replace("{name}", person["name"])
+    return await write_brief(ctx, "digest", f"{person['id']}:{due.isoformat()}", prompt,
+                             f"person:{person['key']}", "digest_snapshot", data, fallback_text)
+
+
+async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_name, data, fallback):
+    adapter = BriefAdapter()
     event = InboundEvent(
-        channel="digest",
-        external_id=f"{person['id']}:{due.isoformat()}",
+        channel=channel,
+        external_id=external_id,
         kind="scheduled",
         text=prompt,
-        payload={"principal": f"person:{person['key']}", "digest_snapshot": jsonable_encoder(data)},
+        payload={"principal": principal, snapshot_name: jsonable_encoder(data)},
     )
     try:
         async with asyncio.timeout(ctx.workspace.config.brain.timeout_s):
             result = await ctx.gateway.receive(event, adapter)
     except Exception:
-        return fallback_text(data)
+        return fallback(data)
     if not result.get("error") and adapter.text and adapter.text.strip():
         return mrkdwn(adapter.text)
     # A process can stop after the model reply and before Slack delivery.
     if result.get("duplicate"):
-        from illo.db import one
-
         async with ctx.pool.connection() as conn:
             row = await one(
                 conn,
-                "SELECT status,payload FROM events WHERE channel='digest' AND external_id=%s",
-                (event.external_id,),
+                "SELECT status,payload FROM events WHERE channel=%s AND external_id=%s",
+                (channel, event.external_id),
             )
         if row:
             if row["status"] == "handled" and row["payload"].get("final_answer"):
                 return mrkdwn(row["payload"]["final_answer"])
-            data = row["payload"]["payload"]["digest_snapshot"]
-    return fallback_text(data)
+            data = row["payload"]["payload"][snapshot_name]
+    return fallback(data)
 
 
 def is_digest(routine):
-    return routine.name == "daily-digest" or routine.path == "routines/digest.md"
+    return routine.name == "daily-digest" or routine.path in {
+        "routines/digest.md", "routines/team-digest.md"
+    }
 
 
 async def send_due(ctx, now=None):
     if not ctx.slack_client:
         return
     now = now or datetime.now(UTC)
+    from illo.routines.team_digest import send_team_due
+
+    await send_team_due(ctx, now)
     async with ctx.pool.connection() as conn:
         members = await people.list_people(conn)
     for person in members:
         zone = ZoneInfo(person["timezone"])
         local = now.astimezone(zone)
-        due = croniter(
-            ctx.workspace.config.digest.schedule, local + timedelta(microseconds=1)
-        ).get_prev(datetime)
-        if local - due > timedelta(minutes=2):
-            continue
         async with ctx.pool.connection() as conn:
             await ledger.lock_digest(conn, person["key"])
+            preferences = await briefs.settings(conn, person)
+            if not preferences["enabled"]:
+                continue
+            due = croniter(
+                briefs.schedule(ctx.workspace.config, preferences), local + timedelta(microseconds=1)
+            ).get_prev(datetime)
+            if local - due > timedelta(minutes=2):
+                continue
             last = await ledger.digest_last_sent(conn, person["key"])
             if last and (last >= due or last.astimezone(zone).date() >= local.date()):
                 continue
-            data = await snapshot(conn, person, ctx, now)
+            stored = await one(
+                conn, "SELECT payload FROM events WHERE channel='digest' AND external_id=%s",
+                (f"{person['id']}:{due.isoformat()}",),
+            )
+            data = (stored["payload"]["payload"]["digest_snapshot"] if stored
+                    else await snapshot(conn, person, ctx, now))
+            if ctx.workspace.config.digest.personal == "needs" and not any(
+                data.get(key) for key in ("needs_you", "stuck", "faults")
+            ):
+                await ledger.digest_sent(conn, person["key"], now)
+                await conn.execute(
+                    "UPDATE routine_state SET last_status='skipped' WHERE key=%s",
+                    (f"digest:{person['key']}",),
+                )
+                continue
             text = await brief_text(ctx, person, data, due)
+            if not preferences["announced"]:
+                text += "\n\n" + FIRST_BRIEF
             sent = await post_dm(
                 ctx, person, text, text_blocks(text), "digest", f"{person['id']}:{due.isoformat()}"
             )
             if sent:
                 await ledger.digest_sent(conn, person["key"], now)
+                await conn.execute(
+                    "UPDATE brief_preferences SET announced=true WHERE person_id=%s", (person["id"],)
+                )
 
 
 async def setup(ctx):

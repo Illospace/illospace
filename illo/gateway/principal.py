@@ -47,6 +47,8 @@ async def resolve(conn, event, workspace) -> Authority | None:
             person["id"] if person else None,
             tainted,
         )
+    if event.channel == "team_digest":
+        return Authority("team", "routine") if workspace.config.digest.team else None
     if event.channel == "digest":
         return await person_authority(conn, event.payload.get("principal", ""))
     if event.channel == "routine":

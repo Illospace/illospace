@@ -143,12 +143,25 @@ class RoutineAdapter:
         log.error("Routine failed: %s", event.payload["routine"])
 
 
-async def deliver_routine(ctx, destination: str, text: str):
+async def deliver_routine(ctx, destination: str, text: str, *, delivery_key=None):
     if destination.startswith("person:"):
         if not await dm_person(ctx, destination[7:], text):
             raise RuntimeError("The routine DM could not be sent")
     elif destination.startswith("channel:") and ctx.slack_client:
-        await ctx.slack_client.chat_postMessage(channel=destination[8:], text=text)
+        from illo.asks.service import message_id
+        from illo.channels.slack.formatting import chunks
+
+        root = None
+        for index, part in enumerate(chunks(text)):
+            options = {"thread_ts": root} if root else {}
+            if delivery_key:
+                options["client_msg_id"] = message_id("routine", f"{delivery_key}:{index}")
+            sent = await ctx.slack_client.chat_postMessage(
+                channel=destination[8:], text=part, unfurl_links=False, unfurl_media=False, **options
+            )
+            if root is None:
+                root = sent["ts"]
+        return {"channel": destination[8:], "ts": root}
     else:
         raise RuntimeError("The routine destination is unavailable")
 

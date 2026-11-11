@@ -16,6 +16,10 @@ github:
 digest:
   schedule: '0 9 * * 1-5'
   destination: person:ada
+  # personal: needs  # Send a DM only when work waits or a fault exists.
+  # team:
+  #   channel: team  # Use a team-visible channel name from slack.channels.
+  #   schedule: '0 9 * * 1-5'  # Use the team time zone.
 stale_minutes:
   t3: 30
   claude-code: 30

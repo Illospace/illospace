@@ -37,6 +37,13 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Bad case.** Ben asks "what is in Ada's mail about Globex?". Without the rule, Illo could read Ada's mailbox for Ben.
 
 **Code.**
+- The team brief has principal `team` and profile `routine`. It uses the normal team model credential.
+  It can call only `team_snapshot`. The personal brief can call only `digest_snapshot`.
+  Each event stores its snapshot. A delivery retry reads the same snapshot.
+  The team snapshot reads only team-visible lanes. It counts asks only on those lanes and never reads their questions.
+  It reads no personal connector. ChatGPT faults include only the team credential's sensor.
+- `brief_settings` has profile `person_dm` and personal scope. It changes only the person of the run.
+  The tool takes no person argument. Tainted runs and agent requests cannot use it.
 - The personal tools (`mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get`, `asks_digest`, `digest_snapshot`, `lanes_attention`) have `personal = true` and the profile `person_dm` only. `scope` in `illo/tools/checks.py` also refuses a personal tool in a tainted run or a run without a person principal.
 - `personal_call` in `illo/connectors/google.py` loads the grant of the run's person. It never takes an owner from the arguments.
 - An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
