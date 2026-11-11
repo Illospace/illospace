@@ -25,7 +25,7 @@ def test_smoke_parser():
 
 
 @pytest.mark.parametrize(
-    "mode", ["success", "missing", "limit", "fallback", "provider_error", "no_tool", "explicit_api"]
+    "mode", ["success", "missing", "limit", "fallback", "provider_error", "no_tool", "explicit_api", "team"]
 )
 async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_path, capsys, mode):
     app, token_backend = chatgpt_app
@@ -37,11 +37,12 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
     path = root / "illo.yaml"
     data = yaml.safe_load(path.read_text())
     data["brain"].update(
-        auth="chatgpt" if mode == "explicit_api" else "api_key",
+        auth="chatgpt" if mode in {"explicit_api", "team"} else "api_key",
         runtime="openai_responses",
         team_credential="ada",
         model="test-model",
         api_key_fallback=mode == "fallback",
+        person_credential="team" if mode == "team" else "own",
     )
     path.write_text(yaml.safe_dump(data))
     ctx.config.workspace_dir = root
@@ -112,12 +113,12 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
         "http://brain", "fake-brain-secret", transport=httpx.ASGITransport(app=service)
     )
     monkeypatch.setattr(chatgpt_smoke, "BrainClient", lambda url: client)
-    args = ["chatgpt", "smoke", "--person", "ada"]
+    args = ["chatgpt", "smoke", "--person", "ben" if mode == "team" else "ada"]
     if mode == "explicit_api":
         args += ["--auth", "api_key"]
     result = await execute(parser().parse_args(args), ctx.config)
     output = capsys.readouterr().out
-    assert result == (0 if mode in {"success", "fallback", "explicit_api"} else 1)
+    assert result == (0 if mode in {"success", "fallback", "explicit_api", "team"} else 1)
     assert "Model: test-model" in output and "Latency: " in output and "Token usage: " in output
     for secret in (
         "fake-old-token",
@@ -139,7 +140,7 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
             "api_key" if mode == "explicit_api" else "chatgpt"
         )
         assert brain_wires[0]["smoke"] is True
-        if mode in {"success", "fallback", "explicit_api"}:
+        if mode in {"success", "fallback", "explicit_api", "team"}:
             assert "Tool round trip: yes" in output and "total_tokens=6" in output
             assert f"Auth kind: {'api_key' if mode in {'fallback', 'explicit_api'} else 'chatgpt'}" in output
             assert any(

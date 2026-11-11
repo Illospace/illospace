@@ -160,6 +160,11 @@ async def execute(args, config: Config) -> int:
         elif args.command == "chatgpt":
             from illo.ledger.chatgpt import status
 
+            brain = load_workspace(config.workspace_dir).config.brain
+            print(
+                f"Person credential: {brain.person_credential}; "
+                f"team credential: {brain.team_credential or 'none'}"
+            )
             for row in await status(conn):
                 state = (
                     "broken"

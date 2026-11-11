@@ -32,7 +32,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.runtime` | Runtime sent to the brain service. Default: `claude`. |
 | `brain.model` | Model sent to the brain service. Default: `default`. |
 | `brain.auth` | `api_key` (default) or `chatgpt`. ChatGPT needs `openai_responses`. |
-| `brain.team_credential` | Explicit active person key for runs with no person. Required with `auth: chatgpt`. |
+| `brain.team_credential` | Active person key for team runs and person runs in `team` mode. Required with `auth: chatgpt`. |
+| `brain.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs and needs `auth: chatgpt`. |
 | `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
 | `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
@@ -56,6 +57,7 @@ brain:
   model: gpt-6.1-sol
   auth: chatgpt
   team_credential: ada
+  person_credential: own
   tainted_credential: none
   api_key_fallback: false
 ```
@@ -63,25 +65,41 @@ brain:
 Use an active person key from your own `people.yaml` for `team_credential`.
 If `ILLO_BRAIN_RUNTIME` is set, set it to `openai_responses` too. Environment overrides still take priority.
 The app refuses startup or reload if the effective runtime cannot use ChatGPT.
-Each person sends `connect my ChatGPT` in their own Slack DM with Illo.
+With the default `person_credential: own`, each person sends `connect my ChatGPT` in their own Slack DM with Illo.
 The DM gives a device code. ChatGPT sign-in needs no public Illo address.
 Send `connect my ChatGPT with a link` to use the OpenAI link and paste the final local address.
-Person DMs, agent requests, and person routines use that person's grant.
+In `own` mode, person DMs, agent requests, person routines, and morning briefs use that person's grant.
 Team channels and team routines use `team_credential`. They share that person's ChatGPT limit.
+The workspace owner can explicitly set `person_credential: team` to pay for all untainted runs with that sign-in.
+This choice changes only who pays for the model. Each run keeps the requester's authority and personal data scope.
+The requester's messages then pass through the ChatGPT account of the person in `team_credential`.
+Only that person needs to send `connect my ChatGPT` in a DM with Illo.
+Other members receive a reply that names the sign-in and says they do not need to connect.
+`ChatGPT status` names the shared sign-in and shows its state to any member.
+If that person sends `disconnect my ChatGPT`, Illo warns that all members lose the model sign-in.
+Other members can still disconnect their own unused grant. This does not disconnect the team grant.
 Tainted runs, signals, and outsiders get no model run by default, even with API fallback.
 Set `tainted_credential: team` to share the team credential and its limit.
 Set `tainted_credential: api_key` to use the API key for those runs.
 The default owner gets at most one notice per hour when Illo skips tainted runs.
-A missing personal grant never selects another person's grant.
+A missing personal grant never selects another person's grant in the default `own` mode.
+In `team` mode, a missing or broken team grant gives a reply that names the person who must repair it.
 The main app refreshes a token when it expires within five minutes.
 No grant means no run, unless `api_key_fallback` is `true`.
 A team run with no grant records a sensor error. The default owner gets at most one notice per hour.
+This notice also covers person runs in `team` mode. It goes to `default_owner`, even if the payer is another person.
+The notice is not sent when the API-key fallback supplies a credential.
 For a subscription limit, an allowed API retry resumes the current turn with its existing tool results.
 It does not repeat completed tool calls. The final answer says that the API key was used.
 The API key must exist in the brain's environment for this retry to work.
 Check that the provider's terms allow this use. An API key is the alternative.
 
 ## Check the ChatGPT connection
+
+`illo chatgpt status` prints the person credential mode and team person key on one line, then the grant states.
+For `openai_responses`, `runs.usage` records `auth_kind`, also when a run fails.
+When the run uses a ChatGPT grant, it also records the payer's key as `credential_person`.
+An API-key fallback records `auth_kind: api_key` and has no `credential_person`.
 
 After sign-in, run this command in the main app environment:
 

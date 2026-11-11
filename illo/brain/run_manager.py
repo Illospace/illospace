@@ -15,9 +15,10 @@ from illo.ledger import runs, sensors
 
 
 def credential_person(authority, workspace):
-    """Only an untainted person request uses that person's subscription."""
+    """Select the model payer without a change to the run's authority."""
     if (
-        not authority.tainted
+        workspace.config.brain.person_credential == "own"
+        and not authority.tainted
         and authority.profile in {"person_dm", "agent_request"}
         and authority.person_id is not None
         and authority.principal.startswith("person:")
@@ -44,8 +45,8 @@ async def provider_auth(
     personal = not authority.tainted and authority.profile in {"person_dm", "agent_request"}
     async with ctx.pool.connection() as conn:
         person = await one(conn, "SELECT id,key FROM people WHERE key=%s AND active", (key,))
-    # A mismatched authority cannot borrow the team grant, even with API fallback.
-    if personal and (
+    # In own mode, a mismatched authority cannot borrow the team grant, even with API fallback.
+    if personal and config.person_credential == "own" and (
         not person or person["id"] != authority.person_id or authority.principal != "person:" + key
     ):
         return None
@@ -67,7 +68,7 @@ async def provider_auth(
             )
         if pending:
             raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
-    if not personal:
+    if not personal or config.person_credential == "team":
         await chatgpt.notify_team_missing(ctx)
     return None
 
@@ -129,6 +130,8 @@ class RunManager:
                     "Illo did not run the model for this event. "
                     "No model credential is allowed for tainted runs."
                 )
+            if config.person_credential == "team":
+                return chatgpt.team_missing(ctx.workspace)
             return chatgpt.MISSING if authority.person_id is not None else (
                 "Illo did not run the model for this event. No model credential is available."
             )
@@ -164,6 +167,8 @@ class RunManager:
             # reports "api_key" after a fallback. A run that reaches its time limit during
             # a fallback keeps the first value.
             usage = {"auth_kind": auth.kind}
+            if auth.kind == "chatgpt":
+                usage["credential_person"] = credential_person(authority, ctx.workspace)
         failure = "internal"
         try:
             async with asyncio.timeout(config.timeout_s):
@@ -192,8 +197,16 @@ class RunManager:
                                 )
                                 if fresh is not None:
                                     auth = fresh
+                                    usage["auth_kind"] = auth.kind
+                                    if auth.kind == "api_key":
+                                        usage.pop("credential_person", None)
                                     request = request.model_copy(update={"provider_auth": auth})
                                     retry = True
+                                    break
+                                if config.person_credential == "team" and not authority.tainted:
+                                    final = chatgpt.team_missing(ctx.workspace)
+                                    error = "The team model sign-in is unavailable"
+                                    failure = "provider"
                                     break
                             if on_event:
                                 await on_event(item)
@@ -206,6 +219,8 @@ class RunManager:
                                 usage = {**usage, **item.usage}
                                 if item.api_key_fallback_failed:
                                     usage["auth_kind"] = "api_key"
+                                if usage.get("auth_kind") == "api_key":
+                                    usage.pop("credential_person", None)
                                 if auth.kind == "chatgpt" and item.code == "usage_limit_reached":
                                     from datetime import UTC, datetime
 
@@ -228,6 +243,8 @@ class RunManager:
                                 if turns > config.max_turns and item.usage.get("limited") is not True:
                                     raise RunFailure("limit")
                                 final, usage, status = item.text, {**usage, **item.usage}, "completed"
+                                if usage.get("auth_kind") == "api_key":
+                                    usage.pop("credential_person", None)
                                 break
                     if not retry:
                         break

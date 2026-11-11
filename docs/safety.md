@@ -42,7 +42,15 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
 - `complete` in `illo/connectors/oauth.py` checks the Google account against the person's addresses in `people.yaml` (`GoogleClient.verify_account` in `illo/connectors/google.py`). It revokes a grant for another account. The web callback needs the `__Host-` browser cookie that the start link set.
 - The pasted sign-in address works only as the only text of an untainted person DM (`claim` in `illo/connectors/oauth.py`).
-- ChatGPT model sign-in is separate from personal data tools. `credential_person` in `illo/brain/run_manager.py` selects the requester's grant for person runs. A run with no person uses only the configured team credential. Person DMs and person routines never borrow another member's grant.
+- ChatGPT model sign-in is separate from personal data tools. `credential_person` in `illo/brain/run_manager.py` selects the model payer.
+  With the default `brain.person_credential: own`, person runs use the requester's grant.
+  Person DMs and person routines never borrow another member's grant in this default mode.
+  A missing personal grant never selects another person's grant in this default mode.
+  The workspace owner can explicitly choose `person_credential: team` to use `team_credential` for all untainted person runs.
+  This changes only who pays for the model. The requester's messages then pass through that person's ChatGPT account.
+  The run keeps the requester's authority. Personal tools still use the requester's grants and data.
+  This includes mail, calendar, drive, asks, and `digest_snapshot`. An agent request still cannot read personal tools.
+  A run with no person uses only the configured team credential.
   Channel runs share the explicit team credential and that account's ChatGPT limit.
   Tainted and outsider model runs stop by default. `brain.tainted_credential` can allow `team` or `api_key`.
   Subscription mode requires `brain.team_credential` to name an active person.

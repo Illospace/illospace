@@ -1,10 +1,9 @@
-"""Manage only the ChatGPT sign-in of the person of this DM."""
+"""Check the ChatGPT sign-in that pays for this person's DM."""
 
 from dataclasses import replace
 
 from illo.connectors import chatgpt_oauth
 from illo.db import one
-from illo.ledger import chatgpt as grants
 from illo.tools.registry import Tool
 
 
@@ -24,7 +23,7 @@ async def owner(ctx):
 
 async def status(ctx, args):
     person = await owner(ctx)
-    return {"message": chatgpt_oauth.status_text((await grants.status(ctx.conn, person["id"]))[0])}
+    return {"message": await chatgpt_oauth.signin_status(ctx.conn, ctx.app.workspace, person["id"])}
 
 
 def register(registry):
@@ -36,7 +35,7 @@ def register(registry):
             lambda a: "person:<self>",
             False,
             handler,
-            description="Check your own ChatGPT sign-in in this DM.",
+            description="Check the ChatGPT sign-in used for this DM.",
             profiles=frozenset({"person_dm"}),
         )
 
