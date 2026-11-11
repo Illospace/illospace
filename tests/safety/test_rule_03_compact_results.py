@@ -25,7 +25,7 @@ async def test_rule_03_compact_private_read_marks_run(app, name):
                                 profile="person_dm", runtime="fake", model="fake")
         result = await ctx.registry.call(ToolContext(conn,run,ctx),name,{})
         assert result["decision"] == "allow"
-        assert "ada private" in result["result"] and "ben private" not in result["result"]
+        assert "ada private" in str(result["result"]) and "ben private" not in str(result["result"])
         assert (await runs.get(conn,run["id"]))["personal_read"]
         assert "private" not in result or result["private"] is not True
         write = await ctx.registry.call(ToolContext(conn,run,ctx),"slack_post_channel",
@@ -62,7 +62,7 @@ async def test_rule_03_attention_person_routine_and_team_visibility(app):
                            state="working",visibility="private",owner_person_id=ada["id"])
         for principal, profile, person_id, expected in (
             ("team","team_channel",None,"deny"), ("person:ada","agent_request",ada["id"],"deny"),
-            ("team","routine",None,"allow"), ("person:ada","routine",ada["id"],"allow")):
+            ("team","routine",None,"deny"), ("person:ada","routine",ada["id"],"deny")):
             run = await runs.create(conn,principal=principal,person_id=person_id,profile=profile,
                                     runtime="fake",model="fake")
             result = await ctx.registry.call(ToolContext(conn,run,ctx),"lanes_attention",{})
@@ -94,4 +94,4 @@ async def test_rule_03_hidden_rows_do_not_change_compact_text_or_counts(app, pri
         assert after["decision"] == before["decision"] == "allow"
         assert after["result"] == before["result"]
         # The digest always marks a personal read, including an empty result.
-        assert (await runs.get(conn, run["id"]))["personal_read"] == (name == "asks_digest")
+        assert (await runs.get(conn, run["id"]))["personal_read"] == (name in {"asks_digest", "lanes_attention"})

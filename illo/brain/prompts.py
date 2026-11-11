@@ -108,7 +108,7 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
             conn, owner_person_id=authority.person_id, principal=authority.principal
         )
         open_asks = len(rows)
-    return build(
+    prompt = build(
         workspace,
         authority.principal,
         authority.profile,
@@ -117,6 +117,12 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
         event_channel=event.channel,
         open_asks=open_asks,
     )
+    if event.channel == "digest":
+        prompt += (
+            "\n\nThis run writes a morning brief. Follow its greeting and format instructions. "
+            "Call digest_snapshot. Use only that snapshot. Return the message as final text."
+        )
+    return prompt
 
 
 def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks) -> str:

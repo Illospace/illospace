@@ -17,7 +17,10 @@ class Compact:
 
 def short(value, limit):
     text = " ".join(str(value or "").split())
-    return text if len(text) <= limit else text[:limit-1] + "…"
+    if len(text) <= limit:
+        return text
+    prefix = text[:limit - 1]
+    return prefix.rsplit(" ", 1)[0] + "…" if " " in prefix else "…"
 
 
 def line(*values):

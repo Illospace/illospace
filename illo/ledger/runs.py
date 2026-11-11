@@ -59,7 +59,8 @@ async def verify_token(conn: Connection, token: str, *, lock: bool = False) -> d
     return await one(
         conn,
         """
-        SELECT r.* FROM runs r
+        SELECT r.*, (SELECT e.channel FROM events e WHERE e.id=r.event_id) AS event_channel
+        FROM runs r
         WHERE token_hash = %s AND status = 'running' AND token_expires_at > clock_timestamp()
           AND (person_id IS NULL OR EXISTS (SELECT 1 FROM people p WHERE p.id = r.person_id AND p.active))
     """

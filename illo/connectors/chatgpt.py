@@ -177,7 +177,7 @@ class ChatGPTClient:
         )
 
 
-async def access(ctx, person, *, force=False, rejected_token=None):
+async def access(ctx, person, *, force=False, rejected_token=None, notify=True):
     """Commit a rotation before a run can fail. Serialize refreshes across app processes."""
     auth = None
 
@@ -233,7 +233,7 @@ async def access(ctx, person, *, force=False, rejected_token=None):
     except asyncio.CancelledError:
         await work
         raise
-    if auth is None:
+    if auth is None and notify:
         await notify_broken(ctx, person)
     return auth
 

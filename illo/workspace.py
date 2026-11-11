@@ -239,6 +239,7 @@ class Workspace(Model):
     connectors: list[Connector]
     notes: list[Note]
     fingerprint: str = ""
+    digest_instructions: str | None = None
 
     def matching_rules(
         self, principal: str, profile: str, channel_id: str | None
@@ -388,6 +389,8 @@ def load_workspace(root: Path | str) -> Workspace:
         ("routines/*.md", Routine, routines),
     ):
         for path in sorted(root.glob(pattern)):
+            if model is Routine and path.name == "digest.md":
+                continue
             target.append(
                 _model(
                     model,
@@ -470,8 +473,16 @@ def load_workspace(root: Path | str) -> Workspace:
             for p in rule.principals
         ):
             raise WorkspaceError(f"{root / rule.path}: principals: unknown principal")
+    digest_path = root / "routines/digest.md"
+    digest_instructions = None
+    if digest_path.exists():
+        text = _read(digest_path)
+        digest_instructions = _front(digest_path)["body"] if text.startswith("---\n") else text.strip()
+    if digest_instructions is None:
+        digest_instructions = next((r.body for r in routines if r.name == "daily-digest"), None)
     workspace = Workspace(
         root=root,
+        digest_instructions=digest_instructions,
         people=people,
         config=config,
         rules=rules,

@@ -21,7 +21,8 @@ def test_complete_example(workspace):
     assert len(workspace.people) == 3
     assert len(workspace.rules) == 2
     assert len(workspace.skills) == 1
-    assert len(workspace.routines) == 2
+    assert len(workspace.routines) == 1
+    assert "digest_snapshot" in workspace.digest_instructions
     assert len(workspace.connectors) == 1
     assert len(workspace.notes) == 1
     assert workspace.config.slack.channels[1].mode == "coordinator"
@@ -52,10 +53,18 @@ def test_bad_front_matter_names_file(example):
 
 
 def test_bad_routine_schedule(example):
-    path = example / "routines/digest.md"
-    path.write_text(path.read_text().replace("0 9 * * 1-5", "not cron"))
+    path = example / "routines/bad.md"
+    path.write_text("---\nname: bad\nschedule: not cron\nprincipal: team\ndestination: none\n---\nRead the lanes.")
     with pytest.raises(WorkspaceError, match="schedule"):
         load_workspace(example)
+
+
+@pytest.mark.parametrize("front", ["", "---\nname: daily-digest\nschedule: ignored\n---\n"])
+def test_digest_instructions_accept_optional_front_matter(example, front):
+    (example / "routines/digest.md").write_text(front + "Write for {name}.")
+    loaded = load_workspace(example)
+    assert loaded.digest_instructions == "Write for {name}."
+    assert all(r.path != "routines/digest.md" for r in loaded.routines)
 
 
 def test_duplicate_identity(example):

@@ -1,13 +1,12 @@
----
-name: daily-digest
-schedule: '0 9 * * 1-5'
-destination: person:ada
-principal: person:ada
----
-Write the morning digest for Ada.
+Write the morning brief for {name}. Call `digest_snapshot` first and use only its data.
 
-1. Read the open asks of Ada and the active lanes of the team.
-2. First line: "<N> need you · <M> run fine". If N is 0: "Nothing needs you · <M> run fine".
-3. Then one line for each open ask: the question, the lane, the age, and the link.
-4. Then the lanes that are blocked or stale, one line each, with the owner.
-5. Leave out each part that is empty. Do not add a greeting or a summary.
+Write like a colleague who respects {name}'s time.
+
+- Start with "Morning, {name}." Then say the one thing that matters most, with the reason and the action.
+- Order: first what needs {name}, then what is stuck, then what finished.
+- One short sentence or one bullet for each item. Make the title a link. Rewrite a raw title into plain words: remove prefixes such as "docs(agents):" and tracker numbers that add nothing.
+- Maximum 8 lines. If a group has more than 3 items, give the count and the 3 most important ones.
+- Write "Nothing needs you" only if `needs_you` and `stuck` are both empty.
+- Mention a fault only if `faults` is not empty. Say what does not work and what {name} can do. Never show a sensor key or an internal id.
+- If nothing happened, send one line: "Morning, {name}. Nothing needs you, and nothing changed since the last brief."
+- No headers, no table, no counts line.

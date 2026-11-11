@@ -20,8 +20,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `slack.channels[].visibility` | `team` or `private`. Default: `team`. Illo also asks Slack. A private channel starts no run and enters no index. |
 | `slack.channels[].rule_files` | Rule paths relative to the workspace. Default: all matching rules. |
 | `github.repositories` | List of `owner/repository` names to follow. Default: empty. |
-| `digest.schedule` | Five-field cron expression in the team time zone. Default: `0 9 * * 1-5`. |
-| `digest.destination` | `person:<key>` or `channel:<id>`. Required. |
+| `digest.schedule` | Five-field cron expression in each person's time zone. Default: `0 9 * * 1-5`. |
+| `digest.destination` | Legacy destination setting. Required. The morning brief goes to each active person. |
 | `stale_minutes` | Source limits in minutes. All values must be positive. |
 | `stale_minutes.t3` | Default: 30. |
 | `stale_minutes.claude-code` | Default: 30. |
@@ -182,3 +182,44 @@ and [GPT-4o Mini Transcribe](https://developers.openai.com/api/docs/models/gpt-4
 The loader checks files every `ILLO_WORKSPACE_CHECK_SECONDS` seconds.
 `illo reload` requests an immediate reload. It needs `ILLO_RELOAD_TOKEN` and a loopback URL.
 File paths in channel rules must match a loaded rule. Destinations must name a configured person or channel.
+
+
+## Morning brief and routine time zones
+
+The built-in digest sends one morning brief per person per local day.
+It uses the person's `timezone` in `people.yaml` and `digest.schedule` in `illo.yaml`.
+A time zone change takes effect after reload. It does not repeat a brief on the same local day.
+
+`routines/digest.md` supplies the model instructions for this brief. Front matter is optional.
+Illo uses only the body. The name, schedule, principal, and destination in old front matter have no effect.
+A routine named `daily-digest` also supplies instructions when `routines/digest.md` is absent.
+The scheduler never runs either file as a separate routine. The built-in brief owns delivery.
+Use `{name}` for the person's name. Without either file, Illo uses its default instructions.
+
+The run uses the same personal grant and model credential rules as a person routine.
+It can call only `digest_snapshot`. That tool returns the snapshot that the brief starts with.
+It cannot send messages or change data. The gateway captures the final reply.
+The digest sends that reply with its normal daily delivery key.
+A model failure, timeout, or missing credential gives a plain brief from the same snapshot.
+The brief suppresses a separate ChatGPT sign-in notice. Other runs keep their normal sign-in notices.
+A failed send keeps the same delivery key for a retry.
+
+In a DM, `digest_snapshot`, `asks_digest`, and `lanes_attention` return the same personal data.
+They include open asks, failed answer deliveries, and lanes that need review.
+They also include blocked work, stale work, finished work, and real service faults.
+A working lane becomes stale only after its source's configured `stale_minutes` limit.
+The snapshot keeps full titles. It returns up to 20 finished lanes and the full finished count.
+The personal snapshot tools bypass the generic text limit to keep the JSON complete.
+
+Event sensors can stay idle without a fault. A sensor error after the last success is a fault.
+Timer sensors record `expected_every_s` when they report.
+A timer sensor becomes silent after three intervals, with a minimum of 30 minutes.
+Scheduled jobs record their actual interval. Collector reports default to 300 seconds and can set another interval.
+After an upgrade, a timer records its interval on its next report.
+The snapshot keeps raw sensor keys for operators. The brief uses plain fault sentences.
+
+Other routines use the destination person's time zone for a person destination.
+A person principal with no channel destination also uses that person's time zone.
+A channel destination uses the team time zone. This rule takes priority over the principal.
+Reload recalculates the next run after a time zone change.
+It suppresses another person run on the last run's local day after that change.

@@ -27,7 +27,7 @@ def credential_person(authority, workspace):
 
 
 async def provider_auth(
-    ctx, authority, runtime, *, force=False, rejected_token=None, auth_kind=None
+    ctx, authority, runtime, *, force=False, rejected_token=None, auth_kind=None, notify=True
 ):
     config = ctx.workspace.config.brain
     if (auth_kind or config.auth) == "api_key":
@@ -50,7 +50,7 @@ async def provider_auth(
     ):
         return None
     auth = (
-        await chatgpt.access(ctx, person, force=force, rejected_token=rejected_token)
+        await chatgpt.access(ctx, person, force=force, rejected_token=rejected_token, notify=notify)
         if person
         else None
     )
@@ -107,10 +107,14 @@ class RunManager:
         runtime = ctx.config.brain_runtime or config.runtime
         model = ctx.config.brain_model or config.model
         try:
-            auth = await provider_auth(ctx, authority, runtime)
+            auth = await provider_auth(ctx, authority, runtime, notify=event.channel != "digest")
         except chatgpt.TemporaryRefresh:
+            if event.channel == "digest":
+                raise RunFailure("provider") from None
             return chatgpt.TEMPORARY
         if auth is None:
+            if event.channel == "digest":
+                raise RunFailure("provider")
             if authority.tainted or authority.profile == "tainted":
                 async with ctx.pool.connection() as conn:
                     row = await runs.create(
@@ -184,6 +188,7 @@ class RunManager:
                                     runtime,
                                     force=True,
                                     rejected_token=auth.access_token.get_secret_value(),
+                                    notify=event.channel != "digest",
                                 )
                                 if fresh is not None:
                                     auth = fresh
@@ -229,6 +234,10 @@ class RunManager:
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
         except chatgpt.TemporaryRefresh:
+            if event.channel == "digest":
+                error = "The model sign-in service is unavailable"
+                failure = "provider"
+                raise RunFailure("provider") from None
             failure = "provider"
             final, error = chatgpt.TEMPORARY, "The model sign-in service is unavailable"
         except (TimeoutError, httpx.TimeoutException):
@@ -251,4 +260,6 @@ class RunManager:
                     await sensors.ok(conn, "brain")
                 else:
                     await sensors.error(conn, "brain", error or "The brain run failed")
+        if event.channel == "digest" and status != "completed":
+            raise RunFailure(failure)
         return final

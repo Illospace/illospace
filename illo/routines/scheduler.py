@@ -9,7 +9,7 @@ from croniter import croniter
 
 from illo.db import all_rows, one
 from illo.gateway.events import InboundEvent
-from illo.ledger import audit, claims, drafts, kv, sensors
+from illo.ledger import audit, claims, drafts, kv, people, sensors
 from illo.slackapi import dm_person
 
 log = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class Scheduler:
     async def setup(self) -> None:
         """Keep the scheduler compatible with the module setup contract."""
 
-    async def _call(self, fn):
+    async def _call(self, fn, seconds=None):
         name = f"job:{fn.__module__}.{fn.__name__}"
         try:
             await fn()
@@ -31,13 +31,13 @@ class Scheduler:
             log.error("Scheduled job failed: %s", name)
             try:
                 async with self.ctx.pool.connection() as conn:
-                    await sensors.error(conn, name, "The scheduled job failed")
+                    await sensors.error(conn, name, "The scheduled job failed", expected_every_s=seconds)
             except Exception:
                 log.error("Could not record the failed job sensor: %s", name)
         else:
             try:
                 async with self.ctx.pool.connection() as conn:
-                    await sensors.ok(conn, name)
+                    await sensors.ok(conn, name, expected_every_s=seconds)
             except Exception:
                 log.error("Could not record the job sensor: %s", name)
 
@@ -49,7 +49,7 @@ class Scheduler:
         async def loop():
             while True:
                 await asyncio.sleep(seconds)
-                await self._call(fn)
+                await self._call(fn, seconds)
 
         task = asyncio.create_task(loop())
         self.tasks.append(task)
@@ -65,7 +65,7 @@ class Scheduler:
                 now = datetime.now(ZoneInfo(self.ctx.workspace.config.timezone))
                 next_time = croniter(expr, now).get_next(datetime)
                 await asyncio.sleep(max(0, next_time.timestamp() - now.timestamp()))
-                await self._call(fn)
+                await self._call(fn, (croniter(expr, next_time).get_next(datetime) - next_time).total_seconds())
 
         task = asyncio.create_task(loop())
         self.tasks.append(task)
@@ -172,9 +172,23 @@ def routine_destination(ctx, value: str) -> str:
 async def tick_routines(ctx, now: datetime | None = None):
     """Commit each scheduled claim before the gateway starts its run."""
     now = (now or datetime.now(UTC)).astimezone(UTC)
-    timezone = ctx.workspace.config.timezone
+    from illo.routines.digest import is_digest
+
     for routine in list(ctx.workspace.routines):
-        identity = f"{routine.schedule}|{timezone}|{routine.enabled}"
+        if is_digest(routine):
+            continue
+        destination = routine_destination(ctx, routine.destination)
+        timezone = ctx.workspace.config.timezone
+        # A channel keeps the team time zone, even with a person principal.
+        target = destination if destination.startswith("person:") else routine.principal
+        personal = not destination.startswith("channel:") and target.startswith("person:")
+        if personal:
+            async with ctx.pool.connection() as conn:
+                person = await people.get(conn, target[7:])
+            if not person:
+                continue
+            timezone = person["timezone"]
+        identity = f"{routine.schedule}|{timezone}|{routine.enabled}|{routine.principal}|{destination}"
         async with ctx.pool.connection() as conn:
             await conn.execute(
                 """
@@ -187,6 +201,10 @@ async def tick_routines(ctx, now: datetime | None = None):
             )
             previous = await kv.get(conn, "routine-config:" + routine.name)
             scheduled = state["next_run_at"]
+            zone_changed = previous is not None and previous.split("|")[1] != timezone
+            if personal and zone_changed and state["last_run_at"]:
+                await kv.set(conn, "routine-zone-day:" + routine.name,
+                             state["last_run_at"].astimezone(ZoneInfo(timezone)).date().isoformat())
             if previous != identity or scheduled is None:
                 scheduled = next_due(
                     routine.schedule,
@@ -208,7 +226,11 @@ async def tick_routines(ctx, now: datetime | None = None):
                 continue
             next_time = next_due(routine.schedule, now, timezone)
             key = f"routine:{routine.name}:{scheduled.isoformat()}"
-            claimed = await claims.take(conn, key, None, "Scheduled routine")
+            same_day = bool(
+                personal and await kv.get(conn, "routine-zone-day:" + routine.name)
+                == scheduled.astimezone(ZoneInfo(timezone)).date().isoformat()
+            )
+            claimed = not same_day and await claims.take(conn, key, None, "Scheduled routine")
             late = now - scheduled >= timedelta(hours=6)
             await conn.execute(
                 """
@@ -216,7 +238,7 @@ async def tick_routines(ctx, now: datetime | None = None):
             """,
                 (
                     next_time,
-                    scheduled,
+                    scheduled if claimed else state["last_run_at"],
                     ("skipped" if late else "running") if claimed else state["last_status"],
                     routine.name,
                 ),

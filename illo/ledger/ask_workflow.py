@@ -1,7 +1,5 @@
 """Ledger queries for cards, routing, and the decision log."""
 
-from psycopg.types.json import Jsonb
-
 from illo.db import Connection, all_rows, one
 from illo.ledger import asks, items
 
@@ -157,47 +155,10 @@ async def record_decisions(conn: Connection):
 
 
 async def digest_data(conn: Connection, person, now):
-    """Only include this person's private lanes. Shared digests never use this snapshot."""
-    person = dict(person)
-    person["now"] = now
-    person["asks"] = await all_rows(
-        conn,
-        """
-        SELECT a.*, l.title AS lane_title FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
-        WHERE a.owner_person_id=%s AND a.state='open'
-        AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s)
-        ORDER BY a.due_at NULLS LAST,a.id
-    """,
-        (person["id"], person["id"]),
-    )
-    person["running"] = (
-        await one(
-            conn,
-            "SELECT count(*) AS n FROM lanes WHERE owner_person_id=%s AND (state='review' OR (state='working' AND last_signal_at>=%s - COALESCE((%s::jsonb ->> source)::integer,30)*interval '1 minute'))",
-            (person["id"], now, Jsonb(person.pop("stale_minutes", {}))),
-        )
-    )["n"]
-    state = await one(
-        conn, "SELECT last_run_at FROM routine_state WHERE key=%s", (f"digest:{person['key']}",)
-    )
-    person["finished"] = await all_rows(
-        conn,
-        "SELECT * FROM lanes WHERE owner_person_id=%s AND state IN ('done','failed') AND closed_at>COALESCE(%s,%s-interval '1 day') ORDER BY closed_at DESC LIMIT 5",
-        (person["id"], state["last_run_at"] if state else None, now),
-    )
-    person["sensors"] = await all_rows(
-        conn,
-        "SELECT * FROM sensors WHERE last_ok_at IS NULL OR last_error_at>last_ok_at OR last_ok_at<%s-interval '30 minutes' ORDER BY key",
-        (now,),
-    )
-    person["failed"] = await all_rows(
-        conn,
-        """SELECT a.id,a.question FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
-        WHERE a.owner_person_id=%s AND a.delivery_state='failed'
-        AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s) ORDER BY a.id""",
-        (person["id"], person["id"]),
-    )
-    return person
+    """Use the same snapshot as the personal read tool."""
+    from illo.ledger.digest_snapshot import build
+
+    return await build(conn, person, now, person.get("stale_minutes"))
 
 
 async def asks_to_check(conn: Connection):

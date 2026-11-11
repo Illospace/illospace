@@ -65,11 +65,12 @@ async def poll(ctx) -> None:
         await refresh_statuses(ctx)
     except Exception:
         async with ctx.pool.connection() as conn:
-            await sensors.error(conn, "github", "The GitHub poll failed")
+            await sensors.error(conn, "github", "The GitHub poll failed",
+                                expected_every_s=ctx.workspace.config.github.poll_seconds)
         raise
     else:
         async with ctx.pool.connection() as conn:
-            await sensors.ok(conn, "github")
+            await sensors.ok(conn, "github", expected_every_s=ctx.workspace.config.github.poll_seconds)
 
 
 async def perform_draft(ctx, draft: dict) -> dict:

@@ -167,9 +167,9 @@ async def asks_cancel_mine(ctx, args):
 
 
 async def asks_digest(ctx, args):
-    from illo.tools.lanes import lanes_attention
+    from illo.tools.digest import digest_snapshot_read
 
-    return await lanes_attention(ctx, args)
+    return await digest_snapshot_read(ctx, args)
 
 
 def register(registry):
