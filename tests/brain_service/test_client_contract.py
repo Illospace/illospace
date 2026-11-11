@@ -56,7 +56,11 @@ async def test_real_gateway_mcp_catalog(app, rpc_token, monkeypatch):
 
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "acme-service-secret")
     run, token = rpc_token
-    expected = [tool["name"] for tool in app.state.ctx.registry.list_tools(run)]
+    from illo.tools.registry import ToolContext
+
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        expected = [tool["name"] for tool in await ctx.registry.list_tools_for(ToolContext(conn, run, ctx))]
     async with serve(app) as gateway_base, serve(create_app()) as brain_base:
         request = RunRequest(
             run_id=run["id"],

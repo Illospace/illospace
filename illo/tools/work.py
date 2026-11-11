@@ -32,7 +32,7 @@ LABELS = {
 # repository still accepts the ticket, so the ticket exists and has no owner.
 NOT_ASSIGNED = "GitHub refused the assignment. The ticket has no owner."
 # Another failure, for example a server error, does not show if GitHub did the assignment.
-NOT_CONFIRMED = "The ticket was created. Illo could not confirm the assignment."
+NOT_CONFIRMED = 'The ticket was created. I could not confirm the assignment.'
 
 
 class StartArgs(CreateArgs):

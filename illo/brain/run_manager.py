@@ -128,13 +128,12 @@ class RunManager:
                         conn, row["id"], usage={"skipped": "no_model_credential"}
                     )
                 return (
-                    "Illo did not run the model for this event. "
-                    "No model credential is allowed for tainted runs."
+                    'I did not answer this message. No model sign-in is allowed for messages from outside the team.'
                 )
             if config.person_credential == "team":
                 return chatgpt.team_missing(ctx.workspace)
             return chatgpt.MISSING if authority.person_id is not None else (
-                "Illo did not run the model for this event. No model credential is available."
+                'I did not answer this message. I have no model sign-in for it.'
             )
         async with ctx.pool.connection() as conn:
             row = await runs.create(

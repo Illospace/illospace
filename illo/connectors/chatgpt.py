@@ -26,7 +26,7 @@ REDIRECT_URI = "http://127.0.0.1:1455/auth/callback"
 SCOPES = "openid profile email offline_access"
 CONNECTED = "ChatGPT is connected as {email}. I use your subscription for your requests."
 MISSING = 'I have no model sign-in for you yet. Say "connect my ChatGPT".'
-BROKEN = 'Your ChatGPT sign-in for Illo stopped working. Say "connect my ChatGPT" to sign in again.'
+BROKEN = 'Your ChatGPT sign-in stopped working, so I cannot answer you. Say "connect my ChatGPT" to sign in again.'
 
 
 TEMPORARY = "I could not reach the model sign-in service. Try again in a minute."
@@ -41,13 +41,13 @@ def team_person(workspace):
 
 def team_missing(workspace):
     return (
-        f'Illo has no model sign-in now. {team_person(workspace).name} must send '
-        '"connect my ChatGPT" in a DM with Illo.'
+        f'I have no model sign-in now, so I cannot answer. {team_person(workspace).name} can fix this: '
+        'send "connect my ChatGPT" to me in a DM.'
     )
 
 
 def team_signin(workspace):
-    return f"Illo uses the sign-in of {team_person(workspace).name} for all runs."
+    return f"I use the ChatGPT sign-in of {team_person(workspace).name} for all runs."
 
 
 class TemporaryRefresh(ValueError):
@@ -303,9 +303,9 @@ async def notify_broken(ctx, person):
 async def notify_team_missing(ctx, *, tainted=False):
     key = "chatgpt:tainted" if tainted else "chatgpt:team"
     message = (
-        "Illo skips tainted model runs. Set brain.tainted_credential to team or api_key to allow them."
+        'I skip model runs for messages from outside the team. Set brain.tainted_credential to team or api_key to allow them.'
         if tainted
-        else "Illo has no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+        else 'I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key.'
     )
     if not tainted and ctx.workspace.config.brain.person_credential == "team":
         message = team_missing(ctx.workspace)

@@ -5,4 +5,4 @@ LIMIT_INSTRUCTION = (
     "Say plainly what you did not check."
 )
 LIMIT_RESULT = "The tool limit is reached. This tool did not run."
-NO_FINAL_ANSWER = "I reached the tool limit. The model did not provide a final answer."
+NO_FINAL_ANSWER = 'I reached my step limit before I had an answer. Ask again with a narrower question.'

@@ -32,23 +32,23 @@ def fault_text(key, *, silent=False, names=None):
         name = (names or {}).get(key.partition(":")[2], "a team member")
         return f"The ChatGPT sign-in of {name} failed."
     if family == "job":
-        return "A background job of Illo stopped." if silent else "A background job of Illo failed."
+        return 'One of my background jobs stopped.' if silent else 'One of my background jobs failed.'
     return {
         "brain": "The model service failed its last run.",
-        "draft": "Illo could not confirm the delivery of a draft.",
-        "drafts": "Illo could not send or update a draft card.",
-        "asks": "Illo could not send or update an ask card.",
+        "draft": 'I could not confirm the delivery of a draft.',
+        "drafts": 'I could not send or update a draft card.',
+        "asks": 'I could not send or update an ask card.',
         "github": "The last GitHub request failed.",
-        "slack": "Illo could not confirm the Slack connection or channel access.",
-        "heartbeat": "Illo stopped its regular health report.",
+        "slack": 'I could not confirm the Slack connection or channel access.',
+        "heartbeat": 'My regular health report stopped.',
         "collector": "A collector stopped its regular report."
         if silent
         else "A collector failed its last report.",
         "connector": "A connected service failed its last request.",
-        "email": "Illo could not read email.",
-        "notes": "Illo could not update a note.",
-        "workspace": "Illo could not save a workspace change.",
-    }.get(family, "An Illo service failed its last check.")
+        "email": 'I could not read email.',
+        "notes": 'I could not update a note.',
+        "workspace": 'I could not save a workspace change.',
+    }.get(family, 'One of my services failed its last check.')
 
 
 def sensor_fault(row, now, names=None, since=None):

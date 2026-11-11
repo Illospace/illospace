@@ -3,10 +3,10 @@
 import httpx
 
 FAILURE_TEXTS = {
-    "limit": "Illo could not finish this request. The run reached its limit. Please try again.",
-    "timeout": "Illo could not finish this request. The run reached its time limit. Please try again.",
-    "provider": "Illo could not finish this request. The model provider failed. Please try again.",
-    "internal": "Illo could not finish this request. An internal error occurred. Please try again.",
+    "limit": 'I could not finish this: I reached my step limit. Ask again, or ask for less.',
+    "timeout": 'I could not finish this in time. Ask again, or ask for less.',
+    "provider": 'I could not finish this: the model service failed. Ask again in a minute.',
+    "internal": 'I could not finish this because of an internal error. Ask again in a minute.',
 }
 
 

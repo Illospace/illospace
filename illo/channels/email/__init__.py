@@ -60,8 +60,7 @@ async def unknown_sender(ctx, event, authority):
         await dm_person(
             ctx,
             ctx.workspace.config.default_owner,
-            "An email from an unknown or unverified sender waits in the mailbox. "
-            "Illo did not reply. Subject: " + event.payload.get("subject", ""),
+            'An email from an unknown or unverified sender waits in the mailbox. I did not reply. Subject: ' + event.payload.get("subject", ""),
         )
     return ""
 

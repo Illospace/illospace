@@ -53,7 +53,7 @@ def test_sensor_fault_rules():
     timer = {**base, "key": "job:example", "expected_every_s": 60}
     stopped = {**timer, "last_error_at": NOW - timedelta(hours=30)}
     assert sensor_fault(stopped, NOW, since=NOW - timedelta(hours=24)) is not None
-    assert sensor_fault(timer, NOW)["what"] == "A background job of Illo stopped."
+    assert sensor_fault(timer, NOW)["what"] == "One of my background jobs stopped."
     assert sensor_fault({**timer, "last_ok_at": NOW - timedelta(minutes=29)}, NOW) is None
     assert sensor_fault({**timer, "expected_every_s": 86400}, NOW) is None
     assert (

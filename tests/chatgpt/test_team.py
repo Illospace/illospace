@@ -84,7 +84,7 @@ async def test_team_missing_names_payer_and_caps_owner_notice(
         await save_grant(ctx, expires=0)
         backend.broken = True
     results = [await replay(sender="U_ACME_BEN") for _ in range(2)]
-    expected = 'Illo has no model sign-in now. Ada must send "connect my ChatGPT" in a DM with Illo.'
+    expected = 'I have no model sign-in now, so I cannot answer. Ada can fix this: send "connect my ChatGPT" to me in a DM.'
     notices = [call for call in slack_client.calls if call.get("text") == expected]
     if fallback:
         assert all(request.provider_auth.kind == "api_key" for request in fake_brain.requests)
@@ -128,21 +128,21 @@ async def test_team_dm_commands(team_chatgpt_app, replay, fake_brain, key, comma
     if command.startswith("connect"):
         if key == "ben":
             assert result["text"] == (
-                "Illo uses the sign-in of Ada for all runs. You do not need to connect your ChatGPT."
+                "I use the ChatGPT sign-in of Ada for all runs. You do not need to connect your ChatGPT."
             )
             assert not states and not backend.requests
         else:
             assert [state["person_id"] for state in states] == [ada["id"]]
             assert ("one-time code" if command == "connect my ChatGPT" else "/oauth/authorize?") in result["text"]
     elif command == "ChatGPT status":
-        assert result["text"].startswith("Illo uses the sign-in of Ada for all runs. ChatGPT is connected.")
+        assert result["text"].startswith("I use the ChatGPT sign-in of Ada for all runs. ChatGPT is connected.")
     elif key == "ada":
         assert not ada_grant
         assert result["text"] == "ChatGPT is disconnected from Illo. Illo now has no model sign-in for all members."
     else:
         assert ada_grant
         assert result["text"] == (
-            "Your ChatGPT sign-in is disconnected from Illo. Illo uses the sign-in of Ada for all runs."
+            "Your ChatGPT sign-in is disconnected from Illo. I use the ChatGPT sign-in of Ada for all runs."
         )
 
 
@@ -156,7 +156,7 @@ async def test_team_status_reads_payers_grant(team_chatgpt_app, replay, mode):
             await conn.execute("UPDATE connector_grants SET broken_at=clock_timestamp() WHERE person_id=%s", (ada["id"],))
     for key in ("ada", "ben"):
         result = await replay(sender="U_ACME_" + key.upper(), text="ChatGPT status")
-        assert result["text"] == "Illo uses the sign-in of Ada for all runs. " + (
+        assert result["text"] == "I use the ChatGPT sign-in of Ada for all runs. " + (
             "The ChatGPT sign-in stopped working." if mode == "broken" else "ChatGPT is not connected."
         )
 
@@ -212,7 +212,7 @@ async def test_team_status_tool_reads_payers_grant(team_chatgpt_app, replay, fak
     result = read_result(fake_brain.results[0])
     assert result["decision"] == "allow"
     assert result["result"]["message"].startswith(
-        "Illo uses the sign-in of Ada for all runs. ChatGPT is connected."
+        "I use the ChatGPT sign-in of Ada for all runs. ChatGPT is connected."
     )
 
 
