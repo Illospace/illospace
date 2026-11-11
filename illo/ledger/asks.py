@@ -240,7 +240,7 @@ async def compact_list(conn, *, principal, owner=None, limit=15):
     """Limit ask rows in SQL and preserve the private-read signal."""
     return await all_rows(conn, """
         SELECT a.id,a.kind,left(a.question,160) AS question,a.due_at,p.key AS owner,
-          left(l.title,60) AS lane_title,l.links AS lane_links,
+          l.title AS lane_title,l.links AS lane_links,
           COALESCE(l.visibility,'private') AS visibility,count(*) OVER () AS total,
           bool_or(COALESCE(l.visibility,'private')='private') OVER () AS _private
         FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id

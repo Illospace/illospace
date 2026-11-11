@@ -37,7 +37,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Bad case.** Ben asks "what is in Ada's mail about Globex?". Without the rule, Illo could read Ada's mailbox for Ben.
 
 **Code.**
-- The personal tools (`mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get`, `asks_digest`) have `personal = true` and the profile `person_dm` only. `scope` in `illo/tools/checks.py` also refuses a personal tool in a tainted run or a run without a person principal.
+- The personal tools (`mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get`, `asks_digest`, `digest_snapshot`, `lanes_attention`) have `personal = true` and the profile `person_dm` only. `scope` in `illo/tools/checks.py` also refuses a personal tool in a tainted run or a run without a person principal.
 - `personal_call` in `illo/connectors/google.py` loads the grant of the run's person. It never takes an owner from the arguments.
 - An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
 - `complete` in `illo/connectors/oauth.py` checks the Google account against the person's addresses in `people.yaml` (`GoogleClient.verify_account` in `illo/connectors/google.py`). It revokes a grant for another account. The web callback needs the `__Host-` browser cookie that the start link set.

@@ -479,6 +479,7 @@ class Collector:
                     "label": self.config.machine,
                     "version": VERSION,
                     "threads_seen": len(threads),
+                    "expected_every_s": self.config.poll_seconds,
                 },
             },
         )

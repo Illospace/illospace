@@ -3,8 +3,8 @@
 from pydantic import Field
 
 from illo.db import all_rows
-from illo.ledger import asks, lanes
-from illo.tools._format import Compact, ask, body, lane, line, relative, rows
+from illo.ledger import lanes
+from illo.tools._format import Compact, body, lane, line, relative, rows
 from illo.tools.registry import Arguments, Tool
 
 
@@ -66,22 +66,16 @@ async def lanes_mine(ctx, args):
 
 
 async def lanes_attention(ctx, args):
-    if not ctx.principal.startswith("person:"):
-        return Compact("A personal attention list needs a person principal.")
-    key = ctx.principal[7:]
-    waiting = await asks.compact_list(ctx.conn, principal=ctx.principal, owner=key, limit=15)
-    active = await listing(ctx, {"limit": 15}, owner=key, attention=True)
-    ask_rows = rows(waiting, ask, total=waiting[0]["total"] if waiting else 0,
-                    hint="Use asks_list with owner= and limit= for more.")
-    return Compact("Open asks: " + ask_rows.text + "\nLanes: " + active.text,
-                   ask_rows.private or active.private)
+    from illo.tools.digest import digest_snapshot_read
+
+    return await digest_snapshot_read(ctx, args)
 
 
 def register(registry) -> None:
     """Register the real lane handlers."""
-    registry.add(Tool("lanes_attention", "lanes", "read", lambda a: "ledger", False,
+    registry.add(Tool("lanes_attention", "lanes", "read", lambda a: "ledger", True,
                       lanes_attention, "Read your open asks and lanes that need attention",
-                      profiles=frozenset({"person_dm", "routine"})))
+                      profiles=frozenset({"person_dm"})))
     for name, handler, arguments in (
         ("lanes_search", lanes_search, SearchArgs),
         ("lanes_get", lanes_get, GetArgs),

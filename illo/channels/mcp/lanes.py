@@ -29,7 +29,8 @@ async def report(ctx, args: dict) -> dict:
     batch = args.pop("lanes", None)
     collector = args.pop("collector", None)
     if collector:
-        await sensors.ok(ctx.conn, "collector:" + collector["label"], json.dumps(collector))
+        await sensors.ok(ctx.conn, "collector:" + collector["label"], json.dumps(collector),
+                         expected_every_s=collector.get("expected_every_s", 300))
     if batch is not None:
         return {"lanes": [await report_one(ctx, lane) for lane in batch]}
     return await report_one(ctx, args)

@@ -29,9 +29,9 @@ class SlackConnection:
     async def report(self, healthy: bool) -> None:
         async with self.ctx.pool.connection() as conn:
             if healthy:
-                await sensors.ok(conn, "slack")
+                await sensors.ok(conn, "slack", expected_every_s=10)
             else:
-                await sensors.error(conn, "slack", "The Slack connection is unavailable")
+                await sensors.error(conn, "slack", "The Slack connection is unavailable", expected_every_s=10)
 
     async def on_request(self, client: SocketModeClient, request: SocketModeRequest) -> None:
         # Acknowledge before database, file, or model work.

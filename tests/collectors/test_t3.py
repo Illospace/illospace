@@ -199,6 +199,7 @@ def test_changed_lanes_heartbeat_refresh_and_restart(setup):
         "label": "acme-laptop",
         "version": "0.1.0",
         "threads_seen": 1,
+        "expected_every_s": collector.config.poll_seconds,
     }
     api.calls.clear()
     collector = Collector(collector.config, collector.source, collector.mcp, clock=lambda: now[0])

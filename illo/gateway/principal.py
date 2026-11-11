@@ -47,6 +47,8 @@ async def resolve(conn, event, workspace) -> Authority | None:
             person["id"] if person else None,
             tainted,
         )
+    if event.channel == "digest":
+        return await person_authority(conn, event.payload.get("principal", ""))
     if event.channel == "routine":
         routine = next(
             (r for r in workspace.routines if r.name == event.payload.get("routine") and r.enabled),
@@ -56,8 +58,7 @@ async def resolve(conn, event, workspace) -> Authority | None:
             return None
         if routine.principal == "team":
             return Authority("team", "routine")
-        person = await people.get(conn, routine.principal[7:])
-        return Authority(routine.principal, "person_dm", person["id"]) if person else None
+        return await person_authority(conn, routine.principal)
     if event.channel == "mcp":
         # The agent channel passes the raw bearer only in sender, never in stored payload.
         token = await tokens.verify(conn, event.sender)
@@ -67,3 +68,11 @@ async def resolve(conn, event, workspace) -> Authority | None:
     if event.channel == "signals":
         return Authority("team", "tainted", tainted=True)
     return None
+
+
+async def person_authority(conn, principal):
+    """Person routines and briefs use the same personal grant."""
+    if not principal.startswith("person:"):
+        return None
+    person = await people.get(conn, principal[7:])
+    return Authority(principal, "person_dm", person["id"]) if person else None

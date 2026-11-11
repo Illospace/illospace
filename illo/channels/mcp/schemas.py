@@ -87,6 +87,7 @@ class Lane(Arguments):
 
 
 class Collector(Arguments):
+    expected_every_s: float = Field(default=300, gt=0)
     label: str = Field(min_length=1, max_length=200)
     version: str = ""
     threads_seen: int = Field(default=0, ge=0)

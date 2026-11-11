@@ -145,7 +145,7 @@ async def test_routine_list_cli(conn, workspace, capsys, monkeypatch):
         )
         == 0
     )
-    assert "daily-digest" in capsys.readouterr().out
+    assert "daily-digest" not in capsys.readouterr().out
 
 
 async def test_unknown_routine_cannot_choose_a_principal(conn, workspace):
@@ -191,3 +191,64 @@ async def test_file_reload_applies_routine_fields(app, tmp_path):
     routine = next(r for r in ctx.workspace.routines if r.name == "added")
     assert routine.enabled and routine.body == "Next prompt."
     assert load_workspace(root).config.email.reply == "both"
+
+
+@pytest.mark.parametrize("principal,destination", [
+    ("person:ada", "none"), ("team", "dm:ada"),
+])
+async def test_person_timezone_reload_has_no_second_daily_run(app, fake_brain, principal, destination):
+    ctx = app.state.ctx
+    configure(ctx, principal=principal, destination=destination)
+    ctx.workspace.routines[0].schedule = "0 9 * * *"
+    now = datetime(2026, 1, 1, 9, tzinfo=UTC)
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET timezone='UTC' WHERE key='ada'")
+    await tick_routines(ctx, now)
+    assert len(fake_brain.requests) == 1
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET timezone='America/New_York' WHERE key='ada'")
+    # A reload before the new due time must retain the daily suppression.
+    await tick_routines(ctx, now + timedelta(minutes=1))
+    await tick_routines(ctx, now + timedelta(hours=5))
+    assert len(fake_brain.requests) == 1
+    await tick_routines(ctx, now + timedelta(days=1, hours=5))
+    assert len(fake_brain.requests) == 2
+
+
+async def test_person_destination_uses_person_zone_and_channel_uses_team(app, fake_brain):
+    ctx = app.state.ctx
+    configure(ctx, principal="person:ada", destination="none")
+    ctx.workspace.config.timezone = "UTC"
+    ctx.workspace.routines[0].schedule = "0 9 * * *"
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET timezone='America/New_York' WHERE key='ada'")
+    now = datetime(2026, 1, 1, 9, tzinfo=UTC)
+    await tick_routines(ctx, now)
+    assert not fake_brain.requests
+    async with ctx.pool.connection() as conn:
+        state = await one(conn, "SELECT * FROM routine_state WHERE key='test-routine'")
+        assert state["next_run_at"] == now + timedelta(hours=5)
+    ctx.workspace.routines[0].destination = "channel:alerts"
+    await tick_routines(ctx, now)
+    assert len(fake_brain.requests) == 1
+
+
+async def test_digest_path_is_reserved_even_with_another_name(app, fake_brain):
+    ctx = app.state.ctx
+    configure(ctx)
+    ctx.workspace.routines[0].path = "routines/digest.md"
+    await tick_routines(ctx, datetime(2026, 1, 1, 9, tzinfo=UTC))
+    assert not fake_brain.requests
+
+
+async def test_timer_records_its_interval(app):
+    ctx = app.state.ctx
+
+    async def example_job():
+        pass
+
+    await ctx.scheduler._call(example_job, 7200)
+    async with ctx.pool.connection() as conn:
+        sensor = await one(conn, "SELECT * FROM sensors WHERE key=%s",
+                           (f"job:{example_job.__module__}.{example_job.__name__}",))
+        assert sensor["expected_every_s"] == 7200
