@@ -263,3 +263,8 @@ ILLO_ENV_FILE="$HOME/.config/illo/env" docker compose --env-file "$HOME/.config/
 docker volume rm illo_postgres
 rm -rf illospace
 ```
+
+
+DM context uses the Slack `im:history` scope in `deploy/slack/manifest.yaml`.
+Illo reads up to 20 earlier messages, with a 6,000-character history limit.
+If Slack refuses the read, Illo answers without history. Check the `slack:dm-history` sensor.

@@ -15,7 +15,7 @@ from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.blocks import message_text
 from illo.channels.slack.clips import read_clips
-from illo.channels.slack.threads import read_context
+from illo.channels.slack.threads import read_context, read_dm_history
 from illo.channels.slack.voice import OpenAITranscriber
 from illo.db import one
 from illo.gateway import InboundEvent
@@ -237,10 +237,12 @@ class SlackIntake:
         })
 
     async def prepare_context(self, event: InboundEvent) -> None:
-        """Add thread history only after claims pass."""
+        """Add conversation history only after claims pass."""
         limit = self.ctx.workspace.config.run_limits.max_message_chars
         if len(event.text) > limit:
             raise ValueError("The message is too long")
+        source = "thread"
+        context = []
         if event.payload.get("thread_ts"):
             context = await read_context(
                 self.ctx,
@@ -248,10 +250,17 @@ class SlackIntake:
                 self.bot_id,
                 self.adapter.working.get(event.external_id),
             )
-            budget = limit - len(event.text) - len(data_text("thread", "")) - len("\n\nRequest:\n")
-            if context and budget > 0:
-                event.text = (
-                    data_text("thread", "\n".join(context)[-budget:])
-                    + "\n\nRequest:\n"
-                    + event.text
-                )
+        elif event.kind == "dm":
+            source = "dm-history"
+            context = await read_dm_history(
+                self.ctx, event, self.bot_id,
+                self.adapter.working.get(event.external_id), bot_identity=self.bot_identity,
+            )
+        budget = limit - len(event.text) - len(data_text(source, "")) - len("\n\nRequest:\n")
+        if context and budget > 0:
+            history = "\n".join(context)[-budget:]
+            # Escaping nested markers can expand the text. Keep the final block in budget.
+            while history and len(data_text(source, history)) > budget + len(data_text(source, "")):
+                history = history[1:]
+            if history:
+                event.text = data_text(source, history) + "\n\nRequest:\n" + event.text
