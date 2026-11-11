@@ -14,6 +14,7 @@ from tests.github.test_tools import call
 
 CHANNEL = "C_ACME_TEAM"
 KEY = f"slack:privacy:{CHANNEL}"
+TEAM = ["U_ACME_ADA", "U_ACME_BEN", "U_ACME_CHLOE"]
 
 
 async def private_team(app, slack_client):
@@ -23,6 +24,10 @@ async def private_team(app, slack_client):
         await slack_client._record("conversations_info", **kwargs)
         return {"channel": {"is_private": True}}
     slack_client.conversations_info = info
+    async def members(**kwargs):
+        await slack_client._record("conversations_members", **kwargs)
+        return {"members": TEAM}
+    slack_client.conversations_members = members
     return channel
 
 
@@ -39,7 +44,7 @@ async def test_known_members_all_pages_and_cache(app, slack_client):
     async def members(**kwargs):
         pages.append(kwargs.get("cursor"))
         if kwargs.get("cursor"):
-            return {"members": ["U_ACME_BEN", "U_ACME_ILLO"]}
+            return {"members": ["U_ACME_BEN", "U_ACME_CHLOE", "U_ACME_ILLO"]}
         return {"members": ["U_ACME_ADA"], "response_metadata": {"next_cursor": "second"}}
     slack_client.conversations_members = members
     assert await channel_private(app.state.ctx, CHANNEL) is False
@@ -63,7 +68,7 @@ async def test_unknown_or_inactive_human_is_private_without_identity_in_sensor(a
     async with app.state.ctx.pool.connection() as conn:
         sensor = await one(conn, "SELECT * FROM sensors WHERE key=%s", (KEY,))
     assert sensor["last_error_at"]
-    assert sensor["detail"] == "Channel #team has a member who is not in people.yaml. Illo treats it as private."
+    assert sensor["detail"] == "The members of #team are not exactly the people in people.yaml. Illo treats it as private."
     assert members[0] not in sensor["detail"]
 
 
@@ -71,7 +76,7 @@ async def test_bot_members_are_accepted_and_verdict_is_cached(app, slack_client)
     await private_team(app, slack_client)
     slack_client.users["U_MONITOR"] = {"is_bot": True}
     async def members(**kwargs):
-        return {"members": ["U_ACME_ADA", "U_MONITOR"]}
+        return {"members": [*TEAM, "U_MONITOR"]}
     slack_client.conversations_members = members
     assert not await channel_private(app.state.ctx, CHANNEL)
     await expire(app.state.ctx)
@@ -82,7 +87,7 @@ async def test_bot_members_are_accepted_and_verdict_is_cached(app, slack_client)
 
 
 @pytest.mark.parametrize("method", ["conversations_info", "conversations_members", "users_info", "auth_test"])
-async def test_slack_failure_is_private_with_sensor(app, slack_client, method):
+async def test_slack_failure_gives_no_verdict_and_keeps_the_index(app, slack_client, method):
     await private_team(app, slack_client)
     async def members(**kwargs):
         return {"members": ["U_UNKNOWN"]}
@@ -90,9 +95,24 @@ async def test_slack_failure_is_private_with_sensor(app, slack_client, method):
     async def fail(**kwargs):
         raise RuntimeError("Slack failed")
     setattr(slack_client, method, fail)
-    assert await channel_private(app.state.ctx, CHANNEL)
     async with app.state.ctx.pool.connection() as conn:
-        assert (await one(conn, "SELECT * FROM sensors WHERE key=%s", (KEY,)))["last_error_at"]
+        await items.upsert(conn, source_ref=f"slack:{CHANNEL}:1.0", kind="slack", title="#team",
+                           body="Nebula", links=[], visibility="team")
+    with pytest.raises(ValueError):
+        await channel_private(app.state.ctx, CHANNEL)
+    async with app.state.ctx.pool.connection() as conn:
+        sensor = await one(conn, "SELECT * FROM sensors WHERE key=%s", (KEY,))
+        assert sensor["last_error_at"] and sensor["detail"] == "Slack could not verify channel privacy"
+        assert await kv.get(conn, KEY) is None
+        assert await one(conn, "SELECT 1 FROM items WHERE source_ref=%s", (f"slack:{CHANNEL}:1.0",))
+
+
+async def test_active_person_outside_the_channel_makes_it_private(app, slack_client):
+    await private_team(app, slack_client)
+    async def members(**kwargs):
+        return {"members": ["U_ACME_ADA", "U_ACME_BEN"]}
+    slack_client.conversations_members = members
+    assert await channel_private(app.state.ctx, CHANNEL)
 
 
 async def test_configured_private_wins_and_default_keeps_slack_private(app, slack_client):
@@ -128,7 +148,7 @@ async def test_outsider_change_hides_index_on_next_check(app, slack_client, rpc,
     async with app.state.ctx.pool.connection() as conn:
         await items.upsert(conn, source_ref=f"slack:{CHANNEL}:1.1", kind="slack", title="Nebula", body="Release plan")
     async def members(**kwargs):
-        return {"members": ["U_ACME_ADA", "U_OUTSIDER"]}
+        return {"members": [*TEAM, "U_OUTSIDER"]}
     slack_client.conversations_members = members
     await expire(app.state.ctx)
     assert not await search.search(app.state.ctx, "team", "Nebula", kinds=["slack"])

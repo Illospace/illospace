@@ -209,8 +209,6 @@ def github_preview(draft):
         details = [f"New ticket from outside text: {link}", quoted_title,
                    f"From {ticket_source(notice['source'])}.{status}", repo,
                    f"Assign to `{visible_escape(args['assignee'])}`."]
-        if draft["state"] == "pending":
-            details.append(current)
         return "\n".join(details)
     if draft["kind"] == "github_assign_issue":
         return "\n".join([

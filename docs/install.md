@@ -271,10 +271,11 @@ rm -rf illospace
 ## Private team channels
 
 Set `team_members_only: true` on a channel in `slack.channels` to use a Slack-private team channel.
-Keep `visibility: team`. Every human member must be active in `people.yaml`.
+Keep `visibility: team`. The human members must be exactly the active people in `people.yaml`.
 Illo accepts its own bot and other bot users. A bot in the channel can read what Illo posts there.
 Illo checks all member pages and caches the result for 10 minutes.
-An unknown human or a Slack error makes the channel private and removes its indexed messages.
+An unknown human, or an active person who is not a member, makes the channel private and removes its indexed messages.
+A Slack error gives no result: Illo does not handle the message, and the index stays.
 The channel sensor reports the failure without member ids.
 `visibility: private` always wins. Without the flag, Slack-private channels stay private.
 A verified channel supports normal intake, search, thread reads, channel posts, and team briefs.

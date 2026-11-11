@@ -193,7 +193,12 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         labels = [OUTSIDE_LABEL]
         await ctx.app.github_client.ensure_label(repo, OUTSIDE_LABEL)
     marker = f"<!-- illo:run:{ctx.run['id']} -->"
-    body = f"{header}\n\n{args['body']}\n\nSignature: {signature}\n\n{marker}".strip()
+    text = args["body"].strip()
+    first = ctx.app.workspace.config.github.issue_header.strip()
+    if first and text.startswith(first):
+        # The model sometimes writes the header too. Keep one.
+        text = text[len(first):].lstrip()
+    body = f"{header}\n\n{text}\n\nSignature: {signature}\n\n{marker}".strip()
     issue = await ctx.app.github_client.create_issue(repo, args["title"], body, labels=labels)
     await kv.set(ctx.conn, signature_key, issue["number"])
     result = {"created": True, "issue": issue, "matches": matches}

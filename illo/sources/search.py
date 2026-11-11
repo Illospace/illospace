@@ -270,7 +270,11 @@ async def search(
         if channel.team_members_only:
             from illo.channels.slack.access import channel_private
 
-            await channel_private(ctx, channel.id, conn=conn)
+            try:
+                await channel_private(ctx, channel.id, conn=conn)
+            except ValueError:
+                # Slack gave no verdict. The index keeps its last verified state.
+                pass
     groups = [
         await _items(conn, principal, query, kinds, candidate_limit, now),
         await _lanes(conn, principal, query, kinds, candidate_limit, now),
@@ -355,7 +359,10 @@ async def get(ctx, principal, source_ref, *, conn=None):
         if channel and channel.team_members_only:
             from illo.channels.slack.access import channel_private
 
-            if await channel_private(ctx, channel_id, conn=conn):
+            try:
+                if await channel_private(ctx, channel_id, conn=conn):
+                    return None
+            except ValueError:
                 return None
     item = await items.get(conn, source_ref, principal=principal)
     if item:
