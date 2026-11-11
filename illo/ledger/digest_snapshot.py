@@ -1,6 +1,7 @@
 """Build one personal snapshot for briefs and attention tools."""
 
 from datetime import timedelta
+from textwrap import shorten
 
 from psycopg.types.json import Jsonb
 
@@ -78,7 +79,7 @@ async def build(conn, person, now, stale_minutes=None):
         LEFT JOIN lanes l ON l.id=a.lane_id
         WHERE a.owner_person_id=%s AND (a.state='open' OR a.delivery_state='failed')
           AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s)
-        ORDER BY a.due_at NULLS LAST,a.id
+        ORDER BY CASE WHEN a.delivery_state='failed' THEN 1 ELSE 0 END,a.due_at NULLS LAST,a.id
     """,
         (person["id"], person["id"]),
     )
@@ -105,7 +106,7 @@ async def build(conn, person, now, stale_minutes=None):
     """,
         (now, Jsonb(limits), person["id"]),
     )
-    stuck, running = [], 0
+    stuck, running, your_moves = [], 0, []
     for lane in lanes:
         age = max(0, (now - lane["last_signal_at"]).total_seconds() / 3600)
         item = {
@@ -116,11 +117,17 @@ async def build(conn, person, now, stale_minutes=None):
             "last_event": lane["last_event"] or "",
         }
         if lane["state"] == "review":
-            needs.append({**item, "kind": "review", "age_hours": age})
+            if lane["source"] == "t3":
+                text = shorten(lane["summary"], width=200, placeholder="…")
+                your_moves.append({**item, "kind": "your_move", "summary": text, "age_hours": age})
+            else:
+                needs.append({**item, "kind": "review", "age_hours": age})
         elif lane["state"] == "blocked" or lane["stale"]:
             stuck.append(item)
         else:
             running += 1
+    your_moves.sort(key=lambda item: item["hours_since_signal"])
+    needs.extend(your_moves[:10])
     state = await one(
         conn, "SELECT last_run_at FROM routine_state WHERE key=%s", (f"digest:{person['key']}",)
     )
@@ -128,12 +135,18 @@ async def build(conn, person, now, stale_minutes=None):
         conn,
         """
         SELECT title,links,state,count(*) OVER () AS total FROM lanes
-        WHERE owner_person_id=%s AND state IN ('done','failed')
+        WHERE owner_person_id=%s AND state IN ('done','failed') AND NOT is_step
           AND closed_at>COALESCE(%s,%s-interval '1 day') ORDER BY closed_at DESC,id DESC LIMIT 20
     """,
         (person["id"], state["last_run_at"] if state else None, now),
     )
     last_brief = (state["last_run_at"] if state else None) or now - timedelta(days=1)
+    finished_steps = await one(
+        conn,
+        """SELECT count(*) AS total FROM lanes WHERE owner_person_id=%s AND is_step
+        AND state IN ('done','failed') AND closed_at>%s""",
+        (person["id"], last_brief),
+    )
     names = {
         row["key"]: row["name"]
         for row in await all_rows(conn, "SELECT key,name FROM people WHERE active")
@@ -147,9 +160,11 @@ async def build(conn, person, now, stale_minutes=None):
     return {
         "name": person["name"],
         "needs_you": needs,
+        "your_move_total": len(your_moves),
         "stuck": stuck,
         "in_progress": running,
         "finished_total": finished[0]["total"] if finished else 0,
+        "finished_steps": finished_steps["total"],
         "finished": [
             {"title": row["title"], "link": web_link(row["links"]), "state": row["state"]}
             for row in finished

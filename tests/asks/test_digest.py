@@ -93,6 +93,67 @@ def test_fallback_groups_limits_and_escaping():
     assert short("abcdefghijk", 8) == "…"
 
 
+def test_fallback_your_move_counts_all_items():
+    text = fallback_text(empty(
+        needs_you=[{"kind": "your_move", "title": f"Task {i}"} for i in range(10)],
+        your_move_total=14,
+    ))
+    assert "14 things need you." in text
+    assert "Task 0: the agent stopped and waits for you." in text
+    assert "and 9 more" in text
+    assert "Finished" not in text
+
+
+async def test_snapshot_separates_steps_and_orders_your_move(conn, ada):
+    from illo.ledger import asks, digest_snapshot
+
+    # The failed answer has an earlier due time. Open asks must still come first.
+    failed = await asks.create(conn, owner_person_id=ada["id"], question="Retry the answer?",
+                               due_at=NOW - timedelta(days=2))
+    await conn.execute("UPDATE asks SET state='answered',delivery_state='failed' WHERE id=%s",
+                       (failed["id"],))
+    await asks.create(conn, owner_person_id=ada["id"], question="Which plan?", due_at=NOW)
+    summary = "Please check this plan before the next step. " * 8
+    for i in range(13):
+        lane = await lanes.upsert(conn, source="t3", external_id=f"thread-{i}",
+                                  title=f"Task {i}", state="review", summary=summary,
+                                  owner_person_id=ada["id"])
+        await conn.execute("UPDATE lanes SET last_signal_at=%s WHERE id=%s",
+                           (NOW - timedelta(hours=i + 1), lane["id"]))
+    await lanes.upsert(conn, source="github", external_id="review-a", title="Review the change",
+                       state="review", owner_person_id=ada["id"])
+    for i, (step, state) in enumerate([(True, "done"), (True, "failed"), (False, "done")]):
+        lane = await lanes.upsert(conn, source="t3", external_id=f"closed-{i}", title=f"Closed {i}",
+                                  state=state, owner_person_id=ada["id"], is_step=step)
+        await conn.execute("UPDATE lanes SET closed_at=%s WHERE id=%s",
+                           (NOW - timedelta(hours=1), lane["id"]))
+    data = await digest_snapshot.build(conn, ada, NOW)
+    assert data["finished_steps"] == 2
+    assert data["finished_total"] == 1
+    assert [item["title"] for item in data["finished"]] == ["Closed 2"]
+    assert data["your_move_total"] == 13
+    assert [item["kind"] for item in data["needs_you"]] == [
+        "ask", "failed_answer", "review", *(["your_move"] * 10),
+    ]
+    moves = data["needs_you"][3:]
+    assert [item["title"] for item in moves] == [f"Task {i}" for i in range(10)]
+    assert moves[0]["hours_since_signal"] == 1
+    assert moves[0]["summary"] == (
+        "Please check this plan before the next step. " * 4 + "Please check this…"
+    )
+
+
+def test_t3_review_format_names_next_move():
+    from illo.tools._format import lane
+
+    base = {"id": 1, "title": "Task", "state": "review", "source": "t3",
+            "last_event": "The lane state is review.", "summary": "Please check the plan."}
+    text = lane(base)
+    assert "your_move" in text and "the agent stopped and waits for you" in text
+    assert "Please check the plan." in text and "The lane state is review" not in text
+    assert "your_move" not in lane({**base, "source": "github"})
+
+
 async def only_ada(ctx, timezone="UTC"):
     async with ctx.pool.connection() as conn:
         await conn.execute("UPDATE people SET active=(key='ada'),timezone=%s", (timezone,))
@@ -305,9 +366,15 @@ async def test_brief_cannot_send_through_a_tool(app, fake_brain, slack_client):
     assert len(posts(slack_client)) == 1
 
 
-async def test_tool_scope_and_snapshot_agree(app, rpc, rpc_token):
+async def test_tool_scope_and_snapshot_agree(app, rpc, rpc_token, monkeypatch):
     from tests.tool_results import read_result
 
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return NOW
+
+    monkeypatch.setattr("illo.tools.digest.datetime", Clock)
     _, token = rpc_token
     ctx = app.state.ctx
     async with ctx.pool.connection() as conn:
@@ -321,6 +388,8 @@ async def test_tool_scope_and_snapshot_agree(app, rpc, rpc_token):
                 state="done",
                 owner_person_id=ada["id"],
             )
+        await lanes.upsert(conn, source="t3", external_id="your-move", title="Check the plan",
+                           state="review", summary="Please check the plan.", owner_person_id=ada["id"])
     results = []
     for name in ("digest_snapshot", "asks_digest", "lanes_attention"):
         response = await rpc(token, "tools/call", {"name": name, "arguments": {}})
@@ -329,6 +398,8 @@ async def test_tool_scope_and_snapshot_agree(app, rpc, rpc_token):
         results.append(result["result"])
     assert results[0] == results[1] == results[2]
     assert len(results[0]["finished"]) == 20 and results[0]["finished_total"] == 21
+    assert results[0]["your_move_total"] == 1
+    assert results[0]["needs_you"][0]["kind"] == "your_move"
     assert all(item["title"] == "Complete example title " * 50 for item in results[0]["finished"])
     response = await rpc(
         token, "tools/call", {"name": "digest_snapshot", "arguments": {"person": "ben"}}

@@ -83,6 +83,8 @@ class Lane(Arguments):
     owner: str | None = None
     event: str | None = None
     end_summary: str | None = None
+    is_step: bool = False
+    parent_ref: str | None = None
     visibility: Literal["team", "private"] = "team"
 
 

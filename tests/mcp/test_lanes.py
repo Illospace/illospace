@@ -149,3 +149,50 @@ async def test_open_lane_report_search_and_stale_filter(app, http):
     for args in ({"state": "open"}, {"query": "Acme"}):
         found = (await agent.call("lane_search", args))["lanes"]
         assert len(found) == 1 and found[0]["state"] == "open" and not found[0]["stale"]
+
+
+async def test_step_fields_are_optional_and_preserved(app, http):
+    agent = await AgentClient.create(app, http)
+    ref = {"source": "t3", "external_id": "step-a"}
+    result = await agent.call("lane_report", {**ref, "is_step": True, "parent_ref": "parent-a"})
+    await agent.call("lane_report", ref)
+    old = await agent.call("lane_report", {"source": "codex", "external_id": "old-a"})
+    async with app.state.ctx.pool.connection() as conn:
+        step = await one(conn, "SELECT * FROM lanes WHERE id=%s", (result["lane_id"],))
+        assert step["is_step"] and step["parent_ref"] == "parent-a"
+        lane = await one(conn, "SELECT * FROM lanes WHERE id=%s", (old["lane_id"],))
+        assert not lane["is_step"] and lane["parent_ref"] is None
+    await agent.call("lane_report", {**ref, "is_step": False, "parent_ref": None})
+    async with app.state.ctx.pool.connection() as conn:
+        step = await one(conn, "SELECT * FROM lanes WHERE id=%s", (result["lane_id"],))
+        assert not step["is_step"] and step["parent_ref"] is None
+
+
+async def test_reopened_lane_clears_closure_and_saved_summary(app, http):
+    from datetime import UTC, datetime
+
+    from illo.asks.service import is_live
+    from illo.ledger import ask_workflow, asks, digest_snapshot, lanes, people
+
+    agent = await AgentClient.create(app, http)
+    ref = {"source": "t3", "external_id": "thread-a"}
+    result = await agent.call("lane_report", {
+        **ref, "title": "Check the plan", "state": "done", "end_summary": "The work finished.",
+    })
+    await agent.call("lane_report", {**ref, "state": "review", "summary": "Please check the plan."})
+    async with app.state.ctx.pool.connection() as conn:
+        lane = await one(conn, "SELECT * FROM lanes WHERE id=%s", (result["lane_id"],))
+        assert lane["closed_at"] is None and lane["end_summary"] is None
+        await ask_workflow.record_decisions(conn)
+        assert await one(conn, "SELECT * FROM items WHERE source_ref=%s",
+                         (f"lane:{lane['id']}:end",)) is None
+        data = await digest_snapshot.build(conn, await people.get(conn, "ada"), datetime.now(UTC))
+        assert data["finished"] == [] and data["finished_total"] == 0
+        assert data["needs_you"][0]["kind"] == "your_move"
+        rows, _, _ = await lanes.compact_search(
+            conn, principal="person:ada", attention=True,
+        )
+        assert [row["id"] for row in rows] == [lane["id"]]
+        ask = await asks.create(conn, lane_id=lane["id"], owner_person_id=lane["owner_person_id"],
+                                question="Which check comes next?", source_ref="t3:thread-a:request-a")
+        assert await is_live(conn, ask)

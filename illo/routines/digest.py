@@ -20,6 +20,7 @@ Write like a colleague who respects {name}'s time.
 
 - Start with "Morning, {name}." Then say the one thing that matters most, with the reason and the action.
 - Order: first what needs {name}, then what is stuck, then what finished.
+- An item with kind "your_move" is a thread where the agent stopped. Say that it waits for {name}, not that it is finished.
 - One short sentence or one bullet for each item. Make the title a link if the item has a link. If not, write the title with no link. Rewrite a raw title into plain words: remove prefixes such as "docs(agents):" and tracker numbers that add nothing.
 - Maximum 8 lines. If a group has more than 3 items, give the count and the 3 most important ones.
 - Write "Nothing needs you" only if `needs_you` and `stuck` are both empty.
@@ -36,7 +37,9 @@ def linked(item):
 def fallback_text(data):
     """Use the same snapshot when the model cannot write the brief."""
     needs, stuck = data.get("needs_you", []), data.get("stuck", [])
-    count = len(needs) + len(stuck)
+    shown_moves = sum(item["kind"] == "your_move" for item in needs)
+    needs_total = len(needs) + max(0, data.get("your_move_total", shown_moves) - shown_moves)
+    count = needs_total + len(stuck)
     first = (
         "Nothing needs you."
         if not count
@@ -49,11 +52,13 @@ def fallback_text(data):
             text += ": " + escape(item["question"])
         elif item["kind"] == "failed_answer":
             text += ": The answer did not reach its agent. " + escape(item["question"])
+        elif item["kind"] == "your_move":
+            text += ": the agent stopped and waits for you."
         else:
             text += ": Please review."
         lines.append("• " + text)
-    if len(needs) > 5:
-        lines.append(f"and {len(needs) - 5} more")
+    if needs_total > 5:
+        lines.append(f"and {needs_total - 5} more")
     if stuck:
         lines.append("Stuck:")
         lines.extend(
