@@ -1,0 +1,13 @@
+agents:
+  - key: build
+    name: Build agents
+    owner: ada
+    kind: other
+    good_at: Code changes and checks.
+    wake: {type: poll}
+  - key: studio
+    name: Studio agents
+    owner: ben
+    kind: other
+    good_at: Scripts, video edits, and page changes.
+    wake: {type: none}

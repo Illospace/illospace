@@ -39,14 +39,15 @@ async def write(
     reason: str,
     run_id: int | None = None,
     token_id: int | None = None,
+    target: str | None = None,
 ) -> None:
     """Authenticate the full arguments. Store field names with all values redacted."""
     digest = await argument_digest(conn, args)
     redacted = {key: "[redacted]" for key in args}
     await conn.execute(
         """
-        INSERT INTO audit (run_id,token_id,principal,tool,args_digest,args,decision,reason)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        INSERT INTO audit (run_id,token_id,principal,tool,args_digest,args,decision,reason,target)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """,
-        (run_id, token_id, principal, tool, digest, Jsonb(redacted), decision, reason),
+        (run_id, token_id, principal, tool, digest, Jsonb(redacted), decision, reason, target),
     )

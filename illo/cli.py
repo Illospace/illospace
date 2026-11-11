@@ -45,6 +45,7 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--person", required=True)
     create.add_argument("--label", required=True)
     create.add_argument("--scope", choices=("collector", "agent"), default="collector")
+    create.add_argument("--agent")
     listing = token.add_parser("list")
     listing.add_argument("--person")
     token.add_parser("revoke").add_argument("id", type=int)
@@ -76,6 +77,8 @@ async def doctor(config: Config) -> int:
         workspace = load_workspace(config.workspace_dir)
         workspace.config.brain.check_runtime(config.brain_runtime)
         print("The workspace is valid.")
+        for warning in workspace.warnings:
+            print(f"Warning: {warning}")
     except ValueError as exc:
         print(f"The workspace needs a fix: {exc}")
         failed = True
@@ -146,7 +149,8 @@ async def execute(args, config: Config) -> int:
             from illo.sources.archive import import_archive
 
             async with conn.transaction(force_rollback=args.dry_run):
-                await load_workspace(config.workspace_dir).sync_people(conn)
+                workspace = load_workspace(config.workspace_dir)
+                await workspace.sync_people(conn)
                 counts = await import_archive(conn, args.file, dry_run=args.dry_run)
             print(("Dry run. " if args.dry_run else "") + counts.text())
 
@@ -188,18 +192,19 @@ async def execute(args, config: Config) -> int:
             await connector_execute(conn, args, config)
         elif args.command == "token":
             if args.action == "create":
-                await load_workspace(config.workspace_dir).sync_people(conn)
+                workspace = load_workspace(config.workspace_dir)
+                await workspace.sync_people(conn)
                 person = await people.get(conn, args.person)
                 if not person:
                     raise ValueError("The person is missing or inactive")
-                print(await tokens.create(conn, person["id"], args.label, scopes=[args.scope]))
+                print(await tokens.create(conn, person["id"], args.label, scopes=[args.scope], agent_key=args.agent, workspace=workspace))
             elif args.action == "list":
                 person = await people.get(conn, args.person) if args.person else None
                 if args.person and not person:
                     raise ValueError("The person is missing or inactive")
                 for row in await tokens.list_tokens(conn, person["id"] if person else None):
                     state = "revoked" if row["revoked_at"] else "active"
-                    print(f"{row['id']}  {row['label']}  {','.join(row['scopes'])}  {state}")
+                    print(f"{row['id']}  {row['label']}  {','.join(row['scopes'])}  {row['agent_key'] or '-'}  {state}")
             elif args.action == "revoke":
                 print(
                     "The token was revoked."
