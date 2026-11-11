@@ -33,11 +33,13 @@ async def team_snapshot_read(ctx, args):
     event = await one(
         ctx.conn, "SELECT channel,payload FROM events WHERE id=%s", (ctx.run.get("event_id"),)
     )
-    if event and event["channel"] == "team_digest":
-        return event["payload"]["payload"]["team_snapshot"]
-    return await digest_snapshot.team_snapshot(
-        ctx.conn, ctx.app.workspace.config, datetime.now(UTC)
-    )
+    if event and event["channel"] in {"digest", "team_digest"}:
+        snapshot = event["payload"]["payload"]["team_snapshot"]
+    else:
+        snapshot = await digest_snapshot.team_snapshot(
+            ctx.conn, ctx.app.workspace.config, datetime.now(UTC)
+        )
+    return data_text("team-snapshot", json_text(snapshot))
 
 
 class BriefSettings(Arguments):

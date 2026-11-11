@@ -97,7 +97,7 @@ async def send_team_due(ctx, now=None):
                 "{team}", config.team_name
             )
             text = await write_brief(
-                ctx, "team_digest", key, prompt, "team", "team_snapshot", data, fallback_text
+                ctx, "team_digest", key, prompt, "team", "team_snapshot", data, fallback_text, channel_id=channel.id
             )
             sent = await deliver_routine(ctx, "channel:" + channel.id, text, delivery_key=key)
             await kv.set(

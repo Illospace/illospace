@@ -163,3 +163,11 @@ async def test_http_tool_list_omits_missing_connectors(app, rpc, rpc_token):
     response = await rpc(rpc_token[1], "tools/list")
     names = {t["name"] for t in response.json()["result"]["tools"]}
     assert not {"mail_search", "calendar_list", "drive_search", "drive_shared_search", "connectors_call", "connectors_list"} & names
+
+
+@pytest.mark.parametrize("channel", ["digest", "team_digest"])
+def test_team_brief_grant_uses_only_the_team_snapshot(channel):
+    registry = Registry()
+    registry.discover()
+    run = authority(principal="team", person_id=None, profile="routine", event_channel=channel)
+    assert [t["name"] for t in registry.list_tools(run)] == ["team_snapshot"]

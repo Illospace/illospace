@@ -126,14 +126,15 @@ async def brief_text(ctx, person, data, due):
                              f"person:{person['key']}", "digest_snapshot", data, fallback_text)
 
 
-async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_name, data, fallback):
+async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_name, data, fallback, *, channel_id=None):
     adapter = BriefAdapter()
     event = InboundEvent(
         channel=channel,
         external_id=external_id,
         kind="scheduled",
         text=prompt,
-        payload={"principal": principal, snapshot_name: jsonable_encoder(data)},
+        payload={"principal": principal, snapshot_name: jsonable_encoder(data),
+                 **({"channel_id": channel_id} if channel_id else {})},
     )
     try:
         async with asyncio.timeout(ctx.workspace.config.brain.timeout_s):
