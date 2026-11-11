@@ -100,7 +100,8 @@ async def build(conn, person, now, stale_minutes=None):
         """
         SELECT l.*,(l.last_signal_at<%s-COALESCE((%s::jsonb->>l.source)::integer,30)
           *interval '1 minute') AS stale,
-          (SELECT e.text FROM lane_events e WHERE e.lane_id=l.id ORDER BY e.at DESC,e.id DESC LIMIT 1) AS last_event
+          (SELECT e.text FROM lane_events e WHERE e.lane_id=l.id ORDER BY e.at DESC,e.id DESC LIMIT 1) AS last_event,
+          (SELECT max(e.at) FROM lane_events e WHERE e.lane_id=l.id AND e.kind='state') AS state_since
         FROM lanes l WHERE owner_person_id=%s AND state IN ('review','working','blocked')
         ORDER BY last_signal_at,id
     """,
@@ -119,7 +120,13 @@ async def build(conn, person, now, stale_minutes=None):
         if lane["state"] == "review":
             if lane["source"] == "t3":
                 text = shorten(lane["summary"], width=200, placeholder="…")
-                your_moves.append({**item, "kind": "your_move", "summary": text, "age_hours": age})
+                # Each collector report refreshes the signal time. The state change is the true age.
+                since = lane["state_since"] or lane["last_signal_at"]
+                age = max(0, (now - since).total_seconds() / 3600)
+                your_moves.append(
+                    {**item, "kind": "your_move", "summary": text, "age_hours": age,
+                     "hours_since_signal": age}
+                )
             else:
                 needs.append({**item, "kind": "review", "age_hours": age})
         elif lane["state"] == "blocked" or lane["stale"]:

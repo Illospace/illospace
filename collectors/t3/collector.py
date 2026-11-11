@@ -297,11 +297,11 @@ class T3Source:
         is_step = row.get("createdBy") == "agent" or lineage.get("relationshipToParent") == "subagent"
         settled = row.get("settledOverride") == "settled"
         evidence = projection.get("settlement", {})
-        # A command ID alone does not prove that a person sent the command.
+        # T3 records each actor as the server. The command ID shows the sender:
+        # the app sends a plain UUID, the server rules use "server:", and MCP tools use "mcp:".
         person_settled = (
             settled
             and evidence.get("event_type") == "thread.settled"
-            and evidence.get("actor_kind") == "user"
             and evidence.get("command_type") == "thread.settle"
             and evidence.get("status") == "accepted"
             and bool(re.fullmatch(
@@ -385,10 +385,15 @@ class T3Source:
                     thread_id = row["id"]
                     row["status"] = runs.get(thread_id, "unknown")
                     projection = projections.setdefault(thread_id, {})
-                    if row.get("settledOverride") == "settled":
-                        # The stream index limits this read to one thread.
+                    lineage = row.get("lineage") or {}
+                    personal = (
+                        row.get("createdBy") == "user"
+                        and lineage.get("relationshipToParent") != "subagent"
+                    )
+                    if personal and row.get("settledOverride") == "settled":
+                        # Only a person's thread needs this proof. The stream index limits the read.
                         evidence = connection.execute(
-                            "SELECT e.event_type,e.actor_kind,c.command_type,c.command_id,c.status "
+                            "SELECT e.event_type,c.command_type,c.command_id,c.status "
                             "FROM orchestration_events e LEFT JOIN orchestration_command_receipts c "
                             "ON c.command_id=e.command_id "
                             "WHERE e.aggregate_kind='thread' AND e.stream_id=? "
@@ -397,7 +402,7 @@ class T3Source:
                         ).fetchone()
                         if evidence:
                             projection["settlement"] = dict(zip(
-                                ("event_type", "actor_kind", "command_type", "command_id", "status"),
+                                ("event_type", "command_type", "command_id", "status"),
                                 evidence,
                             ))
                     result.append(self._thread(row, projection))

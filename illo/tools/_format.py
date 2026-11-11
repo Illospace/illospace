@@ -62,7 +62,7 @@ def rows(values, render, *, total=None, hint="Narrow the query, or pass limit=."
 def lane(row, *, reason=True):
     link = first_link(row.get("links")) or f"lane:{row['id']}"
     repo = row.get("repo")
-    your_move = row["source"] == "t3" and row["state"] == "review"
+    your_move = row.get("source") == "t3" and row["state"] == "review"
     label = "your_move" if your_move else row["state"]
     text = line(label + (" stale" if row.get("stale") else ""),
                 short(row["title"], 90), row.get("owner"), row["source"],

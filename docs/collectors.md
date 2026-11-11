@@ -129,12 +129,13 @@ T3 can settle a thread in three ways:
 
 - `thread.auto-settle`, with a `server:auto-settle:` command ID: the server applies its own rule.
 - `thread.settle`, with a `server:settle-after-run:` command ID: an agent asks to settle after its turn.
-- `thread.settle`, with a plain UUID: the command can come from the app. The ID alone does not prove a person sent it.
+- `thread.settle`, with a plain UUID: the T3 app sends the command. This is the person's decision.
 
-Other MCP settlements can use `mcp:` IDs. These also do not prove a person's decision.
+An MCP tool sends a settlement with an `mcp:` command ID. An agent sends it, so it does not close a person's work.
+T3 records the actor of each event as the server. Thus the command ID is the only evidence of the sender.
 The read-only SQLite source joins the latest settle or unsettle event to its command receipt.
-It requires `actor_kind: user`, `command_type: thread.settle`, an accepted receipt, and a plain UUID for person settlement.
-An event with `actor_kind: server` does not meet this rule, even with a plain UUID.
+A person settlement needs `command_type: thread.settle`, an accepted receipt, and a plain UUID.
+The collector reads this evidence only for a thread that a person created.
 A later unsettle event or `unsettledAt` revokes that proof.
 The HTTP source has no verified actor evidence. It uses `review` for a person's completed thread, even when settled.
 An archive still counts as `done` on both sources.
@@ -148,7 +149,7 @@ Unknown thread origins do not count as proof of completion.
 The next report corrects old `done` lanes and clears their `closed_at` and saved end summaries when they reopen.
 New state and step fields change the report hash, so the next poll normally sends this correction.
 The full refresh sends all selected lanes every 600 seconds, plus at most one poll interval.
-SQLite reads settle evidence on each poll. An actor-only change that changes the lane state changes the report hash.
+SQLite reads settle evidence on each poll. A change of the sender that changes the lane state changes the report hash.
 No manual data repair is needed. Apply the lane migration before you update the collector.
 
 One question with 2–5 options becomes an ask with those options.

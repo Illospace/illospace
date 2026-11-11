@@ -596,3 +596,23 @@ async def test_snapshot_links_are_web_addresses(app, seed):
         "plain": "http://example.com/review",
         "both": "https://example.com/pull/2",
     }
+
+
+async def test_your_move_age_is_the_time_since_the_state_change(conn, ada):
+    """A collector report refreshes the signal time. It must not make an old stop look new."""
+    from illo.ledger import digest_snapshot
+
+    for name, hours in (("old-stop", 20), ("new-stop", 2)):
+        lane = await lanes.upsert(conn, source="t3", external_id=name, title=name, state="review",
+                                  owner_person_id=ada["id"])
+        await conn.execute(
+            "INSERT INTO lane_events (lane_id,kind,text,at) VALUES (%s,'state','Example',%s)",
+            (lane["id"], NOW - timedelta(hours=hours)),
+        )
+        # The newest report comes from the old stop.
+        await conn.execute("UPDATE lanes SET last_signal_at=%s WHERE id=%s",
+                           (NOW - timedelta(minutes=hours), lane["id"]))
+    data = await digest_snapshot.build(conn, ada, NOW)
+    assert [(item["title"], item["age_hours"]) for item in data["needs_you"]] == [
+        ("new-stop", 2), ("old-stop", 20),
+    ]

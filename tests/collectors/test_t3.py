@@ -236,15 +236,14 @@ def test_http_projection_supplies_thread_origin_without_settle_proof(setup):
     assert collector.source.list_threads()[0].state == "review"
 
 
-@pytest.mark.parametrize("actor,command_type,command_id,state", [
-    ("server", "thread.auto-settle", "server:auto-settle:example", "review"),
-    ("server", "thread.settle", "server:settle-after-run:example", "review"),
-    ("server", "thread.settle", "mcp:example", "review"),
-    ("server", "thread.settle", "00000000-0000-4000-8000-000000000001", "review"),
-    ("user", "thread.settle", "00000000-0000-4000-8000-000000000001", "done"),
-    ("user", "thread.auto-settle", "server:auto-settle:example", "review"),
+@pytest.mark.parametrize("command_type,command_id,state", [
+    ("thread.auto-settle", "server:auto-settle:example", "review"),
+    ("thread.settle", "server:settle-after-run:example", "review"),
+    ("thread.settle", "mcp:example", "review"),
+    ("thread.settle", "00000000-0000-4000-8000-000000000001", "done"),
+    ("thread.auto-settle", "00000000-0000-4000-8000-000000000001", "review"),
 ])
-def test_sqlite_reads_settle_actor(setup, tmp_path, actor, command_type, command_id, state):
+def test_sqlite_reads_settle_sender(setup, tmp_path, command_type, command_id, state):
     collector, api, now = setup
     api.shell.update(status="completed", settledOverride="settled", settledAt="2026-01-02T00:00:00Z")
     database = tmp_path / "state.sqlite"
@@ -252,16 +251,18 @@ def test_sqlite_reads_settle_actor(setup, tmp_path, actor, command_type, command
     with sqlite3.connect(database) as connection:
         connection.execute("INSERT INTO orchestration_command_receipts VALUES (?,?,'accepted')",
                            (command_id, command_type))
-        connection.execute("INSERT INTO orchestration_events VALUES (1,'thread','thread-a','thread.settled',?,?)",
-                           (actor, command_id))
+        # T3 records the server as the actor, also for a command from the app.
+        connection.execute("INSERT INTO orchestration_events VALUES (1,'thread','thread-a','thread.settled','server',?)",
+                           (command_id,))
     collector.config.data_path = database
     before = database.read_bytes()
     collector.poll()
     assert database.read_bytes() == before
     assert api.calls[0][1]["lanes"][0]["state"] == state
-    # Only the event actor changes. The thread projection and run stay the same.
+    # Only the sender changes. The thread projection and run stay the same.
     with sqlite3.connect(database) as connection:
-        connection.execute("UPDATE orchestration_events SET actor_kind='server'")
+        connection.execute("INSERT INTO orchestration_command_receipts VALUES ('server:auto-settle:later','thread.auto-settle','accepted')")
+        connection.execute("INSERT INTO orchestration_events VALUES (2,'thread','thread-a','thread.settled','server','server:auto-settle:later')")
     api.calls.clear()
     now[0] += 30
     collector.poll()
