@@ -258,6 +258,7 @@ Its JSON body has these fields:
 | `run_id` | The gateway run ID, as an integer or string. |
 | `system_prompt` | The system prompt. |
 | `user_message` | The event text. |
+| `images` | Optional list of `mime` and base64 `data` fields. Only `openai_responses` shows these images. |
 | `mcp_url` | The gateway's HTTP MCP endpoint, normally `/brain/mcp`. |
 | `mcp_token` | The bearer token for this run. |
 | `runtime` | `claude`, `openai_responses`, `openai_compat`, or `echo`. Default: `claude`. |

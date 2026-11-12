@@ -13,6 +13,7 @@ import httpx
 from psycopg.types.json import Jsonb
 
 from illo.channels.slack.clips import pending, transcript
+from illo.channels.slack.files import download, slack_call
 from illo.channels.slack.limits import lock
 from illo.ledger import audit, kv
 from illo.workspace import Person
@@ -145,7 +146,7 @@ class OpenAITranscriber:
         if not person:
             return None
         # Never use a URL from the event. Fetch this file's metadata from Slack.
-        response = await self.ctx.slack_client.files_info(file=file_id)
+        response = await slack_call(self.ctx.slack_client.files_info, file=file_id)
         file = response["file"]
         if file.get("id") != file_id:
             return None
@@ -154,7 +155,7 @@ class OpenAITranscriber:
             async with asyncio.timeout(self.slack_timeout):
                 while not text and pending(file):
                     await asyncio.sleep(self.slack_poll)
-                    response = await self.ctx.slack_client.files_info(file=file_id)
+                    response = await slack_call(self.ctx.slack_client.files_info, file=file_id)
                     file = response["file"]
                     if file.get("id") != file_id:
                         return None
@@ -190,15 +191,6 @@ class OpenAITranscriber:
         ):
             return None
         url = file.get("url_private_download", "")
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != "files.slack.com"
-            or not parsed.path.startswith("/")
-            or parsed.query
-            or parsed.fragment
-        ):
-            return None
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         bot_token = self.ctx.config.slack_bot_token
         base = os.environ.get("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1"
@@ -224,26 +216,10 @@ class OpenAITranscriber:
         ) as client:
             # TemporaryFile has no persistent name and closes on every exit path.
             with tempfile.TemporaryFile() as audio:
-                async with client.stream(
-                    "GET",
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {bot_token.get_secret_value()}",
-                        "Accept-Encoding": "identity",
-                    },
-                ) as download:
-                    if download.status_code != 200:
-                        return None
-                    if int(download.headers.get("content-length", 0)) > self.config.max_bytes:
-                        return None
-                    length = 0
-                    async for chunk in download.aiter_bytes(chunk_size=65536):
-                        length += len(chunk)
-                        if length > self.config.max_bytes:
-                            return None
-                        audio.write(chunk)
-                if not length:
+                body = await download(client, url, bot_token, self.config.max_bytes)
+                if body is None:
                     return None
+                audio.write(body)
                 audio.seek(0)
                 async with client.stream(
                     "POST",

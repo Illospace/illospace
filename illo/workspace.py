@@ -83,6 +83,16 @@ class SlackChannel(Model):
 
 
 class SlackConfig(Model):
+    images: Literal["on", "off"] = "on"
+    max_images: int = Field(default=4, ge=1, le=4, strict=True)
+    max_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1, le=8 * 1024 * 1024, strict=True)
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def image_switch(cls, value):
+        # YAML reads unquoted on and off as booleans.
+        return {True: "on", False: "off"}.get(value, value) if isinstance(value, bool) else value
+
     channels: list[SlackChannel] = Field(default_factory=list)
     default_mode: Literal["listen", "off"] = "listen"
     default_rule_files: list[str] = Field(default_factory=list)

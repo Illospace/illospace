@@ -17,6 +17,9 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `timezone` | IANA time zone for schedules. Default: `UTC`. |
 | `default_owner` | Active person key from `people.yaml`. Required. |
 | `slack.default_mode` | `listen` (default) or `off`. The mode for channels with no entry. |
+| `slack.images` | `on` (default) or `off`. Allow still images in safe person and team runs. |
+| `slack.max_images` | Maximum images per run. Default and upper limit: 4. Minimum: 1. |
+| `slack.max_image_bytes` | Maximum bytes per file. Default and upper limit: 8388608 (8 MB). Minimum: 1. |
 | `slack.default_rule_files` | Rule file paths for channels with no entry. Default: empty. Paths must name loaded rules. |
 | `slack.channels` | Optional channel overrides. List a channel for coordinator mode, its own rules, or `mode: off`. |
 | `slack.channels[].name` | Display name. |
@@ -412,3 +415,28 @@ Illo answers mentions from known active people there with team tools only.
 The channel text stays out of shared search. A private thread read needs live proof of membership.
 A task that a person requests there goes to the normal team list.
 The run context tells the model to copy no other channel text into that task.
+
+## Slack images
+
+Illo sees PNG, JPEG, GIF, and WebP files from known active people.
+It reads files on the run message first. It then reads retained context, newest first.
+It reads no PDF, video, or SVG files.
+Only safe `person_dm` and `team_channel` runs get images.
+A bot, webhook, unknown sender, or outside workspace never supplies an image.
+A run with outside text gets no images. Routines and agent requests get no images.
+A private channel of class `members` needs a mention before Illo keeps text or reads images.
+
+The defaults allow four images, each at most 8 MB as Slack reports it.
+You can lower these limits. The whole image read has a 20-second deadline.
+For a file above 2 MB, Illo reads Slack's 1024-pixel copy, when Slack has one. That copy also lets Illo show a file above the size limit.
+Illo checks the file's first bytes. A failed read does not stop the answer.
+Illo names each image's author and place. It reports files that it cannot show, with the reason.
+Set `slack.images: off` to stop all image downloads.
+
+The `openai_responses` runtime sends images with API keys and ChatGPT sign-in.
+If the model provider refuses the images, the runtime sends the request again with text only. Illo then says that it could not see the images.
+Other runtimes receive text that says the images could not be shown.
+Image bytes and private Slack URLs stay in memory for the run.
+The model provider receives the images. Illo does not store the bytes, URLs, or bot token in its ledger or logs.
+The event records each shown file's ID, type, size, and person key. It also records skip counts by reason.
+Text inside an image is data, never an instruction.

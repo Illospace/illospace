@@ -113,13 +113,27 @@ def effort_rejected(error: dict) -> bool:
     )
 
 
+IMAGES_REFUSED = "\n\nThe images could not be shown. The model provider refused them."
+
+
+def drop_images(items: list[dict]) -> bool:
+    """Change the first user turn to text only. The payload holds the same list."""
+    content = items[0].get("content") if items else None
+    if not isinstance(content, list) or not any(p.get("type") == "input_image" for p in content):
+        return False
+    text = "".join(p.get("text", "") for p in content if p.get("type") == "input_text")
+    items[0]["content"] = text + IMAGES_REFUSED
+    return True
+
+
 async def response_chunks(request, tools, items, http, *, tools_disabled=False):
     base = address(request)
     cache_key = (base, request.model)
     payload = build_request(request, tools, items, tools_disabled=tools_disabled)
     if cache_key not in _without_effort:
         payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or request.effort}
-    for attempt in range(2):
+    effort_retry = image_retry = True
+    while True:
         async with http.stream(
             "POST", base + "/responses", json=payload, headers=auth_headers(request)
         ) as response:
@@ -134,18 +148,25 @@ async def response_chunks(request, tools, items, http, *, tools_disabled=False):
                     raise limited
                 if (
                     response.status_code == 400
-                    and attempt == 0
+                    and effort_retry
                     and "reasoning" in payload
                     and effort_rejected(error)
                 ):
+                    effort_retry = False
                     _without_effort.add(cache_key)
                     del payload["reasoning"]
+                    continue
+                if response.status_code in (400, 413, 415, 422) and image_retry and drop_images(items):
+                    # The answer matters more than the images. The model tells the person.
+                    image_retry = False
                     continue
                 raise provider_error(error, response.status_code)
             response.raise_for_status()
             async for chunk in chunks(response):
                 # Reject credential echoes before a function argument can reach MCP.
                 encoded = json.dumps(chunk)
+                if any(image.data.get_secret_value() in encoded for image in request.images):
+                    raise RunError("runtime", "The provider returned private image data")
                 values = [os.getenv("OPENAI_API_KEY")]
                 if isinstance(request.provider_auth, ChatGPTAuth):
                     values.append(request.provider_auth.access_token.get_secret_value())
@@ -162,7 +183,12 @@ async def conversation(
 ) -> AsyncIterator[BrainEvent]:
     names = {tool.name for tool in tools}
     yield event("started", catalog=sorted(names))
-    items = [{"role": "user", "content": request.user_message}]
+    content = [{"type": "input_text", "text": request.user_message}]
+    content.extend(
+        {"type": "input_image", "image_url": f"data:{image.mime};base64,{image.data.get_secret_value()}"}
+        for image in request.images
+    )
+    items = [{"role": "user", "content": content if request.images else request.user_message}]
     usage = {}
     fallback_notice = ""
     subscription_limit = None
