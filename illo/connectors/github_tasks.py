@@ -253,7 +253,7 @@ async def signal(ctx, conn, repo, item):
         await kv.set(conn, key, True)
         await tasks.alive(conn, row["id"], "github")
         if is_worker:
-            await tasks._event(conn, row, row["holder"], "message", body[:500], {"url": comment.get("html_url")})
+            await tasks._event(conn, row, row["holder"], "message", body, {"url": comment.get("html_url")})
     labels = {v["name"] if isinstance(v, dict) else v for v in item.get("labels", [])}
     waiting = any(label in labels and state == "waiting_person" for label, state in ctx.workspace.config.github.label_map.items())
     key = f"task:needs-input:{row['id']}"

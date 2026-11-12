@@ -23,6 +23,6 @@ search_get: Read one search result in full by its `source_ref` from `search_all`
 skills_get: Read the steps of one team skill by its name
 slack_send_dm: Send a Slack DM to one team member (`person`: a person key). For a question that needs an answer, use `asks_create` instead. It becomes a draft card after a personal or private read. At most 3 per run.
 task_get: Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer.
-task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count.
+task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold.
 team_snapshot: Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.
 web_read_public_page: Read one public web page whose URL is in the run message, or the root page of that host. In a run from outside text, only the first URL of the message, once. Refused after this run read personal data.

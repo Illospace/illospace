@@ -78,7 +78,7 @@ async def _require(conn, task_id, viewer):
 
 
 async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_for=None,
-                 parent_id=None, query="", open=False, limit=30):
+                 parent_id=None, query="", open=False, limit=30, mine_refs=None):
     person = await _identity(conn, viewer)
     rows = await all_rows(conn, """SELECT t.*,
         (SELECT count(*) FROM tasks c WHERE c.parent_id=t.id
@@ -89,11 +89,13 @@ async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_
         AND (%s::text IS NULL OR state=%s) AND (%s::text IS NULL OR waits_for=%s)
         AND (%s::bigint IS NULL OR parent_id=%s)
         AND (NOT %s OR state NOT IN ('done','cancelled'))
+        AND (%s::text[] IS NULL OR holder=ANY(%s) OR waits_for=%s)
         AND (%s='' OR tsv @@ websearch_to_tsquery('english',%s)
              OR title ILIKE %s)
         ORDER BY updated_at DESC,id DESC LIMIT %s""",
         (person["id"] if person and not viewer.team_only else None, list_key, list_key, holder, holder, state, state,
-         waits_for, waits_for, parent_id, parent_id, open, query, query, f"%{query}%", min(100, max(1, limit))))
+         waits_for, waits_for, parent_id, parent_id, open, mine_refs, mine_refs,
+         "person:" + viewer.person if viewer.person else None, query, query, f"%{query}%", min(100, max(1, limit))))
 
     return [await timing(conn, row) for row in rows]
 

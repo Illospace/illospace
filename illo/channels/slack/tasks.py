@@ -7,11 +7,32 @@ from psycopg.types.json import Jsonb
 
 from illo.asks.cards import escape, task_return_card
 from illo.channels.slack.access import channel_private
+from illo.channels.slack.formatting import mrkdwn
 from illo.db import all_rows, one
 from illo.ledger import audit, kv, people, sensors
 from illo.ledger import tasks as ledger
 from illo.tasks.release import in_window
 from illo.tools._format import data_text, json_text
+
+
+def state_label(state):
+    return {"todo": "to do", "working": "in work", "review": "in review",
+            "done": "done", "cancelled": "cancelled"}[state]
+
+
+def agent_message(event):
+    # Escape source text before the helper makes Slack links.
+    text = mrkdwn(escape(event["text"]))
+    if len(text) > 600:
+        cut = 600
+        # Keep a converted Markdown link whole at the cut.
+        opening = text.rfind("<", 0, cut)
+        if opening > text.rfind(">", 0, cut):
+            cut = opening
+        text = text[:cut] + "…"
+        if url := event["data"].get("url"):
+            text += f" <{escape(url)}|Read the rest>"
+    return text
 
 
 async def holder_name(ctx, conn, ref):
@@ -49,7 +70,7 @@ async def _thread(ctx, conn, row, entry, person):
         return row
     channel = await _channel(ctx, conn, row, entry, person)
     text = ("Task: " + escape(row["title"]) + " · " + escape(entry.name) + " · "
-            + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(row["state"]))
+            + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(state_label(row["state"])))
     sent = await ctx.slack_client.chat_postMessage(channel=channel, text=text,
         unfurl_links=False, client_msg_id=message_id("root", row["id"]))
     row = await one(conn, "UPDATE tasks SET slack_channel=%s,slack_ts=%s WHERE id=%s RETURNING *",
@@ -120,7 +141,7 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
         return
     row = await _thread(ctx, conn, row, entry, person)
     root_text = ("Task: " + escape(row["title"]) + " · " + escape(entry.name) + " · "
-                 + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(row["state"]))
+                 + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(state_label(row["state"])))
     if await kv.get(conn, f"task:root:{task_id}") != root_text:
         await ctx.slack_client.chat_update(channel=row["slack_channel"], ts=row["slack_ts"], text=root_text)
         await kv.set(conn, f"task:root:{task_id}", root_text)
@@ -162,7 +183,7 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
                 text=mention + "You hold this task now.", client_msg_id=message_id("handed", task_id, event["id"]))
         elif event["kind"] == "message" and event["actor"].startswith("agent:") and not returned:
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
-                text=escape(event["text"]), client_msg_id=message_id("message", task_id, event["id"]))
+                text=agent_message(event), client_msg_id=message_id("message", task_id, event["id"]))
     if row["state"] == "review" and (returned or not card):
         if card:
             await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
@@ -187,7 +208,7 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
         proof = await ledger.proof(conn, ctx.workspace, row, ctx)
         final = None if row["state"] == "review" else ("Done." if row["state"] == "done" else "Sent back." if row["state"] in {"todo", "working"} else "Cancelled.")
         await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
-            text=escape(row["title"]) + " · " + row["state"],
+            text=escape(row["title"]) + " · " + state_label(row["state"]),
             blocks=task_return_card(row, card["message"], proof, final=final))
     if reminder and reminder_counts is not None:
         reminder_counts[target] += 1
