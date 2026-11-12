@@ -146,6 +146,8 @@ async def response_chunks(request, tools, items, http, *, tools_disabled=False):
             async for chunk in chunks(response):
                 # Reject credential echoes before a function argument can reach MCP.
                 encoded = json.dumps(chunk)
+                if any(image.data.get_secret_value() in encoded for image in request.images):
+                    raise RunError("runtime", "The provider returned private image data")
                 values = [os.getenv("OPENAI_API_KEY")]
                 if isinstance(request.provider_auth, ChatGPTAuth):
                     values.append(request.provider_auth.access_token.get_secret_value())
@@ -162,7 +164,12 @@ async def conversation(
 ) -> AsyncIterator[BrainEvent]:
     names = {tool.name for tool in tools}
     yield event("started", catalog=sorted(names))
-    items = [{"role": "user", "content": request.user_message}]
+    content = [{"type": "input_text", "text": request.user_message}]
+    content.extend(
+        {"type": "input_image", "image_url": f"data:{image.mime};base64,{image.data.get_secret_value()}"}
+        for image in request.images
+    )
+    items = [{"role": "user", "content": content if request.images else request.user_message}]
     usage = {}
     fallback_notice = ""
     subscription_limit = None

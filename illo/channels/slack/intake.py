@@ -175,6 +175,7 @@ class SlackIntake:
                         for k in (
                             "id",
                             "mimetype",
+                            "size",
                             "is_audio",
                             "subtype",
                             "transcript",

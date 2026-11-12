@@ -65,6 +65,7 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                             # Do not let a provider echo a credential into the stream.
                             line = json.dumps(item)
                             for value in (
+                                *(image.data.get_secret_value() for image in body.images),
                                 body.mcp_token.get_secret_value(),
                                 secret,
                                 os.getenv("ANTHROPIC_API_KEY"),

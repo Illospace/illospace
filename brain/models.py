@@ -20,11 +20,21 @@ class ChatGPTAuth(BaseModel):
     account_id: SecretStr
 
 
+class RunImage(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    mime: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
+    data: SecretStr = Field(repr=False, exclude=True)
+
+    def wire(self):
+        return {"mime": self.mime, "data": self.data.get_secret_value()}
+
+
 class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, validate_assignment=True)
 
     run_id: str | int
     system_prompt: str = Field(max_length=100_000)
+    images: list[RunImage] = Field(default_factory=list, repr=False, exclude=True)
     user_message: str = Field(max_length=100_000)
     mcp_url: HttpUrl
     mcp_token: SecretStr
@@ -49,6 +59,10 @@ class RunRequest(BaseModel):
             raise ValueError("The smoke check needs openai_responses")
         if self.provider_auth.kind == "chatgpt" and self.runtime != "openai_responses":
             raise ValueError("ChatGPT sign-in needs the openai_responses runtime")
+        if self.images and self.runtime != "openai_responses":
+            object.__setattr__(self, "user_message", self.user_message +
+                               "\n\nThe images could not be shown. This runtime accepts text only.")
+            object.__setattr__(self, "images", [])
         return self
 
     def wire(self) -> dict:
@@ -60,6 +74,7 @@ class RunRequest(BaseModel):
                 "access_token": self.provider_auth.access_token.get_secret_value(),
                 "account_id": self.provider_auth.account_id.get_secret_value(),
             }
+        data["images"] = [image.wire() for image in self.images]
         return data
 
 

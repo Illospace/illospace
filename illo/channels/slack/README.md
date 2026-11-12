@@ -28,6 +28,16 @@ A pending Slack transcript can wait for up to 15 seconds. A thread read can wait
 A missing transcript or `none` status fails at once by default.
 Illo sends audio to the transcription API only with `voice.transcription: openai`.
 See [voice setup](../../../docs/workspace.md#voice-clips) for limits and privacy checks.
+Illo reads still images from known active people in safe DMs and team runs.
+It reads the run message first, then retained context, newest first.
+It supports PNG, JPEG, GIF, and WebP. It reads no PDF, video, or SVG files.
+The defaults allow four images of at most 8 MB each, with 20 seconds for all image reads.
+Set `slack.images: off` to stop image downloads. You can lower the count and size limits.
+Illo records file IDs, types, sizes, person keys, and skip counts.
+It keeps no image bytes, private Slack URLs, or bot tokens in the ledger or logs.
+The model provider receives the images. A failed image read does not stop the answer.
+Only `openai_responses` shows images. Other runtimes get a text notice.
+See [image setup](../../../docs/workspace.md#slack-images) for settings and privacy checks.
 Private DMs never become search items.
 Messages of a configured public channel become team search items after the gateway handles them.
 Illo reads message text, Block Kit text, button links, and legacy attachments in display order.
@@ -35,7 +45,7 @@ The event, search item, and thread readers use the same text reader.
 It keeps Slack escapes and skips unknown elements. It cuts text at 8,000 characters with a clear marker.
 It reads at most 1,000 elements and 12 nested levels. Bot text keeps its `tainted` status.
 Sign-in commands and card answers use only the person's typed text or verified voice transcript.
-A private channel starts no run and enters no index.
+A channel of class `members` answers known active people after a mention. It enters no shared index.
 A channel is private when Slack says so, when `illo.yaml` sets `visibility: private`, or when Slack does not answer.
 `slack_read_thread` reads a private channel only for a member. It checks membership live on each call.
 

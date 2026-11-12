@@ -35,10 +35,20 @@ class ProviderAuth(BaseModel):
         }
 
 
+class RunImage(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    mime: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
+    data: SecretStr = Field(repr=False, exclude=True)
+
+    def wire(self):
+        return {"mime": self.mime, "data": self.data.get_secret_value()}
+
+
 class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     run_id: int
     system_prompt: str
+    images: list[RunImage] = Field(default_factory=list, repr=False, exclude=True)
     user_message: str
     mcp_url: str
     mcp_token: str = Field(repr=False)
@@ -54,6 +64,7 @@ class RunRequest(BaseModel):
     def wire(self):
         data = self.model_dump(exclude={"smoke"} if not self.smoke else set())
         data["provider_auth"] = self.provider_auth.wire()
+        data["images"] = [image.wire() for image in self.images]
         return data
 
 

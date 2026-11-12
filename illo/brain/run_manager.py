@@ -74,12 +74,14 @@ async def provider_auth(
     return None
 
 
-def safe_event(item, auth):
+def safe_event(item, auth, images=()):
     """Keep a provider echo out of progress, delivery, and all ledger fields."""
     line = item.model_dump_json()
     for value in (auth.access_token, auth.account_id):
         if value:
             line = line.replace(json.dumps(value.get_secret_value())[1:-1], "[redacted]")
+    for image in images:
+        line = line.replace(image.data.get_secret_value(), "[redacted]")
     return BrainEvent.model_validate_json(line)
 
 
@@ -148,7 +150,11 @@ class RunManager:
             )
             token = await runs.mint_token(conn, row["id"], config.timeout_s)
             system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
+        from illo.channels.slack.images import for_run
+
+        images, image_context = await for_run(ctx, event, authority, runtime)
         request = RunRequest(
+            images=images,
             run_id=row["id"],
             system_prompt=system_prompt,
             user_message=(data_text("inbound-message", event.text)
@@ -164,6 +170,8 @@ class RunManager:
             provider_auth=auth,
             api_key_fallback=config.api_key_fallback,
         )
+        if image_context:
+            request.user_message += "\n\n" + image_context
         status, error, usage, final = "failed", None, {}, None
         if runtime == "openai_responses":
             # The ledger shows which sign-in the run used, also for a failed run. The brain
@@ -180,7 +188,7 @@ class RunManager:
                     retry = False
                     async with aclosing(ctx.brain_client.run(request)) as stream:
                         async for item in stream:
-                            item = safe_event(item, auth)
+                            item = safe_event(item, auth, request.images)
                             if item.type == "tool_call":
                                 turns += 1
                             if (
