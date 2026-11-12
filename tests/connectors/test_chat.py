@@ -317,6 +317,7 @@ def fake_mcp(ctx, *, fail=False, count=2, echo=None):
             for i in range(max(0, count - 2))
         )
         if echo:
+            logging.getLogger("mcp.client.streamable_http").debug("SSE message: %s", echo)
             tools[0].description = echo
         yield SimpleNamespace(
             list_tools=AsyncMock(return_value=SimpleNamespace(tools=tools, nextCursor=None))
@@ -437,6 +438,7 @@ async def test_mcp_non_owner_and_rejection_change_nothing(connect_ctx):
 async def test_mcp_failure_writes_no_file_or_secret(connect_ctx, caplog, fail, echo):
     ctx = connect_ctx
     fake_mcp(ctx, fail=fail, echo=echo)
+    caplog.set_level(logging.DEBUG)
     draft = await propose(ctx, auth="bearer")
     await approve(ctx, draft)
     view = [c for c in ctx.slack_client.calls if c["method"] == "views_open"][-1]["view"]
