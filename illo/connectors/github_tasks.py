@@ -1,5 +1,6 @@
 """Connect task wake, proof, and signals to GitHub."""
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -55,21 +56,30 @@ def agent_for(ctx, login):
 
 async def write(ctx, conn, task, event, step, method, *args, **kwargs):
     """Count each attempt and keep a receipt for each action of a wake event."""
-    key = f"task:action:{event['id']}:{step}"
-    receipt = await kv.get(conn, key)
-    if receipt is not None:
-        return receipt
-    await conn.execute("SELECT pg_advisory_xact_lock(12000004)")
-    budget = await kv.get(conn, "tasks:github-writes") or []
-    now = datetime.now(UTC).timestamp()
-    budget = [at for at in budget if now-at < 3600]
-    if len(budget) >= ctx.workspace.config.tasks.github_writes_per_hour:
-        raise ValueError("The task limit for GitHub writes per hour is reached.")
-    await kv.set(conn, "tasks:github-writes", [*budget, now])
-    await audit.write(conn, principal="code", tool="task_github_" + method, args={"id": task["id"], "step": step},
-                      decision="allow", reason="The write belongs to a task action.", target=f"task {task['id']}")
-    result = await getattr(ctx.github_client, method)(*args, **kwargs)
-    await kv.set(conn, key, result or {})
+    failure = None
+    async with conn.transaction():
+        key = f"task:action:{event['id']}:{step}"
+        await conn.execute("SELECT pg_advisory_xact_lock(12000004)")
+        receipt = await kv.get(conn, key)
+        if receipt is not None:
+            return receipt
+        budget = await kv.get(conn, "tasks:github-writes") or []
+        now = datetime.now(UTC).timestamp()
+        budget = [at for at in budget if now-at < 3600]
+        if len(budget) >= ctx.workspace.config.tasks.github_writes_per_hour:
+            raise ValueError("The task limit for GitHub writes per hour is reached.")
+        await kv.set(conn, "tasks:github-writes", [*budget, now])
+        await audit.write(conn, principal="code", tool="task_github_" + method, args={"id": task["id"], "step": step},
+                          decision="allow", reason="The write belongs to a task action.", target=f"task {task['id']}")
+        try:
+            result = await getattr(ctx.github_client, method)(*args, **kwargs)
+        except (Exception, asyncio.CancelledError) as exc:
+            # Keep the attempt in the budget even when the outside call fails.
+            failure = exc
+        else:
+            await kv.set(conn, key, result or {})
+    if failure:
+        raise failure
     return result
 
 

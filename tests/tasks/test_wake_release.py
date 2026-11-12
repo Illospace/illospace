@@ -322,3 +322,73 @@ async def test_webhook_http_logs_omit_address_and_secret(ctx, caplog):
     assert "agents.example.com" not in caplog.text
     assert "private=query" not in caplog.text
     assert "example-bearer" not in caplog.text
+
+
+async def test_network_wake_releases_graph_lock_and_ignores_changed_holder(ctx):
+    import asyncio
+
+    await setup_webhook(ctx)
+    row = await make(ctx, holder="agent:build")
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def transport(request):
+        started.set()
+        await finish.wait()
+        return httpx.Response(204)
+
+    ctx.wake_transport = httpx.MockTransport(transport)
+    delivery = asyncio.create_task(wake.tick(ctx))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        async with ctx.pool.connection() as conn:
+            lock = await one(conn, "SELECT pg_try_advisory_xact_lock(12000001) AS ok")
+            assert lock["ok"]
+            await tasks.hand(conn, row["id"], workspace=ctx.workspace, viewer=ADA, holder="person:ben")
+    finally:
+        finish.set()
+        await asyncio.wait_for(delivery, 2)
+    current, events = await record(ctx, row["id"])
+    assert current["waits_for"] == "person:ben"
+    assert not any(e["kind"] in {"woken", "wake_failed"} for e in events)
+
+
+async def test_lease_prevents_duplicate_claim_and_old_result(ctx):
+    row = await make(ctx, holder="agent:build")
+    now = datetime.now(UTC)
+    async with ctx.pool.connection() as conn:
+        pending = await one(conn, "SELECT * FROM task_wakes WHERE task_id=%s", (row["id"],))
+        first = await wake.claim(ctx, conn, pending["event_id"], now)
+    async with ctx.pool.connection() as conn:
+        assert not await wake.claim(ctx, conn, pending["event_id"], now + timedelta(seconds=30))
+    async with ctx.pool.connection() as conn:
+        second = await wake.claim(ctx, conn, pending["event_id"], now + timedelta(seconds=61))
+    await wake.deliver(ctx, first, now)
+    assert not any(e["kind"] == "woken" for e in (await record(ctx, row["id"]))[1])
+    await wake.deliver(ctx, second, now + timedelta(seconds=61))
+    assert len([e for e in (await record(ctx, row["id"]))[1] if e["kind"] == "woken"]) == 1
+
+
+async def test_last_lost_attempt_expires_without_an_extra_network_call(ctx):
+    calls = await setup_webhook(ctx)
+    row = await make(ctx, holder="agent:build")
+    now = datetime.now(UTC)
+    async with ctx.pool.connection() as conn:
+        pending = await one(conn, "UPDATE task_wakes SET attempts=3,due_at=%s WHERE task_id=%s RETURNING *", (now, row["id"]))
+    await wake.tick(ctx, now)
+    current, events = await record(ctx, row["id"])
+    assert not calls and current["waits_for"] == "person:ada"
+    assert events[-1]["kind"] == "wake_failed" and events[-1]["data"]["final"]
+    async with ctx.pool.connection() as conn:
+        saved = await one(conn, "SELECT * FROM task_wakes WHERE event_id=%s", (pending["event_id"],))
+        assert saved["attempts"] == 3 and saved["finished_at"]
+
+
+async def test_final_failure_keeps_a_new_question_recipient(ctx):
+    await setup_webhook(ctx, 403)
+    row = await make(ctx, holder="agent:build")
+    async with ctx.pool.connection() as conn:
+        await tasks.post(conn, row["id"], workspace=ctx.workspace, viewer=BUILD,
+                         text="Which format?", question=True, to="person:ben")
+    for seconds in (0, 20, 40):
+        await wake.tick(ctx, datetime.now(UTC) + timedelta(seconds=seconds))
+    assert (await record(ctx, row["id"]))[0]["waits_for"] == "person:ben"

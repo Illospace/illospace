@@ -404,3 +404,36 @@ async def test_open_pull_signal_adds_reference_change_to_review_task_once(ctx):
         current = await get_without_pool(conn, row["id"])
         assert current["state"] == "review"
         assert len([link for link in current["links"] if link["kind"] == "change"]) == 1
+
+
+async def test_github_network_call_has_no_task_graph_lock(ctx, github_client, monkeypatch):
+    row = await make(ctx)
+    original = github_client.assign_issue
+    locks = []
+
+    async def assign(*args, **kwargs):
+        async with ctx.pool.connection() as conn:
+            lock = await one(conn, "SELECT pg_try_advisory_xact_lock(12000001) AS ok")
+            locks.append(lock["ok"])
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(github_client, "assign_issue", assign)
+    await wake.tick(ctx)
+    assert locks == [True]
+    assert (await events(ctx, row["id"]))[-1]["kind"] == "woken"
+
+
+async def test_failed_network_write_keeps_attempt_budget_and_audit(ctx, github_client, monkeypatch):
+    from illo.ledger import kv
+
+    await make(ctx)
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("A network error")
+
+    monkeypatch.setattr(github_client, "assign_issue", unavailable)
+    await wake.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        assert len(await kv.get(conn, "tasks:github-writes")) == 2
+        attempts = await all_rows(conn, "SELECT * FROM audit WHERE tool='task_github_assign_issue'")
+        assert len(attempts) == 1
