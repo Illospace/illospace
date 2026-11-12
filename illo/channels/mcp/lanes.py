@@ -39,11 +39,12 @@ async def report(ctx, args: dict) -> dict:
 async def report_one(ctx, args: dict) -> dict:
     if args["source"] == "github":
         raise ValueError("Only the GitHub poller can report GitHub lanes")
+    await ctx.conn.execute("SELECT pg_advisory_xact_lock(12000001)")
     await mcp.lock_lane_ref(ctx.conn, args["source"], args["external_id"])
     previous = await mcp.lane_by_ref(ctx.conn, args["source"], args["external_id"], lock=True)
     if previous and previous["owner_person_id"] != ctx.token["person_id"]:
         raise ValueError("The lane belongs to another person")
-    values = {key: value for key, value in args.items() if key not in {"owner", "event"}}
+    values = {key: value for key, value in args.items() if key not in {"owner", "event", "task"}}
     # An omitted field keeps the stored snapshot, including its private visibility.
     base = (
         {
@@ -74,6 +75,9 @@ async def report_one(ctx, args: dict) -> dict:
     if base.get("visibility") == "private" and base["owner_person_id"] != ctx.token["person_id"]:
         raise ValueError("A private lane must belong to the calling person")
     lane = await lanes.upsert(ctx.conn, **base)
+    from illo.tasks.connectors import lane as task_lane
+
+    await task_lane(ctx.app, ctx.conn, lane, task_id=args.get("task"), token=ctx.token)
     await mcp.sync_lane_summary_visibility(ctx.conn, lane)
     changed = previous is None or previous["state"] != lane["state"]
     if args.get("event") or changed:

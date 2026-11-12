@@ -161,11 +161,20 @@ async def get_pull(ctx: ToolContext, args: dict) -> dict:
     )
 
 
+def issue_body(header, text, signature, marker, original_header=None):
+    text = text.strip()
+    first = (original_header or header).strip()
+    if first and text.startswith(first):
+        text = text[len(first):].lstrip()
+    return f"{header.strip()}\n\n{text}\n\nSignature: {signature}\n\n{marker}".strip()
+
+
 async def create_issue(ctx: ToolContext, args: dict) -> dict:
     repo = repository(ctx.app, args["repo"])
     signature = " ".join(args["signature"].split())
     if not signature or any(c in signature for c in '\\":\n\r'):
         raise Refusal("Use a short phrase for the signature, with no colon, quote, or backslash")
+    await ctx.conn.execute("SELECT pg_advisory_xact_lock(12000001)")
     await ledger.lock_repository(ctx.conn, repo.lower())
     matches = await ctx.app.github_client.search_issues(
         f'"{signature}" is:issue', repo=repo, state="all"
@@ -193,12 +202,8 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         labels = [OUTSIDE_LABEL]
         await ctx.app.github_client.ensure_label(repo, OUTSIDE_LABEL)
     marker = f"<!-- illo:run:{ctx.run['id']} -->"
-    text = args["body"].strip()
-    first = ctx.app.workspace.config.github.issue_header.strip()
-    if first and text.startswith(first):
-        # The model sometimes writes the header too. Keep one.
-        text = text[len(first):].lstrip()
-    body = f"{header}\n\n{text}\n\nSignature: {signature}\n\n{marker}".strip()
+    body = issue_body(header, args["body"], signature, marker,
+                      original_header=ctx.app.workspace.config.github.issue_header)
     issue = await ctx.app.github_client.create_issue(repo, args["title"], body, labels=labels)
     await kv.set(ctx.conn, signature_key, issue["number"])
     result = {"created": True, "issue": issue, "matches": matches}
@@ -208,6 +213,16 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         result.update(assigned_to=login, assignment="automatic" if login else "waits_for_owner")
         if login:
             issue["assignees"] = [{"login": login}]
+        from illo.connectors.github_tasks import capture
+
+        payload = (event or {}).get("payload", {}).get("payload", {})
+        coordinator = event and event["channel"] == "slack" and any(
+            channel.id == payload.get("channel_id") and channel.mode == "coordinator"
+            for channel in ctx.app.workspace.config.slack.channels)
+        is_alert = ctx.run["tainted"] or coordinator or (event and event["channel"] == "signals")
+        task_id = await capture(ctx.app, ctx.conn, repo, issue, login, event) if is_alert else None
+        if task_id:
+            result["task_id"] = task_id
         if not login:
             await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue, repo, event)
     return result
@@ -215,9 +230,17 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
 
 async def assign_issue(ctx: ToolContext, args: dict) -> dict:
     login = await validate_assignee(ctx, args["assignee"])
-    return await ctx.app.github_client.assign_issue(
-        repository(ctx.app, args["repo"]), args["number"], [login]
-    )
+    repo = repository(ctx.app, args["repo"])
+    result = await ctx.app.github_client.assign_issue(repo, args["number"], [login])
+    from illo.connectors.github_tasks import assigned
+    from illo.db import one
+
+    mapping = await one(ctx.conn, "SELECT task_id FROM task_tickets WHERE url=%s",
+                        (f"https://github.com/{repo}/issues/{args['number']}",))
+    if mapping:
+        await assigned(ctx.app, ctx.conn, mapping["task_id"], login)
+        result["task_id"] = mapping["task_id"]
+    return result
 
 
 async def comment_issue(ctx: ToolContext, args: dict) -> dict:
@@ -230,7 +253,7 @@ DESCRIPTIONS = {
     "github_search_issues": "Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.",
     "github_get_issue": "Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.",
     "github_get_pull": "Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.",
-    "github_create_issue": "File one issue in a configured repository. `signature` is a short phrase with no colon, quote, or backslash that stays the same for every report of one problem: when an open issue already has it, nothing is filed and the result lists the matches (use `force_new_reason` only for a different problem). A private repository files at once; a public repository or a label that starts agent work needs a draft. For outside text, code chooses automatic assignment to the default owner or an owner card. Report `assignment` and `assigned_to` from the result. You never choose an assignee for outside text.",
+    "github_create_issue": "File one issue in a configured repository. `signature` is a short phrase with no colon, quote, or backslash that stays the same for every report of one problem: when an open issue already has it, nothing is filed and the result lists the matches (use `force_new_reason` only for a different problem). A private repository files at once; a public repository or a label that starts agent work needs a draft. For outside text, code chooses automatic assignment to the default owner or an owner card. Report `assignment`, `assigned_to`, and `task_id` when present. You never choose an assignee for outside text.",
     "github_assign_issue": "Propose to assign an issue to a team member (`assignee`: a person key or GitHub login). Always a draft card: the assignment happens only when the person you act for taps Assign.",
     "github_comment_issue": "Propose a comment on an issue or pull request; `body` is the full comment. Always a draft card: the comment is posted only when the person you act for taps Send.",
 }

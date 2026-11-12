@@ -1,6 +1,7 @@
 """Store tasks and their record. All authority checks run before a write."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import wraps
 
 from psycopg.types.json import Jsonb
@@ -62,9 +63,11 @@ def _mutation(fn):
 
 async def get(conn, task_id, *, viewer, lock=False):
     person = await _identity(conn, viewer)
-    return await one(conn, """SELECT * FROM tasks WHERE id=%s
+    row = await one(conn, """SELECT * FROM tasks WHERE id=%s
         AND (visibility='team' OR owner_person_id=%s)""" + (" FOR UPDATE" if lock else ""),
         (task_id, person["id"] if person and not viewer.team_only else None))
+
+    return await timing(conn, row) if row else None
 
 
 async def _require(conn, task_id, viewer):
@@ -77,7 +80,7 @@ async def _require(conn, task_id, viewer):
 async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_for=None,
                  parent_id=None, query="", open=False, limit=30):
     person = await _identity(conn, viewer)
-    return await all_rows(conn, """SELECT t.*,
+    rows = await all_rows(conn, """SELECT t.*,
         (SELECT count(*) FROM tasks c WHERE c.parent_id=t.id
           AND c.state NOT IN ('done','cancelled')) AS open_pieces,
         (SELECT actor FROM task_events e WHERE e.task_id=t.id ORDER BY id DESC LIMIT 1) AS last_actor
@@ -92,6 +95,8 @@ async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_
         (person["id"] if person and not viewer.team_only else None, list_key, list_key, holder, holder, state, state,
          waits_for, waits_for, parent_id, parent_id, open, query, query, f"%{query}%", min(100, max(1, limit))))
 
+    return [await timing(conn, row) for row in rows]
+
 
 async def events(conn, task_id, *, viewer, limit=20):
     if not await get(conn, task_id, viewer=viewer):
@@ -101,12 +106,40 @@ async def events(conn, task_id, *, viewer, limit=20):
 
 
 async def _event(conn, row, actor, kind, text="", data=None):
-    stamps = await one(conn, "UPDATE tasks SET updated_at=now(),last_activity_at=now() WHERE id=%s RETURNING updated_at,last_activity_at", (row["id"],))
+    active = kind not in {"woken", "wake_failed", "released", "reminded"}
+    stamps = await one(conn, """UPDATE tasks SET updated_at=now(),
+        last_activity_at=CASE WHEN %s THEN now() ELSE last_activity_at END
+        WHERE id=%s RETURNING updated_at,last_activity_at,waits_for""", (active, row["id"]))
     row.update(stamps)
+    if actor == row.get("holder") or kind == "reopened":
+        await conn.execute("UPDATE tasks SET stopped_at=NULL WHERE id=%s", (row["id"],))
+    data = {**(data or {}), "waits_for": row["waits_for"]}
     event = await one(conn, """INSERT INTO task_events (task_id,actor,kind,text,data)
-        VALUES (%s,%s,%s,%s,%s) RETURNING *""", (row["id"], actor, kind, text, Jsonb(data or {})))
+        VALUES (%s,%s,%s,%s,%s) RETURNING *""", (row["id"], actor, kind, text, Jsonb(data)))
     await kv.set(conn, f"task:pending:{row['id']}", {"event": event["id"]})
+    reason = {"handed": "task.handed", "reopened": "task.reopened", "released": "task.released"}.get(kind)
+    if kind == "message" and data.get("wake"):
+        reason = "task.message"
+    if reason and (row.get("holder") or "").startswith("agent:"):
+        await conn.execute("""INSERT INTO task_wakes(event_id,task_id,holder,reason)
+            VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (event["id"], row["id"], row["holder"], reason))
     return event
+
+
+async def timing(conn, row, now=None):
+    now = now or datetime.now(UTC)
+    last = await one(conn, "SELECT max(at) AS at FROM task_events WHERE task_id=%s AND kind='woken'",
+                     (row["id"],))
+    base = max(t for t in (row["last_activity_at"], row.get("alive_at"), last["at"]) if t)
+    row["silent_hours"] = (round(max(0, (now-base).total_seconds()/3600), 1)
+                           if row["holder"] and row["state"] not in {"done", "cancelled"} else None)
+    return row
+
+
+async def alive(conn, task_id, source, at=None):
+    await conn.execute("""UPDATE tasks SET alive_at=GREATEST(alive_at,%s),stopped_at=NULL
+        WHERE id=%s AND state IN ('todo','working')""", (at or datetime.now(UTC), task_id))
 
 
 async def _holder(conn, workspace, entry, holder):
@@ -224,10 +257,10 @@ async def _settle(conn, workspace, row, ctx=None, *, active=False):
 
 @_mutation
 async def create(conn, *, workspace, viewer, list_key, title, brief="", holder=None,
-                 due_at=None, parent_id=None, links=None):
+                 due_at=None, parent_id=None, links=None, use_default=True):
     await _identity(conn, viewer)
     entry = list_config(workspace, list_key, viewer)
-    holder = holder or entry.default_holder
+    holder = (holder or entry.default_holder) if use_default else holder
     await _holder(conn, workspace, entry, holder)
     parent = await _require(conn, parent_id, viewer) if parent_id else None
     if parent:
@@ -235,7 +268,7 @@ async def create(conn, *, workspace, viewer, list_key, title, brief="", holder=N
             raise TaskError("Reopen the parent before you add a piece.")
         if parent["list_key"] != list_key:
             raise TaskError("A piece must use its parent's list.")
-    if not viewer.human and holder and holder != viewer.actor:
+    if not viewer.human and viewer.actor != "code" and holder and holder not in {viewer.actor, "person:" + (viewer.person or "")}:
         delegation = parent and parent["holder"] == viewer.actor and parent["state"] in {"todo", "working"}
         if not delegation and holder != entry.default_holder:
             raise TaskError("An agent can hand over only a piece of its own task.")
@@ -247,6 +280,7 @@ async def create(conn, *, workspace, viewer, list_key, title, brief="", holder=N
         RETURNING *""", (list_key, title, brief, holder, holder, viewer.actor if holder else None,
                             holder, due_at, parent_id, Jsonb(links or []), viewer.actor,
                             owner["id"] if owner else None, "private" if owner else "team"))
+    await _ticket_links(conn, row)
     await _event(conn, row, viewer.actor, "created", title)
     if holder:
         await _event(conn, row, viewer.actor, "handed", "The task has a holder.", {"holder": holder})
@@ -286,7 +320,7 @@ async def hand(conn, task_id, *, workspace, viewer, holder):
     entry = list_config(workspace, row["list_key"], viewer)
     await _holder(conn, workspace, entry, holder)
     row = await one(conn, """UPDATE tasks SET holder=%s,holder_since=CASE WHEN %s::text IS NOT NULL
-        THEN now() END,handed_by=%s WHERE id=%s RETURNING *""", (holder, holder, viewer.actor, task_id))
+        THEN now() END,handed_by=%s,alive_at=NULL,stopped_at=NULL WHERE id=%s RETURNING *""", (holder, holder, viewer.actor, task_id))
     return await _state(conn, workspace, row, "todo", viewer.actor, "handed",
                         "The task has a new holder.", {"holder": holder})
 
@@ -294,10 +328,13 @@ async def hand(conn, task_id, *, workspace, viewer, holder):
 @_mutation
 async def add_link(conn, task_id, *, workspace, viewer, links, ctx=None, _defer=False):
     row = await _require(conn, task_id, viewer)
-    if not viewer.human:
+    if not viewer.human and viewer.actor != "code":
         _working_holder(row, viewer)
     merged = row["links"] + [link for link in links if link not in row["links"]]
+    if merged == row["links"]:
+        return row
     row = await one(conn, "UPDATE tasks SET links=%s WHERE id=%s RETURNING *", (Jsonb(merged), task_id))
+    await _ticket_links(conn, row)
     await _event(conn, row, viewer.actor, "link", "The proof links changed.", {"links": links})
     if _defer or row["state"] in {"done", "cancelled"}:
         return row
@@ -356,7 +393,8 @@ async def post(conn, task_id, *, workspace, viewer, text, question=False, to=Non
     elif row["state"] in {"todo", "working"} and row["waits_for"] == viewer.actor:
         await conn.execute("UPDATE tasks SET waits_for=holder WHERE id=%s", (task_id,))
     await _event(conn, row, viewer.actor, "question" if question else "message", text,
-                 {"to": target} if question else {})
+                 {"to": target} if question else {"wake": viewer.human and row["state"] in {"todo", "working"}
+                 and (row["waits_for"] in {viewer.actor, row["holder"]})})
     return await get(conn, task_id, viewer=viewer)
 
 
@@ -397,3 +435,35 @@ async def cancel(conn, task_id, *, workspace, viewer, reason=""):
     row = await _state(conn, workspace, row, "cancelled", viewer.actor, "cancelled", reason)
     await _parent(conn, workspace, row)
     return row
+
+
+@_mutation
+async def returned_by_signal(conn, task_id, source, message, *, workspace, ctx=None):
+    row = await one(conn, "SELECT * FROM tasks WHERE id=%s FOR UPDATE", (task_id,))
+    if not row or row["state"] not in {"todo", "working", "review"}:
+        return row
+    if row["state"] == "review":
+        return await _settle(conn, workspace, row, ctx)
+    row = await _state(conn, workspace, row, "review", "code", "returned", message,
+                       {"source": source, "holder": row["holder"]})
+    return await _settle(conn, workspace, row, ctx)
+
+
+@_mutation
+async def wake(conn, task_id, *, workspace, viewer, reason="A person requests a restart."):
+    _person(viewer)
+    row = await _require(conn, task_id, viewer)
+    if row["state"] not in {"todo", "working"} or not (row["holder"] or "").startswith("agent:"):
+        raise TaskError("Wake needs an open task with an agent holder.")
+    await conn.execute("UPDATE tasks SET waits_for=holder,stopped_at=NULL WHERE id=%s", (task_id,))
+    await _event(conn, row, viewer.actor, "released", reason, {"requested": True})
+    return row
+
+
+async def _ticket_links(conn, row):
+    for link in row["links"]:
+        if link.get("kind") == "ticket":
+            existing = await one(conn, """INSERT INTO task_tickets(url,task_id) VALUES (%s,%s)
+                ON CONFLICT(url) DO UPDATE SET url=EXCLUDED.url RETURNING task_id""", (link["url"], row["id"]))
+            if existing["task_id"] != row["id"]:
+                raise TaskError("The ticket already has a task.")

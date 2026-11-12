@@ -219,3 +219,35 @@ The same source and dedupe key return the first signal id with `duplicate: true`
 Illo treats the signal as outside data. The run has the team principal and the tainted profile.
 It can read issues, file a ticket, and read the first URL of the signal text. Code decides the owner under the [outside-text triage rules](github.md#triage-of-outside-text). It gets no personal connector. A signal has no reply destination.
 A token can send 60 new signals in one hour. A duplicate does not count.
+
+## Wake notices
+
+Core wake types are `none`, `poll`, and `webhook`.
+`none` leaves the start to a person. `poll` means the agent reads `task_mine` on its own clock.
+A webhook config uses `type`, an HTTPS `url`, and `secret`, the name of a vault secret.
+Store the bearer token with `illo secret set <name>`. Do not put the token in the workspace.
+
+```yaml
+wake:
+  type: webhook
+  url: https://agents.example.com/wake
+  secret: build-wake-token
+```
+
+Illo sends a JSON POST with this shape:
+
+```json
+{"event":"task.handed","task":42,"event_id":"123","text":"Read task 42."}
+```
+
+The event is `task.handed`, `task.message`, `task.reopened`, or `task.released`.
+The bearer token comes from the vault. Each request has a 10-second timeout and one retry.
+A non-2xx answer fails the wake. The durable outbox also retries failed wakes three times.
+Use `event_id` to ignore duplicate notices. Read the task through the agent door to get the work.
+Illo never logs the token or the complete URL query.
+
+`lane_report` accepts an optional `task` ID, including on each lane in a batch.
+A working lane refreshes that task's liveness. Matching ticket and change links also work.
+The token can affect only tasks of its person or that person's agents.
+A stopped lane with an open ticket tells Illo to restart the holder at the next silence check.
+A repeated stopped report does not cause repeated restarts. A new working report starts a new run period.

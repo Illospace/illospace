@@ -72,6 +72,7 @@ class GetKnowledge(Arguments):
 
 
 class Lane(Arguments):
+    task: int | None = Field(default=None, ge=1)
     source: Source
     external_id: str = Field(min_length=1)
     title: str | None = None

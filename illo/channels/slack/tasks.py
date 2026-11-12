@@ -1,5 +1,6 @@
 """Send task questions and returned work after the task transaction commits."""
 
+from collections import Counter
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg.types.json import Jsonb
@@ -9,7 +10,19 @@ from illo.channels.slack.access import channel_private
 from illo.db import all_rows, one
 from illo.ledger import audit, kv, people, sensors
 from illo.ledger import tasks as ledger
+from illo.tasks.release import in_window
 from illo.tools._format import data_text, json_text
+
+
+async def holder_name(ctx, conn, ref):
+    if not ref:
+        return "No holder"
+    kind, _, key = ref.partition(":")
+    if kind == "person":
+        person = await people.get(conn, key)
+        return person["name"] if person else key
+    agent = next((a for a in ctx.workspace.agents if a.key == key), None)
+    return agent.name if agent else key
 
 
 def message_id(kind, task_id, event_id=0):
@@ -36,7 +49,7 @@ async def _thread(ctx, conn, row, entry, person):
         return row
     channel = await _channel(ctx, conn, row, entry, person)
     text = ("Task: " + escape(row["title"]) + " · " + escape(entry.name) + " · "
-            + escape(row["holder"] or "No holder") + " · " + escape(row["state"]))
+            + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(row["state"]))
     sent = await ctx.slack_client.chat_postMessage(channel=channel, text=text,
         unfurl_links=False, client_msg_id=message_id("root", row["id"]))
     row = await one(conn, "UPDATE tasks SET slack_channel=%s,slack_ts=%s WHERE id=%s RETURNING *",
@@ -65,7 +78,7 @@ async def _thread_task(conn, channel, thread):
     return {"id": int(card["key"].rsplit(":", 1)[1])} if card else None
 
 
-async def _send(ctx, conn, task_id):
+async def _send(ctx, conn, task_id, reminder_counts=None):
     # This separate connection can see only committed task changes.
     await conn.execute("SELECT pg_advisory_xact_lock(12000002)")
     pending_version = await kv.get(conn, f"task:pending:{task_id}")
@@ -85,11 +98,18 @@ async def _send(ctx, conn, task_id):
     else:
         ref = target or await ledger.reviewer(conn, ctx.workspace, row)
         person = await people.get(conn, ref[7:]) if ref else None
+    reminder = next((e for e in reversed(events) if e["kind"] == "reminded"
+                     and e["data"].get("to") == target), None)
+    if reminder and (not in_window(ctx.workspace, person) or
+                     (reminder_counts is not None and reminder_counts[target] >= 5)):
+        raise ValueError("The task reminder waits for its delivery window.")
     # The thread starts only when the task needs a person: a question, returned work,
     # or a hand-over from someone else. A read never starts it.
     handed = [e for e in events if e["kind"] == "handed" and target
               and e["data"].get("holder") == target and e["actor"] != target]
-    needs_person = handed or any(e["kind"] in {"question", "returned"} for e in events) or (
+    needs_person = handed or reminder or any(e["kind"] in {"question", "returned"}
+        or (e["kind"] == "wake_failed" and e["data"].get("final"))
+        or e["data"].get("escalated") or e["data"].get("notify") for e in events) or (
         row["state"] == "review" and target)
     if not row["slack_ts"] and not needs_person:
         if events:
@@ -99,7 +119,7 @@ async def _send(ctx, conn, task_id):
         return
     row = await _thread(ctx, conn, row, entry, person)
     root_text = ("Task: " + escape(row["title"]) + " · " + escape(entry.name) + " · "
-                 + escape(row["holder"] or "No holder") + " · " + escape(row["state"]))
+                 + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(row["state"]))
     if await kv.get(conn, f"task:root:{task_id}") != root_text:
         await ctx.slack_client.chat_update(channel=row["slack_channel"], ts=row["slack_ts"], text=root_text)
         await kv.set(conn, f"task:root:{task_id}", root_text)
@@ -107,7 +127,24 @@ async def _send(ctx, conn, task_id):
     card = await kv.get(conn, f"task:card:{task_id}")
     returned = next((e for e in reversed(events) if e["kind"] == "returned"), None)
     for event in events:
-        if event["kind"] == "question":
+        if event["kind"] in {"reminded", "wake_failed"} or event["data"].get("escalated") or event["data"].get("notify"):
+            if event["kind"] == "reminded" and event is not reminder:
+                continue
+            if event["kind"] == "wake_failed" and not event["data"].get("final"):
+                continue
+            text = event["text"]
+            name = await holder_name(ctx, conn, event["data"].get("holder") or row["holder"])
+            if event["kind"] == "wake_failed":
+                text = f"Illo could not wake {name}. Reason: {text}"
+            elif event["data"].get("escalated"):
+                text += f" Holder: {name}. Silence: {event['data']['hours']} hours. Illo tried {event['data']['restarts']} restarts."
+            await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
+                text=mention + escape(text), client_msg_id=message_id(event["kind"], task_id, event["id"]))
+            direct = await _recipient_channel(ctx, conn, row, person)
+            if direct != row["slack_channel"]:
+                await ctx.slack_client.chat_postMessage(channel=direct, text=mention + f"Task {task_id}: " + escape(text),
+                    client_msg_id=message_id("notice-" + event["kind"], task_id, event["id"]))
+        elif event["kind"] == "question":
             asked = await people.get(conn, event["data"].get("to", "")[7:])
             prefix = f"<@{asked['slack_id']}> " if asked and asked["slack_id"] else mention
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
@@ -151,6 +188,8 @@ async def _send(ctx, conn, task_id):
         await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
             text=escape(row["title"]) + " · " + row["state"],
             blocks=task_return_card(row, card["message"], proof, final=final))
+    if reminder and reminder_counts is not None:
+        reminder_counts[target] += 1
     if events:
         await kv.set(conn, f"task:sent:{task_id}", events[-1]["id"])
     await conn.execute("DELETE FROM kv WHERE key=%s AND value=%s",
@@ -162,11 +201,12 @@ async def tick(ctx):
         return
     async with ctx.pool.connection() as conn:
         pending = await all_rows(conn, "SELECT key FROM kv WHERE key LIKE 'task:pending:%%' ORDER BY key LIMIT 50")
+    reminder_counts = Counter()
     for value in pending:
         task_id = int(value["key"].rsplit(":", 1)[1])
         try:
             async with ctx.pool.connection() as conn:
-                await _send(ctx, conn, task_id)
+                await _send(ctx, conn, task_id, reminder_counts)
                 await sensors.ok(conn, "tasks:slack")
         except Exception:
             async with ctx.pool.connection() as conn:

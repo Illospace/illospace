@@ -42,8 +42,8 @@ It starts with a letter. YAML front matter sets these fields:
 | `default_holder` | Optional holder for a new task. Without it, the task has no holder. |
 | `done` | `person` by default, or a non-empty list of check names. |
 | `reviewer` | Optional `person:<key>`. The default is `default_owner`. |
-| `silence.agent_hours` | A positive number. Default: 4. Stored for a later build. |
-| `silence.person_hours` | A positive number. Default: 24. Stored for a later build. |
+| `silence.agent_hours` | A positive number. Default: 4. Releases a silent agent. |
+| `silence.person_hours` | A positive number. Default: 24. Reminds a person. |
 | `slack_channel` | Optional name of a configured channel. |
 | `owner` | Optional person key. The list is private to that person and their agents. |
 
@@ -67,7 +67,8 @@ agents:
 ```
 
 The key has the same format as a list key. The owner must be an active person.
-`kind` is a free label. `wake.type` accepts `none` and `poll`; neither starts an agent in this build.
+`kind` is a free label. `wake.type` accepts `none`, `poll`, `webhook`, and registered connector types.
+Unknown types cause a doctor warning and a clear wake failure.
 The files reload with the other workspace files.
 `illo doctor` names invalid files and fields. It warns about unknown holders, channels, and checks.
 A missing check never passes. A missing holder cannot take a task.
@@ -77,8 +78,8 @@ A missing check never passes. A missing holder cannot take a task.
 `lists` returns the visible lists. Give `key` to read one list's instructions.
 `task_create` creates a task. Give a `pieces` array to create a parent and its pieces in one transaction.
 `task_list` filters by `list`, `holder`, `state`, `waits_for`, `parent`, `query`, and `open`.
-It returns compact rows with the next move and the number of open pieces.
-`task_get` returns the brief, result, links, pieces, checks, and recent events.
+It returns compact rows with the next move, `silent_hours`, and the number of open pieces.
+`task_get` returns the brief, result, links, pieces, checks, recent events, `silent_hours`, and the last `wake` result.
 
 `task_update` changes the title, brief, due time, or list. Its `links` field adds proof links.
 `task_hand` changes the holder. `task_post` adds a message or blocking question.
@@ -124,7 +125,7 @@ Only the current holder can write a result or ask a blocking question on a `todo
 If someone hands the task to another holder, change nothing and end the run.
 An agent cannot mark Done, clear itself, or hand an existing task to another holder.
 It can create a piece under its own active task and give that piece an allowed holder.
-An agent can capture stated work with `task_create`. It can hold the new task or use the list default.
+An agent can capture stated work with `task_create`. It can hold the new task, give it to its own person, or use the list default.
 
 ## Proof and Done
 
@@ -173,12 +174,45 @@ Task changes commit before Slack delivery.
 The existing scheduler retries pending messages every two seconds. Stable message IDs limit duplicate sends.
 A Slack failure records a sensor error and leaves the pending change in the ledger.
 
-## Limits of this build
+## Wake and release
 
-- Illo does not wake agents, release silent holders, or send task reminders.
-- `last_activity_at`, `waits_for`, silence limits, and wake settings support that later work.
-- Alerts still create tickets through the current flow. Lanes, asks, triage, and digests keep their current roles.
+Illo wakes an agent on hand-over, creation with a holder, reopen, and a person's message to the waiting holder.
+`task_wake` records a person's restart request. It needs no approval card.
+People keep the existing hand-over notice. Slack shows holder names from the workspace files.
+
+The durable wake outbox commits with the task event. Delivery starts after that commit.
+Each delivery keeps a stable event ID. Illo tries three times, with short delays.
+Each attempt records `woken` or `wake_failed`. A final failure gives the next move to the reviewer.
+Slack tells that person why the wake failed. A failure never loses the task change.
+The `none` type leaves the start to a person. The `poll` type leaves it to the agent's clock.
+The `webhook` type sends a small notice with a vault token. See [Agents](agents.md).
+Connectors register other types. See [Connectors](connectors.md).
+
+The scheduler checks silence every five minutes under one advisory lock.
+Silence starts at the latest task activity, successful wake, or liveness stamp.
+A silent agent gets a `released` event and a new wake. A holding period permits two automatic releases by default.
+After the second release stays silent, the reviewer gets the next move and the facts in the task thread.
+A blocking question that waits for a person prevents release.
+A stopped collector run can cause immediate release when its linked ticket stays open.
+
+`tasks.alive(conn, task_id, source, at=None)` records liveness without an event.
+A connector or collector calls it when the holder shows activity. Reads never count.
+Task result writes and messages already update `last_activity_at`.
+
+A task that waits for a person gets a `reminded` event after `silence.person_hours`.
+Illo derives the start of that wait from the record. Messages do not restart the wait.
+It sends at most one reminder per task per period, between 08:00 and 20:00 in the person's time zone.
+A tick sends at most five reminders per person, then one line with the count of other tasks.
+The reminder quotes the question, asks for review, or says that the person holds the task.
+
+The `tasks:` block sets `release_max`, `check_minutes`, `reminder_window`, and the connector write limit.
+See [Workspace](workspace.md) for defaults.
+
+## Limits
+
 - Task results have no attachments. Use links to durable files.
 - A private task cannot move to a different list. A parent and its pieces cannot move between lists.
-- Task writes use one graph lock. This keeps parent and piece changes consistent at the cost of write concurrency.
+- Task writes use one graph lock. This limits write concurrency.
+- A delivery can repeat after a process stops between the outside write and its local receipt.
+  Webhook receivers must use `event_id` to prevent duplicates. Connector writes use markers and receipts.
 - Slack can show a stale card until the next successful retry. The ledger remains the source of truth.

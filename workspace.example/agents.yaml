@@ -4,10 +4,18 @@ agents:
     owner: ada
     kind: other
     good_at: Code changes and checks.
-    wake: {type: poll}
+    wake:
+      type: github_issue
+      assignee: acme-ada-example
+      repos: [acme-example/engine]
+      default_repo: acme-example/engine
+      restart: {remove_labels: [agent:working]}
   - key: studio
     name: Studio agents
     owner: ben
     kind: other
     good_at: Scripts, video edits, and page changes.
-    wake: {type: none}
+    wake:
+      type: webhook
+      url: https://agents.example.com/wake
+      secret: studio-wake-token

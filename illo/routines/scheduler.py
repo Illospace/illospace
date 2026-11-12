@@ -80,6 +80,10 @@ class Scheduler:
 
 async def setup(ctx) -> None:
     """Register persisted routines and run the startup catch-up once."""
+    from illo.tasks import release, wake
+
+    await wake.setup(ctx)
+    await release.setup(ctx)
     ctx.gateway.register("routine", RoutineAdapter(ctx))
     ctx.draft_performers["routine_delivery"] = perform_delivery
 

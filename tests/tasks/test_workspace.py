@@ -20,10 +20,12 @@ def root(tmp_path):
 def test_lists_agents_and_default_list(root):
     workspace = load_workspace(root)
     assert {entry.key for entry in workspace.lists} == {"bugs", "launches"}
-    assert workspace.agents[0].wake.type == "poll"
+    assert workspace.agents[0].wake.type == "github_issue"
     assert workspace.warnings == []
     shutil.rmtree(root / "lists")
     (root / "agents.yaml").unlink()
+    config = root / "illo.yaml"
+    config.write_text(config.read_text().replace("  task_list: bugs\n", ""))
     workspace = load_workspace(root)
     assert workspace.lists[0].key == "tasks" and workspace.lists[0].done == "person"
     assert not workspace.agents
@@ -32,7 +34,6 @@ def test_lists_agents_and_default_list(root):
 @pytest.mark.parametrize("file,text,reason", [
     ("agents.yaml", "agents: [{key: Bad, name: Build, owner: ada}]", "key"),
     ("agents.yaml", "agents: [{key: build, name: Build, owner: missing}]", "owner"),
-    ("agents.yaml", "agents: [{key: build, name: Build, owner: ada, wake: {type: remote}}]", "wake"),
     ("agents.yaml", "agents: [{key: build, name: Build, owner: ada}, {key: build, name: Build, owner: ada}]", "duplicate"),
     ("lists/bad.md", "---\nname: Bad\nholders: [nobody]\n---\nText", "holders"),
     ("lists/bad.md", "---\nname: Bad\ndone: []\n---\nText", "done"),
@@ -124,4 +125,56 @@ def test_empty_lists_folder_changes_fingerprint(root):
     absent = fingerprint(root)
     (root / "lists").mkdir()
     assert fingerprint(root) != absent
+    config = root / "illo.yaml"
+    config.write_text(config.read_text().replace("  task_list: bugs\n", ""))
     assert not load_workspace(root).lists
+
+
+def test_unknown_wake_type_warns_and_known_config_keeps_fields(root):
+    import yaml
+
+    workspace = load_workspace(root)
+    assert workspace.agents[0].model_dump()["wake"]["assignee"] == "acme-ada-example"
+    path = root / "agents.yaml"
+    path.write_text(yaml.safe_dump({"agents": [{"key": "build", "name": "Build", "owner": "ada", "wake": {"type": "remote"}}]}))
+    workspace = load_workspace(root)
+    assert any("unknown wake type remote" in warning for warning in workspace.warnings)
+
+
+@pytest.mark.parametrize("wake", [
+    {"type": "webhook", "url": "http://example.com", "secret": "token"},
+    {"type": "webhook", "url": "https://user:password@example.com", "secret": "token"},
+    {"type": "webhook", "url": "https://example.com"},
+    {"type": "github_issue", "assignee": "builder", "repos": ["bad"]},
+    {"type": "github_issue", "assignee": "builder", "repos": ["acme/app"], "default_repo": "acme/other"},
+])
+def test_known_wake_config_validates(root, wake):
+    import yaml
+
+    (root / "agents.yaml").write_text(yaml.safe_dump({"agents": [{"key": "build", "name": "Build", "owner": "ada", "wake": wake}]}))
+    with pytest.raises(WorkspaceError):
+        load_workspace(root)
+
+
+@pytest.mark.parametrize("values", [
+    {"release_max": 0}, {"release_max": 11}, {"check_minutes": 0},
+    {"reminder_window": [20, 8]}, {"reminder_window": [-1, 20]},
+    {"github_writes_per_hour": 0},
+])
+def test_task_config_validates(values):
+    from pydantic import ValidationError
+
+    from illo.workspace import TasksConfig
+
+    with pytest.raises(ValidationError):
+        TasksConfig(**values)
+
+
+def test_task_defaults_and_missing_alert_list(root):
+    from illo.workspace import TasksConfig
+
+    assert TasksConfig().model_dump() == {"release_max": 2, "check_minutes": 5, "reminder_window": (8, 20), "github_writes_per_hour": 30}
+    config = root / "illo.yaml"
+    config.write_text(config.read_text().replace("task_list: bugs", "task_list: missing"))
+    with pytest.raises(WorkspaceError, match="unknown list"):
+        load_workspace(root)

@@ -2,18 +2,21 @@
 
 import json
 
-from illo.db import all_rows
+from illo.db import all_rows, one
 from illo.ledger import tasks
 from illo.tools._format import data_text
 
 
 def compact(row):
     return {key: (data_text("task-title", row[key]) if key == "title" else row.get(key))
-            for key in ("id", "title", "list_key", "holder", "state", "waits_for", "due_at", "open_pieces", "visibility")}
+            for key in ("id", "title", "list_key", "holder", "state", "waits_for", "due_at", "open_pieces", "visibility", "silent_hours")}
 
 
 async def full(conn, workspace, row, viewer, *, limit=20, ctx=None):
     result = {key: value for key, value in row.items() if key != "tsv"}
+    latest = await one(conn, """SELECT text FROM task_events WHERE task_id=%s
+        AND kind IN ('woken','wake_failed') ORDER BY id DESC LIMIT 1""", (row["id"],))
+    result["wake"] = data_text("task-wake", latest["text"]) if latest else None
     result["title"] = data_text("task-title", row["title"])
     if not row["created_by"].startswith("person:"):
         result["brief"] = data_text("task-brief", row["brief"])

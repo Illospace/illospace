@@ -121,3 +121,67 @@ The remaining tickets wait for an hourly digest with their titles and links.
 Run `scripts/test-db.sh`, then `.venv/bin/pytest -q` and
 `.venv/bin/ruff check .`. The tests use real Postgres and fake GitHub,
 Slack, and model calls. They do not need GitHub credentials.
+
+## Tasks and agent wake
+
+GitHub is a [task connector](connectors.md). Its wake config is:
+
+```yaml
+wake:
+  type: github_issue
+  assignee: acme-builder
+  repos: [acme/app]
+  default_repo: acme/app
+  restart:
+    remove_labels: [agent:working]
+```
+
+The connector first uses a `ticket` link in an allowed repository.
+Otherwise, it selects an allowed `repo` link or `default_repo`.
+Without either, the wake fails with: "Add a link of kind repo to the task."
+It searches for `Illo task: <id>` before it creates an issue.
+A new issue has the configured AI header once, the brief, links, task ID, signature, and marker.
+The connector assigns the issue and adds its ticket link through the task ledger.
+A second wake reuses the same ticket. Message wakes quote the person's text in a comment.
+A reopen wake reopens the issue and removes the configured restart labels.
+
+Task writes need no approval card. Each write has an audit row with the task as its target.
+The shared client keeps the existing API rate limits.
+`tasks.github_writes_per_hour` adds a limit of 30 attempted writes per hour by default.
+Other GitHub tools keep their existing approval rules.
+
+The poller follows open tasks with ticket links in the connector repositories:
+
+- New comments from another identity refresh task liveness.
+- Comments from the assignee, or comments with `<!-- worker -->`, also add up to 500 characters of progress.
+- A label mapped to `waiting_person` asks the reviewer. The question uses the newest worker comment.
+- Removal of that label returns the next move to the holder.
+- A completed issue returns the work. The task's Done checks run.
+- An issue closed as not planned waits for the reviewer.
+- A merged change with an existing closing-keyword link becomes a `change` link on the task.
+
+`ticket_closed` requires every ticket link to name an issue closed as completed.
+`change_merged` requires at least one merged change link. Checks cache fresh client reads for 60 seconds.
+Outside comments stay inside data markers when a model reads them. They never become instructions.
+
+## Restart example
+
+An outside dispatcher starts a worker when an issue gets an assignee.
+It sets the `agent:working` lock label to prevent duplicate starts.
+The worker merges its change, then its run stops before it returns the work.
+Its collector reports a stopped lane with the ticket link or task ID.
+The ticket stays open, so the next task check releases the holder at once.
+Illo removes `agent:working`, removes the assignee, assigns it again, and posts the restart comment.
+The comment tells the worker to read the current branch, change, and comments first.
+The dispatcher starts the worker again. Illo permits two automatic restarts per holding period.
+After two silent restarts, the reviewer gets the facts and must decide.
+
+## Alert tickets in the list
+
+Set `github.task_list: bugs` to put filed alert tickets in that list.
+A trusted monitor's assignment selects the first agent with a matching `github_issue.assignee`.
+Illo records "The ticket is assigned." without another wake.
+An owner-card ticket has no holder and waits for the default owner.
+The approved assignment then sets the matching agent holder without another wake.
+The tool result includes `task_id`. The reply names that ID.
+A unique ticket mapping prevents a second task for the same URL.

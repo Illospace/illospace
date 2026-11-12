@@ -68,7 +68,7 @@ async def handle(ctx, name, args):
 def tools(factory):
     entries = [
         ("task_mine", Mine, "read", "Read your tasks with state, waits_for, and new_for_you. Read task_get before you work. An unnamed token reads the tasks of its person and their agents."),
-        ("task_get", shared.Get, "read", "Read the task first: the task is the brief. Read its result version, proof links, pieces, checks, and recent messages before you change it."),
+        ("task_get", shared.Get, "read", "Read the brief, result version, links, pieces, checks, messages, silent_hours, and last wake result before you act."),
         ("task_write", shared.Write, "write_internal", "Write your result below the brief. Give either result with the version you read, or append. A message must say what changed and what you need. Set returned true on the last write. Never say done."),
         ("task_post", Question, "write_internal", "Ask one blocking question on your task. Optionally name a person in to. If the task has another holder, change nothing and end the run."),
         ("task_create", shared.Create, "write_internal", "Capture work the person stated. Hold it yourself or use the list default. You may give an allowed holder a piece under your own task. You cannot hand over an existing task."),

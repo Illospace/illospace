@@ -84,7 +84,7 @@ TOOLS = {
             schemas.LaneReport,
             lanes.report,
             "write_internal",
-            "Report the state of one lane (`source`, `external_id`, `state`, and optional `title`, `summary`, `links`, `event`) or of several in `lanes`; add `collector` to report that a collector is alive. A field that you leave out keeps its stored value. A new lane is private to the token's person unless `visibility` is `team`, and `github` lanes come only from Illo's own poller.",
+            "Report the state of one lane (`source`, `external_id`, `state`, and optional `title`, `summary`, `links`, `event`) or of several in `lanes`; add `collector` to report that a collector is alive. The optional `task` ID connects the lane to task liveness. A field that you leave out keeps its stored value. A new lane is private to the token's person unless `visibility` is `team`, and `github` lanes come only from Illo's own poller.",
         ),
         agent_tool(
             "lane_search",

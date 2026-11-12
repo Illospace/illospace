@@ -289,3 +289,14 @@ The final answer guard replaces a broken person-facing answer with a plain sente
 It lists drafts and task changes from that run's audit rows, using tool names and safe target IDs.
 Its sensor records the run ID without the private answer text.
 Tests in `tests/tasks/` cover these boundaries, both example workflows, and Slack retries.
+
+## Task connector actions
+
+A GitHub write that belongs to a task action needs no approval card.
+The connector permits only configured repositories and the configured agent assignee.
+Each write has an audit row with the task as its target. Hourly limits count attempts too.
+The existing GitHub tools keep their approval rules for other writes.
+A webhook sends only the task ID, stable event ID, event name, and a short notice.
+Its token comes from the vault. Error text excludes the token and the complete URL query.
+Outside comments supply facts and liveness. They never become instructions or a person's approval.
+Collector reads do not count as liveness. A token affects only tasks of its person and that person's agents.

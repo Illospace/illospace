@@ -255,3 +255,44 @@ It must put its own results above any headers that the sender supplies.
 Illo requires exactly one DMARC result: `pass`, with `header.from` equal to the From domain.
 SPF and DKIM results alone do not give a sender authority.
 A failed check treats the sender as an outsider.
+
+## Task connectors
+
+A connector is the only place that knows one outside tool.
+The task core calls registered functions. It never imports that tool.
+A team can use tasks with only the generic wake types.
+
+A connector supplies four parts:
+
+- **Signals:** outside changes that create or move a task.
+- **Context:** facts that a person or agent can read for a task.
+- **Actions:** writes to the outside tool, with explicit approval rules.
+- **Checks:** facts that a Done rule can use.
+
+### GitHub example
+
+GitHub registers the `github_issue` wake type and the `ticket_closed` and `change_merged` checks.
+Its poller follows ticket links on open tasks. Comments supply activity and progress.
+A needs-input label asks the reviewer. A completed issue returns the work for its Done checks.
+The context tools read issues and changes through the shared client.
+Task wake actions create, assign, comment, reopen, or restart the ticket without a card.
+Each write has an audit row with the task as its target. Other writes keep their approval rules.
+Outside comments remain data. They never grant authority.
+
+### Write your own connector
+
+1. Define a Pydantic wake config. Keep the outside fields in your connector module.
+2. Call `illo.tasks.connectors.register_wake(name, model, function)`.
+   The async function accepts `(ctx, conn, task, agent, reason, event)`.
+   It returns `WakeResult(ok, text, links=[])`.
+3. Call `illo.tasks.checks.register(name, async_check)` for each proof check.
+4. Call `illo.tasks.connectors.register_signal(name, handler)` for source signals.
+   Dispatch them with `signal(name, ctx, conn, **facts)`.
+5. Call `register_links(kind, handler)` to watch links on open tasks.
+   Dispatch fresh facts with `changed(ctx, conn, kind, **facts)`.
+6. Call `register_lane(handler)` if collector activity can prove task liveness.
+7. Register context tools with the existing tool registry.
+
+Register installed connectors before workspace validation.
+Wake retries keep the same event ID. Use it to prevent duplicate writes.
+A wake payload tells the holder where to look. It does not carry the work.

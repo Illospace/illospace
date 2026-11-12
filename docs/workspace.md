@@ -342,3 +342,29 @@ Both files reload with the rules. `illo doctor` names bad files and warns about 
 Without a `lists/` folder, Illo supplies the `tasks` list with a person confirmation rule.
 The example workspace includes `bugs` and `launches` and needs no code change for either workflow.
 See [Lists and tasks](tasks.md#workspace-files) for every field, defaults, and the token setup.
+
+## Task wake and silence
+
+Set the optional `github.task_list` to a team list key.
+Tickets from alerts then enter that list. A ticket URL maps to one task.
+The list must exist. Remove the setting when you remove the list.
+
+```yaml
+github:
+  repositories: [acme/app]
+  task_list: bugs
+tasks:
+  release_max: 2
+  check_minutes: 5
+  reminder_window: [8, 20]
+  github_writes_per_hour: 30
+```
+
+These values are the defaults. `release_max` is from 1 to 10. `check_minutes` is from 1 to 60.
+The window has two hours from 0 to 24, in time order. The end hour is exclusive.
+The write limit is from 1 to 1,000. Each attempted connector write counts for one hour.
+A list sets `silence.agent_hours` and `silence.person_hours`. Both must be positive.
+A person sets their IANA `timezone` in `people.yaml`.
+
+`agents.yaml` accepts registered wake types. Unknown types give a doctor warning.
+Known types validate their own fields. See [Agents](agents.md) and [GitHub](github.md).
