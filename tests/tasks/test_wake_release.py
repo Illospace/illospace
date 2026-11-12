@@ -209,7 +209,7 @@ async def test_person_reminders_window_period_cap_and_summary(ctx, monkeypatch):
     monkeypatch.setattr(surface, "in_window", lambda *_: True)
     ids = [(await make(ctx, holder="person:ada"))["id"] for _ in range(8)]
     for task_id in ids:
-        await age(ctx, task_id, 30)
+        await age(ctx, task_id, 40)
     noon = datetime.now(UTC).replace(hour=12)
     await release.tick(ctx, noon)
     async with ctx.pool.connection() as conn:
@@ -265,7 +265,7 @@ async def test_question_reminder_keeps_wait_start_after_messages(ctx):
     await wake.tick(ctx)
     async with ctx.pool.connection() as conn:
         await tasks.post(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, text="Which date?", question=True)
-    await age(ctx, row["id"], 30)
+    await age(ctx, row["id"], 40)
     async with ctx.pool.connection() as conn:
         # A later message from the holder does not clear the question or reset its wait.
         await tasks.post(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, text="I still need the date.")
@@ -290,7 +290,7 @@ async def test_missing_webhook_secret_and_timeout_do_not_expose_url(ctx):
 
 async def test_reminder_retry_waits_for_window_and_drops_obsolete_target(ctx, monkeypatch):
     row = await make(ctx, holder="person:ada")
-    await age(ctx, row["id"], 30)
+    await age(ctx, row["id"], 40)
     await release.tick(ctx, datetime.now(UTC).replace(hour=12))
     monkeypatch.setattr(surface, "in_window", lambda *_: False)
     await surface.tick(ctx)

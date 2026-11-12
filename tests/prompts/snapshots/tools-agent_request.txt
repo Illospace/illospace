@@ -27,7 +27,7 @@ rules_list: List the standing rules that answer asks without a person: the team'
 search_all: Search everything this run can see, ranked by match and recency. Optional `kinds`: saved, decision, note, lane_summary, archive, slack, github, doc, lane, and mail (this person's mail, DM only). Read one result in full with `search_get` and its `source_ref`.
 search_get: Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.
 skills_get: Read the steps of one team skill by its name
-task_create: Create a task from the person's words. Give a list, title, and brief. A pieces array creates the parent and its pieces in one call.
+task_create: Create a task from the person's words. Give a list, title, and brief. A holder is `person:<key>` or `agent:<key>`. A pieces array creates the parent and its pieces in one call.
 task_get: Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer.
 task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold.
 task_post: Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder.

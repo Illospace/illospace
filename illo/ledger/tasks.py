@@ -154,7 +154,7 @@ async def _holder(conn, workspace, entry, holder):
     kind, _, key = holder.partition(":")
     owner = key if kind == "person" else next((a.owner for a in workspace.agents if a.key == key), None)
     if kind not in {"agent", "person"} or not owner:
-        raise TaskError("The holder is unknown.")
+        raise TaskError("The holder is unknown. Write `person:<key>` or `agent:<key>`.")
     if entry.owner and entry.owner != owner:
         raise TaskError("A private task needs a holder of its owner.")
     if not await one(conn, "SELECT id FROM people WHERE key=%s AND active", (owner,)):

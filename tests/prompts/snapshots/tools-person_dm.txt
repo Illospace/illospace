@@ -49,7 +49,7 @@ slack_post_channel: Post in a configured team channel (`channel`: its id; `threa
 slack_read_thread: Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.
 slack_send_dm: Send a Slack DM to one team member (`person`: a person key). For a question that needs an answer, use `asks_create` instead. It becomes a draft card after a personal or private read. At most 3 per run.
 task_cancel: Cancel a task with a reason. It has no next move. The task and its full record stay in the ledger for later reads.
-task_create: Create a task from the person's words. Give a list, title, and brief. A pieces array creates the parent and its pieces in one call.
+task_create: Create a task from the person's words. Give a list, title, and brief. A holder is `person:<key>` or `agent:<key>`. A pieces array creates the parent and its pieces in one call.
 task_done: Confirm a task for the person who made this request. The Done checks must pass. Use force true and a reason to override failed checks.
 task_get: Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer.
 task_hand: Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo.

@@ -20,11 +20,11 @@ You do not need to edit a file.
 Illo also saves lasting facts that you state without a request to remember.
 It asks you to confirm an answer from the old archive, with its date.
 A one-time task can use the general list without a question.
+Illo does not give a request back to the person who asked. If it does not know who does the work, it asks.
 
 After the answer, code posts `Saved to memory: <name>.` with **Correct** and **Forget**.
 **Correct** asks you to say what is wrong, in the same thread. Illo reads your reply and changes only the wrong part.
 You can also tell Illo in words, at any time: "that is wrong, the folder is X" or "forget that note".
-Your next reply replaces the note text or the list instructions.
 **Forget** deletes a note or restores a list's earlier text.
 For a new list, Forget deletes the list only if no open task uses it.
 An old notice cannot replace a later file edit.
