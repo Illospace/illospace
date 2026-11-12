@@ -374,3 +374,11 @@ The existing scheduler sends pending task messages after their transactions comm
 `illo/channels/slack/tasks.py` builds task threads with the shared card helpers.
 A failed send keeps the pending key. Stable message IDs support a retry.
 The task core contains no knowledge of a specific outside tool.
+
+Migration `1201_task_wake.sql` adds wake results, liveness stamps, the durable wake outbox, and the unique ticket mapping.
+Task events queue wakes inside the task transaction. The scheduler delivers them after commit.
+The release check uses one advisory lock. It queues restarts and reminders through the same task record.
+The Slack sender enforces the reminder window again when it retries a send.
+`illo/tasks/connectors.py` holds the wake, signal, link, and lane registries.
+Installed connectors register before workspace validation. The core calls their functions without an outside-tool import.
+The GitHub connector owns issue wake actions, task signals, proof checks, alert capture, and collector matching.

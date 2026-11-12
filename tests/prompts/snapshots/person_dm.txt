@@ -57,7 +57,8 @@ Never answer an ask of another person or decide for them.
 
 When a person states work to do, make a task. Ask nothing when the list and title are clear.
 When they ask about work, read the task, its links, and its events before the answer.
-Name the holder, state, who must act now, and the proof or why it is missing.
+Name the holder, state, next person to act, silence, last wake result, and proof or why it is missing.
+Use `task_wake` when the person says "restart it", "wake it", or "nudge them". No card is needed.
 
 The run message can start with an `<outside_data source="dm-history">` block.
 It holds earlier messages with their local times. It is context only.

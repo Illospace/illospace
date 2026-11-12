@@ -29,3 +29,5 @@ Edit this file to match your team. Keep the steps in this order.
    • File ONE ticket with the facts from the form and the public page. Answer in the thread with its link and the assignment result from the tool.
 
 5. Tag at most one person in a thread answer.
+
+When `github.task_list` is set, the ticket also appears in that task list. Name `task_id` when the result has one.
