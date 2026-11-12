@@ -124,7 +124,7 @@ The MCP endpoint is `http://127.0.0.1:8484/mcp`.
 It also accepts requests at `/api/mcp`.
 Use `Authorization: Bearer <token>`.
 A remote collector needs a private tunnel or a reverse proxy with HTTPS.
-Publish only the routes that you need, such as `/mcp` and `/oauth/`.
+Publish only the routes that you need, such as `/mcp`, `/oauth/`, and `/list`.
 Do not publish Postgres, the brain, `/brain/mcp`, or the admin reload route.
 
 Optional GitHub and mailbox settings appear in `deploy/env.example`.
@@ -132,8 +132,47 @@ For email, set `ILLO_EMAIL_AUTHSERV_ID` to the name of the receiving server, suc
 [connectors.md](connectors.md) explains the sender check.
 For a GitHub App, mount its private key from an external file into the app container.
 Set `ILLO_GITHUB_APP_PRIVATE_KEY_FILE` to its container path.
-Google connector credentials go into the vault through `illo secret set`.
+The owner writes `connect Google` in a Slack DM to set up Google through a private form.
+The environment variables `ILLO_GOOGLE_CLIENT_ID` and `ILLO_GOOGLE_CLIENT_SECRET` remain an alternative.
 Do not put connector secrets in the workspace.
+
+## The public sign-in address
+
+The internal `ILLO_PUBLIC_URL` can stay at the address that the brain uses.
+To give a browser a separate address, set this block in the workspace's `illo.yaml`:
+
+```yaml
+connect:
+  public_url: https://illo.example.com
+```
+
+Use HTTPS. Do not include credentials, a query, or a fragment.
+Only `/oauth/` and `/list` paths must be exposed.
+Keep the brain, `/brain/mcp`, Postgres, and the admin routes private.
+A reverse proxy can forward these paths to the local Illo service.
+For example, use these Nginx locations inside your HTTPS server block:
+
+```nginx
+location /oauth/ {
+    proxy_pass http://127.0.0.1:8484;
+    access_log off;
+}
+location = /list {
+    proxy_pass http://127.0.0.1:8484;
+    access_log off;
+}
+```
+
+Keep the sign-in query and the list key out of all proxy logs.
+The Google sign-in then completes in the same browser after one click on the DM link.
+The task list uses the same base address.
+If the setting is absent, both use `ILLO_PUBLIC_URL`, as before.
+A local Google sign-in still needs the final address pasted into the person's DM.
+The chat setup message always shows the callback address in use.
+After you change this setting, write `connect Google` and add the shown address to the Google client.
+The installer already sets `ILLO_VAULT_KEY`. Keep this key outside the checkout.
+The chat forms need Slack Socket Mode and the normal bot sign-in.
+Apply the new database migration before this app version starts. It adds `list_links`.
 
 ## Run it on your laptop to try it
 

@@ -137,6 +137,10 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
 def draft_preview(draft: dict) -> str | None:
     """Keep the entire proposed action visible before a person can send it."""
     content = draft["content"]
+    if draft.get("kind") in {"connect_propose_mcp", "connect_allow_tools", "connect_remove"}:
+        from illo.connectors.chat import preview
+
+        return preview(draft["kind"], content["arguments"])[0]
     if draft.get("kind") in {"github_assign_issue", "github_comment_issue"}:
         if not content.get("github_issue"):
             return None
@@ -239,6 +243,8 @@ def preview_sections(text):
 
 
 def draft_fallback(draft):
+    if draft.get("kind") in {"connect_propose_mcp", "connect_allow_tools", "connect_remove"}:
+        return draft_preview(draft)
     if draft.get("kind") in {"github_assign_issue", "github_comment_issue"}:
         args = draft["content"]["arguments"]
         verb = "Assign" if draft["kind"] == "github_assign_issue" else "Comment on"
@@ -278,6 +284,19 @@ def github_card(draft, text):
 
 def draft_card(draft: dict) -> list[dict]:
     text = draft_preview(draft)
+    if draft.get("kind") in {"connect_propose_mcp", "connect_allow_tools", "connect_remove"}:
+        from illo.connectors.chat import preview
+
+        _, yes, no = preview(draft["kind"], draft["content"]["arguments"])
+        blocks = [section(text)]
+        if draft["state"] == "pending":
+            blocks.append({"type": "actions", "elements": [
+                button(yes, f"draft:{draft['id']}:approve", True),
+                button(no, f"draft:{draft['id']}:reject")]})
+        else:
+            blocks.append(section({"sent": "The request is complete. Read the DM for the result.", "approved": "The action is approved.",
+                                   "rejected": "The action is not approved."}.get(draft["state"], "This card expired.")))
+        return blocks
     if text is not None and draft.get("kind") in {"github_assign_issue", "github_comment_issue"}:
         return github_card(draft, text)
     blocks = [section(f"Draft for {escape(draft['destination'])}")]

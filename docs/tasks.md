@@ -225,6 +225,31 @@ See [Workspace](workspace.md) for defaults.
   Webhook receivers must use `event_id` to prevent duplicates. Connector writes use markers and receipts.
 - Slack can show a stale card until the next successful retry. The ledger remains the source of truth.
 
+## The list page
+
+Ask Illo for your list link in a DM or a team channel.
+Illo uses `list_link`. In a channel, it sends the link only to your DM.
+The link has the form `https://illo.example.com/list?k=<key>` and expires after 24 hours.
+Several links can stay valid. Ask Illo to revoke your list links to cancel all of them.
+Anyone with the link can read that page until it expires or you revoke it. Keep it private.
+
+The page shows team tasks and your own private lists. It never shows another person's private list.
+It shows open tasks by list, with pieces under their parent, then Done in the last 7 days.
+Each task shows its ID, title, holder, state, next person to act, due time, open pieces, and safe links.
+An agent task also shows silent hours above zero. Due times use your time zone from `people.yaml`.
+The states read `to do`, `in work`, `in review`, and `done`.
+The page shows no brief, result, or chat text.
+
+Use `Mine` for tasks that wait for you, tasks you hold, and tasks your agents hold.
+A parent stays visible as context for a matching piece. Other pieces do not appear in that filter.
+Select a list name to filter by that list. These filters use plain links and need no script.
+The page fits a phone or desktop and follows the device's light or dark mode.
+It sets no cookie and uses no external asset. It asks browsers and search engines not to store it.
+A missing, expired, or revoked key gives a plain 404 page.
+
+The base address is `connect.public_url` when set, else `ILLO_PUBLIC_URL`.
+Expose `/list` with `/oauth/`. See [Install](install.md#the-public-sign-in-address).
+
 ## Morning briefs
 
 The task list is the picture of work. Lanes supply run evidence from collectors.

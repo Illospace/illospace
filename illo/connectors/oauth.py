@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import secrets
+from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import HTTPException, Request
@@ -20,15 +21,28 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def public_url(ctx) -> str:
+    return (ctx.workspace.config.connect.public_url or ctx.config.public_url).rstrip("/")
+
+
 def callback_url(ctx) -> str:
-    return ctx.config.public_url.rstrip("/") + "/oauth/google/callback"
+    return public_url(ctx) + "/oauth/google/callback"
 
 
-async def issue(ctx, person_id: int) -> str:
+@asynccontextmanager
+async def connection(ctx, conn):
+    if conn is not None:
+        yield conn
+    else:
+        async with ctx.pool.connection() as opened:
+            yield opened
+
+
+async def issue(ctx, person_id: int, *, conn=None) -> str:
     config = google.google_config(ctx)
     if not config:
         raise ValueError("The Google connector is not enabled")
-    async with ctx.pool.connection() as conn:
+    async with connection(ctx, conn) as conn:
         await google.credentials(ctx, conn)
         verifier = secrets.token_urlsafe(48)
         # The encrypted state authenticates its owner and nonce. The ledger enforces one use.
@@ -50,11 +64,11 @@ async def issue(ctx, person_id: int) -> str:
                 ),
             ),
         )
-    return ctx.config.public_url.rstrip("/") + "/oauth/google/start?" + urlencode({"state": state})
+    return public_url(ctx) + "/oauth/google/start?" + urlencode({"state": state})
 
 
-async def start(ctx, state: str, *, browser_nonce: str | None = None) -> str:
-    async with ctx.pool.connection() as conn:
+async def start(ctx, state: str, *, browser_nonce: str | None = None, conn=None) -> str:
+    async with connection(ctx, conn) as conn:
         row = await one(
             conn,
             """UPDATE connector_oauth_states SET started_at=clock_timestamp()
@@ -228,10 +242,12 @@ class OAuthLogFilter(logging.Filter):
 async def claim(ctx, event, authority) -> str | None:
     if not person_dm(event, authority):
         return None
+    from illo.connectors import chat
+
+    text = event.text.strip().lower().rstrip(".!?")
     pasted = callback_address(event.text, callback_url(ctx))
-    if not pasted and event.text.strip().lower() not in {
-        "connect my google",
-        "disconnect my google",
+    if not pasted and text not in chat.PERSONAL_PHRASES | {
+        "connect google", "set up google", "disconnect my google",
     }:
         return None
     try:
@@ -243,17 +259,11 @@ async def claim(ctx, event, authority) -> str | None:
             return await complete(
                 ctx, params["state"][0], params["code"][0], person_id=authority.person_id
             )
-        if event.text.strip().lower() == "connect my google":
-            link = await issue(ctx, authority.person_id)
-            if urlsplit(ctx.config.public_url).hostname in {"localhost", "127.0.0.1", "::1"}:
-                state = parse_qs(urlsplit(link).query)["state"][0]
-                link = await start(ctx, state)
-                return (
-                    "Open this link to connect Google: "
-                    + link
-                    + "\nThe final local address can fail to open. Paste that full address here."
-                )
-            return "Open this link to connect your Google account: " + link
+        if text != "disconnect my google":
+            async with ctx.pool.connection() as conn:
+                return await chat.start(ctx, conn, authority.person_id, "google",
+                                        "personal" if text in chat.PERSONAL_PHRASES else "team",
+                                        send=False)
         async with ctx.pool.connection() as conn:
             revoked = await ctx.google_client.disconnect(
                 conn, ctx, google.google_config(ctx), authority.person_id

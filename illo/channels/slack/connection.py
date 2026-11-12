@@ -34,6 +34,17 @@ class SlackConnection:
                 await sensors.error(conn, "slack", "The Slack connection is unavailable", expected_every_s=10)
 
     async def on_request(self, client: SocketModeClient, request: SocketModeRequest) -> None:
+        if request.type == "interactive" and request.payload.get("type") == "view_submission":
+            from illo.channels.slack.modals import prepare
+
+            response, finish = await prepare(self.ctx, request.payload)
+            await client.send_socket_mode_response(SocketModeResponse(
+                envelope_id=request.envelope_id, payload=response))
+            if finish:
+                task = asyncio.create_task(finish())
+                self.pending.add(task)
+                task.add_done_callback(self.pending.discard)
+            return
         # Acknowledge before database, file, or model work.
         await client.send_socket_mode_response(SocketModeResponse(envelope_id=request.envelope_id))
         if request.type not in {"events_api", "interactive"}:

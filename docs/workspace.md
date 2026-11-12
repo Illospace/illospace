@@ -44,7 +44,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.effort` | Optional profile-to-effort map: `low`, `medium`, or `high`. Person DM, team channel, and agent request default to `medium`; others default to `low`. `ILLO_BRAIN_EFFORT` overrides it in the Responses runtime. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
-| `workspace.git_push` | Commit and push confirmed notes. Default: false. |
+| `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |
+| `connect.public_url` | Optional HTTPS browser address for `/oauth/` and `/list`. No credentials or query. Default: `ILLO_PUBLIC_URL`. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |
 | `run_limits.max_message_chars` | Maximum inbound text length. Default: 20000. |
 

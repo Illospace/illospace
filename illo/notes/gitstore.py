@@ -1,4 +1,4 @@
-"""Commit only the note. A failed push leaves the file on disk."""
+"""Commit one workspace file. A failed push leaves the file on disk."""
 
 import asyncio
 import os
@@ -37,19 +37,21 @@ async def _git(root: Path, *args: str, capture: bool = False) -> bool | str:
         raise
 
 
-async def store(ctx, conn, path: Path, title: str) -> bool:
+async def store(ctx, conn, path: Path, title: str, *, commit: bool = False) -> bool:
     """Do not push unless the workspace explicitly enables it and has a remote."""
-    if not ctx.workspace.config.workspace.git_push:
+    if not commit and not ctx.workspace.config.workspace.git_push:
         return True
     root = ctx.workspace.root
     try:
         if not await _git(root, "rev-parse", "--is-inside-work-tree"):
             return True
+        if commit and await _git(root, "rev-parse", "--show-toplevel", capture=True) != str(root.resolve()):
+            return True
         # Read names only. Never print a remote URL or Git output.
         remotes = (await _git(root, "remote", capture=True)).splitlines()
-        if not remotes:
+        if not remotes and not commit:
             return True
-        remote = "origin" if "origin" in remotes else remotes[0]
+        remote = "origin" if "origin" in remotes else (remotes[0] if remotes else None)
         relative = str(path.relative_to(root))
         if not await _git(root, "add", "--", relative):
             raise RuntimeError
@@ -61,17 +63,17 @@ async def store(ctx, conn, path: Path, title: str) -> bool:
                 "commit",
                 "--only",
                 "-m",
-                f"note: {title}",
+                f"workspace: {title}" if commit else f"note: {title}",
                 "--",
                 relative,
             ):
                 raise RuntimeError
-        if not await _git(root, "push", "--", remote, "HEAD"):
+        if ctx.workspace.config.workspace.git_push and remote and not await _git(root, "push", "--", remote, "HEAD"):
             raise RuntimeError
     except Exception:
         await sensors.error(
-            conn, "workspace", "The note is saved. The workspace commit or push failed."
+            conn, "workspace", "The file is saved. The workspace commit or push failed."
         )
         return False
-    await sensors.ok(conn, "workspace", "The note is saved and pushed.")
+    await sensors.ok(conn, "workspace", "The connector file is saved." if commit else "The note is saved and pushed.")
     return True

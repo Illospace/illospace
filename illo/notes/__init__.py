@@ -1,8 +1,6 @@
 """Keep confirmed team notes in files and pending proposals in the ledger."""
 
-import os
 import re
-import tempfile
 from datetime import UTC
 from pathlib import Path
 
@@ -108,24 +106,9 @@ async def propose(ctx, conn, run, title, text, about):
 
 
 def _write(root, file_name, text):
-    folder = root / "notes"
-    if folder.is_symlink():
-        raise ValueError("The notes folder must not be a link")
-    folder.mkdir(exist_ok=True)
-    path = folder / file_name
-    if path.is_symlink() or path.resolve().parent != folder.resolve():
-        raise ValueError("The note path is invalid")
-    fd, name = tempfile.mkstemp(prefix=".note-", dir=folder)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-    return path
+    from illo.notes.files import write
+
+    return write(root, "notes", file_name, text)
 
 
 async def keep(ctx, conn, row, person, text=None):

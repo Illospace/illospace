@@ -52,6 +52,8 @@ async def google_ready(conn, app, scope, person_id) -> bool:
 async def credentials(ctx, conn) -> tuple[str, str]:
     client_id = os.environ.get("ILLO_GOOGLE_CLIENT_ID", "")
     secret = os.environ.get("ILLO_GOOGLE_CLIENT_SECRET")
+    if not client_id:
+        client_id = await store.vault(ctx).get(conn, "google-client-id")
     if not secret:
         secret = await store.vault(ctx).get(conn, "google-client-secret")
     if not client_id or not secret:
@@ -361,8 +363,7 @@ async def shared_provider(ctx, principal, query, kinds, limit):
     return await _search_provider(ctx, principal, query, kinds, limit, shared=True)
 
 
-async def setup(ctx) -> None:
-    ctx.google_client = GoogleClient()
+def register_search(ctx) -> None:
     from illo.sources import search
 
     register = getattr(search, "register_provider", None)
@@ -376,3 +377,8 @@ async def setup(ctx) -> None:
             # Several app instances can share this module. Providers take their app as an argument.
             if getattr(search, "_providers", {}).get(name) != (fn, personal, False):
                 register(name, fn, personal=personal, tainted=False)
+
+
+async def setup(ctx) -> None:
+    ctx.google_client = GoogleClient()
+    register_search(ctx)

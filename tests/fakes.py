@@ -20,6 +20,9 @@ class FakeSlackClient:
             "ts": str(len(self.calls)),
         }
 
+    async def views_open(self, **kwargs):
+        return await self._record("views_open", **kwargs)
+
     async def chat_postMessage(self, **kwargs):
         result = await self._record("chat_postMessage", **kwargs)
         self.messages[result["ts"]] = {
