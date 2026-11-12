@@ -42,14 +42,16 @@ INTERNAL_TOOLS = frozenset(
         "slack_post_channel",
         "slack_read_thread",
         "notes_propose",
+        "note_save",
+        "list_save",
         "connectors_list",
         "connectors_call",
         "email_draft",
     }
 )
 GRANT_PROFILES = {
-    "person_dm": READ_TOOLS | TICKET_TOOLS | PERSONAL_TOOLS | INTERNAL_TOOLS,
-    "team_channel": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_read_thread"},
+    "person_dm": (READ_TOOLS | TICKET_TOOLS | PERSONAL_TOOLS | INTERNAL_TOOLS) - {"notes_propose"},
+    "team_channel": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_read_thread", "note_save", "list_save"},
     "tainted": frozenset({
         "github_search_issues", "github_get_issue", "github_create_issue", "claims_take",
         "web_read_public_page", "connectors_list", "connectors_call", "skills_get",

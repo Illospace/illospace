@@ -1,5 +1,7 @@
 # Workspace files
 
+Teach Illo through chat with [Team memory](memory.md). You can still edit these files by hand.
+
 `ILLO_WORKSPACE_DIR` points to the folder. Start with `workspace.example/`.
 The loader rejects unknown fields. Errors name the file and field.
 A failed reload keeps the last valid workspace. The loader syncs people in one transaction.
@@ -47,6 +49,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |
+| `memory.list_changes` | `owners` (default) or `everyone`. Controls who creates lists and changes holders or Done rules. |
 | `connect.public_url` | Optional HTTPS browser address for `/oauth/` and `/list`. No credentials or query. Default: `ILLO_PUBLIC_URL`. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |
 | `run_limits.max_message_chars` | Maximum inbound text length. Default: 20000. |

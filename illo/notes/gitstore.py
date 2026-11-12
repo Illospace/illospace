@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 from illo.ledger import sensors
@@ -16,28 +18,30 @@ async def _git(root: Path, *args: str, capture: bool = False) -> bool | str:
         GIT_COMMITTER_NAME="Illo",
         GIT_COMMITTER_EMAIL="illo@example.invalid",
     )
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        "-C",
-        str(root),
-        *args,
-        env=env,
-        stdout=asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
-        async with asyncio.timeout(30):
-            output, _ = await process.communicate()
-            if capture:
-                return output.decode().strip() if process.returncode == 0 else ""
-            return process.returncode == 0
-    except BaseException:
-        process.kill()
-        await process.wait()
-        raise
+    with ExitStack() as stack:
+        if (not env.get("HOME") or not Path(env["HOME"]).is_dir()
+                or not os.access(env["HOME"], os.R_OK | os.X_OK)):
+            env["HOME"] = stack.enter_context(tempfile.TemporaryDirectory(prefix="illo-git-"))
+        process = await asyncio.create_subprocess_exec(
+            "git", "-c", f"safe.directory={root.resolve()}", "-C", str(root), *args,
+            env=env,
+            stdout=asyncio.subprocess.PIPE if capture else asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with asyncio.timeout(30):
+                output, _ = await process.communicate()
+                if capture:
+                    return output.decode().strip() if process.returncode == 0 else ""
+                return process.returncode == 0
+        except BaseException:
+            process.kill()
+            await process.wait()
+            raise
 
 
-async def store(ctx, conn, path: Path, title: str, *, commit: bool = False) -> bool:
+async def store(ctx, conn, path: Path, title: str, *, commit: bool = False,
+                message: str | None = None) -> bool:
     """Do not push unless the workspace explicitly enables it and has a remote."""
     if not commit and not ctx.workspace.config.workspace.git_push:
         return True
@@ -63,7 +67,7 @@ async def store(ctx, conn, path: Path, title: str, *, commit: bool = False) -> b
                 "commit",
                 "--only",
                 "-m",
-                f"workspace: {title}" if commit else f"note: {title}",
+                message or (f"workspace: {title}" if commit else f"note: {title}"),
                 "--",
                 relative,
             ):

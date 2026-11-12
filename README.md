@@ -6,6 +6,7 @@ The morning briefs read tasks. They show what needs a person, with the reason an
 Lanes are run evidence from collectors.
 
 Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools, proof, and Slack cards.
+Read [Team memory](docs/memory.md) to teach Illo your team's work through chat.
 
 ## What it does
 

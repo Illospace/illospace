@@ -47,6 +47,7 @@ SETUP_MODULES = (
     "illo.routines.heartbeat",
     "illo.asks",
     "illo.notes",
+    "illo.memory",
     "collectors",
     "collectors.t3",
     "collectors.hooks",

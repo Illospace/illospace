@@ -267,6 +267,10 @@ class ConnectConfig(Model):
         return value
 
 
+class MemoryConfig(Model):
+    list_changes: Literal["owners", "everyone"] = "owners"
+
+
 class TeamConfig(Model):
     language: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ()-]{1,39}$")
     team_name: str = Field(min_length=1)
@@ -284,6 +288,7 @@ class TeamConfig(Model):
     run_limits: RunLimits = Field(default_factory=RunLimits)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     connect: ConnectConfig = Field(default_factory=ConnectConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     email: EmailConfig = Field(default_factory=EmailConfig)
 

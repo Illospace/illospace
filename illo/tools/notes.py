@@ -60,7 +60,7 @@ def register(registry) -> None:
             notes_propose,
             "Propose a team note with `title` and `text`. The person you act for gets a card, and the note is saved only when they tap Keep; until then the result is pending, so say that the note waits for their approval.",
             ProposeArgs,
-            profiles=frozenset({"person_dm", "agent_request"}),
+            profiles=frozenset({"agent_request"}),
             team_visible=True,
         )
     )

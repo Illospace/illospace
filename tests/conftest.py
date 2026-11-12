@@ -1,6 +1,7 @@
 """One isolated database for each session. No real channel or model calls."""
 
 import os
+import shutil
 import uuid
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from illo.db import create_pool, migrate
 from illo.gateway import InboundEvent
 from illo.workspace import load_workspace
 from tests.fakes import FakeChannelAdapter, FakeGitHubClient, FakeSlackClient
+from tests.workspaces import task_workspace
 
 ROOT = Path(__file__).parents[1]
 
@@ -56,8 +58,10 @@ async def pool(database_pool):
 
 
 @pytest.fixture(scope="session")
-def workspace():
-    return load_workspace(ROOT / "workspace.example")
+def workspace(tmp_path_factory):
+    root = tmp_path_factory.mktemp("workspace") / "team"
+    shutil.copytree(ROOT / "workspace.example", root)
+    return load_workspace(task_workspace(root))
 
 
 @pytest.fixture
@@ -111,9 +115,9 @@ def fake_brain():
 
 
 @pytest.fixture
-async def app(pool, fake_brain, slack_client, github_client):
+async def app(pool, workspace, fake_brain, slack_client, github_client):
     config = Config(
-        workspace_dir=ROOT / "workspace.example",
+        workspace_dir=workspace.root,
         public_url="http://test",
         revision="test-revision",
         reload_token="test-reload",

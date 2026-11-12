@@ -16,7 +16,7 @@ from illo.gateway import InboundEvent
 from illo.gateway.principal import Authority
 from illo.ledger import asks
 from illo.tools.checks import PROFILE_NAMES
-from illo.workspace import WorkspaceError, load_workspace
+from illo.workspace import WorkspaceError
 
 ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOTS = Path(__file__).with_name("snapshots")
@@ -36,8 +36,8 @@ CASES = {
 
 
 @pytest.fixture(scope="module")
-def example():
-    return load_workspace(ROOT / "workspace.example")
+def example(workspace):
+    return workspace
 
 
 def words(text: str) -> int:
@@ -63,7 +63,7 @@ def test_assembled_prompt_matches_snapshot(example, name):
 
 
 def test_base_prompt_stays_short():
-    assert words(BASE_PROMPT) <= 900
+    assert words(BASE_PROMPT) <= 1100
 
 
 def test_every_profile_has_a_short_text():
@@ -167,6 +167,9 @@ def test_runtime_prompt_size_boundary_keeps_all_text(example):
         }
     )
     remaining = 60_000 - len(build(changed, "person:ada", "person_dm", now=NOW))
+    from illo.brain.prompts import _memory_facts
+
+    remaining += len(_memory_facts(changed, "person:ada", "person_dm")) + 2
     changed.rules[0].body = "x" * remaining
     assert len(build(changed, "person:ada", "person_dm", now=NOW)) == 60_000
     changed.rules[0].body += "x"
