@@ -2,8 +2,34 @@
 
 import asyncio
 import json
+import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
+
+_private_request = ContextVar("private_http_request", default=False)
+
+
+class _PrivateRequestLog(logging.Filter):
+    def filter(self, record):
+        if _private_request.get():
+            # A request address can contain a secret in its query.
+            record.msg = "The private HTTP request completed."
+            record.args = ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_PrivateRequestLog())
+
+
+@contextmanager
+def private_http_logs():
+    token = _private_request.set(True)
+    try:
+        yield
+    finally:
+        _private_request.reset(token)
 
 
 class BoundedHTTP:

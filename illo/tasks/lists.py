@@ -17,7 +17,10 @@ def load_task_files(root, keys, config):
              for path in sorted(root.glob("lists/*.md"))]
     if not (root / "lists").exists():
         lists = [TaskList(key="tasks", name="Tasks")]
-    warnings = []
+    from illo.tasks.connectors import wake_types
+
+    warnings = [f"{agents_path}: unknown wake type {a.wake.type}" for a in agents
+                if a.wake.type not in wake_types]
     holders = {"person:" + key for key in keys} | {"agent:" + a.key for a in agents}
     from illo.tasks.checks import known
 

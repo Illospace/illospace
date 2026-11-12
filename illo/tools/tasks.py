@@ -164,8 +164,8 @@ async def handle(ctx, name, args):
                 row = await ledger.add_link(ctx.conn, args["id"], **common, links=args["links"], ctx=ctx)
         else:
             fn = {"task_hand": ledger.hand, "task_post": ledger.post, "task_done": ledger.done,
-                  "task_reopen": ledger.reopen, "task_cancel": ledger.cancel}[name]
-            values = {k: v for k, v in args.items() if k != "id"}
+                  "task_reopen": ledger.reopen, "task_wake": ledger.wake, "task_cancel": ledger.cancel}[name]
+            values = {k: v for k, v in args.items() if k not in {"id", "events"}}
             row = await fn(ctx.conn, args["id"], **common, **values, **({"ctx": ctx} if name == "task_done" else {}))
         return await full(ctx.conn, ctx.app.workspace, row, viewer, limit=args.get("events", 20), ctx=ctx)
     except ledger.TaskError as exc:
@@ -176,13 +176,14 @@ def register(registry):
     entries = [
         ("lists", Lists, READ, "read", "Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work."),
         ("task_create", Create, CAPTURE, "write_internal", "Create a task from the person's words. Give a list, title, and brief. A pieces array creates the parent and its pieces in one call."),
-        ("task_list", ListArgs, READ, "read", "Read visible tasks by list, holder, state, waits_for, parent, or text. Rows show who must act now and the number of open pieces."),
-        ("task_get", Get, READ, "read", "Read the task brief, current result, proof links, pieces, checks, and recent events. Read this before you answer a question about the work."),
+        ("task_list", ListArgs, READ, "read", "Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count."),
+        ("task_get", Get, READ, "read", "Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer."),
         ("task_update", Update, WRITE, "write_internal", "Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility."),
         ("task_hand", Hand, WRITE, "write_internal", "Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo."),
         ("task_post", Post, CAPTURE, "write_internal", "Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder."),
         ("task_done", Done, WRITE, "write_internal", "Confirm a task for the person who made this request. The Done checks must pass. Use force true and a reason to override failed checks."),
         ("task_reopen", Reason, WRITE, "write_internal", "Send a task back to its holder with a reason. The state becomes todo and waits_for names the holder. The record keeps the reason."),
+        ("task_wake", Get, WRITE, "write_internal", "Wake the agent holder and record the person who requests the restart."),
         ("task_cancel", Reason, WRITE, "write_internal", "Cancel a task with a reason. It has no next move. The task and its full record stay in the ledger for later reads."),
     ]
     for name, arguments, profiles, risk, description in entries:

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 CORE = ["illo/ledger/tasks.py", "illo/tools/tasks.py", "illo/channels/mcp/tasks.py",
-        "illo/channels/slack/tasks.py", "illo/tasks/checks.py", "illo/tasks/access.py", "illo/tasks/views.py", "illo/tasks/lists.py"]
+        "illo/channels/slack/tasks.py", "illo/tasks/checks.py", "illo/tasks/access.py", "illo/tasks/views.py", "illo/tasks/lists.py", "illo/tasks/wake.py", "illo/tasks/release.py", "illo/tasks/connectors.py"]
 
 
 def test_task_core_has_no_outside_tool_names():
