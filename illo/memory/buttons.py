@@ -6,11 +6,11 @@ from datetime import UTC, datetime, timedelta
 from illo.asks.cards import escape
 from illo.db import one
 from illo.ledger import audit, kv, people, sensors
-from illo.memory import files, saves
+from illo.memory import saves
 from illo.notes.files import file_path
 from illo.tools.registry import Refusal
 
-CORRECT = "Reply in this thread with the correct text."
+CORRECT = "Tell me what is wrong, in this thread. I correct it."
 EXPIRED = "These buttons expired after 7 days. Tell Illo the change in words."
 
 
@@ -138,7 +138,13 @@ async def action(ctx, person, action):
             await reply(ctx, row, CORRECT)
 
 
-async def claim(ctx, event, authority):
+async def prepare(ctx, event, authority):
+    """Give the correction to the model with the name of the memory that it corrects.
+
+    A reply is a statement such as "No, the drafts are in the other folder", not a full
+    new text. The model reads the memory and changes only the wrong part with a save tool.
+    The save tools apply their normal rules to the person who replies.
+    """
     if (event.channel != "slack" or authority.tainted or not event.text.strip()
             or authority.profile not in {"person_dm", "team_channel"}
             or any(event.payload.get(k) for k in ("bot", "bot_id", "webhook", "form", "outside_workspace", "contains_outside_text"))):
@@ -148,34 +154,19 @@ async def claim(ctx, event, authority):
     if not thread or not channel:
         return None
     async with ctx.pool.connection() as conn:
-        person = await people.by_slack_id(conn, event.sender)
-        if not person:
+        if not await people.by_slack_id(conn, event.sender):
             return None
         row = await one(conn, """SELECT * FROM memory_changes WHERE slack_channel=%s
             AND correction_ts=%s AND state<>'forgotten' FOR UPDATE""", (channel, thread))
         if not row:
             return None
-        if not await authorized(conn, row, person):
-            return await refusal(conn, row)
-        if expired(row):
-            await conn.execute("UPDATE memory_changes SET correction_ts=NULL WHERE id=%s", (row["id"],))
-            return EXPIRED
-        if len(event.text) > 20000:
-            return "The text is too long. Use at most 20000 characters."
-        try:
-            await saves.limit(conn, person)
-            async with ctx.reload_lock:
-                current(ctx, row)
-                front, _ = files.split(row["after_text"])
-                after = files.render(front, event.text)
-                await saves.persist(ctx, conn, row["kind"], row["target"], after,
-                    f"memory: correct {row['kind']} {row['title'] if row['kind'] == 'note' else row['target']}")
-                await saves.record(ctx, conn, kind=row["kind"], target=row["target"], title=row["title"],
-                    before=row["after_text"], after=after, person=person, run_id=None,
-                    state="corrected", tool="memory_correct")
-                await conn.execute("""UPDATE memory_changes SET after_text=%s,state='corrected',
-                    correction_ts=NULL,updated_at=now() WHERE id=%s""", (after, row["id"]))
-        except Refusal as exc:
-            return str(exc)
-        await edit(ctx, conn, {**row, "after_text": after}, "Saved the correct text.", controls=True)
-        return "Saved the correct text."
+        await conn.execute("UPDATE memory_changes SET correction_ts=NULL,updated_at=now() WHERE id=%s",
+                           (row["id"],))
+    if row["kind"] == "note":
+        memory = f"the team note `note:{row['target']}`. Read it with `search_get`, then save it with `note_save` and `replaces`"
+    else:
+        memory = f"the list `{row['target']}`. Read it with `lists`, then save it with `list_save`"
+    hint = (f"[Code wrote this line. The person pressed Correct on a saved memory: {memory}. "
+            "The message below is the correction. Change only the wrong part and keep the rest. "
+            "Then confirm in one line.]\n")
+    return event.model_copy(update={"text": hint + event.text})

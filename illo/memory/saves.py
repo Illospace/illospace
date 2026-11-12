@@ -137,7 +137,7 @@ async def note_save(ctx, args):
         row = await record(ctx.app, ctx.conn, kind="note", target=target, title=args["title"],
                            before=before, after=after, person=person, run_id=ctx.run["id"])
     return {"ref": "note:" + target, "change_id": row["id"], "committed": committed,
-            "line": "I will remember: " + " ".join(args["text"].split())}
+            "line": "I will remember: " + " ".join(args["text"].split())[:300]}
 
 
 async def list_save(ctx, args):
@@ -175,4 +175,35 @@ async def list_save(ctx, args):
                            before=before, after=after, person=person, run_id=ctx.run["id"])
     line = args.get("add") or body or front.get("description") or front["name"]
     return {"ref": "list:" + args["key"], "change_id": row["id"], "committed": committed,
-            "line": "I will remember: " + " ".join(line.split())}
+            "line": "I will remember: " + " ".join(line.split())[:300]}
+
+
+async def forget_check(ctx, args):
+    if not await actor(ctx):
+        return Decision("deny", "Memory needs a known active person's untainted request.")
+    if ctx.run["personal_read"]:
+        return Decision("deny", "This run read personal data. Ask again in a new conversation to forget a note.")
+    return Decision("allow", "The person can forget team notes.")
+
+
+async def note_forget(ctx, args):
+    """Delete one team note. The record keeps its last text."""
+    person = await actor(ctx)
+    if not person or ctx.run["personal_read"]:
+        raise Refusal("Memory needs a known active person's untainted request without personal reads.")
+    await limit(ctx.conn, person)
+    async with ctx.app.reload_lock:
+        target = args["ref"][5:]
+        path = file_path(ctx.app.workspace.root, "notes", target, create=False)
+        if not path.exists():
+            raise Refusal("ref: The note was not found.")
+        before = path.read_text()
+        front, _ = files.split(before)
+        title = (front or {}).get("title") or target
+        if person["role"] != "owner" and (front or {}).get("author") != person["key"]:
+            raise Refusal("Only the author of the note or an owner can forget it.")
+        committed = await persist(ctx.app, ctx.conn, "note", target, None, "memory: forget note " + title)
+        row = await record(ctx.app, ctx.conn, kind="note", target=target, title=title,
+                           before=before, after="", person=person, run_id=ctx.run["id"],
+                           state="forgotten")
+    return {"ref": "note:" + target, "change_id": row["id"], "committed": committed, "forgotten": True}

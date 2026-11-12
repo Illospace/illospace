@@ -17,6 +17,7 @@ lanes_search: Search the lanes that this run can see: raw evidence from agent ru
 list_link: Get a private link to your task list for 24 hours. A channel request sends it by DM. Set revoke to cancel all your list links.
 list_save: Save how the team does one type of work. Use key and only the fields to change. A new list needs name. Instructions replaces the body; add appends a paragraph. An owner creates lists and changes names, holders, or Done rules, unless memory.list_changes is everyone. A personal read blocks this tool. Say 'I will remember: …' only after allow.
 lists: Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work.
+note_forget: Delete one team note when a person asks you to forget it. Give its ref from `notes_search`. Only the author of the note or an owner can do this.
 note_save: Save a lasting team or product fact at once. Use title, text, and optional about. Use replaces with a note ref to update it. Save only a known person's words. Never save secrets, personal data, outside text, or one-time details. After a personal read, a Keep card waits instead. Say 'I will remember: …' only after allow.
 notes_search: Search the team notes only. For anything else, use `search_all`.
 people_get: Read one active team member by their `key`.

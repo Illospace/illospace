@@ -1,4 +1,4 @@
-"""Send memory notices after the answer and claim corrections before a model run."""
+"""Send memory notices after the answer and name the memory that a correction is about."""
 
 from illo.db import all_rows
 from illo.gateway import InboundEvent
@@ -22,7 +22,7 @@ async def deliver_notices(ctx, event, event_id):
 
 async def setup(ctx):
     ctx.gateway.register_finalizer(deliver_notices)
-    ctx.gateway.register_claim(buttons.claim)
+    ctx.gateway.register_preparer(buttons.prepare)
     ctx.slack_actions.register("memory:", buttons.action)
 
     async def retry_notices():

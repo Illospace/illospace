@@ -16,6 +16,10 @@ class NoteSave(ProposeArgs):
     replaces: str | None = Field(default=None, pattern=r"^note:[a-zA-Z0-9_.-]+\.md$")
 
 
+class NoteForget(Arguments):
+    ref: str = Field(pattern=r"^note:[a-zA-Z0-9_.-]+\.md$")
+
+
 class ListSave(Arguments):
     key: str = Field(max_length=100, pattern=r"^[a-z][a-z0-9_-]*$")
     name: str = Field(default="", min_length=1, max_length=200, pattern=r"^[^\r\n]+$")
@@ -53,4 +57,10 @@ def register(registry):
         "A personal read blocks this tool. Say 'I will remember: …' only after allow.",
         ListSave, profiles=PROFILES, preflight=saves.list_check, team_visible=True,
         exclude_unset=True,
+    ))
+    registry.add(Tool(
+        "note_forget", "memory", "write_internal", lambda _: "ledger", False, saves.note_forget,
+        "Delete one team note when a person asks you to forget it. Give its ref from `notes_search`. "
+        "Only the author of the note or an owner can do this.",
+        NoteForget, profiles=PROFILES, preflight=saves.forget_check, team_visible=True,
     ))

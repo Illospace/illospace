@@ -46,7 +46,8 @@ async def correct(ctx, row, text, person="ada", **payload):
         external_id="correction", sender=acting["slack_id"], text=text,
         payload={"channel_id": row["slack_channel"], "thread_ts": row["thread_ts"], **payload})
     authority = Authority("person:" + person, "person_dm", acting["id"]) if event.kind == "dm" else Authority("team", "team_channel")
-    return await buttons.claim(ctx, event, authority)
+    prepared = await buttons.prepare(ctx, event, authority)
+    return prepared.text if prepared else None
 
 
 async def test_channel_note_writes_every_record_and_commit(memory_ctx, call):
@@ -194,31 +195,61 @@ async def test_forget_new_list_open_tasks(memory_ctx, call):
 
 @pytest.mark.parametrize("channel", ["C_ACME_TEAM", "D_EXAMPLE"])
 @pytest.mark.parametrize("saver,editor", [("ben", "ben"), ("ben", "ada")])
-async def test_correct_note_in_thread(memory_ctx, call, channel, saver, editor):
+async def test_correct_note_names_the_memory_for_the_model(memory_ctx, call, channel, saver, editor):
     result, run = await call("note_save", NOTE, person=saver)
     row = await announce(memory_ctx, result, run, channel=channel)
     await click(memory_ctx, row, "correct", person=editor)
-    assert memory_ctx.slack_client.calls[-1]["text"] == "Reply in this thread with the correct text."
-    assert await correct(memory_ctx, row, "Ada owns model research.", person=editor) == "Saved the correct text."
+    assert memory_ctx.slack_client.calls[-1]["text"] == buttons.CORRECT
+    text = await correct(memory_ctx, row, "No, Ada owns it.", person=editor)
+    # Code names the memory. The person's words stay whole, after the code line.
+    assert f"`note:{row['target']}`" in text and "`note_save`" in text
+    assert text.endswith("]\nNo, Ada owns it.")
+    # The file changes only when the model saves. The correction waits no more.
+    assert "Ben owns model research." in (memory_ctx.workspace.root / "notes" / row["target"]).read_text()
+    assert (await row_for(memory_ctx, result))["correction_ts"] is None
+    assert await correct(memory_ctx, row, "A later message.", person=editor) is None
+    replaced, _ = await call("note_save", {**NOTE, "text": "Ada owns model research.",
+                                           "replaces": result["result"]["ref"]}, person=editor)
+    assert replaced["decision"] == "allow"
     assert "Ada owns model research." in (memory_ctx.workspace.root / "notes" / row["target"]).read_text()
-    async with memory_ctx.pool.connection() as conn:
-        assert await one(conn, "SELECT id FROM audit WHERE tool='memory_correct'")
-        assert (await one(conn, "SELECT body FROM items WHERE source_ref=%s", (result["result"]["ref"],)))["body"] == "Ada owns model research."
-    assert git(memory_ctx.workspace.root, "log", "-1", "--format=%s") == "memory: correct note Research owner"
 
 
-async def test_correct_list_and_refuse_other_person_or_bot(memory_ctx, call):
+async def test_correct_list_keeps_the_rest_and_refuses_a_bot(memory_ctx, call):
+    before = next(e for e in memory_ctx.workspace.lists if e.key == "bugs").body
     result, run = await call("list_save", {"key": "bugs", "add": "Keep the proof."}, person="ben")
     row = await announce(memory_ctx, result, run)
     await click(memory_ctx, row, "forget", person="chloe")
     assert memory_ctx.slack_client.calls[-1]["text"] == "Only Ben or an owner can change this."
     await click(memory_ctx, row, "correct", person="ben")
-    assert await correct(memory_ctx, row, "Wrong.", person="chloe") == "Only Ben or an owner can change this."
     assert await correct(memory_ctx, row, "Bot.", person="ben", bot=True) is None
     assert await correct(memory_ctx, row, "Outside.", person="ben", contains_outside_text=True) is None
-    assert await correct(memory_ctx, row, "Ben keeps proof links.", person="ben") == "Saved the correct text."
+    text = await correct(memory_ctx, row, "Ben keeps proof links.", person="ben")
+    assert "the list `bugs`" in text and "`list_save`" in text
+    # A reply never replaces the list text by itself.
     entry = next(e for e in memory_ctx.workspace.lists if e.key == "bugs")
-    assert entry.body == "Ben keeps proof links." and entry.holders == ["person:ada", "agent:build"]
+    assert entry.body.startswith(before.strip()) and entry.body.endswith("Keep the proof.")
+
+
+async def test_note_forget_by_words(memory_ctx, call):
+    result, _ = await call("note_save", NOTE, person="ben")
+    ref = result["result"]["ref"]
+    denied, _ = await call("note_forget", {"ref": ref}, person="chloe")
+    assert denied["decision"] == "deny" and "author" in denied["reason"]
+    denied, _ = await call("note_forget", {"ref": ref}, person="ben", personal=True)
+    assert denied["decision"] == "deny"
+    denied, _ = await call("note_forget", {"ref": ref}, person="ben", profile="agent_request")
+    assert denied["decision"] == "deny"
+    done, run = await call("note_forget", {"ref": ref}, person="ada")
+    assert done["decision"] == "allow" and done["result"]["forgotten"]
+    assert not (memory_ctx.workspace.root / "notes" / ref[5:]).exists()
+    async with memory_ctx.pool.connection() as conn:
+        assert not await one(conn, "SELECT 1 FROM items WHERE source_ref=%s", (ref,))
+        row = await one(conn, "SELECT * FROM memory_changes WHERE state='forgotten'")
+        assert "Ben owns model research." in row["before_text"]
+    # A forgotten note gets no notice with buttons.
+    await announce(memory_ctx, done, run)
+    assert (await row_for(memory_ctx, done))["slack_ts"] is None
+    assert git(memory_ctx.workspace.root, "log", "-1", "--format=%s") == "memory: forget note Research owner"
 
 
 async def test_button_expiry_and_later_edits(memory_ctx, call):
@@ -306,20 +337,14 @@ async def test_search_and_note_grants(memory_ctx, call):
     assert {"note_save", "list_save"} <= names and "notes_propose" not in names
 
 
-async def test_pending_correction_expiry_and_forget_after_correction(memory_ctx, call):
+async def test_forget_button_after_a_correction_request(memory_ctx, call):
     result, run = await call("note_save", NOTE, person="ben")
     row = await announce(memory_ctx, result, run)
     await click(memory_ctx, row, "correct", person="ben")
-    assert await correct(memory_ctx, row, "Ada owns research.", person="ada") == "Saved the correct text."
-    assert len(memory_ctx.slack_client.calls[-1]["blocks"][1]["elements"]) == 2
-    await click(memory_ctx, row, "correct", person="ben")
-    async with memory_ctx.pool.connection() as conn:
-        await conn.execute("UPDATE memory_changes SET created_at=now()-interval '8 days' WHERE id=%s", (row["id"],))
-    assert "expired" in await correct(memory_ctx, row, "Too late.", person="ben")
-    async with memory_ctx.pool.connection() as conn:
-        await conn.execute("UPDATE memory_changes SET created_at=now() WHERE id=%s", (row["id"],))
+    assert (await row_for(memory_ctx, result))["correction_ts"]
     await click(memory_ctx, row, "forget", person="ada")
     assert not (memory_ctx.workspace.root / "notes" / row["target"]).exists()
+    assert await correct(memory_ctx, row, "Too late.", person="ben") is None
 
 
 async def test_prompt_question_then_answer_creates_work(memory_ctx, fake_brain):

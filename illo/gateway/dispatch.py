@@ -161,7 +161,11 @@ class Gateway:
                 text = await self.run_manager.execute(event, authority, row["id"], relay)
             await adapter.deliver_final(event, text)
             for finalize in self.finalizers:
-                await finalize(ctx, event, row["id"])
+                try:
+                    await finalize(ctx, event, row["id"])
+                except Exception:
+                    # The answer is delivered. A notice that fails has its own retry.
+                    log.exception("A finalizer failed after the answer")
             async with ctx.pool.connection() as conn:
                 await conn.execute(
                     """
