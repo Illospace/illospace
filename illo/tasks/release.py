@@ -15,7 +15,9 @@ async def _agent(ctx, conn, row, entry, now):
         WHERE task_id=%s AND kind='woken' AND at>=%s""", (row["id"], row["holder_since"]))
     base = max(t for t in (row["last_activity_at"], row["alive_at"], last["at"]) if t)
     hours = max(0, (now-base).total_seconds()/3600)
-    if not row["stopped_at"] and hours <= entry.silence.agent_hours:
+    grace = timedelta(minutes=ctx.workspace.config.tasks.stop_grace_minutes)
+    stopped = bool(row["stopped_at"]) and now - row["stopped_at"] >= grace
+    if not stopped and hours <= entry.silence.agent_hours:
         return
     if await one(conn, "SELECT event_id FROM task_wakes WHERE task_id=%s AND finished_at IS NULL", (row["id"],)):
         return
@@ -31,7 +33,7 @@ async def _agent(ctx, conn, row, entry, now):
     else:
         await conn.execute("UPDATE tasks SET stopped_at=NULL WHERE id=%s", (row["id"],))
         await tasks._event(conn, row, "code", "released", f"The holder is silent for {hours:.1f} hours.",
-                           {"hours": round(hours, 1), "stopped": bool(row["stopped_at"])})
+                           {"hours": round(hours, 1), "stopped": stopped})
 
 
 def in_window(workspace, person, now=None):

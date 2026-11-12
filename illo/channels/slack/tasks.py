@@ -102,7 +102,8 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
                      and e["data"].get("to") == target), None)
     if reminder and (not in_window(ctx.workspace, person) or
                      (reminder_counts is not None and reminder_counts[target] >= 5)):
-        raise ValueError("The task reminder waits for its delivery window.")
+        # Not an error: the pending marker stays, and a later tick sends the reminder.
+        return
     # The thread starts only when the task needs a person: a question, returned work,
     # or a hand-over from someone else. A read never starts it.
     handed = [e for e in events if e["kind"] == "handed" and target

@@ -193,7 +193,9 @@ Silence starts at the latest task activity, successful wake, or liveness stamp.
 A silent agent gets a `released` event and a new wake. A holding period permits two automatic releases by default.
 After the second release stays silent, the reviewer gets the next move and the facts in the task thread.
 A blocking question that waits for a person prevents release.
-A stopped collector run can cause immediate release when its linked ticket stays open.
+A stopped collector run can cause an early release when its linked ticket stays open.
+Illo waits `tasks.stop_grace_minutes` (default 30) first, because a run can start again by itself.
+A new working report in that time cancels the release.
 
 `tasks.alive(conn, task_id, source, at=None)` records liveness without an event.
 A connector or collector calls it when the holder shows activity. Reads never count.
@@ -205,7 +207,7 @@ It sends at most one reminder per task per period, between 08:00 and 20:00 in th
 A tick sends at most five reminders per person, then one line with the count of other tasks.
 The reminder quotes the question, asks for review, or says that the person holds the task.
 
-The `tasks:` block sets `release_max`, `check_minutes`, `reminder_window`, and the connector write limit.
+The `tasks:` block sets `release_max`, `check_minutes`, `reminder_window`, `stop_grace_minutes`, and the connector write limit.
 See [Workspace](workspace.md) for defaults.
 
 ## Limits

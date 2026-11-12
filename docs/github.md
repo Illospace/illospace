@@ -170,8 +170,12 @@ An outside dispatcher starts a worker when an issue gets an assignee.
 It sets the `agent:working` lock label to prevent duplicate starts.
 The worker merges its change, then its run stops before it returns the work.
 Its collector reports a stopped lane with the ticket link or task ID.
+A run whose title names the ticket as `repo#12` or `repo #12` also belongs to the task.
+When one run stops and another run of the same task still works, the task is not stopped.
 The ticket stays open, so the next task check releases the holder at once.
-Illo removes `agent:working`, removes the assignee, assigns it again, and posts the restart comment.
+After the grace period, Illo removes `agent:working`, removes the assignee, assigns it again, and posts the restart comment.
+Set `restart: {comment: false}` when the dispatcher treats a comment as a second start signal.
+A hand-over adds no comment: the assignment is the signal.
 The comment tells the worker to read the current branch, change, and comments first.
 The dispatcher starts the worker again. Illo permits two automatic restarts per holding period.
 After two silent restarts, the reviewer gets the facts and must decide.

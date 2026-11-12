@@ -358,6 +358,7 @@ tasks:
   check_minutes: 5
   reminder_window: [8, 20]
   github_writes_per_hour: 30
+  stop_grace_minutes: 30
 ```
 
 These values are the defaults. `release_max` is from 1 to 10. `check_minutes` is from 1 to 60.

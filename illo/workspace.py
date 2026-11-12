@@ -216,6 +216,8 @@ class TasksConfig(Model):
     check_minutes: int = Field(default=5, ge=1, le=60)
     reminder_window: tuple[int, int] = (8, 20)
     github_writes_per_hour: int = Field(default=30, ge=1, le=1000)
+    # A stopped run can start again by itself, for example after a long check. Wait before a restart.
+    stop_grace_minutes: int = Field(default=30, ge=0, le=1440)
 
     @field_validator("reminder_window")
     @classmethod

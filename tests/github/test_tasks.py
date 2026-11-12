@@ -193,7 +193,7 @@ async def test_trusted_alert_one_task_without_second_wake(app, ctx, fake_brain, 
     result = await alert(app, fake_brain)
     current = await get(ctx, result["task_id"])
     assert current["created_by"] == "code" and current["holder"] == "agent:build"
-    assert current["brief"] == "Filed from slack in C_ACME_ALERTS."
+    assert current["brief"] == "Filed from slack in #alerts."
     await wake.tick(ctx)
     assert len([c for c in github_client.calls if c["method"] == "assign_issue"]) == 1
     async with ctx.pool.connection() as conn:
@@ -240,6 +240,8 @@ async def test_working_lane_alive_stopped_lane_releases_now(ctx, github_client, 
         await lane_tools.report_one(caller, {**values, "state": "unknown"})
     assert (await get(ctx, row["id"]))["stopped_at"]
     await release.tick(ctx)
+    assert not [e for e in await events(ctx, row["id"]) if e["kind"] == "released"]  # the grace period
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
     await wake.tick(ctx)
     assert any(c["method"] == "remove_label" for c in github_client.calls)
     assert any(c["method"] == "unassign_issue" for c in github_client.calls)
@@ -323,3 +325,28 @@ async def test_existing_merged_lane_supplies_change_link(ctx, github_client):
             "html_url": f"https://github.com/{REPO}/pull/2"}, {})
     await poll(ctx)
     assert any(link["kind"] == "change" for link in (await get(ctx, row["id"]))["links"])
+
+
+async def test_run_title_that_names_the_ticket_links_the_run(ctx, github_client):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    number = github_client.issues[0]["number"]
+    lane = {"id": 7, "source": "t3", "state": "working", "links": ["t3-thread://x"], "title": f"engine #{number}: Repair"}
+    other = {**lane, "id": 8, "title": f"engine #{number}0: Another ticket"}
+    async with ctx.pool.connection() as conn:
+        await connector.lane_signal(ctx, conn, other, token={"person_key": "ada"})
+        assert not (await get_without_pool(conn, row["id"]))["alive_at"]
+        await connector.lane_signal(ctx, conn, lane, token={"person_key": "ada"})
+        assert (await get_without_pool(conn, row["id"]))["alive_at"]
+        # A second run stops. The first run still works, so the task is not stopped.
+        helper = {**lane, "id": 9, "state": "done", "title": f"Review acme-example/engine#{number}"}
+        await connector.lane_signal(ctx, conn, helper, token={"person_key": "ada"})
+        assert not (await get_without_pool(conn, row["id"]))["stopped_at"]
+        await connector.lane_signal(ctx, conn, {**lane, "state": "done"}, token={"person_key": "ada"})
+        assert (await get_without_pool(conn, row["id"]))["stopped_at"]
+
+
+async def test_hand_over_adds_no_comment(ctx, github_client):
+    await make(ctx)
+    await wake.tick(ctx)
+    assert not any(c["method"] == "comment_issue" for c in github_client.calls)

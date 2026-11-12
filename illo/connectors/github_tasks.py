@@ -17,6 +17,8 @@ REPO = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 class Restart(BaseModel):
     model_config = ConfigDict(extra="forbid")
     remove_labels: list[str] = Field(default_factory=list)
+    # An outside dispatcher can treat a comment as a second start signal. Then set this to false.
+    comment: bool = True
 
 
 class IssueWake(BaseModel):
@@ -139,7 +141,9 @@ async def wake(ctx, conn, task, agent, reason, event):
         else:
             comment = f"Task {task['id']}: {event['text']}"
         marker = f"<!-- illo:wake:{event['id']} -->"
-        if not any(marker in c.get("body", "") for c in issue.get("comments_data", [])):
+        # The assignment is the signal for a hand-over. The ticket body already names the task.
+        silent = reason == "task.handed" or (reason == "task.released" and not config.restart.comment)
+        if not silent and not any(marker in c.get("body", "") for c in issue.get("comments_data", [])):
             await act("comment", "comment_issue", comment + "\n\n" + marker)
     except ValueError as exc:
         return WakeResult(False, str(exc))
@@ -281,6 +285,7 @@ async def capture(ctx, conn, repo, issue, login=None, event=None):
     payload = (event or {}).get("payload", {}).get("payload", {})
     channel = payload.get("channel_id") or payload.get("source") or source
     source = " ".join(str(source).split())[:120]
+    channel = next(("#" + c.name for c in ctx.workspace.config.slack.channels if c.id == channel), channel)
     channel = " ".join(str(channel).split())[:120]
     agent = agent_for(ctx, login)
     row = await tasks.create(conn, workspace=ctx.workspace, viewer=tasks.Viewer(None, "code", team=True),
@@ -320,18 +325,26 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
     if not token:
         return
     refs = ["person:" + token["person_key"], *["agent:" + a.key for a in ctx.workspace.agents if a.owner == token["person_key"]]]
-    urls = [link if isinstance(link, str) else link.get("url")
-            for link in lane["links"] if isinstance(link, (str, dict))]
+    urls = {link if isinstance(link, str) else link.get("url")
+            for link in lane["links"] if isinstance(link, (str, dict))}
+    title = lane.get("title") or ""
     await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
-    rows = await all_rows(conn, """SELECT * FROM tasks WHERE state IN ('todo','working') AND holder=ANY(%s)
-        AND (id=%s OR EXISTS (SELECT 1 FROM jsonb_array_elements(links) l
-            WHERE l->>'kind' IN ('ticket','change') AND l->>'url'=ANY(%s)))""", (refs, task_id, urls))
+    rows = await all_rows(conn, "SELECT * FROM tasks WHERE state IN ('todo','working') AND holder=ANY(%s)", (refs,))
     for row in rows:
+        linked = any(link.get("kind") in {"ticket", "change"} and link.get("url") in urls for link in row["links"])
+        if not (row["id"] == task_id or linked or names_ticket(title, row)):
+            continue
         key = f"task:lane-stop:{row['id']}:{lane['id']}:{row['holder_since']}"
+        live = f"task:lane-live:{row['id']}:{lane['id']}"
         if lane["state"] == "working":
             await kv.delete(conn, key)
+            await kv.set(conn, live, True)
             await tasks.alive(conn, row["id"], lane["source"])
         elif lane["state"] in {"done", "failed", "unknown"}:
+            await kv.delete(conn, live)
+            # One run can stop while another run still does the work.
+            if await one(conn, "SELECT key FROM kv WHERE key LIKE %s LIMIT 1", (f"task:lane-live:{row['id']}:%",)):
+                continue
             tickets = [link for link in row["links"] if link.get("kind") == "ticket"]
             is_open = False
             for link in tickets:
@@ -344,6 +357,19 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
             await kv.set(conn, key, True)
             await tasks._event(conn, row, "code", "state", "The agent's run stopped and the work is not returned.", {"lane": lane["id"]})
             await conn.execute("UPDATE tasks SET stopped_at=now() WHERE id=%s", (row["id"],))
+
+
+def names_ticket(title, row):
+    """A run title that names the ticket as `repo#12` or `repo #12` belongs to the task."""
+    for link in row["links"]:
+        ref = parse(link.get("url", "")) if link.get("kind") == "ticket" else None
+        if not ref:
+            continue
+        owner, name = ref[0].split("/")
+        pattern = rf"(?<![\w/.-])(?:{re.escape(owner)}/)?{re.escape(name)}\s?#{ref[1]}(?!\d)"
+        if re.search(pattern, title, re.IGNORECASE):
+            return True
+    return False
 
 
 def register():

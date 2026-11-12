@@ -173,7 +173,7 @@ def test_task_config_validates(values):
 def test_task_defaults_and_missing_alert_list(root):
     from illo.workspace import TasksConfig
 
-    assert TasksConfig().model_dump() == {"release_max": 2, "check_minutes": 5, "reminder_window": (8, 20), "github_writes_per_hour": 30}
+    assert TasksConfig().model_dump() == {"release_max": 2, "check_minutes": 5, "reminder_window": (8, 20), "github_writes_per_hour": 30, "stop_grace_minutes": 30}
     config = root / "illo.yaml"
     config.write_text(config.read_text().replace("task_list: bugs", "task_list: missing"))
     with pytest.raises(WorkspaceError, match="unknown list"):
