@@ -119,6 +119,13 @@ async def handle(ctx, person, action):
             or action.get("message_ts") != draft["slack_ts"]
         ):
             return
+        if draft["kind"] in {"connect_propose_mcp", "connect_allow_tools", "connect_remove"}:
+            from illo.connectors.chat import active_person
+
+            try:
+                await active_person(conn, person["id"], owner=True)
+            except ValueError:
+                return
         run = await runs.get(conn, draft["run_id"])
         if not run or run["person_id"] != person["id"]:
             return
@@ -147,6 +154,11 @@ async def handle(ctx, person, action):
     # Commit the decision before the external action. A second click or a restart cannot send again.
     if approved:
         try:
+            if draft["kind"] == "connect_propose_mcp" and draft["content"]["arguments"]["auth"] == "bearer":
+                from illo.connectors.chat import open_mcp_form
+
+                await open_mcp_form(ctx, person, draft, action.get("trigger_id", ""))
+                return
             await perform(ctx, draft)
         except Exception:
             async with ctx.pool.connection() as conn:

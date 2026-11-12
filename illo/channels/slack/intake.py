@@ -56,6 +56,13 @@ class SlackIntake:
         return None
 
     async def receive(self, envelope: dict) -> dict | None:
+        if envelope.get("type") == "view_submission":
+            from illo.channels.slack.modals import prepare
+
+            response, finish = await prepare(self.ctx, envelope)
+            if finish:
+                await finish()
+            return response
         if envelope.get("type") == "block_actions":
             await actions.dispatch(self.ctx, envelope)
             return
