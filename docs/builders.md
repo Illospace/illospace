@@ -94,10 +94,9 @@ the Agent SDK. Outside text must keep its data marker after a format change.
 Google list offsets select rows from one source page. Mail reads at most 50 rows.
 Narrow the query or the date range when the source has more results.
 
-`lanes_attention` reads the principal's open asks and lanes that need attention.
-It has risk `read` and profiles `person_dm` and `routine`. It requires a person
-principal. A team routine gets no personal list. The registry marks a private read
-from the result, as it does for the other lane and ask reads.
+`digest_snapshot` reads the person's task brief and open asks. Only a workspace owner gets service faults.
+It has risk `read`, uses the `person_dm` profile, and marks a personal read.
+The team snapshot reads only team-visible tasks. Lane tools supply raw run evidence.
 
 Run `scripts/test-db.sh`, then `.venv/bin/python scripts/measure_tool_results.py`.
 The script creates and deletes its own database. It uses invented text and fakes.

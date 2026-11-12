@@ -14,7 +14,7 @@ async def test_setup_keeps_github_disabled_without_credentials(app, monkeypatch)
     await setup(ctx)
     assert ctx.github_client is None
     assert "github_create_issue" in ctx.draft_performers
-    assert [s for s, fn in jobs] == [60, 15, 120]
+    assert [s for s, fn in jobs] == [60, 120]
 
 
 async def test_setup_token_and_sensor_report_flush(app, monkeypatch):

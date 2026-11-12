@@ -110,6 +110,26 @@ class Thread:
     pending: list[Pending] = field(default_factory=list)
     is_step: bool = False
     parent_ref: str | None = None
+    links: list[str] = field(default_factory=list)
+
+
+def task_links(row, projection):
+    """Read only task links. Never copy a user's message into a lane."""
+    links = []
+    for item in [*(row.get("pullRequests") or []), row.get("linkedPullRequest"), row.get("branchPullRequest")]:
+        url = item.get("url") if isinstance(item, dict) else None
+        if url and re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+", url):
+            links.append(url)
+    messages = projection.get("firstUserMessage") or sorted(
+        [m for m in projection.get("messages", []) if m.get("role") == "user"],
+        key=lambda m: m.get("createdAt") or m.get("updatedAt") or "",
+    )[:1]
+    if messages:
+        urls = re.findall(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+(?![\w/#?])",
+                          messages[0].get("text", ""))
+        if len(urls) == 1:
+            links.extend(urls)
+    return list(dict.fromkeys(links))
 
 
 def lane_state(
@@ -335,6 +355,7 @@ class T3Source:
             pending,
             is_step,
             lineage.get("parentThreadId") if is_step else None,
+            task_links(row, projection),
         )
 
     def _sqlite_threads(self) -> list[Thread]:
@@ -364,6 +385,10 @@ class T3Source:
                     "messages": "SELECT thread_id, payload_json FROM (SELECT thread_id, payload_json, "
                     "row_number() OVER (PARTITION BY thread_id ORDER BY updated_at DESC) AS position "
                     "FROM orchestration_v2_projection_messages WHERE role='assistant') WHERE position=1",
+                    "firstUserMessage": "SELECT thread_id, payload_json FROM (SELECT thread_id, payload_json, "
+                    "row_number() OVER (PARTITION BY thread_id ORDER BY "
+                    "json_extract(payload_json, '$.createdAt'),updated_at,rowid) AS position "
+                    "FROM orchestration_v2_projection_messages WHERE role='user') WHERE position=1",
                     "runtimeRequests": "SELECT thread_id, payload_json "
                     "FROM orchestration_v2_projection_runtime_requests WHERE status='pending'",
                     "turnItems": "SELECT i.thread_id, i.payload_json "
@@ -377,6 +402,16 @@ class T3Source:
                         projections.setdefault(thread_id, {}).setdefault(key, []).append(
                             json.loads(payload)
                         )
+                pulls = {}
+                # Older T3 versions keep only the JSON link. The separate table is optional.
+                has_pulls = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projection_thread_pull_requests'"
+                ).fetchone()
+                if has_pulls:
+                    for thread_id, url in connection.execute(
+                        "SELECT thread_id,url FROM projection_thread_pull_requests ORDER BY thread_id,linked_at,url"
+                    ):
+                        pulls.setdefault(thread_id, []).append({"url": url})
                 result = []
                 for (payload,) in rows:
                     row = json.loads(payload)
@@ -384,6 +419,7 @@ class T3Source:
                         continue
                     thread_id = row["id"]
                     row["status"] = runs.get(thread_id, "unknown")
+                    row["pullRequests"] = [*(row.get("pullRequests") or []), *pulls.get(thread_id, [])]
                     projection = projections.setdefault(thread_id, {})
                     lineage = row.get("lineage") or {}
                     personal = (
@@ -460,7 +496,7 @@ class Collector:
             "title": clean(thread.title, 200, self.secrets),
             "state": thread.state,
             "summary": clean(thread.summary, 500, self.secrets),
-            "links": [thread.link],
+            "links": [thread.link, *[clean(url, 2000, self.secrets) for url in thread.links]],
             "repo": self.config.projects.get(thread.project),
             "machine": self.config.machine,
             "visibility": "team" if self.config.share == "team" else "private",

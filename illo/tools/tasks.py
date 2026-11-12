@@ -41,6 +41,7 @@ class Create(Piece):
 
 
 class ListArgs(Arguments):
+    mine: bool = False
     list: str | None = None
     holder: str | None = None
     state: Literal["todo", "working", "review", "done", "cancelled"] | None = None
@@ -150,6 +151,11 @@ async def handle(ctx, name, args):
             row = await create_for(ctx.conn, ctx.app.workspace, viewer, args)
         elif name == "task_list":
             values = {("list_key" if k == "list" else "parent_id" if k == "parent" else k): v for k, v in args.items()}
+            if values.pop("mine", False):
+                if not viewer.person:
+                    return {"tasks": []}
+                values["mine_refs"] = ["person:" + viewer.person, *[
+                    "agent:" + a.key for a in ctx.app.workspace.agents if a.owner == viewer.person]]
             return {"tasks": [compact(r) for r in await ledger.search(ctx.conn, viewer=viewer, **values)]}
         elif name == "task_get":
             row = await ledger.get(ctx.conn, args["id"], viewer=viewer)
@@ -176,7 +182,7 @@ def register(registry):
     entries = [
         ("lists", Lists, READ, "read", "Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work."),
         ("task_create", Create, CAPTURE, "write_internal", "Create a task from the person's words. Give a list, title, and brief. A pieces array creates the parent and its pieces in one call."),
-        ("task_list", ListArgs, READ, "read", "Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count."),
+        ("task_list", ListArgs, READ, "read", "Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold."),
         ("task_get", Get, READ, "read", "Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer."),
         ("task_update", Update, WRITE, "write_internal", "Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility."),
         ("task_hand", Hand, WRITE, "write_internal", "Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo."),

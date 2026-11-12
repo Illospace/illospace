@@ -1,12 +1,9 @@
-"""Build one personal snapshot for briefs and attention tools."""
+"""Build task snapshots for the personal and team briefs."""
 
-from datetime import timedelta
-from textwrap import shorten
-
-from psycopg.types.json import Jsonb
+from datetime import datetime, timedelta
 
 from illo.db import all_rows, one
-from illo.ledger.lanes import DEFAULT_STALE_MINUTES
+from illo.ledger import kv, tasks
 
 
 def web_link(links):
@@ -69,145 +66,199 @@ def sensor_fault(row, now, names=None, since=None):
     }
 
 
-async def build(conn, person, now, stale_minutes=None):
-    """Return only the person's work. Keep full titles and explicit state decisions."""
-    limits = {**DEFAULT_STALE_MINUTES, **(stale_minutes or {})}
-    asks = await all_rows(
-        conn,
-        """
-        SELECT a.*,l.title AS lane_title,l.links AS lane_links FROM asks a
-        LEFT JOIN lanes l ON l.id=a.lane_id
-        WHERE a.owner_person_id=%s AND (a.state='open' OR a.delivery_state='failed')
-          AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s)
-        ORDER BY CASE WHEN a.delivery_state='failed' THEN 1 ELSE 0 END,a.due_at NULLS LAST,a.id
-    """,
-        (person["id"], person["id"]),
-    )
-    needs = []
-    for ask in asks:
-        needs.append(
-            {
-                "kind": "failed_answer" if ask["delivery_state"] == "failed" else "ask",
-                "question": ask["question"],
-                "title": ask["lane_title"] or ask["question"],
-                "lane_title": ask["lane_title"],
-                "link": card_link(ask),
-                "age_hours": max(0, (now - ask["created_at"]).total_seconds() / 3600),
-            }
-        )
-    lanes = await active_lanes(conn, now, limits, owner=person["id"])
-    stuck, running, your_moves = [], 0, []
-    for lane in lanes:
-        age = max(0, (now - lane["last_signal_at"]).total_seconds() / 3600)
-        item = {
-            "title": lane["title"],
-            "link": web_link(lane["links"]),
-            "state": lane["state"],
-            "hours_since_signal": age,
-            "last_event": lane["last_event"] or "",
-        }
-        if lane["state"] == "review":
-            if lane["source"] == "t3":
-                text = shorten(lane["summary"], width=200, placeholder="…")
-                # Each collector report refreshes the signal time. The state change is the true age.
-                since = lane["state_since"] or lane["last_signal_at"]
-                age = max(0, (now - since).total_seconds() / 3600)
-                your_moves.append(
-                    {**item, "kind": "your_move", "summary": text, "age_hours": age,
-                     "hours_since_signal": age}
-                )
-            else:
-                needs.append({**item, "kind": "review", "age_hours": age})
-        elif lane["state"] == "blocked" or lane["stale"]:
-            stuck.append(item)
-        else:
-            running += 1
-    your_moves.sort(key=lambda item: item["hours_since_signal"])
-    needs.extend(your_moves[:10])
-    last_brief = await brief_window(conn, f"digest:{person['key']}", now)
-    finished, finished_total, finished_steps, closed_not_done = await closed_work(
-        conn, last_brief, owner=person["id"]
-    )
-    faults = await read_faults(conn, now, last_brief, person["key"])
-    return {
-        "name": person["name"],
-        "needs_you": needs,
-        "your_move_total": len(your_moves),
-        "stuck": stuck,
-        "in_progress": running,
-        "finished_total": finished_total,
-        "finished_steps": finished_steps,
-        "closed_not_done": closed_not_done,
-        "recent_openings": await recent_openings(conn, "digest", person["id"]),
-        "finished": [
-            {"title": row["title"], "link": web_link(row["links"]), "state": row["state"]}
-            for row in finished
-        ],
-        "faults": faults,
+TEAM_STATE_KEY = "digest-team"
+
+
+def thread_link(row):
+    if row.get("slack_channel") and row.get("slack_ts"):
+        return (f"https://slack.com/archives/{row['slack_channel']}/p"
+                + row["slack_ts"].replace(".", ""))
+    return ""
+
+
+def hours(now, at):
+    return round(max(0, (now - at).total_seconds() / 3600), 1)
+
+
+def wait_record(row, events):
+    """Find the current wait period. Later messages do not reset it."""
+    period = []
+    for event in reversed(events):
+        if event["data"].get("waits_for") != row["waits_for"]:
+            break
+        period.append(event)
+    return (period[-1]["at"] if period else row["created_at"]), period
+
+
+def wait_reason(row, period, name):
+    for event in period:
+        if event["kind"] == "question":
+            return event["text"][:200]
+        if event["kind"] == "wake_failed" and event["data"].get("final"):
+            return "the wake failed: " + event["text"]
+        if event["text"] == "The ticket waits for an owner.":
+            return "the ticket waits for an owner; choose a holder"
+        if event["data"].get("escalated"):
+            return f"{name} stays silent after {event['data']['restarts']} restarts; decide the next step"
+    if row["state"] == "review":
+        return f"returned by {name}, confirm or send back"
+    if row["holder"] == row["waits_for"]:
+        due = f"; due {row['due_at'].isoformat()}" if row["due_at"] else ""
+        return "you hold it" + due
+    if not row["holder"]:
+        return "the ticket waits for an owner; choose a holder"
+    return "choose the next step"
+
+
+async def task_records(conn, workspace, now, since, person=None):
+    """Read the ledger's visibility boundary before any task text or event."""
+    rows = await all_rows(conn, """SELECT * FROM tasks
+        WHERE (visibility='team' OR owner_person_id=%s)
+        AND (state NOT IN ('done','cancelled') OR done_at>%s OR updated_at>%s)
+        ORDER BY id""", (person["id"] if person else None, since, since))
+    events = await all_rows(conn, """SELECT * FROM task_events
+        WHERE task_id=ANY(%s) ORDER BY id""", ([r["id"] for r in rows],))
+    by_task = {}
+    for event in events:
+        by_task.setdefault(event["task_id"], []).append(event)
+    members = await all_rows(conn, "SELECT key,name FROM people")
+    names = {"person:" + p["key"]: p["name"] for p in members}
+    names.update({"agent:" + a.key: a.name for a in workspace.agents})
+    records = []
+    for row in rows:
+        history = by_task.get(row["id"], [])
+        since_wait, period = wait_record(row, history)
+        holder = names.get(row["holder"], row["holder"] or "No holder")
+        last_wake = [e["at"] for e in history if e["kind"] == "woken"]
+        base = max(t for t in [row["last_activity_at"], row["alive_at"], *last_wake] if t)
+        restarts, previous_holder = [], None
+        for event in history:
+            if event["kind"] == "handed":
+                previous_holder = event["data"].get("holder")
+            if event["kind"] == "released" and event["actor"] == "code" and not event["data"].get("requested"):
+                restarts.append((event["data"].get("holder", previous_holder or row["holder"]), event["at"]))
+        records.append({
+            "row": row, "events": history, "period": period, "wait_since": since_wait, "restarts": restarts,
+            "reviewer": await tasks.reviewer(conn, workspace, row),
+            "item": {"id": row["id"], "title": row["title"], "link": thread_link(row),
+                     "holder": holder, "reason": wait_reason(row, period, holder),
+                     "age_hours": hours(now, since_wait), "due_at": row["due_at"],
+                     "silent_hours": hours(now, base)},
+        })
+    return records, names
+
+
+def done_item(record, names):
+    row = record["row"]
+    event = next((e for e in reversed(record["events"]) if e["kind"] == "done"), None)
+    proof = [c["text"] for c in (event or {}).get("data", {}).get("checks", []) if c["ok"]]
+    links = [{"kind": link["kind"], "url": link["url"]} for link in row["links"]]
+    actor = row["done_by"]
+    return {k: record["item"][k] for k in ("id", "title", "link", "holder")} | {
+        "proof": proof or [link["kind"] for link in links] or [(event or {}).get("text", "A person confirms the work.")],
+        "proof_links": links, "done_by": "the Done rule" if actor == "code" else names.get(actor, actor),
     }
 
 
+async def build(conn, person, now, workspace):
+    """Build the person's task sections and keep their asks and owner faults."""
+    since = await brief_window(conn, f"digest:{person['key']}", now)
+    records, names = await task_records(conn, workspace, now, since, person)
+    ref = "person:" + person["key"]
+    open_records = [r for r in records if r["row"]["state"] not in {"done", "cancelled"}]
+    needs = [r for r in open_records if r["row"]["waits_for"] == ref]
+    needs.sort(key=lambda r: (not bool(r["row"]["due_at"] and r["row"]["due_at"] < now),
+                              r["wait_since"], r["row"]["id"]))
+    owned = {"agent:" + a.key: a for a in workspace.agents if a.owner == person["key"]}
+    agents = []
+    for holder, agent in owned.items():
+        held = [r for r in open_records if r["row"]["holder"] == holder]
+        silent = []
+        for r in held:
+            entry = next((e for e in workspace.lists if e.key == r["row"]["list_key"]), None)
+            if entry and r["item"]["silent_hours"] > entry.silence.agent_hours / 2:
+                silent.append(r["row"]["id"])
+        restarts = [r["row"]["id"] for r in records for event_holder, at in r["restarts"]
+                    if at > since and event_holder == holder]
+        if held or restarts:
+            agents.append({"name": agent.name, "count": len(held), "silent": silent,
+                           "restarts": len(restarts), "restart_tasks": sorted(set(restarts))})
+    finished = [r for r in records if r["row"]["state"] == "done" and r["row"]["done_at"] > since
+                and (ref in {r["row"]["created_by"], r["row"]["handed_by"], r["reviewer"]}
+                     or r["row"]["holder"] in owned)]
+    finished.sort(key=lambda r: (r["row"]["done_at"], r["row"]["id"]), reverse=True)
+    due = [r["item"] for r in open_records if r not in needs and r["row"]["due_at"]
+           and r["row"]["due_at"] <= now + timedelta(hours=24)
+           and (r["row"]["holder"] == ref or r["reviewer"] == ref)]
+    due.sort(key=lambda r: (r["due_at"], r["id"]))
+    asks = await all_rows(conn, """SELECT a.*,l.links AS lane_links FROM asks a
+        LEFT JOIN lanes l ON l.id=a.lane_id
+        WHERE a.owner_person_id=%s AND (a.state='open' OR a.delivery_state='failed')
+        AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s)
+        ORDER BY a.due_at NULLS LAST,a.id""", (person["id"], person["id"]))
+    return {
+        "name": person["name"], "needs_you": [r["item"] for r in needs[:7]],
+        "needs_you_total": len(needs), "your_agents": agents,
+        "finished_total": len(finished), "finished": [done_item(r, names) for r in finished[:5]],
+        "due": due, "asks": [{"title": a["question"], "link": card_link(a),
+            "reason": "The answer did not reach its agent." if a["delivery_state"] == "failed" else "Please answer.",
+            "age_hours": hours(now, a["created_at"])} for a in asks],
+        "faults": await read_faults(conn, now, since, person["key"]) if person["role"] == "owner" else [],
+        "recent_openings": await recent_openings(conn, "digest", person["id"]),
+    }
+
+
+async def team_snapshot(conn, workspace, now):
+    """Read team tasks only. Keep private tasks, asks, and service faults out."""
+    since = await brief_window(conn, TEAM_STATE_KEY, now)
+    records, names = await task_records(conn, workspace, now, since)
+    finished = [r for r in records if r["row"]["state"] == "done" and r["row"]["done_at"] > since]
+    finished.sort(key=lambda r: (r["row"]["done_at"], r["row"]["id"]), reverse=True)
+    waiting, stuck, agents, people_count = {}, [], 0, 0
+    for r in records:
+        row, item = r["row"], r["item"]
+        if row["state"] in {"done", "cancelled"}:
+            continue
+        target = row["waits_for"] or ""
+        if target.startswith("person:"):
+            entry = waiting.setdefault(target, {"name": names.get(target, target), "count": 0,
+                                                "oldest_hours": 0, "oldest": item})
+            entry["count"] += 1
+            if item["age_hours"] >= entry["oldest_hours"]:
+                entry.update(oldest_hours=item["age_hours"], oldest={k: item[k] for k in ("id", "title", "link")})
+        facts = []
+        for event in r["period"]:
+            if event["kind"] == "wake_failed" and event["data"].get("final"):
+                facts.append("the wake failed: " + event["text"])
+                break
+            if event["data"].get("escalated"):
+                facts.append(f"the holder stays silent after {event['data']['restarts']} restarts")
+                break
+        if not row["holder"]:
+            unheld = next((e["at"] for e in reversed(r["events"])
+                           if e["kind"] == "handed" and not e["data"].get("holder")), row["created_at"])
+            if now - unheld > timedelta(hours=24):
+                facts.append("no holder for more than 24 hours")
+        if row["due_at"] and row["due_at"] < now:
+            facts.append("past the due time")
+        if facts:
+            stuck.append({k: item[k] for k in ("id", "title", "link")} | {
+                "fact": "; ".join(facts), "action_by": names.get(target or r["reviewer"], "the list reviewer")})
+        agents += (row["holder"] or "").startswith("agent:")
+        people_count += (row["holder"] or "").startswith("person:")
+    return {"team": workspace.config.team_name, "finished_total": len(finished),
+            "finished": [done_item(r, names) for r in finished[:7]],
+            "waiting": sorted(waiting.values(), key=lambda r: -r["oldest_hours"]),
+            "stuck": stuck, "in_work": {"agents": agents, "people": people_count},
+            "recent_openings": await recent_openings(conn, "team_digest")}
+
+
 async def brief_window(conn, key, now):
-    row = await one(conn, "SELECT last_run_at FROM routine_state WHERE key=%s", (key,))
+    saved = await kv.get(conn, "brief:sent:" + key)
+    if saved:
+        return datetime.fromisoformat(saved)
+    row = await one(conn, "SELECT last_run_at FROM routine_state WHERE key=%s AND last_status IS DISTINCT FROM 'skipped'", (key,))
     return (row["last_run_at"] if row else None) or now - timedelta(days=1)
-
-
-async def active_lanes(conn, now, limits, *, owner=None, team_only=False):
-    return await all_rows(
-        conn,
-        """
-        SELECT l.*,(l.last_signal_at<%s-COALESCE((%s::jsonb->>l.source)::integer,30)
-          *interval '1 minute') AS stale,
-          (SELECT e.text FROM lane_events e WHERE e.lane_id=l.id ORDER BY e.at DESC,e.id DESC LIMIT 1) AS last_event,
-          (SELECT max(e.at) FROM lane_events e WHERE e.lane_id=l.id AND e.kind='state') AS state_since
-        FROM lanes l WHERE (%s::bigint IS NULL OR owner_person_id=%s)
-          AND (NOT %s OR l.visibility='team') AND state IN ('review','working','blocked')
-        ORDER BY last_signal_at,id
-        """,
-        (now, Jsonb(limits), owner, owner, team_only),
-    )
-
-
-async def closed_work(conn, since, *, owner=None, team_only=False):
-    """Count finished work once. Use an issue title with its closing pull request link."""
-    rows = await all_rows(
-        conn,
-        """
-        WITH completed AS (
-          SELECT * FROM lanes
-          WHERE (%s::bigint IS NULL OR owner_person_id=%s OR visibility='team')
-            AND (NOT %s OR visibility='team') AND state='done' AND NOT is_step
-        ), edges AS (
-          SELECT issue.id AS issue_id, pull.id AS pull_id, pull.links,
-            pull.owner_person_id AS pull_owner,
-            GREATEST(issue.closed_at,pull.closed_at) AS closed_at
-          FROM completed pull CROSS JOIN LATERAL jsonb_array_elements(pull.links) link
-          JOIN completed issue ON issue.source='github' AND issue.id<>pull.id
-            AND (issue.id::text=link->>'lane_id' OR issue.external_id=link->>'external_id')
-          WHERE pull.source='github' AND link->>'kind'='closes'
-        ), preferred AS (
-          SELECT DISTINCT ON (issue_id) * FROM edges ORDER BY issue_id,closed_at DESC,pull_id DESC
-        )
-        SELECT c.title,COALESCE(p.links,c.links) AS links,c.state,c.source,c.owner_person_id,
-          count(*) OVER () AS total
-        FROM completed c LEFT JOIN preferred p ON p.issue_id=c.id
-        WHERE GREATEST(c.closed_at,p.closed_at)>%s
-          AND (%s::bigint IS NULL OR c.owner_person_id=%s OR EXISTS
-            (SELECT 1 FROM edges e WHERE e.issue_id=c.id AND e.pull_owner=%s))
-          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.pull_id=c.id)
-        ORDER BY GREATEST(c.closed_at,p.closed_at) DESC,c.id DESC LIMIT 20
-        """,
-        (owner, owner, team_only, since, owner, owner, owner),
-    )
-    counts = await one(
-        conn,
-        """SELECT count(*) FILTER (WHERE state='done' AND is_step) AS steps,
-          count(*) FILTER (WHERE state='failed') AS closed_not_done FROM lanes
-        WHERE (%s::bigint IS NULL OR owner_person_id=%s) AND (NOT %s OR visibility='team')
-          AND state IN ('done','failed') AND closed_at>%s""",
-        (owner, owner, team_only, since),
-    )
-    return rows, rows[0]["total"] if rows else 0, counts["steps"], counts["closed_not_done"]
 
 
 async def recent_openings(conn, channel, person_id=None):
@@ -233,77 +284,3 @@ async def read_faults(conn, now, since, credential_key):
         if fault := sensor_fault(row, now, names, since):
             faults.append(fault)
     return faults
-
-
-TEAM_STATE_KEY = "digest-team"
-
-
-async def team_snapshot(conn, config, now):
-    """Read team lanes and ask counts. Never read an ask question or a private lane."""
-    members = await all_rows(conn, "SELECT id,key,name,slack_id FROM people ORDER BY key")
-    owners = {p["id"]: p for p in members}
-    since = await brief_window(conn, TEAM_STATE_KEY, now)
-    shipped, total, steps, closed_not_done = await closed_work(conn, since, team_only=True)
-    waiting = {}
-
-    def person_waits(person_id, since):
-        person = owners.get(person_id)
-        if not person:
-            return None
-        item = waiting.setdefault(person_id, {
-            "name": person["name"], "key": person["key"], "slack_id": person["slack_id"],
-            "asks": 0, "reviews": [], "your_moves": 0, "oldest_hours": 0,
-        })
-        item["oldest_hours"] = max(item["oldest_hours"], hours(since))
-        return item
-
-    def hours(at):
-        return max(0, (now - at).total_seconds() / 3600)
-
-    asks = await all_rows(
-        conn,
-        """SELECT a.owner_person_id,count(*) AS total,min(a.created_at) AS oldest
-        FROM asks a JOIN lanes l ON l.id=a.lane_id
-        WHERE a.state='open' AND l.visibility='team' GROUP BY a.owner_person_id""",
-    )
-    for ask in asks:
-        if item := person_waits(ask["owner_person_id"], ask["oldest"]):
-            item["asks"] = ask["total"]
-    stuck, running = [], {}
-    for lane in await active_lanes(
-        conn, now, {**DEFAULT_STALE_MINUTES, **config.stale_minutes.model_dump(by_alias=True)},
-        team_only=True,
-    ):
-        owner = owners.get(lane["owner_person_id"], {}).get("name", "Unassigned")
-        age = hours(lane["last_signal_at"])
-        item = {"title": lane["title"], "link": web_link(lane["links"]), "owner": owner}
-        if lane["state"] == "review":
-            if lane["source"] not in {"github", "t3"}:
-                continue
-            since_review = lane["state_since"] or lane["last_signal_at"]
-            entry = person_waits(lane["owner_person_id"], since_review)
-            if entry is not None:
-                if lane["source"] == "github":
-                    entry["reviews"].append({**item, "hours": hours(since_review)})
-                else:
-                    entry["your_moves"] += 1
-        elif lane["state"] == "blocked" or lane["stale"]:
-            stuck.append({**item, "hours_since_signal": age, "last_event": lane["last_event"] or ""})
-        else:
-            running[owner] = running.get(owner, 0) + 1
-    return {
-        "team": config.team_name,
-        "people": {p["name"]: p["slack_id"] for p in members},
-        "shipped": [{
-            "title": r["title"], "link": web_link(r["links"]), "source": r["source"],
-            "state": r["state"],
-            "owner": owners.get(r["owner_person_id"], {}).get("name", "Unassigned"),
-        } for r in shipped],
-        "shipped_total": total, "shipped_steps": steps,
-        "closed_not_done": closed_not_done,
-        "recent_openings": await recent_openings(conn, "team_digest"),
-        "stuck": stuck,
-        "waiting": sorted(waiting.values(), key=lambda r: (-r["oldest_hours"], r["key"])),
-        "in_progress": running,
-        "faults": await read_faults(conn, now, since, config.brain.team_credential),
-    }

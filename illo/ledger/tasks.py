@@ -78,7 +78,7 @@ async def _require(conn, task_id, viewer):
 
 
 async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_for=None,
-                 parent_id=None, query="", open=False, limit=30):
+                 parent_id=None, query="", open=False, limit=30, mine_refs=None):
     person = await _identity(conn, viewer)
     rows = await all_rows(conn, """SELECT t.*,
         (SELECT count(*) FROM tasks c WHERE c.parent_id=t.id
@@ -89,11 +89,13 @@ async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_
         AND (%s::text IS NULL OR state=%s) AND (%s::text IS NULL OR waits_for=%s)
         AND (%s::bigint IS NULL OR parent_id=%s)
         AND (NOT %s OR state NOT IN ('done','cancelled'))
+        AND (%s::text[] IS NULL OR holder=ANY(%s) OR waits_for=%s)
         AND (%s='' OR tsv @@ websearch_to_tsquery('english',%s)
              OR title ILIKE %s)
         ORDER BY updated_at DESC,id DESC LIMIT %s""",
         (person["id"] if person and not viewer.team_only else None, list_key, list_key, holder, holder, state, state,
-         waits_for, waits_for, parent_id, parent_id, open, query, query, f"%{query}%", min(100, max(1, limit))))
+         waits_for, waits_for, parent_id, parent_id, open, mine_refs, mine_refs,
+         "person:" + viewer.person if viewer.person else None, query, query, f"%{query}%", min(100, max(1, limit))))
 
     return [await timing(conn, row) for row in rows]
 
@@ -114,6 +116,8 @@ async def _event(conn, row, actor, kind, text="", data=None):
     if actor == row.get("holder") or kind == "reopened":
         await conn.execute("UPDATE tasks SET stopped_at=NULL WHERE id=%s", (row["id"],))
     data = {**(data or {}), "waits_for": row["waits_for"]}
+    if kind == "released":
+        data["holder"] = row["holder"]
     event = await one(conn, """INSERT INTO task_events (task_id,actor,kind,text,data)
         VALUES (%s,%s,%s,%s,%s) RETURNING *""", (row["id"], actor, kind, text, Jsonb(data)))
     await kv.set(conn, f"task:pending:{row['id']}", {"event": event["id"]})

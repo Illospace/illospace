@@ -27,18 +27,17 @@ def limits(ctx):
     return ctx.app.workspace.config.stale_minutes.model_dump(by_alias=True)
 
 
-async def listing(ctx, args, *, owner=None, attention=False):
+async def listing(ctx, args, *, owner=None):
     values, counts, private = await lanes.compact_search(
         ctx.conn,
         principal=ctx.principal,
         stale_minutes=limits(ctx),
         owner=owner,
-        attention=attention,
         **args,
     )
     formatted = rows(
         values,
-        (lambda row: lane(row).replace("\n  ", " · ")) if attention else lane,
+        lane,
         total=values[0]["total"] if values else 0,
         hint="Narrow the query, or pass state= / repo= / limit=.",
     )
@@ -82,34 +81,15 @@ async def lanes_mine(ctx, args):
     return await listing(ctx, args, owner=ctx.principal[7:])
 
 
-async def lanes_attention(ctx, args):
-    from illo.tools.digest import digest_snapshot_read
-
-    return await digest_snapshot_read(ctx, args)
-
-
 DESCRIPTIONS = {
-    "lanes_search": "Search the lanes that this run can see: agent or ticket work with a state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.",
+    "lanes_search": "Search the lanes that this run can see: raw evidence from agent runs and GitHub with a source state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.",
     "lanes_get": "Read one lane by `id`: its summary, links, and last 5 events.",
     "lanes_mine": "Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.",
-    "lanes_attention": "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
 }
 
 
 def register(registry) -> None:
     """Register the real lane handlers."""
-    registry.add(
-        Tool(
-            "lanes_attention",
-            "lanes",
-            "read",
-            lambda a: "ledger",
-            True,
-            lanes_attention,
-            "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
-            profiles=frozenset({"person_dm"}),
-        )
-    )
     for name, handler, arguments in (
         ("lanes_search", lanes_search, SearchArgs),
         ("lanes_get", lanes_get, GetArgs),

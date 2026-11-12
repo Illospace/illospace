@@ -6,7 +6,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from illo.db import one
-from illo.ledger import digest_snapshot, github, lanes
+from illo.ledger import digest_snapshot
 from tests.asks.test_digest import NOW
 
 
@@ -31,8 +31,8 @@ async def test_recent_openings_are_bounded_and_private(conn, ada, ben, workspace
         await brief_event(conn, channel, person, None, suffix="empty")
     await brief_event(conn, "slack", ada["id"], "A direct message")
     await brief_event(conn, "digest", ada["id"], "x" * 200 + "\nDetails", suffix="long")
-    personal = await digest_snapshot.build(conn, ada, NOW)
-    team = await digest_snapshot.team_snapshot(conn, workspace.config, NOW)
+    personal = await digest_snapshot.build(conn, ada, NOW, workspace)
+    team = await digest_snapshot.team_snapshot(conn, workspace, NOW)
     assert personal["recent_openings"] == ["x" * 160, "Opening 6", "Opening 5", "Opening 4", "Opening 3"]
     assert team["recent_openings"] == [f"Team {i}" for i in range(6, 1, -1)]
     assert "Other person" not in str(personal["recent_openings"]) + str(team["recent_openings"])
@@ -91,70 +91,6 @@ async def test_openings_are_frozen_before_the_model_reads_them(app, fake_brain, 
     assert stored["payload"]["payload"][key]["recent_openings"] == ["Previous opening"]
 
 
-async def sync(conn, number, *, body="", pull=False, done=True, not_planned=False):
-    item = {
-        "number": number, "title": f"{'Pull request' if pull else 'Issue'} {number}",
-        "body": body, "state": "closed", "closed_at": (NOW - timedelta(hours=1)).isoformat(),
-        "html_url": f"https://github.com/example/project/{'pull' if pull else 'issues'}/{number}",
-        "assignees": [{"login": "ada-example"}],
-    }
-    if pull:
-        item.update(pull_request={}, merged=done)
-    if not_planned:
-        item["state_reason"] = "not_planned"
-    return await github.sync_item(conn, "example/project", item, {})
-
-
-@pytest.mark.parametrize("issue_first", [True, False])
-async def test_finished_issue_and_merged_pull_count_once(conn, ada, workspace, issue_first):
-    # The poller stores a closes link in either arrival order.
-    if issue_first:
-        issue = await sync(conn, 10)
-    pull = await sync(conn, 11, body="Fixes #10", pull=True)
-    if not issue_first:
-        issue = await sync(conn, 10)
-    for row in (issue, pull):
-        await conn.execute("UPDATE lanes SET owner_person_id=%s WHERE id=%s", (ada["id"], row["id"]))
-    for data, field in (
-        (await digest_snapshot.build(conn, ada, NOW), "finished"),
-        (await digest_snapshot.team_snapshot(conn, workspace.config, NOW), "shipped"),
-    ):
-        assert data[field + "_total"] == 1
-        assert len(data[field]) == 1
-        assert data[field][0]["title"] == "Issue 10"
-        assert data[field][0]["link"] == "https://github.com/example/project/pull/11"
-        assert data[field][0]["state"] == "done"
-
-
-async def test_failed_work_is_counted_but_never_shipped(conn, ada, ben, workspace):
-    for number, args in ((20, {"not_planned": True}), (21, {"pull": True, "done": False})):
-        row = await sync(conn, number, **args)
-        await conn.execute("UPDATE lanes SET owner_person_id=%s WHERE id=%s", (ada["id"], row["id"]))
-    private = await lanes.upsert(conn, source="manual", external_id="hidden-failure", title="Hidden failure", state="failed", owner_person_id=ben["id"], visibility="private")
-    await conn.execute("UPDATE lanes SET closed_at=%s WHERE id=%s", (NOW, private["id"]))
-    for data, field in (
-        (await digest_snapshot.build(conn, ada, NOW), "finished"),
-        (await digest_snapshot.team_snapshot(conn, workspace.config, NOW), "shipped"),
-    ):
-        assert data[field] == [] and data[field + "_total"] == 0
-        assert data["closed_not_done"] == 2
-        assert "Hidden failure" not in str(data)
-
-
-async def test_pair_does_not_expose_a_private_issue(conn, ada, ben, workspace):
-    issue = await sync(conn, 30)
-    await conn.execute("UPDATE lanes SET visibility='private',owner_person_id=%s,title='Hidden issue' WHERE id=%s", (ben["id"], issue["id"]))
-    pull = await sync(conn, 31, body="Closes #30", pull=True)
-    await conn.execute("UPDATE lanes SET owner_person_id=%s WHERE id=%s", (ada["id"], pull["id"]))
-    for data, field in (
-        (await digest_snapshot.build(conn, ada, NOW), "finished"),
-        (await digest_snapshot.team_snapshot(conn, workspace.config, NOW), "shipped"),
-    ):
-        assert data[field + "_total"] == 1
-        assert data[field][0]["title"] == "Pull request 31"
-        assert "Hidden issue" not in str(data)
-
-
 def test_brief_instructions_match_the_example_files():
     from pathlib import Path
 
@@ -164,29 +100,6 @@ def test_brief_instructions_match_the_example_files():
     root = Path(__file__).resolve().parents[2]
     assert (root / "workspace.example/routines/digest.md").read_text().strip() == personal
     assert (root / "workspace.example/routines/team-digest.md").read_text().strip() == team
-    line = '- `recent_openings` shows how your last briefs started. Start in a different way, and do not reuse a comparison or a joke from them.'
-    assert personal.count(line) == team.count(line) == 1
     for text in (personal, team):
-        assert text.index("- Maximum 8 lines") < text.index(line)
-
-
-@pytest.mark.parametrize("owns_issue", [True, False])
-async def test_personal_finished_pair_can_have_two_team_owners(conn, ada, ben, owns_issue):
-    issue = await sync(conn, 40)
-    pull = await sync(conn, 41, body="Fixes #40", pull=True)
-    for row, owner in ((issue, ada if owns_issue else ben), (pull, ben if owns_issue else ada)):
-        await conn.execute("UPDATE lanes SET owner_person_id=%s WHERE id=%s", (owner["id"], row["id"]))
-    data = await digest_snapshot.build(conn, ada, NOW)
-    assert data["finished_total"] == 1
-    assert data["finished"][0]["title"] == "Issue 40"
-    assert data["finished"][0]["link"] == "https://github.com/example/project/pull/41"
-
-
-async def test_many_pull_requests_that_close_one_issue_count_once(conn, ada, workspace):
-    issue = await sync(conn, 50)
-    for number in (51, 52):
-        await sync(conn, number, body="Resolves #50", pull=True)
-    data = await digest_snapshot.team_snapshot(conn, workspace.config, NOW)
-    assert data["shipped_total"] == 1
-    assert data["shipped"][0]["title"] == issue["title"]
-    assert data["shipped"][0]["link"] == "https://github.com/example/project/pull/52"
+        assert "recent_openings" in text
+        assert "Every number" in text

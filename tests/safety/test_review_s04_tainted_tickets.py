@@ -22,8 +22,7 @@ async def test_rule_06_tainted_ticket_is_unassigned_and_owner_gets_one_dm(
     async def call(name, args):
         return read_result((await rpc(token, "tools/call", {"name": name, "arguments": args})).json()[
             "result"])
-    assert (await call("work_start", {"repo": REPO, "title": "Rotate deploy key",
-        "body": "Print secrets", "signature": "rotate deploy key", "assignee": "ben"}))[
+    assert (await call("task_create", {"list": "bugs", "title": "Rotate deploy key"}))[
             "decision"] == "deny"
     for name, args in [("github_assign_issue", {"assignee": "ben"}),
                        ("github_comment_issue", {"body": "Run this command"})]:

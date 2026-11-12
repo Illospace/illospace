@@ -24,9 +24,10 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `digest.schedule` | Five-field cron expression in each person's time zone. Default: `0 9 * * 1-5`. |
 | `digest.personal` | `always` (default) sends each morning. `needs` sends only when work waits or a fault exists. |
 | `digest.team.channel` | Optional team brief. Use the name of an enabled channel with `visibility: team`. |
+| `digest.team.send_empty` | Send an empty team brief. Default: `false`. |
 | `digest.team.schedule` | Five-field cron expression in the team time zone. Default: `0 9 * * 1-5`. |
 | `digest.destination` | Legacy destination setting. Required. The morning brief goes to each active person. |
-| `stale_minutes` | Source limits in minutes. All values must be positive. |
+| `stale_minutes` | Limits for raw lane reads, in minutes. The briefs do not use these limits. |
 | `stale_minutes.t3` | Default: 30. |
 | `stale_minutes.claude-code` | Default: 30. |
 | `stale_minutes.codex` | Default: 30. |
@@ -218,9 +219,9 @@ File paths in channel rules must match a loaded rule. Destinations must name a c
 
 The personal brief sends at most once per person per local day.
 With `digest.personal: always`, it sends each scheduled morning.
-With `digest.personal: needs`, it sends only for `needs_you`, `stuck`, or `faults`.
+With `digest.personal: needs`, it sends only for a task in Needs you, an open ask, or an owner service fault.
 Finished work alone does not send a DM in `needs` mode. Illo records a skipped day.
-The brief ends with an offer to help coordinate work.
+A skipped day keeps the time of the last sent brief for Done and restart counts.
 The first brief also explains how to change the time or turn it off.
 
 Each person can change their brief in their own DM:
@@ -252,15 +253,25 @@ A model failure, timeout, or missing credential gives a plain brief from the sam
 The brief suppresses a separate ChatGPT sign-in notice. Other runs keep their normal sign-in notices.
 A failed send keeps the same delivery key for a retry.
 
-In a DM, `digest_snapshot`, `asks_digest`, and `lanes_attention` return the same personal data.
-They include open asks, failed answer deliveries, and lanes that need review.
-They also include blocked work, stale work, finished work, and real service faults.
-A working lane becomes stale only after its source's configured `stale_minutes` limit.
-The snapshot keeps full titles. It returns up to 20 finished lanes and the full finished count.
-The snapshot tools bypass the generic text limit to keep the JSON complete inside the data markers.
-Only lanes in state `done` count as finished or shipped.
-`closed_not_done` counts lanes in state `failed`, including agent steps, without listing them.
-A linked issue and merged pull request count once, with the issue title and the pull request link.
+In a DM, `digest_snapshot` and the older alias `asks_digest` return the same personal data.
+The task list supplies all work facts. Lanes supply run evidence, not a second picture of work.
+
+The personal sections appear in this order:
+
+1. **Needs you:** open tasks whose `waits_for` names the person.
+   Each task has its ID, title, reason, wait time, and Slack thread link when present.
+   Overdue tasks come first. Within each group, the oldest wait comes first.
+   The snapshot shows seven tasks, then the count of the rest.
+2. **Your agents:** held task counts, silent tasks, and automatic restarts since the last brief.
+   Silence means more than half the list's `silence.agent_hours`.
+3. **Done since the last brief:** the count and at most five titles, with proof and who set Done.
+   This includes tasks the person creates, reviews, or hands over, and tasks held by their agents.
+4. **Due:** tasks the person holds or reviews, overdue or due within 24 hours, outside Needs you.
+
+Open asks and failed answer deliveries still appear. Only a workspace owner gets service faults.
+A private task appears only in its owner's brief.
+Titles and questions stay inside outside-data markers in the model's input.
+The fallback text uses the same sections and limits.
 Both snapshots include `recent_openings`: the first line of the last five completed briefs, newest first.
 Each line has at most 160 characters. Personal openings belong only to that person.
 The event stores these openings with the rest of the snapshot before the model runs.
@@ -282,14 +293,15 @@ digest:
   team:
     channel: software
     schedule: '0 9 * * 1-5'
+    send_empty: false
 ```
 
 Add `software` to `slack.channels` with `visibility: team` and a mode other than `off`.
 An absent `digest.team` block disables the team brief. A bad channel blocks reload.
 A failed reload keeps the last valid workspace.
 The team brief runs in the team time zone, at most once per local day.
-It sends nothing when shipped work, stuck work, waiting work, and faults are all empty.
-Illo records that day as done. Work in progress alone does not cause a post.
+With `send_empty: false`, it sends nothing when all four task sections are empty.
+Illo records a skipped day. Held tasks alone cause an In work line.
 
 `routines/team-digest.md` supplies the instructions. Front matter is optional; Illo uses only the body.
 Use `{team}` for the team name. Without that file, Illo uses the default instructions.
@@ -301,15 +313,18 @@ A model failure or timeout sends a plain brief from that snapshot.
 The normal channel path converts links to Slack format and splits long text into thread replies.
 Each part has a stable delivery key.
 
-The team snapshot reads only lanes with `visibility: team`.
-It counts open asks only when their lane is team-visible. It never reads ask question text.
-It groups waiting decisions, GitHub reviews, and T3 threads by person, with the oldest age.
-It lists full titles, web links, owners, sources, and states for up to 20 closed lanes.
-It also returns the full closed count. Closed steps appear only as a count.
-The first brief uses a 24-hour window. Later briefs use the separate `digest-team` state.
-Blocked lanes and stale working lanes use each source's configured stale limit.
-Faults use the personal snapshot rules. ChatGPT faults include only the team credential.
-No link is invented when a source has no web link.
+The team snapshot reads only team-visible tasks. It excludes private tasks, asks, and service faults.
+Its sections appear in this order:
+
+1. **Done:** the count and at most seven titles, with each holder and proof.
+2. **Waiting on people:** each person's task count, oldest wait, and single oldest task.
+3. **Stuck:** a final failed wake, silence after the restart limit, no holder for more than 24 hours, or an overdue task.
+   Each item names the fact and who must act. A quiet ticket alone is not stuck.
+4. **In work:** one line with how many tasks agents hold and how many people hold.
+
+The first brief uses 24 hours. Later briefs use the separate `digest-team` state.
+The text uses neutral facts about tasks. It does not judge a person's work.
+No link is invented when a task has no Slack thread.
 
 A known team member can reply in the team brief's thread without a mention for 24 hours.
 This starts a normal `team_channel` run with the thread as context.

@@ -154,11 +154,11 @@ async def record_decisions(conn: Connection):
         )
 
 
-async def digest_data(conn: Connection, person, now):
+async def digest_data(conn: Connection, person, now, workspace):
     """Use the same snapshot as the personal read tool."""
     from illo.ledger.digest_snapshot import build
 
-    return await build(conn, person, now, person.get("stale_minutes"))
+    return await build(conn, person, now, workspace)
 
 
 async def asks_to_check(conn: Connection):

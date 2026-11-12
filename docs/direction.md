@@ -14,11 +14,11 @@ A small team that works with coding agents. Each person runs several agents on s
 
 ## What Illo does
 
-- It knows each lane of agent work, on each machine, and its state.
+- It reads one task list for people and their agents. Collectors supply run evidence.
 - It answers "where are we on X?" from the ledger, with links.
 - It sends a card only for a real blocker. One tap answers it. The answer goes back to the agent.
 - It carries a request from one person to another as an ask.
-- It starts clear work through a GitHub issue.
+- It makes a task in the list for clear work. The list can wake an agent through a GitHub issue.
 - It searches the team context where it lives, and it keeps the decisions.
 
 ## How it must feel
@@ -35,7 +35,7 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 - **One assistant for the team.** The principal of each run is a person, the team, or an outsider. The gateway decides it in code.
 - **Safe by code, not by prompt.** The tool server checks scope, destination, and risk on each call. The prompt holds no authority. See [safety.md](safety.md).
-- **Truth comes from the source system.** A lane state and an ask state are rows in the ledger. The model reads them through tools.
+- **Truth comes from the source system.** A task state and an ask state are rows in the ledger. The model reads them through tools.
 - **Small.** One Python process, one Postgres, one brain service. No ORM, no queue service.
 - **Any model.** The brain runs the Claude Agent SDK, one fresh process for each run, with only the Illo tools. A second, experimental runtime speaks the OpenAI-compatible API for other providers and local models.
 - **The workspace is a folder of files.** People, rules, skills, routines, and notes live in a repository of the team. A person can read and change each one.
@@ -44,7 +44,7 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 - **Not a web app.** Slack, email, and the MCP endpoint are the only ways in. The only web pages are the Google sign-in start and callback.
 - **Not a coding agent.** Illo does not write code, run commands, release, merge, or delete. It files a ticket, and an agent or a person does the work.
-- **Not a copy of your data.** Illo searches most sources where they live. The ledger stores lanes, asks, decisions, notes, and saved items, with links. It also stores the messages of the configured public Slack channels, and each message to Illo with its answer. The model provider that the team chooses receives the prompts and the tool results of each run.
+- **Not a copy of your data.** Illo searches most sources where they live. The ledger stores tasks, run evidence, asks, decisions, notes, and saved items, with links. It also stores messages from the configured public Slack channels, and each message to Illo with its answer. The model provider that the team chooses receives the prompts and the tool results of each run.
 - **Not a second inbox.** It does not send progress messages.
 - **Not a remote control for your machines.** Illo holds no credential for them. A collector on each machine pulls the answers.
 

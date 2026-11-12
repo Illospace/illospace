@@ -185,3 +185,26 @@ async def test_other_person_gets_question_and_review_in_their_dm(app, slack_clie
     await surface.handle(ctx, ada, {"action_id": f"task:{other['id']}:done", "channel": card["channel"], "message_ts": card["ts"]})
     async with ctx.pool.connection() as conn:
         assert (await tasks.get(conn, other["id"], viewer=ADA))["state"] == "done"
+
+
+def test_agent_comment_uses_slack_markdown_and_bounded_text():
+    body = "## Progress\n**The checks pass.** [Proof](https://example.com/proof)\n" + "More detail. " * 100
+    event = {"text": body, "data": {"url": "https://github.com/acme/app/issues/1#issuecomment-2"}}
+    text = surface.agent_message(event)
+    assert text.startswith("*Progress*\n*The checks pass.* <https://example.com/proof|Proof>")
+    assert "**" not in text and "##" not in text
+    prefix, rest = text.split("… ")
+    assert len(prefix) <= 600
+    assert rest == "<https://github.com/acme/app/issues/1#issuecomment-2|Read the rest>"
+    assert surface.agent_message({"text": "**Ready.** <@U_ACME_ADA>", "data": {}}) == "*Ready.* &lt;@U_ACME_ADA&gt;"
+
+
+async def test_task_root_uses_plain_state_words(app, slack_client):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        row = await tasks.create(conn, workspace=ctx.workspace, viewer=ADA, list_key="launches", title="A task", holder="person:ben")
+    await surface.tick(ctx)
+    assert any(c["text"].endswith(" · to do") for c in slack_client.calls if c["method"] == "chat_postMessage")
+    assert [surface.state_label(s) for s in ("todo", "working", "review", "done", "cancelled")] == [
+        "to do", "in work", "in review", "done", "cancelled"]
+    assert row["state"] == "todo"

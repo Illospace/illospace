@@ -262,3 +262,28 @@ async def test_reads_do_not_count_as_liveness(app, http):
     last = await build.call("task_get", {"id": row["id"]})
     assert first["last_activity_at"] == last["last_activity_at"]
     assert first["alive_at"] is last["alive_at"] is None
+
+
+async def test_operator_mine_filters_in_sql_before_the_limit(app):
+    waiting = await operator(app, "task_create", list="launches", title="Wait for Ada", holder="agent:studio")
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE tasks SET waits_for='person:ada' WHERE id=%s", (waiting["id"],))
+    held = await operator(app, "task_create", list="launches", title="Ada holds it", holder="person:ada")
+    agent_task = await operator(app, "task_create", list="launches", title="Ada's agent", holder="agent:build")
+    for i in range(4):
+        await operator(app, "task_create", list="launches", title=f"Ben's task {i}", holder="person:ben")
+    found = await operator(app, "task_list", mine=True, limit=3)
+    assert {t["id"] for t in found["tasks"]} == {waiting["id"], held["id"], agent_task["id"]}
+    filtered = await operator(app, "task_list", mine=True, holder="person:ada")
+    assert [t["id"] for t in filtered["tasks"]] == [held["id"]]
+
+
+async def test_operator_mine_keeps_other_private_tasks_out(app):
+    ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.lists.append(TaskList(key="private", name="Private", owner="ben"))
+    async with ctx.pool.connection() as conn:
+        row = await tasks.create(conn, workspace=ctx.workspace,
+            viewer=tasks.Viewer("ben", "person:ben", human=True), list_key="private", title="Private task", holder="person:ben")
+        await conn.execute("UPDATE tasks SET waits_for='person:ada' WHERE id=%s", (row["id"],))
+    assert (await operator(app, "task_list", mine=True))["tasks"] == []

@@ -147,11 +147,9 @@ When a lane leaves these states, Illo clears its closing time and end summary. I
 Set `is_step: true` for a lane that is one agent step of other work.
 Set `parent_ref` to the parent thread ID when the source supplies it. A step can have no known parent.
 Both fields are optional. Old reports keep their stored values. New lanes default to `is_step: false`.
-The brief leaves steps out of `finished` and `finished_total`. It reports their count as `finished_steps`.
-For T3, `review` means the agent stopped and waits for the person. An agent that stops is not a proof.
-The snapshot calls this `kind: "your_move"`. It includes the last agent text in `summary` and `hours_since_signal`.
-It lists at most 10 such threads, newest first, after asks, failed answers, and other reviews.
-`your_move_total` counts all such threads. GitHub reviews keep `kind: "review"`.
+These fields describe the source run. Briefs count tasks instead of lanes or steps.
+For T3, `review` means the source run stops after its turn. It is not proof that a task is done.
+The task's holder, `waits_for`, checks, and record decide its next move.
 See [T3 state rules](collectors.md#reports-and-asks) for settlement evidence and step fields.
 Set `visibility: "private"` for a lane that only its owner may read. A private lane must belong to the calling person.
 
@@ -251,3 +249,11 @@ A working lane refreshes that task's liveness. Matching ticket and change links 
 The token can affect only tasks of its person or that person's agents.
 A stopped lane with an open ticket tells Illo to restart the holder at the next silence check.
 A repeated stopped report does not cause repeated restarts. A new working report starts a new run period.
+
+The task list supplies the work facts for both morning briefs. Lanes supply raw run evidence.
+The T3 collector includes linked pull request URLs from the thread JSON.
+For SQLite, it also reads the optional `projection_thread_pull_requests` table.
+It also includes an issue URL when the first user message contains exactly one GitHub issue URL.
+It never copies that user message into the lane. Use fixture databases to test this read path.
+A pull request link can match a task ticket through its GitHub closing or reference link in the same repository.
+A reference supplies a `change` link. It never closes an issue by itself.

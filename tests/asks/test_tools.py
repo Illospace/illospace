@@ -31,7 +31,7 @@ async def test_create_answer_cancel_and_digest(app, rpc, rpc_token):
     got = await call(rpc, token, "asks_get", {"id": ask_id})
     assert "Review Acme plan?" in got["result"]
     digest = await call(rpc, token, "asks_digest")
-    assert len(snapshot_data(digest["result"])["needs_you"]) == 1
+    assert len(snapshot_data(digest["result"])["asks"]) == 1
     result = await call(rpc, token, "asks_answer", {"id": ask_id, "text": "Use the reviewed plan."})
     assert result["decision"] == "draft"
     result = await call(rpc, token, "asks_answer", {"id": ask_id, "option": "yes"})

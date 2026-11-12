@@ -350,3 +350,90 @@ async def test_hand_over_adds_no_comment(ctx, github_client):
     await make(ctx)
     await wake.tick(ctx)
     assert not any(c["method"] == "comment_issue" for c in github_client.calls)
+
+
+@pytest.mark.parametrize("keyword,kind", [("Fixes", "closes"), ("Refs", "refs"), ("Ref", "refs"), ("Related to", "refs")])
+async def test_pull_link_matches_ticket_once_without_closing(ctx, github_client, keyword, kind):
+    from illo.ledger import github
+
+    row = await make(ctx)
+    await wake.tick(ctx)
+    issue = github_client.issues[0]
+    change = f"https://github.com/{REPO}/pull/22"
+    async with ctx.pool.connection() as conn:
+        pull = await github.sync_item(conn, REPO, {"number": 22, "title": "Repair the export",
+            "body": f"{keyword} #{issue['number']}", "state": "open", "pull_request": {}, "html_url": change}, {})
+        assert any(link["kind"] == kind for link in pull["links"])
+        lane = {"id": 70, "source": "t3", "state": "working", "links": [change]}
+        for _ in range(2):
+            await connector.lane_signal(ctx, conn, lane, token={"person_key": "ada"})
+        current = await get_without_pool(conn, row["id"])
+        assert current["alive_at"] and current["state"] == "todo"
+        assert len([link for link in current["links"] if link["kind"] == "change"]) == 1
+        assert len([e for e in await tasks.events(conn, row["id"], viewer=ADA) if e["kind"] == "link"]) == 2
+        assert github_client.issues[0]["state"] == "open"
+
+
+async def test_unrelated_pull_or_another_repo_cannot_match_task(ctx):
+    from illo.ledger import github
+
+    ticket = f"https://github.com/{REPO}/issues/12"
+    row = await make(ctx, links=[{"kind": "ticket", "url": ticket}])
+    async with ctx.pool.connection() as conn:
+        for repo, body in [(REPO, "Refs #13"), ("acme/other", "Refs #12")]:
+            change = f"https://github.com/{repo}/pull/22"
+            await github.sync_item(conn, repo, {"number": 22, "title": "Another change", "state": "open",
+                "pull_request": {}, "body": body, "html_url": change}, {})
+            await connector.lane_signal(ctx, conn, {"id": 80, "source": "t3", "state": "working", "links": [change]},
+                                        token={"person_key": "ada"})
+        current = await get_without_pool(conn, row["id"])
+        assert not current["alive_at"] and len(current["links"]) == 1
+
+
+async def test_open_pull_signal_adds_reference_change_to_review_task_once(ctx):
+    from illo.ledger import github
+
+    row = await make(ctx, links=[{"kind": "ticket", "url": f"https://github.com/{REPO}/issues/12"}])
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE tasks SET state='review',waits_for='person:ada' WHERE id=%s", (row["id"],))
+        item = {"number": 22, "title": "Repair the export", "state": "open", "pull_request": {},
+                "body": "Refs #12", "html_url": f"https://github.com/{REPO}/pull/22"}
+        await github.sync_item(conn, REPO, item, {})
+        for _ in range(2):
+            await connector.signal(ctx, conn, REPO, item)
+        current = await get_without_pool(conn, row["id"])
+        assert current["state"] == "review"
+        assert len([link for link in current["links"] if link["kind"] == "change"]) == 1
+
+
+async def test_github_network_call_has_no_task_graph_lock(ctx, github_client, monkeypatch):
+    row = await make(ctx)
+    original = github_client.assign_issue
+    locks = []
+
+    async def assign(*args, **kwargs):
+        async with ctx.pool.connection() as conn:
+            lock = await one(conn, "SELECT pg_try_advisory_xact_lock(12000001) AS ok")
+            locks.append(lock["ok"])
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(github_client, "assign_issue", assign)
+    await wake.tick(ctx)
+    assert locks == [True]
+    assert (await events(ctx, row["id"]))[-1]["kind"] == "woken"
+
+
+async def test_failed_network_write_keeps_attempt_budget_and_audit(ctx, github_client, monkeypatch):
+    from illo.ledger import kv
+
+    await make(ctx)
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("A network error")
+
+    monkeypatch.setattr(github_client, "assign_issue", unavailable)
+    await wake.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        assert len(await kv.get(conn, "tasks:github-writes")) == 2
+        attempts = await all_rows(conn, "SELECT * FROM audit WHERE tool='task_github_assign_issue'")
+        assert len(attempts) == 1

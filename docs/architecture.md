@@ -7,14 +7,15 @@ This file is the contract of Illo. Each builder reads it first. It is public: it
 Illo is one list of tasks for people and their agents.
 The task holds the brief, result, proof, next move, and record.
 Lists hold each team's instructions and Done rules. People and outside agents do the work.
-The existing lanes, asks, alerts, and knowledge tools stay available.
+The task list is the picture of work. Lanes are run evidence from collectors.
+Asks, alerts, and knowledge tools stay available.
 See [Lists and tasks](tasks.md) for the task contract.
 
 Design goals, in order:
 1. **Safe by code, not by prompt.** The ten safety rules of section 4 live in server code and have tests.
 2. **Small.** A person can read the whole engine. No web app. No ORM. No queue service. One Postgres.
 3. **Easy to install.** A new team installs it with the README in less than 30 minutes: one install command, a Slack app from a manifest file, `people.yaml`, a model sign-in, one collector.
-4. **Truth comes from the source system, not from the model.** A lane state, an ask state, and a card are data in the ledger. The model reads them through tools. It never invents them.
+4. **Truth comes from the source system, not from the model.** A task state, an ask state, and a card are data in the ledger. The model reads them through tools. It never invents them.
 
 ## 2. The words
 
@@ -25,7 +26,7 @@ Each word has one meaning. Use these words in code, in docs, and in the text tha
 - **Task**: one unit of work, with a holder, state, next move, proof, and record. A piece is a task under a parent.
 - **List**: workspace instructions, allowed holders, visibility, and a Done rule for one type of work.
 - **Holder**: `person:<key>` or `agent:<key>`. An unassigned task has no holder.
-- **Lane**: one stream of agent work (a T3 thread, a Claude Code session, a GitHub issue or pull request). It has a source, an owner, a state, a summary, and links.
+- **Lane**: run evidence from a source (a T3 thread, a Claude Code session, a GitHub issue or pull request). It has a source, an owner, a state, a summary, and links.
 - **Ask**: one thing that a person must decide or do. It has an owner, a question, options, a recommended option, proof, a due time, and a path to send the answer back.
 - **Rule**: a standing answer or a standing permission from a person. It is visible, it has an owner, and the owner can remove it.
 - **Connector**: an outside system that Illo can call. Its scope is `team` or `personal`.
@@ -53,7 +54,7 @@ Channels ──► Gateway ──► Ledger (Postgres)
 |---|---|---|
 | **Channels** | Receive and send. Slack (DM, channel, card), email, the MCP endpoint for agents, the signal intake. A channel has no logic about authority. | `illo/channels/` |
 | **Gateway** | Receives an event once (dedupe). Finds the principal. Decides: no answer, a direct ledger action, or a brain run. Builds the grant of the run. Delivers the final text to the place the event came from. | `illo/gateway/` |
-| **Ledger** | Postgres. People, tokens, events, runs, audit, lanes, asks, rules, items, drafts, signals, claims, connector grants. Plain SQL functions, no model calls. | `illo/ledger/`, `illo/migrations/` |
+| **Ledger** | Postgres. Tasks, people, tokens, events, runs, audit, lanes, asks, rules, items, drafts, signals, claims, connector grants. Plain SQL functions, no model calls. | `illo/ledger/`, `illo/migrations/` |
 | **Brain** | One agent run for each event. A standard agent runtime in a container with no host mount, no shell tool, no file tool, and no web tool. It sees only the Illo tool server, through a token that is valid for that run. | `illo/brain/` (client and run manager), `brain/` (the sandbox service) |
 | **Tool server** | An MCP server for the brain. Each call passes three checks: scope, destination, risk. Each call writes one audit row. | `illo/tools/` |
 
@@ -100,9 +101,9 @@ The gateway gives each run one profile. The profile decides the tool list. `illo
 | Profile | When | Principal | Tools |
 |---|---|---|---|
 | `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | all tools |
-| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `work_start`, `asks_create`, `slack_read_thread` |
-| `routine` | a team routine | `team` | team reads, create an unassigned issue, `work_start`, `asks_create`, `slack_send_dm` |
-| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, create an unassigned issue, `work_start`, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
+| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `asks_create`, `slack_read_thread` |
+| `routine` | a team routine | `team` | team reads, create an unassigned issue, `asks_create`, `slack_send_dm` |
+| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, create an unassigned issue, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
 | `tainted` | a bot, webhook, or form post; a forwarded email; a signal; a Slack thread with outside text | `team`, or the person of a forwarded email | up to 8 tools (below) |
 | `outsider` | an email from an unknown or unauthenticated sender | `outsider` | `web_read_public_page` |
 
@@ -110,9 +111,9 @@ A run with no person does not list a tool with risk `send_outside`.
 Google tools need a configured connector and a current grant, or a team service account.
 Connector tools need a configured team MCP service. Tainted runs also need an allowed read tool.
 These checks narrow the tool list. Each call still passes all authority checks.
-The old names `asks_digest` and `lanes_attention` stay callable but are absent from the tool list.
+The old name `asks_digest` stays callable but is absent from the tool list.
 
-"Team reads" are the lane, ask, rule, people, search, notes, skills, shared Drive, GitHub read, connector, and public web tools. The personal tools work only in `person_dm`. `asks_answer`, `asks_cancel_mine`, `rules_remove_mine`, `asks_digest`, `digest_snapshot`, `lanes_attention`, and `slack_post_channel` also work only in `person_dm`.
+"Team reads" are the lane, ask, rule, people, search, notes, skills, shared Drive, GitHub read, connector, and public web tools. The personal tools work only in `person_dm`. `asks_answer`, `asks_cancel_mine`, `rules_remove_mine`, `asks_digest`, `digest_snapshot`, and `slack_post_channel` also work only in `person_dm`.
 
 The `tainted` grant permits these tools: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, and `skills_get`. A tool that names `tainted` but is not in this set is still refused. With these tools a tainted run reads only issues of the configured repositories, connector results, and public pages. It cannot read lanes, asks, people, rules, notes, search results, Slack, or pull requests. Its tickets keep the label `from-outside-text`. Code assigns trusted monitors to the default owner within the hourly triage limit. Other sources need an owner card. A connector tool needs `tainted: true` and risk `read`. A tainted run reads one public page: the first URL of its event text, once.
 
@@ -137,11 +138,11 @@ The run gets `personal_read = true` after a personal tool, and after a read resu
 
 A check returns `allow`, `draft`, or `deny`. The strictest result wins. `draft` creates a row in `drafts` and a card for the person of the run. A run with no person cannot create a draft: the result is `deny`. The tool result tells the model what happened. Each call writes `audit` with: run, principal, tool, an HMAC digest of the arguments, the redacted arguments, the decision, the reason.
 
-Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_comment_issue` have risk `send_outside`. Assignments through `work_start` and agent trigger labels also need approval. Without a person, tickets stay unassigned and drop model labels. A GitHub write to a public repository becomes `send_outside` in its preflight.
+Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_comment_issue` have risk `send_outside`. Agent trigger labels also need approval. Without a person, tickets stay unassigned and drop model labels. A GitHub write to a public repository becomes `send_outside` in its preflight.
 
 ### Limits in one run
 
-`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`, and 1 `work_start`. All tool calls of one run stop at `brain.max_turns`. At the limit, a normal model request can still answer.
+`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`. All tool calls of one run stop at `brain.max_turns`. At the limit, a normal model request can still answer.
 If the model asks for more tools, the runtime makes one final request with tools disabled.
 The answer has `usage.limited = true`. Claude uses a separate client with no tools and the results from the run.
 The run stops at `brain.timeout_s`.
@@ -159,11 +160,10 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `events`: the gateway inbox. `channel`, `external_id`, unique (`channel`, `external_id`), `kind`, `principal`, `person_id`, `tainted`, `payload jsonb`, `status` (`received`, `ignored`, `handled`, `failed`).
 - `runs`: `event_id`, `principal`, `person_id`, `profile`, `tainted`, `personal_read`, `status` (`running`, `completed`, `failed`, `timeout`), `runtime`, `model`, `usage jsonb`, `error`, `started_at`, `ended_at`, `token_hash` (the per-run token), `token_expires_at`.
 - `audit`: `run_id` (nullable), `token_id` (nullable), `principal`, `tool`, `args_digest`, `args jsonb` (redacted), `decision`, `reason`, `at`.
-- `lanes`: `source` (`t3`, `claude-code`, `codex`, `github`, `manual`, `email`), `external_id`, unique (`source`, `external_id`), `title`, `owner_person_id`, `state` (`open`, `working`, `waiting_person`, `blocked`, `review`, `done`, `failed`, `unknown`), `summary`, `links jsonb`, `repo`, `machine`, `visibility` (`team`, `private`), `last_signal_at`, `updated_at`, `closed_at`, `end_summary`, `slack_channel`, `slack_ts`. A lane with state `working` and no signal for longer than the limit of its source shows as `stale`. `stale` is computed on read. It is never stored. `open` means backlog: the lane exists and is not closed, and nobody reported work on it. Default lane lists omit `open` unless a text query matches it or a state filter requests it. Active lanes appear first. The brief counts fresh `working` lanes as in progress. A `review` lane needs the person.
+- `lanes`: `source` (`t3`, `claude-code`, `codex`, `github`, `manual`, `email`), `external_id`, unique (`source`, `external_id`), `title`, `owner_person_id`, `state` (`open`, `working`, `waiting_person`, `blocked`, `review`, `done`, `failed`, `unknown`), `summary`, `links jsonb`, `repo`, `machine`, `visibility` (`team`, `private`), `last_signal_at`, `updated_at`, `closed_at`, `end_summary`, `slack_channel`, `slack_ts`. A lane with state `working` and no signal for longer than the limit of its source shows as `stale`. `stale` is computed on read. It is never stored. `open` means backlog: the lane exists and is not closed, and nobody reported work on it. Default lane lists omit `open` unless a text query matches it or a state filter requests it. Active lanes appear first. The briefs read tasks instead. Source states do not decide who must act on a task.
 - `lane_events`: `lane_id`, `at`, `kind`, `text`, `data jsonb`.
 - A lane also has `is_step` (default `false`) and optional `parent_ref`. These fields mark steps of other work.
-  The brief counts closed steps in `finished_steps`, with no list. It omits them from `finished` and `finished_total`.
-  A T3 `review` lane appears as `your_move`. The agent stopped; the person has the next move.
+  These fields describe the source run. They do not add work items to a brief.
   An agent that stops is not a proof. See [the T3 rules](collectors.md#reports-and-asks) for settlement evidence.
 - `asks`: `lane_id` (nullable), `kind` (`decision`, `action`, `review`, `reminder`), `requester_token_id` (nullable), `requester_person_id` (nullable), `owner_person_id`, `question`, `options jsonb` (list of `{id, label, detail}`), `recommended_option`, `proof jsonb` (text and links), `due_at`, `expires_at`, `state` (`open`, `answered`, `expired`, `cancelled`), `answer_option`, `answer_text`, `answered_by_person_id`, `answered_via` (`person`, `rule`, `approved_draft`), `rule_id`, `answered_at`, `delivery_state` (`none`, `pending`, `delivered`, `acked`, `failed`), `delivery_attempts`, `delivered_at`, `acked_at`, `slack_channel`, `slack_ts`, `reminded_at`, `source_ref` (the thing in the source system that this ask mirrors, for the stale check).
 - `rules`: `owner_person_id`, `scope` (`person`, `team`), `kind` (`always_allow`, `standing_answer`), `match jsonb` (ask kind, lane source, repository, requester, a question pattern), `answer_option_id`, `answer_option_label`, `answer_option_detail`, `text`, `origin` (`card`, `file`, `proposal`), `uses`, `removed_at`.
@@ -224,7 +224,6 @@ Tool names use `family_verb`. Each family is one file in `illo/tools/`. The regi
 | `connectors` | `connectors_list`, `connectors_call` (a team connector through the MCP client, with a risk level for each tool) |
 | `personal` | `mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get` (personal connectors, read-only), `drive_shared_search`, `drive_shared_get` (the team shared drive) |
 | `email` | `email_draft` (always a draft) |
-| `work` | `work_start` (a GitHub issue plus a lane plus one Slack status message) |
 
 Section 4 says which profile gets which tool.
 

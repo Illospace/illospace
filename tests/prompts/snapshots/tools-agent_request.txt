@@ -16,7 +16,7 @@ github_get_pull: Read one pull request by `repo` and `number`: its body, merge s
 github_search_issues: Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.
 lanes_get: Read one lane by `id`: its summary, links, and last 5 events.
 lanes_mine: Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.
-lanes_search: Search the lanes that this run can see: agent or ticket work with a state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
+lanes_search: Search the lanes that this run can see: raw evidence from agent runs and GitHub with a source state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
 lists: Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work.
 notes_propose: Propose a team note with `title` and `text`. The person you act for gets a card, and the note is saved only when they tap Keep; until then the result is pending, so say that the note waits for their approval.
 notes_search: Search the team notes only. For anything else, use `search_all`.
@@ -28,7 +28,6 @@ search_get: Read one search result in full by its `source_ref` from `search_all`
 skills_get: Read the steps of one team skill by its name
 task_create: Create a task from the person's words. Give a list, title, and brief. A pieces array creates the parent and its pieces in one call.
 task_get: Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer.
-task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count.
+task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold.
 task_post: Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder.
 web_read_public_page: Read one public web page whose URL is in the run message, or the root page of that host. In a run from outside text, only the first URL of the message, once. Refused after this run read personal data.
-work_start: Start work through a GitHub issue: file it in a configured repository, track it as a lane, and post a status message. With `assignee` (a person key or GitHub login) in a person's run, the result is a draft card, and the issue is filed and assigned only when the person taps Send. Without a person, code decides ticket ownership under the outside-text triage rules. A model assignment is refused with `deny` and the ticket link. `signature` works as in `github_create_issue`; once per run.

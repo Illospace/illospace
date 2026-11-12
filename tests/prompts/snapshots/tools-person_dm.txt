@@ -10,7 +10,7 @@ chatgpt_status: Check the ChatGPT sign-in that pays for this person's runs. Retu
 claims_take: Lock an item so that only one run handles it, for example an alert that arrives twice. `key` must be identical for each copy; use the format of a team rule if one gives it. Returns true when this run has the claim; false means that another run has it, so stop. A claim lasts 24 hours.
 connectors_call: Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.
 connectors_list: List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.
-digest_snapshot: Read what needs this person now: their open asks, reviews, agent threads that wait for them (kind `your_move`), stuck work, work in progress, finished work, and service faults. Call it first for 'what needs me?'. It counts as a personal read.
+digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.
 drive_get: Read one of this person's own Drive files by `id` from `drive_search`.
 drive_search: Search this person's own Drive files. For team documents, use `drive_shared_search`.
 drive_shared_get: Read one file of the team's shared Drive by `id` from `drive_shared_search`.
@@ -24,7 +24,7 @@ github_get_pull: Read one pull request by `repo` and `number`: its body, merge s
 github_search_issues: Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.
 lanes_get: Read one lane by `id`: its summary, links, and last 5 events.
 lanes_mine: Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.
-lanes_search: Search the lanes that this run can see: agent or ticket work with a state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
+lanes_search: Search the lanes that this run can see: raw evidence from agent runs and GitHub with a source state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
 lists: Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work.
 mail_get: Read one message of this person's own mail by `id` from `mail_search`.
 mail_search: Search this person's own mail. `query` uses Gmail search syntax; returns one line per message with its id.
@@ -45,11 +45,10 @@ task_create: Create a task from the person's words. Give a list, title, and brie
 task_done: Confirm a task for the person who made this request. The Done checks must pass. Use force true and a reason to override failed checks.
 task_get: Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer.
 task_hand: Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo.
-task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count.
+task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold.
 task_post: Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder.
 task_reopen: Send a task back to its holder with a reason. The state becomes todo and waits_for names the holder. The record keeps the reason.
 task_update: Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility.
 task_wake: Wake the agent holder and record the person who requests the restart.
-team_snapshot: Read the team's state for the team brief: what shipped, what is stuck, and what waits for whom. It holds team-visible data only, never a private lane or a private ask.
+team_snapshot: Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.
 web_read_public_page: Read one public web page whose URL is in the run message, or the root page of that host. In a run from outside text, only the first URL of the message, once. Refused after this run read personal data.
-work_start: Start work through a GitHub issue: file it in a configured repository, track it as a lane, and post a status message. With `assignee` (a person key or GitHub login) in a person's run, the result is a draft card, and the issue is filed and assigned only when the person taps Send. Without a person, code decides ticket ownership under the outside-text triage rules. A model assignment is refused with `deny` and the ticket link. `signature` works as in `github_create_issue`; once per run.

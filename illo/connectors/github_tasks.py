@@ -1,5 +1,6 @@
 """Connect task wake, proof, and signals to GitHub."""
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -55,21 +56,30 @@ def agent_for(ctx, login):
 
 async def write(ctx, conn, task, event, step, method, *args, **kwargs):
     """Count each attempt and keep a receipt for each action of a wake event."""
-    key = f"task:action:{event['id']}:{step}"
-    receipt = await kv.get(conn, key)
-    if receipt is not None:
-        return receipt
-    await conn.execute("SELECT pg_advisory_xact_lock(12000004)")
-    budget = await kv.get(conn, "tasks:github-writes") or []
-    now = datetime.now(UTC).timestamp()
-    budget = [at for at in budget if now-at < 3600]
-    if len(budget) >= ctx.workspace.config.tasks.github_writes_per_hour:
-        raise ValueError("The task limit for GitHub writes per hour is reached.")
-    await kv.set(conn, "tasks:github-writes", [*budget, now])
-    await audit.write(conn, principal="code", tool="task_github_" + method, args={"id": task["id"], "step": step},
-                      decision="allow", reason="The write belongs to a task action.", target=f"task {task['id']}")
-    result = await getattr(ctx.github_client, method)(*args, **kwargs)
-    await kv.set(conn, key, result or {})
+    failure = None
+    async with conn.transaction():
+        key = f"task:action:{event['id']}:{step}"
+        await conn.execute("SELECT pg_advisory_xact_lock(12000004)")
+        receipt = await kv.get(conn, key)
+        if receipt is not None:
+            return receipt
+        budget = await kv.get(conn, "tasks:github-writes") or []
+        now = datetime.now(UTC).timestamp()
+        budget = [at for at in budget if now-at < 3600]
+        if len(budget) >= ctx.workspace.config.tasks.github_writes_per_hour:
+            raise ValueError("The task limit for GitHub writes per hour is reached.")
+        await kv.set(conn, "tasks:github-writes", [*budget, now])
+        await audit.write(conn, principal="code", tool="task_github_" + method, args={"id": task["id"], "step": step},
+                          decision="allow", reason="The write belongs to a task action.", target=f"task {task['id']}")
+        try:
+            result = await getattr(ctx.github_client, method)(*args, **kwargs)
+        except (Exception, asyncio.CancelledError) as exc:
+            # Keep the attempt in the budget even when the outside call fails.
+            failure = exc
+        else:
+            await kv.set(conn, key, result or {})
+    if failure:
+        raise failure
     return result
 
 
@@ -193,15 +203,16 @@ async def signal(ctx, conn, repo, item):
     url = item.get("html_url", f"https://github.com/{repo}/issues/{item['number']}")
     await kv.delete(conn, "tasks:github-cache:" + url)
     # The lane parser already knows the closing-keyword syntax.
-    if item.get("merged"):
+    if "pull_request" in item or "merged" in item:
         lane = await one(conn, "SELECT * FROM lanes WHERE source='github' AND external_id=%s", (f"{repo}#{item['number']}",))
         for link in (lane or {}).get("links", []):
-            if link["kind"] != "closes":
+            if link["kind"] not in {"closes", "refs"}:
                 continue
             match = await one(conn, "SELECT task_id FROM task_tickets WHERE url=%s", (link["url"],))
             if match:
                 row = await one(conn, "SELECT * FROM tasks WHERE id=%s", (match["task_id"],))
-                if row["state"] not in {"done", "cancelled"}:
+                if (row["state"] not in {"done", "cancelled"}
+                        and not any(v.get("kind") == "change" and v["url"] == url for v in row["links"])):
                     await tasks.add_link(conn, row["id"], workspace=ctx.workspace,
                         viewer=tasks.Viewer(None, "code", team=True),
                         links=[{"kind": "change", "url": url, "title": item["title"]}], ctx=ctx)
@@ -213,12 +224,13 @@ async def signal(ctx, conn, repo, item):
     row = await one(conn, "SELECT * FROM tasks WHERE id=%s FOR UPDATE", (mapping["task_id"],))
     if row["state"] in {"done", "cancelled"}:
         return
-    merged = await all_rows(conn, """SELECT links,title FROM lanes WHERE source='github' AND state='done'
+    merged = await all_rows(conn, """SELECT links,title FROM lanes WHERE source='github'
         AND EXISTS (SELECT 1 FROM jsonb_array_elements(links) link
-            WHERE link->>'kind'='closes' AND link->>'url'=%s)""", (url,))
+            WHERE link->>'kind' IN ('closes','refs') AND link->>'url'=%s)""", (url,))
     for lane in merged:
         for link in lane["links"]:
-            if link.get("kind") == "github" and parse(link["url"], "pull"):
+            if (link.get("kind") == "github" and parse(link["url"], "pull")
+                    and not any(v.get("kind") == "change" and v["url"] == link["url"] for v in row["links"])):
                 row = await tasks.add_link(conn, row["id"], workspace=ctx.workspace,
                     viewer=tasks.Viewer(None, "code", team=True),
                     links=[{"kind": "change", "url": link["url"], "title": lane["title"]}], _defer=True)
@@ -241,7 +253,7 @@ async def signal(ctx, conn, repo, item):
         await kv.set(conn, key, True)
         await tasks.alive(conn, row["id"], "github")
         if is_worker:
-            await tasks._event(conn, row, row["holder"], "message", body[:500], {"url": comment.get("html_url")})
+            await tasks._event(conn, row, row["holder"], "message", body, {"url": comment.get("html_url")})
     labels = {v["name"] if isinstance(v, dict) else v for v in item.get("labels", [])}
     waiting = any(label in labels and state == "waiting_person" for label, state in ctx.workspace.config.github.label_map.items())
     key = f"task:needs-input:{row['id']}"
@@ -329,8 +341,27 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
             for link in lane["links"] if isinstance(link, (str, dict))}
     title = lane.get("title") or ""
     await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
-    rows = await all_rows(conn, "SELECT * FROM tasks WHERE state IN ('todo','working') AND holder=ANY(%s)", (refs,))
+    rows = await all_rows(conn, "SELECT * FROM tasks WHERE state NOT IN ('done','cancelled') AND holder=ANY(%s)", (refs,))
+    pulls = await all_rows(conn, """SELECT * FROM lanes WHERE source='github'
+        AND (visibility='team' OR owner_person_id=(SELECT id FROM people WHERE key=%s))
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements(links) link WHERE link->>'url'=ANY(%s))""",
+        (token["person_key"], list(urls)))
     for row in rows:
+        for pull in pulls:
+            changes = [v["url"] for v in pull["links"] if v.get("kind") == "github"
+                       and v.get("url") in urls and parse(v["url"], "pull")]
+            for change in changes:
+                repo, _ = parse(change, "pull")
+                tickets = {v["url"] for v in row["links"] if v.get("kind") == "ticket"
+                           and parse(v["url"]) and parse(v["url"])[0].lower() == repo.lower()}
+                if not any(v.get("kind") in {"closes", "refs"} and v.get("url") in tickets for v in pull["links"]):
+                    continue
+                if not any(v.get("kind") == "change" and v["url"] == change for v in row["links"]):
+                    row = await tasks.add_link(conn, row["id"], workspace=ctx.workspace,
+                        viewer=tasks.Viewer(None, "code", team=True),
+                        links=[{"kind": "change", "url": change, "title": pull["title"]}], ctx=ctx)
+        if row["state"] not in {"todo", "working"}:
+            continue
         linked = any(link.get("kind") in {"ticket", "change"} and link.get("url") in urls for link in row["links"])
         if not (row["id"] == task_id or linked or names_ticket(title, row)):
             continue
