@@ -146,6 +146,9 @@ class SlackIntake:
                     bool(await kv.get(conn, f"slack:thread:{channel}:{thread}"))
                 )
                 mentioned = mentioned or follows
+        if private and not mentioned:
+            # Illo keeps no text of a private channel unless a person speaks to it.
+            return {"decision": "ignore"}
         text = message_text(raw)
         event = InboundEvent(
             channel="slack",

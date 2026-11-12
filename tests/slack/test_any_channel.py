@@ -429,3 +429,19 @@ async def test_connect_status_reports_disconnected_builtins(app):
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_status", {})
         builtins = [c for c in result["result"] if c["kind"] in {"slack", "github"}]
         assert len(builtins) == 2 and all(c["connected"] == "no" for c in builtins)
+
+
+async def test_members_channel_keeps_no_text_and_no_fault_without_mention(
+    intake, message, app, fake_brain, member_slack
+):
+    ctx = app.state.ctx
+    result = await intake.receive(message(channel=PRIVATE, channel_type="group",
+                                          text="Nebula private words"))
+    assert result == {"decision": "ignore"}
+    assert not fake_brain.requests
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, "SELECT 1 FROM events WHERE channel='slack'")
+        assert not await one(conn, "SELECT 1 FROM items WHERE kind='slack'")
+        # A private channel with no entry is a normal state. It must not show as a fault.
+        sensor = await one(conn, "SELECT * FROM sensors WHERE key=%s", (f"slack:privacy:{PRIVATE}",))
+        assert sensor and sensor["last_ok_at"] and not sensor["last_error_at"]

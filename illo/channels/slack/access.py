@@ -82,10 +82,13 @@ async def channel_private(ctx, channel_id: str, *, conn=None, bot_id=None) -> bo
                 "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
             })
             if private:
+                await hide_index(ctx, channel_id, conn=conn)
+            if private and channel.listed and channel.team_members_only:
+                # The workspace says that the whole team reads this channel. Slack says no.
                 await sensors.error(conn, key,
                     f"The members of #{channel.name} are not exactly the people in people.yaml. Illo treats it as private.")
-                await hide_index(ctx, channel_id, conn=conn)
             else:
+                # A private channel with no entry is a normal state, not a fault.
                 await sensors.ok(conn, key)
     if failed:
         raise ValueError("Slack could not verify channel privacy")
