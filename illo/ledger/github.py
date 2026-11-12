@@ -42,24 +42,17 @@ async def sync_item(conn: Connection, repo: str, item: dict, label_map: dict[str
             "kind": "github",
         }
     ]
-    # GitHub accepts these closing keywords for issues in the same repository.
-    for number in re.findall(
-        r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", item.get("body") or "", re.I
-    ):
-        if "pull_request" in item or "merged" in item:
-            linked = await one(
-                conn,
-                "SELECT id FROM lanes WHERE source='github' AND external_id=%s",
-                (f"{repo}#{number}",),
-            )
-            links.append(
-                {
-                    "kind": "closes",
-                    "url": f"https://github.com/{repo}/issues/{number}",
-                    "external_id": f"{repo}#{number}",
-                    "lane_id": linked["id"] if linked else None,
-                }
-            )
+    if "pull_request" in item or "merged" in item:
+        patterns = {
+            "closes": r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b",
+            "refs": r"\b(?:refs?|related to)\s+#(\d+)\b",
+        }
+        for kind, pattern in patterns.items():
+            for number in dict.fromkeys(re.findall(pattern, item.get("body") or "", re.I)):
+                linked = await one(conn, "SELECT id FROM lanes WHERE source='github' AND external_id=%s",
+                                   (f"{repo}#{number}",))
+                links.append({"kind": kind, "url": f"https://github.com/{repo}/issues/{number}",
+                              "external_id": f"{repo}#{number}", "lane_id": linked["id"] if linked else None})
     row = await lanes.upsert(
         conn,
         source="github",

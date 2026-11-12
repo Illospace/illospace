@@ -710,3 +710,49 @@ def test_config_environment_overrides_toml(tmp_path, monkeypatch):
 )
 def test_start_question_is_narrow(text, expected):
     assert start_question(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Repair https://github.com/acme/app/issues/12. Keep this private text out.", ["https://github.com/acme/app/issues/12"]),
+    ("No issue URL here.", []),
+    ("https://github.com/acme/app/issues/12 and https://github.com/acme/app/issues/13", []),
+    ("https://github.com/acme/app/issues/12 https://github.com/acme/app/issues/12", []),
+])
+def test_first_user_issue_and_all_pull_links_use_fixture_database(setup, tmp_path, text, expected):
+    collector, api, _ = setup
+    api.shell["linkedPullRequest"] = {"url": "https://github.com/acme/app/pull/20"}
+    api.shell["pullRequests"] = [{"url": "https://github.com/acme/app/pull/21"}]
+    database = tmp_path / "state.sqlite"
+    t3_database(database, api)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE projection_thread_pull_requests (thread_id,url,linked_at)")
+        connection.executemany("INSERT INTO projection_thread_pull_requests VALUES ('thread-a',?,?)", [
+            ("https://github.com/acme/app/pull/21", "2026-01-01"),
+            ("https://github.com/acme/app/pull/22", "2026-01-02"),
+        ])
+        for created, updated, body in [
+            ("2026-01-01", "2026-01-04", text),
+            ("2026-01-02", "2026-01-02", "Later message https://github.com/acme/app/issues/99"),
+        ]:
+            connection.execute("INSERT INTO orchestration_v2_projection_messages VALUES ('thread-a','user',?,?)",
+                               (updated, json.dumps({"role": "user", "createdAt": created, "text": body})))
+    before = database.read_bytes()
+    collector.config.data_path = database
+    collector.poll()
+    lane = api.calls[0][1]["lanes"][0]
+    assert set(lane["links"][1:]) == set(["https://github.com/acme/app/pull/20",
+        "https://github.com/acme/app/pull/21", "https://github.com/acme/app/pull/22", *expected])
+    assert "Keep this private text out" not in json.dumps(api.calls)
+    assert "Later message" not in json.dumps(api.calls)
+    assert database.read_bytes() == before
+
+
+def test_http_thread_links_keep_user_text_out_of_lane(setup):
+    collector, api, _ = setup
+    api.shell["linkedPullRequest"] = {"url": "https://github.com/acme/app/pull/20"}
+    api.projection["messages"].insert(0, {"role": "user", "text": "Private words https://github.com/acme/app/issues/12"})
+    collector.poll()
+    lane = api.calls[0][1]["lanes"][0]
+    assert "https://github.com/acme/app/issues/12" in lane["links"]
+    assert "https://github.com/acme/app/pull/20" in lane["links"]
+    assert "Private words" not in json.dumps(api.calls)
