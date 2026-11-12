@@ -2,6 +2,9 @@
 
 Illo is one list of tasks for people and their agents. It gives each task to a holder and keeps the record. People and outside agents do the work.
 
+The morning briefs read tasks. They show what needs a person, with the reason and the action.
+Lanes are run evidence from collectors.
+
 Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools, proof, and Slack cards.
 
 ## What it does
@@ -10,7 +13,7 @@ Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools
 
 > **Ada:** where are we on the billing export?
 >
-> **Illo:** Blocked on one decision from you. 2 of 3 lanes move. The CSV format waits for you: UTC or local time?
+> **Illo:** Task #12 waits for your CSV format choice: UTC or local time? The build agent needs your answer.
 
 **A blocker becomes one card. One tap answers it.**
 
@@ -48,7 +51,7 @@ Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools
 
 - **One assistant for the team.** Not one for each person. It sees the work of each person, and it carries requests between people.
 - **It follows your coding agents on every machine.** A small collector reports each stream of work. Illo needs no access to the machine.
-- **Your team hosts the ledger.** One Postgres on your server. It stores the lanes, the asks, the saved items, and the messages of the public Slack channels that you configure. It also keeps each message to Illo and its answer. Illo searches the other sources where they live.
+- **Your team hosts the ledger.** One Postgres on your server. It stores tasks, run evidence, asks, and saved items. It stores messages from the public Slack channels that you configure. It also keeps each message to Illo and its answer. Illo searches the other sources where they live.
 - **You choose the model provider.** That provider receives the prompts and the tool results of each run. Only a local model keeps everything on your server.
 - **Any model.** Use the Claude Agent SDK, OpenAI through the Responses API, or the ChatGPT subscription of each team member. OpenAI-compatible Chat Completions supports other providers and local servers. Claude Agent SDK has earlier live checks. OpenAI Responses with an API key is tested live with `gpt-6.1-sol` and `gpt-6.1-terra` at effort `low`. ChatGPT subscriptions and Chat Completions have offline tests only. See [the brain guide](brain/README.md) for measured results.
 - **Safety rules in code.** The tool server checks each action. The prompt holds no authority.
@@ -77,7 +80,7 @@ Channels ──► Gateway ──► Ledger (Postgres)
 
 - **Channels** receive and send: Slack, email, the MCP endpoint for agents, and the signal intake.
 - **Gateway** finds who a message is from, decides who the run acts for, and delivers the answer.
-- **Ledger** is one Postgres. It holds the people, the lanes, the asks, the rules, the drafts, and the audit.
+- **Ledger** is one Postgres. It holds the tasks, people, run evidence, asks, rules, drafts, and audit.
 - **Brain** is one agent run for each event. It sees only the Illo tools, through a token that ends with the run.
 - **Tool server** checks each call for scope, destination, and risk, and writes one audit row.
 

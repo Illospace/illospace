@@ -77,7 +77,8 @@ A missing check never passes. A missing holder cannot take a task.
 
 `lists` returns the visible lists. Give `key` to read one list's instructions.
 `task_create` creates a task. Give a `pieces` array to create a parent and its pieces in one transaction.
-`task_list` filters by `list`, `holder`, `state`, `waits_for`, `parent`, `query`, and `open`.
+`task_list` filters by `list`, `holder`, `state`, `waits_for`, `parent`, `query`, `open`, and `mine`.
+`mine: true` reads tasks that wait for this person, tasks they hold, and tasks their agents hold.
 It returns compact rows with the next move, `silent_hours`, and the number of open pieces.
 `task_get` returns the brief, result, links, pieces, checks, recent events, `silent_hours`, and the last `wake` result.
 
@@ -155,6 +156,8 @@ A team list uses its configured channel when the channel passes the privacy chec
 Otherwise, the thread uses the DM of the person who must act.
 A private list always uses its owner's DM.
 The root shows the task title, list, holder, and state.
+State words are plain: to do, in work, in review, done, and cancelled.
+Agent progress uses Slack Markdown. A long comment shows 600 characters and a Read the rest link.
 A task keeps its primary thread when the next person changes.
 If that thread is in another person's DM, Illo sends the asked person a direct notice with the task ID.
 A return card also goes to the reviewer's DM when needed. Its replies carry the same task context.
@@ -182,7 +185,10 @@ People keep the existing hand-over notice. Slack shows holder names from the wor
 
 The durable wake outbox commits with the task event. Delivery starts after that commit.
 Each delivery keeps a stable event ID. Illo tries three times, with short delays.
-Each attempt records `woken` or `wake_failed`. A final failure gives the next move to the reviewer.
+Each attempt records `woken` or `wake_failed`.
+Illo claims an attempt with a 60-second lease, then calls the wake function outside the task graph lock.
+The call has a 50-second time limit. A second transaction checks the holder before it records the result.
+Each GitHub action commits its own receipt before the next action. A final failure gives the next move to the reviewer.
 Slack tells that person why the wake failed. A failure never loses the task change.
 The `none` type leaves the start to a person. The `poll` type leaves it to the agent's clock.
 The `webhook` type sends a small notice with a vault token. See [Agents](agents.md).
@@ -218,3 +224,12 @@ See [Workspace](workspace.md) for defaults.
 - A delivery can repeat after a process stops between the outside write and its local receipt.
   Webhook receivers must use `event_id` to prevent duplicates. Connector writes use markers and receipts.
 - Slack can show a stale card until the next successful retry. The ledger remains the source of truth.
+
+## Morning briefs
+
+The task list is the picture of work. Lanes supply run evidence from collectors.
+Make a task in the list for new work. A default agent holder with a wake type starts that work.
+The personal brief has Needs you, Your agents, Done since the last brief, and Due.
+The team brief has Done, Waiting on people, Stuck, and In work.
+A quiet ticket alone never means Stuck. Private tasks stay in their owner's brief.
+See [Workspace](workspace.md#morning-brief-and-routine-time-zones) for sections, limits, and send rules.
