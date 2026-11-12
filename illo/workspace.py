@@ -510,7 +510,10 @@ def load_workspace(root: Path | str) -> Workspace:
         config.brain.check_runtime()
     except ValueError as error:
         raise WorkspaceError(f"{root / 'illo.yaml'}: brain.auth: {error}") from None
+    from illo.connectors import github_tasks  # Register the installed connector before validation.
     from illo.tasks.lists import load_task_files
+
+    github_tasks.register()
 
     agents, lists, warnings = load_task_files(root, keys, config)
     if config.github.task_list and config.github.task_list not in {entry.key for entry in lists}:

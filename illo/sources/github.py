@@ -6,6 +6,7 @@ from psycopg.types.json import Jsonb
 
 from illo.channels.slack.limits import flush_owner_notices
 from illo.connectors.github_client import GitHubClient
+from illo.db import one
 from illo.ledger import github as ledger
 from illo.ledger import kv, runs, sensors
 from illo.tools.registry import ToolContext
@@ -39,17 +40,36 @@ async def poll(ctx) -> None:
     if not ctx.github_client:
         return
     try:
-        for repo in ctx.workspace.config.github.repositories:
+        configured = [*ctx.workspace.config.github.repositories,
+                      *[r for a in ctx.workspace.agents if a.wake.type == "github_issue" for r in a.wake.repos]]
+        for repo in dict.fromkeys(configured):
             key = f"github:cursor:{repo.lower()}"
             async with ctx.pool.connection() as conn:
                 since = await kv.get(conn, key)
             # Use the start time so changes during a long poll enter the next poll.
             until = datetime.now(UTC).isoformat()
             items = await ctx.github_client.list_changed(repo, since=since)
+            async with ctx.pool.connection() as conn:
+                linked = await one(conn, """SELECT array_agg(tt.url) AS urls FROM task_tickets tt
+                    JOIN tasks t ON t.id=tt.task_id WHERE t.state NOT IN ('done','cancelled')""")
+            from illo.connectors.github_tasks import parse
+
+            seen = {item["number"] for item in items}
+            task_numbers, detailed = set(), set()
+            for url in linked["urls"] or []:
+                ref = parse(url)
+                if not ref or ref[0].lower() != repo.lower():
+                    continue
+                task_numbers.add(ref[1])
+                if ref[1] not in seen:
+                    detail = await ctx.github_client.get_issue(repo, ref[1])
+                    if detail:
+                        items.append(detail)
+                        detailed.add(ref[1])
+                        seen.add(ref[1])
             for item in items:
-                # The first load of a repository uses the list data only: one call for each
-                # 100 items. A later poll reads the details of the few items that changed.
-                if since is not None:
+                # Linked tasks need fresh facts, also on the first poll.
+                if item["number"] not in detailed and (since is not None or item["number"] in task_numbers):
                     if "pull_request" in item:
                         detail = await ctx.github_client.get_pull(repo, item["number"])
                         item = {**item, **detail, "pull_request": item["pull_request"]}
@@ -58,8 +78,13 @@ async def poll(ctx) -> None:
                 # One short transaction for each item. A restart keeps the lanes that are done,
                 # and no database connection stays open across the GitHub calls.
                 async with ctx.pool.connection() as conn:
+                    # Task actions take the graph lock before the repository lock.
+                    await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
                     await ledger.lock_repository(conn, repo.lower())
                     await ledger.sync_item(conn, repo, item, ctx.workspace.config.github.label_map)
+                    from illo.tasks.connectors import changed
+
+                    await changed(ctx, conn, "change" if "pull_request" in item else "ticket", repo=repo, item=item)
             async with ctx.pool.connection() as conn:
                 await kv.set(conn, key, until)
         await refresh_statuses(ctx)

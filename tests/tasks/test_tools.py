@@ -29,7 +29,8 @@ async def operator(app, name, **args):
     return result["result"]
 
 
-async def test_bugs_end_to_end(app, http):
+async def test_bugs_end_to_end(app, http, github_client):
+    github_client.issues.append({"number": 1, "title": "A fault", "state": "closed", "state_reason": "completed"})
     build = await agent(app, http, "build")
     row = await operator(app, "task_create", list="bugs", title="Repair a fault", brief="The preview fails.")
     assert row["holder"] == "agent:build"
@@ -39,7 +40,7 @@ async def test_bugs_end_to_end(app, http):
     assert read["brief"] == "The preview fails."
     row = await build.call("task_write", {"id": row["id"], "result": "The repair passes.",
         "result_version": read["result_version"], "message": "The checks pass. The link has the proof.",
-        "links": [{"url": "https://example.com/fault/1", "kind": "ticket", "title": "Proof"}], "returned": True})
+        "links": [{"url": "https://github.com/acme-example/engine/issues/1", "kind": "ticket", "title": "Proof"}], "returned": True})
     assert row["state"] == "done" and row["done_by"] == "code"
     assert row["result"].startswith('<outside_data source="task-result">')
     assert row["links"][0]["title"].startswith('<outside_data')
@@ -229,3 +230,35 @@ async def test_unnamed_actor_cannot_match_another_persons_named_agent(app, http)
     row = await operator(app, "task_create", list="launches", title="Ben's task", holder="agent:" + key)
     result = await unnamed.call("task_write", {"id": row["id"], "append": "No", "message": "No"}, error=True)
     assert "handed to someone else" in result["error"]["message"]
+
+
+async def test_task_wake_tool_and_read_fields(app):
+    from illo.tasks import wake
+
+    row = await operator(app, "task_create", list="launches", title="Restart the check", holder="agent:build")
+    row = await operator(app, "task_wake", id=row["id"])
+    assert row["holder"] == "agent:build"
+    await wake.tick(app.state.ctx)
+    read = await operator(app, "task_get", id=row["id"])
+    assert read["silent_hours"] == 0.0
+    assert "The ticket is assigned." in read["wake"]
+    assert any(event["kind"] == "released" and "person:ada" == event["actor"] for event in read["events"])
+    listed = await operator(app, "task_list")
+    assert listed["tasks"][0]["silent_hours"] == 0.0
+
+
+async def test_agent_token_can_capture_for_its_person(app, http):
+    build = await agent(app, http, "build")
+    row = await build.call("task_create", {"list": "launches", "title": "Check the report", "holder": "person:ada"})
+    assert row["holder"] == "person:ada"
+    await build.call("task_create", {"list": "launches", "title": "No", "holder": "person:ben"}, error=True)
+
+
+async def test_reads_do_not_count_as_liveness(app, http):
+    build = await agent(app, http, "build")
+    row = await operator(app, "task_create", list="launches", title="Read the task", holder="agent:build")
+    first = await build.call("task_get", {"id": row["id"]})
+    await build.call("task_mine")
+    last = await build.call("task_get", {"id": row["id"]})
+    assert first["last_activity_at"] == last["last_activity_at"]
+    assert first["alive_at"] is last["alive_at"] is None

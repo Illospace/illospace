@@ -17,6 +17,7 @@ STUDIO = tasks.Viewer("ben", "agent:studio")
 def ws(workspace):
     workspace = workspace.model_copy(deep=True)
     workspace.lists.append(TaskList(key="tasks", name="Tasks"))
+    workspace.lists[0].done = ["link:ticket"]
     return workspace
 
 

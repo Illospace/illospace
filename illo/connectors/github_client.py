@@ -267,6 +267,21 @@ class GitHubClient:
             "POST", f"/repos/{repo}/issues/{number}/assignees", json={"assignees": assignees}
         )
 
+    async def unassign_issue(self, repo, number, assignees):
+        return await self._request("DELETE", f"/repos/{repo}/issues/{number}/assignees",
+                                   json={"assignees": assignees})
+
+    async def remove_label(self, repo, number, label):
+        try:
+            return await self._request("DELETE", f"/repos/{repo}/issues/{number}/labels/{quote(label, safe='')}")
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+        return {}
+
+    async def reopen_issue(self, repo, number):
+        return await self._request("PATCH", f"/repos/{repo}/issues/{number}", json={"state": "open"})
+
     async def ensure_label(self, repo: str, name: str) -> None:
         path = f"/repos/{repo}/labels/{quote(name, safe='')}"
         try:

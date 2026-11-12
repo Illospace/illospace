@@ -13,6 +13,7 @@ slack:
       mode: coordinator
       rule_files: [rules/team.md, rules/alerts-coordinator.md]
 github:
+  task_list: bugs
   repositories: [acme-example/engine]
 digest:
   schedule: '0 9 * * 1-5'
@@ -43,3 +44,9 @@ run_limits:
 #     slack_bots: []  # Trusted monitor bot_id values from Slack.
 #     signal_sources: []  # Trusted machine signal source names.
 #   max_per_hour: 6  # Automatic assignments per hour, from 1 to 100.
+
+tasks:
+  release_max: 2
+  check_minutes: 5
+  reminder_window: [8, 20]
+  github_writes_per_hour: 30

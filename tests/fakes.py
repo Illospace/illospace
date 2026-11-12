@@ -157,6 +157,27 @@ class FakeGitHubClient:
                 issue["assignees"] = [{"login": login} for login in assignees]
         return {"number": number, "assignees": assignees}
 
+    async def unassign_issue(self, repo, number, assignees):
+        self.calls.append({"method": "unassign_issue", "repo": repo, "number": number, "assignees": assignees})
+        for item in self._items(repo, self.issues):
+            if item["number"] == number:
+                item["assignees"] = [a for a in item["assignees"] if a["login"] not in assignees]
+        return {}
+
+    async def remove_label(self, repo, number, label):
+        self.calls.append({"method": "remove_label", "repo": repo, "number": number, "label": label})
+        for item in self._items(repo, self.issues):
+            if item["number"] == number:
+                item["labels"] = [v for v in item["labels"] if (v.get("name") if isinstance(v, dict) else v) != label]
+        return {}
+
+    async def reopen_issue(self, repo, number):
+        self.calls.append({"method": "reopen_issue", "repo": repo, "number": number})
+        for item in self._items(repo, self.issues):
+            if item["number"] == number:
+                item["state"] = "open"
+        return {}
+
     async def add_labels(self, repo, number, labels):
         self.calls.append(
             {"method": "add_labels", "repo": repo, "number": number, "labels": labels}
