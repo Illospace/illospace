@@ -187,7 +187,7 @@ Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is on
 3. The gateway finds the principal:
    - A Slack DM from a known person → `person:<key>`, profile `person_dm`.
    - A Slack DM from an unknown sender → no answer (rule 7).
-   - A message in a configured channel from a known person → `team`, profile `team_channel`. A message from a webhook, a bot, or a form → `team`, `tainted`. A message from an unknown user, or from a Slack Connect user of another workspace → no run. A private channel → no run.
+   - A message in a member channel from a known person → `team`, profile `team_channel`. A message from a webhook, a bot, or a form → `team`, `tainted`. A message from an unknown user, or from a Slack Connect user of another workspace → no run. A private channel can answer a known active member. Its text stays out of shared search unless all active people can read it.
    - An email with one aligned DMARC pass from a known address → `person:<key>`, profile `person_dm`. A forwarded email → the same person, `tainted`. Any other email → `outsider`, and the `unknown_sender` claim takes it before a run.
    - A team routine → `team`, profile `routine`. A person routine → `person:<key>`, profile `person_dm`.
    - An MCP request from an agent token → `person:<owner of the token>`, profile `agent_request`.
@@ -273,7 +273,7 @@ A secret is never in the workspace. Boot secrets are in the environment file. Co
 
 ## 10. Channels
 
-**Slack** (`illo/channels/slack/`): Socket Mode, so the host needs no public address. The app comes from `deploy/slack/manifest.yaml`. Events: `message.im`, `app_mention`, `message.channels` and `message.groups` for the configured channels, `block_actions`, files. A private channel starts no run and enters no index. A channel is private when Slack says so or when `illo.yaml` sets `visibility: private`. Cards use Block Kit. A click on a button comes in as `block_actions`, the handler writes the ledger, and it edits the card. A card is built from the ledger row, and a check compares each open card with its row. An audio clip uses Slack's transcript first. By default, a clip with no transcript fails at once. The optional `voice.transcription: openai` mode transcribes verified human audio with the API key. It checks the file, thread authors, duration, size, deadline, and per-person hourly limit before use. The transcript keeps the person's authority and enters the preparer before claims. See [workspace.md](workspace.md#voice-clips) and [safety.md](safety.md#voice-privacy).
+**Slack** (`illo/channels/slack/`): Socket Mode, so the host needs no public address. The app comes from `deploy/slack/manifest.yaml`. Events: `message.im`, `app_mention`, `message.channels` and `message.groups` for member channels, `block_actions`, files. A private channel answers known active people who mention Illo. It enters the shared index only with proof that every active person can read it. `visibility: private` keeps its text out of the shared index. Channels need no entry. `slack.default_mode: off` accepts only listed channels. Cards use Block Kit. A click on a button comes in as `block_actions`, the handler writes the ledger, and it edits the card. A card is built from the ledger row, and a check compares each open card with its row. An audio clip uses Slack's transcript first. By default, a clip with no transcript fails at once. The optional `voice.transcription: openai` mode transcribes verified human audio with the API key. It checks the file, thread authors, duration, size, deadline, and per-person hourly limit before use. The transcript keeps the person's authority and enters the preparer before claims. See [workspace.md](workspace.md#voice-clips) and [safety.md](safety.md#voice-privacy).
 
 Card types: the ask card (question, options as buttons, the recommended option first, proof, "Always allow" where a rule is possible), the draft card (Send, Do not send; the full text, with hidden characters shown as escapes), the morning brief (a model reply from one personal snapshot, with a plain fallback), the note card ("I noted: ...", Correct, Remove).
 
@@ -287,7 +287,7 @@ One function, `search(principal, query, kinds, limit)`, in `illo/sources/search.
 - `items` by full text (`websearch_to_tsquery`, `simple` and `english`), filtered by visibility: a private item shows only to its owner.
 - `lanes` by title, summary, and events.
 - GitHub issues and pull requests, live, through the GitHub client.
-- Slack messages that Illo saw in configured team channels: the `slack` items and inbound events missing from that index.
+- Slack messages that Illo saw in verified team channels: the `slack` items and inbound events missing from that index.
   Event search checks current channel privacy. It never reads DMs or email. Tainted runs cannot use search.
 - When the Google connector files exist: the shared drive, and the mail and Drive of the person (only in an untainted run of the owner).
 

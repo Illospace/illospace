@@ -80,7 +80,9 @@ async def test_team_thread_keeps_identity_privacy_and_taint_checks(
     else:
         event.update(subtype="bot_message", bot_id="B_OUTSIDE")
     result = await intake.receive({"event": event})
-    if change == "bot":
+    if change == "private":
+        assert result["decision"] == "run"
+    elif change == "bot":
         assert result["decision"] == "run"
         async with ctx.pool.connection() as conn:
             run = await one(conn, "SELECT * FROM runs ORDER BY id DESC LIMIT 1")

@@ -103,6 +103,9 @@ async def get(ctx, args: GetKnowledge) -> dict:
     if isinstance(ref, int) or str(ref).isdigit():
         ref = await mcp.item_ref(ctx.conn, int(ref), principal=ctx.principal) or str(ref)
     row = await items.get(ctx.conn, str(ref), principal=ctx.principal)
+    if str(ref).startswith("slack-event:") or (row and row["kind"] == "slack"):
+        canonical = row["source_ref"] if row else str(ref)
+        row = await shared_search.get(ctx.app, ctx.principal, canonical, conn=ctx.conn)
     if not row and str(ref).startswith("lane:") and str(ref)[5:].isdigit():
         row = await lanes.get(ctx.conn, int(str(ref)[5:]), principal=ctx.principal)
         if row:
@@ -110,5 +113,5 @@ async def get(ctx, args: GetKnowledge) -> dict:
     if not row:
         # A hidden private item has the same answer as a missing item.
         return {"items": [], "missing": [str(ref)], "not_indexed": []}
-    row["owner"] = row["owner_person_id"]
+    row["owner"] = row.get("owner_person_id")
     return {**row, "items": [dict(row)], "missing": [], "not_indexed": []}

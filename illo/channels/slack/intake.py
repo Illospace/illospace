@@ -14,15 +14,21 @@ from illo.channels.slack import actions
 from illo.channels.slack.access import channel_private, hide_index
 from illo.channels.slack.adapter import SlackAdapter
 from illo.channels.slack.blocks import message_text
+from illo.channels.slack.channels import member_channels
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context, read_dm_history
 from illo.channels.slack.voice import OpenAITranscriber
 from illo.db import one
 from illo.gateway import InboundEvent
-from illo.ledger import items, kv, people
+from illo.ledger import items, kv, people, sensors
 from illo.tools._format import data_text
 
 log = logging.getLogger(__name__)
+JOIN_NOTICE = "I am here. Mention me to give me a task or to ask a question."
+MEMBERS_CONTEXT = (
+    "This channel is private to its members. A task that you make here goes to the team list. "
+    "Do not copy other text of this channel into a task."
+)
 CLIP_ERROR = (
     "I could not read your voice clip. Slack gave no transcript. Write the question as text."
 )
@@ -68,6 +74,10 @@ class SlackIntake:
             return
         raw = envelope.get("event", {})
         kind = raw.get("type")
+        if kind == "member_joined_channel":
+            if raw.get("user") == self.bot_id and raw.get("channel"):
+                await self.join_notice(raw["channel"])
+            return
         if kind not in {"message", "app_mention"}:
             return
         if (
@@ -88,17 +98,18 @@ class SlackIntake:
         if not channel or not ts:
             return
         dm = raw.get("channel_type") == "im" or channel.startswith("D")
-        configured = next(
-            (
-                c
-                for c in self.ctx.workspace.config.slack.channels
-                if c.id == channel and c.mode != "off"
-            ),
-            None,
-        )
-        if not dm and not configured:
+        configured = self.ctx.workspace.config.slack.channel(channel)
+        if not dm and configured.mode == "off":
             return
-        if configured and not dm:
+        if not dm and not configured.listed:
+            if (not raw.get("user") or raw.get("bot_id") or raw.get("bot_profile")
+                    or raw.get("workflow_id") or raw.get("subtype") == "bot_message"):
+                return
+            async with self.ctx.pool.connection() as conn:
+                if not await people.by_slack_id(conn, raw["user"]):
+                    return
+        private = False
+        if not dm:
             try:
                 private = await channel_private(self.ctx, channel, bot_id=self.bot_id)
             except Exception:
@@ -118,13 +129,14 @@ class SlackIntake:
                         "error": "Slack could not verify channel privacy"}
             if private:
                 await hide_index(self.ctx, channel)
-                return {"decision": "ignore"}
         thread = raw.get("thread_ts")
         outside_workspace = False
         if raw.get("user_team"):
             if not self.team_id:
                 self.team_id = (await self.ctx.slack_client.auth_test())["team_id"]
             outside_workspace = raw["user_team"] != self.team_id
+        if outside_workspace and not dm and not configured.listed:
+            return
         mentioned = kind == "app_mention" or f"<@{self.bot_id}>" in raw.get("text", "")
         if thread and not dm:
             async with self.ctx.pool.connection() as conn:
@@ -144,6 +156,7 @@ class SlackIntake:
             reply_to=thread if dm else thread or ts,
             payload={
                 "channel_id": channel,
+                "channel_class": "members" if private else "team",
                 "outside_workspace": outside_workspace,
                 "message_ts": ts,
                 "thread_ts": thread,
@@ -179,13 +192,29 @@ class SlackIntake:
         if dm and text != raw.get("text", ""):
             # Claims use only what the person typed, before block or thread context.
             event.payload["slack_typed_text"] = raw.get("text", "")
-        # Search sees only configured team channels. Never index a private DM.
+        # Only verified team channels enter the shared index.
         result = await self.ctx.gateway.receive(event)
-        if configured and not dm:
+        if not dm and not private:
             await self.index(
                 event.model_copy(update={"text": text}), configured.name
             )
         return result
+
+    async def join_notice(self, channel):
+        if self.ctx.workspace.config.slack.channel(channel).mode == "off":
+            return
+        key = f"slack:join-notice:{channel}"
+        try:
+            async with self.ctx.pool.connection() as conn:
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
+                if await kv.get(conn, key):
+                    return
+                # Claim before the send. An uncertain Slack response must not send twice.
+                await kv.set(conn, key, True)
+            await self.ctx.slack_client.chat_postMessage(channel=channel, text=JOIN_NOTICE)
+        except Exception:
+            async with self.ctx.pool.connection() as conn:
+                await sensors.error(conn, key, "Slack could not post the join notice")
 
     async def index(self, event: InboundEvent, channel_name: str) -> None:
         client = self.ctx.slack_client
@@ -198,6 +227,8 @@ class SlackIntake:
             )
             async with self.ctx.pool.connection() as conn:
                 person = await people.by_slack_id(conn, event.sender)
+                cached = await kv.get(conn, "slack:member-channels")
+                channel_name = (cached or {}).get("channels", {}).get(event.payload["channel_id"], channel_name)
                 await items.upsert(
                     conn,
                     source_ref=f"slack:{event.external_id}",
@@ -249,6 +280,11 @@ class SlackIntake:
         limit = self.ctx.workspace.config.run_limits.max_message_chars
         if len(event.text) > limit:
             raise ValueError("The message is too long")
+        if event.kind != "dm":
+            try:
+                await member_channels(self.ctx)
+            except ValueError:
+                pass
         source = "thread"
         context = []
         if event.payload.get("thread_ts"):

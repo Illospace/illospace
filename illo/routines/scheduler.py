@@ -147,14 +147,20 @@ class RoutineAdapter:
         log.error("Routine failed: %s", event.payload["routine"])
 
 
-async def deliver_routine(ctx, destination: str, text: str, *, delivery_key=None):
+async def deliver_routine(ctx, destination: str, text: str, *, delivery_key=None, conn=None):
     if destination.startswith("person:"):
         if not await dm_person(ctx, destination[7:], text):
             raise RuntimeError("The routine DM could not be sent")
     elif destination.startswith("channel:") and ctx.slack_client:
         from illo.asks.service import message_id
+        from illo.channels.slack.access import channel_private
+        from illo.channels.slack.channels import resolve_channel
         from illo.channels.slack.formatting import chunks
 
+        channel = await resolve_channel(ctx, destination[8:], conn=conn)
+        if channel.mode == "off" or await channel_private(ctx, channel.id, conn=conn):
+            raise ValueError("The routine needs a channel that the team can read.")
+        destination = "channel:" + channel.id
         root = None
         for index, part in enumerate(chunks(text)):
             options = {"thread_ts": root} if root else {}
@@ -182,7 +188,7 @@ def routine_destination(ctx, value: str) -> str:
     if value.startswith("channel:"):
         for channel in ctx.workspace.config.slack.channels:
             if value[8:] in {channel.name, channel.id}:
-                return "channel:" + channel.id
+                return "channel:" + ctx.workspace.config.slack.channel(channel.id).id
     return value
 
 

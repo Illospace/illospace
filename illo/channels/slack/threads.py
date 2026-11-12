@@ -40,7 +40,10 @@ async def read_context(ctx, event, bot_id: str, working_ts: str | None) -> list[
                 person["slack_id"]: person["name"] for person in await people.list_people(conn)
             }
         names[bot_id] = "Illo"
-        if tainted:
+        keep_outside = (event.kind == "dm" or (
+            ctx.workspace.config.slack.channel(event.payload["channel_id"]).listed
+            and event.payload.get("channel_class") != "members"))
+        if tainted and keep_outside:
             event.payload["contains_outside_text"] = True
         context = []
         for message in messages:
@@ -48,6 +51,8 @@ async def read_context(ctx, event, bot_id: str, working_ts: str | None) -> list[
             if user != bot_id and (
                 message.get("bot_id") or message.get("subtype") or not user or user not in names
             ):
+                if not keep_outside:
+                    continue
                 event.payload["contains_outside_text"] = True
             if user and user not in names:
                 names[user] = f"Outside user ({user})"

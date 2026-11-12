@@ -297,7 +297,15 @@ async def capture(ctx, conn, repo, issue, login=None, event=None):
     payload = (event or {}).get("payload", {}).get("payload", {})
     channel = payload.get("channel_id") or payload.get("source") or source
     source = " ".join(str(source).split())[:120]
-    channel = next(("#" + c.name for c in ctx.workspace.config.slack.channels if c.id == channel), channel)
+    if source == "slack":
+        from illo.channels.slack.channels import member_channels
+
+        settings = ctx.workspace.config.slack.channel(channel)
+        try:
+            names = await member_channels(ctx, conn=conn)
+        except ValueError:
+            names = {}
+        channel = "#" + names.get(channel, settings.name)
     channel = " ".join(str(channel).split())[:120]
     agent = agent_for(ctx, login)
     row = await tasks.create(conn, workspace=ctx.workspace, viewer=tasks.Viewer(None, "code", team=True),

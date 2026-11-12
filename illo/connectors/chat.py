@@ -418,3 +418,56 @@ async def setup(ctx):
             )
 
     ctx.every(300, expire_forms)
+
+
+async def builtin_status(tc, person_id):
+    """Name built-in connections without exposing a private channel to another person."""
+    from illo.channels.slack.access import channel_private, require_member
+    from illo.channels.slack.channels import member_channels
+    from illo.ledger import sensors
+
+    ctx, conn = tc.app, tc.conn
+    slack = {"name": "Slack", "kind": "slack", "scope": "team",
+             "connected": "yes" if ctx.slack_client else "no", "channels": [],
+             "use": "Add Illo to a channel in Slack, then mention it."}
+    if ctx.slack_client:
+        identity = await kv.get(conn, "slack:bot")
+        if not identity:
+            try:
+                auth = await ctx.slack_client.auth_test()
+                if auth.get("ok") is False:
+                    raise ValueError("Slack did not report the bot")
+                identity = {"name": auth.get("user"), "id": auth.get("user_id")}
+                await kv.set(conn, "slack:bot", identity)
+            except Exception:
+                await sensors.error(conn, "slack:identity", "Slack could not report the bot name")
+        if identity and identity.get("name"):
+            slack["bot"] = identity["name"]
+        person = await one(conn, "SELECT slack_id FROM people WHERE id=%s AND active", (person_id,))
+        private = 0
+        try:
+            channels = await member_channels(ctx, conn=conn)
+        except ValueError:
+            channels = {}
+            slack["state"] = "The channel list is unavailable."
+        for channel_id, name in sorted(channels.items(), key=lambda pair: pair[1]):
+            visible = False
+            try:
+                visible = not await channel_private(ctx, channel_id, conn=conn)
+                if not visible and person and person["slack_id"]:
+                    # A shared run must not reveal other private channel names to its audience.
+                    if tc.principal.startswith("person:"):
+                        await require_member(ctx, channel_id, person["slack_id"])
+                        visible = True
+            except Exception:
+                pass
+            if visible:
+                slack["channels"].append("#" + name)
+            else:
+                private += 1
+        if private:
+            slack["channels"].append(f"{private} private " + ("channel" if private == 1 else "channels"))
+    github = {"name": "GitHub", "kind": "github", "scope": "team",
+              "connected": "yes" if ctx.github_client else "no",
+              "repositories": ctx.workspace.config.github.repositories}
+    return [slack, github]

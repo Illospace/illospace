@@ -2,6 +2,10 @@ team_name: Acme
 timezone: Europe/Paris
 default_owner: ada
 slack:
+  # Add Illo to a channel in Slack, then mention it. No channel entry is required.
+  default_mode: listen  # Use off to accept only listed channels.
+  default_rule_files: []  # Rule files for channels with no entry.
+  # List a channel for coordinator mode, its own rules, or mode: off.
   channels:
     - name: team
       id: C_ACME_TEAM
@@ -20,7 +24,7 @@ digest:
   destination: person:ada
   # personal: needs  # Send a DM only when work waits or a fault exists.
   # team:
-  #   channel: team  # Use a team-visible channel name from slack.channels.
+  #   channel: team  # Use a team-visible member channel name or ID.
   #   schedule: '0 9 * * 1-5'  # Use the team time zone.
 stale_minutes:
   t3: 30

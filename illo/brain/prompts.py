@@ -123,7 +123,21 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
             conn, owner_person_id=authority.person_id, principal=authority.principal
         )
         open_asks = len(rows)
-    prompt = build(
+    context = []
+    if event.channel == "slack" and event.kind != "dm":
+        from illo.channels.slack.intake import MEMBERS_CONTEXT
+        from illo.ledger import kv
+
+        cached = await kv.get(conn, "slack:member-channels")
+        name = (cached or {}).get("channels", {}).get(event.payload.get("channel_id"))
+        if name:
+            from illo.tools._format import data_text
+
+            context.append(data_text("channel-name", f"You are in the channel #{name}."))
+        if event.payload.get("channel_class") == "members":
+            context.append(MEMBERS_CONTEXT)
+    suffix = "\n" + "\n".join(context) if context else ""
+    return build(
         workspace,
         authority.principal,
         authority.profile,
@@ -131,8 +145,8 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
         now=now,
         event_channel=event.channel,
         open_asks=open_asks,
-    )
-    return prompt
+        _fact_reserve=len(suffix),
+    ) + suffix
 
 
 def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks) -> str:
@@ -168,7 +182,7 @@ def _facts(workspace, principal, key, channel_id, now, event_channel, open_asks)
 
 def _where(workspace, channel_id, event_channel, key) -> str | None:
     """Name the place of the event. A configured channel also shows its mode."""
-    channel = next((c for c in workspace.config.slack.channels if c.id == channel_id), None)
+    channel = workspace.config.slack.channel(channel_id) if channel_id else None
     if channel:
         return f"Slack channel #{channel.name} (`{channel.id}`), mode {channel.mode}"
     if event_channel == "slack":

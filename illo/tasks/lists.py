@@ -31,8 +31,8 @@ def load_task_files(root, keys, config):
                 warnings.append(f"{path}: unknown holder {ref}")
         if entry.owner and entry.owner not in keys:
             raise WorkspaceError(f"{path}: owner: unknown or inactive person")
-        if entry.slack_channel and entry.slack_channel not in {c.name for c in config.slack.channels}:
-            warnings.append(f"{path}: unknown channel {entry.slack_channel}")
+        if entry.slack_channel and entry.slack_channel.removeprefix("#") not in {v for c in config.slack.channels for v in (c.name, c.id)}:
+            warnings.append(f"{path}: channel {entry.slack_channel} is not listed. Illo checks it in Slack at run time.")
         if isinstance(entry.done, list):
             if not entry.done:
                 raise WorkspaceError(f"{path}: done: give at least one check")
