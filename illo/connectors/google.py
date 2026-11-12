@@ -363,16 +363,22 @@ async def shared_provider(ctx, principal, query, kinds, limit):
     return await _search_provider(ctx, principal, query, kinds, limit, shared=True)
 
 
-async def setup(ctx) -> None:
-    ctx.google_client = GoogleClient()
+def register_search(ctx) -> None:
     from illo.sources import search
 
     register = getattr(search, "register_provider", None)
     if register:
-        # Each provider checks the current workspace. A chat connection needs no restart.
-        providers = [("mail", mail_provider, True), ("drive", drive_provider, True),
-                     ("drive_shared", shared_provider, False)]
+        providers = []
+        if google_config(ctx):
+            providers.extend((("mail", mail_provider, True), ("drive", drive_provider, True)))
+        if google_config(ctx, "team"):
+            providers.append(("drive_shared", shared_provider, False))
         for name, fn, personal in providers:
             # Several app instances can share this module. Providers take their app as an argument.
             if getattr(search, "_providers", {}).get(name) != (fn, personal, False):
                 register(name, fn, personal=personal, tainted=False)
+
+
+async def setup(ctx) -> None:
+    ctx.google_client = GoogleClient()
+    register_search(ctx)

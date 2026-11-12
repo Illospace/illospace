@@ -20,6 +20,10 @@ async def save(ctx, conn, config: Connector, *, create=False):
             yaml.safe_dump(config.model_dump(exclude_none=True), sort_keys=False),
         )
         ctx.workspace = load_workspace(ctx.workspace.root)
+        if config.kind == "google":
+            from illo.connectors.google import register_search
+
+            register_search(ctx)
         return await gitstore.store(ctx, conn, path, "Save connector " + config.key, commit=True)
 
 
