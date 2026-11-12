@@ -107,7 +107,7 @@ RANK_COLUMNS = f"""
 RANK_ORDER = "lexical * recency * CASE match_tier WHEN 'strict' THEN 2 ELSE 1 END"
 
 
-async def _items(conn, principal, query, kinds, limit, now):
+async def _items(conn, principal, query, kinds, limit, now, slack_channels):
     q, params = query_sql(query)
     rows = await all_rows(conn, f"""
         WITH q AS ({q}), texts AS (
@@ -117,6 +117,7 @@ async def _items(conn, principal, query, kinds, limit, now):
           WHERE (i.visibility='team' OR i.owner_person_id=
             (SELECT id FROM people WHERE 'person:'||key=%s AND active))
             AND (%s::text[] IS NULL OR i.kind=ANY(%s))
+            AND (i.kind<>'slack' OR split_part(i.source_ref,':',2)=ANY(%s))
         ), ranked AS (
           SELECT t.*, {RANK_COLUMNS},
             ts_headline('simple',concat_ws(' ',t.summary,t.body),
@@ -124,7 +125,7 @@ async def _items(conn, principal, query, kinds, limit, now):
               'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
           FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
         ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
-    """, (*params, principal, kinds, kinds, now, limit))
+    """, (*params, principal, kinds, kinds, list(slack_channels), now, limit))
     return [Hit(
         r["source_ref"], r["kind"], r["source_ref"].split(":", 1)[0], r["title"],
         r["snippet"], first_link(r["links"]), r["owner"], r["at"],
@@ -265,21 +266,16 @@ async def search(
     now = utc_now()
     # A short page must not reduce the evidence available from any source.
     candidate_limit = 50
-    # Refresh opt-in channel membership before reading its derived index.
-    for channel in ctx.workspace.config.slack.channels:
-        if channel.team_members_only:
-            from illo.channels.slack.access import channel_private
-
-            try:
-                await channel_private(ctx, channel.id, conn=conn)
-            except ValueError:
-                # Slack gave no verdict. The index keeps its last verified state.
-                pass
+    failures = []
+    try:
+        allowed_slack = await slack_index.channels(ctx, conn)
+    except Exception:
+        allowed_slack = {}
+        failures.append("slack_inbound")
     groups = [
-        await _items(conn, principal, query, kinds, candidate_limit, now),
+        await _items(conn, principal, query, kinds, candidate_limit, now, allowed_slack),
         await _lanes(conn, principal, query, kinds, candidate_limit, now),
     ]
-    failures = []
     if not tainted:
         try:
             async with conn.transaction():
@@ -355,17 +351,22 @@ async def get(ctx, principal, source_ref, *, conn=None):
         return await slack_index.get(ctx, conn, source_ref)
     if source_ref.startswith("slack:"):
         channel_id = source_ref.split(":", 2)[1]
-        channel = next((c for c in ctx.workspace.config.slack.channels if c.id == channel_id), None)
-        if channel and channel.team_members_only:
-            from illo.channels.slack.access import channel_private
+        channel = ctx.workspace.config.slack.channel(channel_id)
+        if channel.mode == "off":
+            return None
+        from illo.channels.slack.access import channel_private
 
-            try:
-                if await channel_private(ctx, channel_id, conn=conn):
-                    return None
-            except ValueError:
+        try:
+            if await channel_private(ctx, channel_id, conn=conn):
                 return None
+        except ValueError:
+            return None
     item = await items.get(conn, source_ref, principal=principal)
     if item:
+        if item["kind"] == "slack" and source_ref != item["source_ref"]:
+            return await get(ctx, principal, item["source_ref"], conn=conn)
+        if item["kind"] == "slack" and not source_ref.startswith("slack:"):
+            return None
         return item
     if re.fullmatch(r"lane:[1-9][0-9]*", source_ref):
         lane = await lanes.get(

@@ -81,8 +81,16 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `read_page` in `illo/tools/web.py` refuses a public page after a personal read.
 - An ask without a lane is private to its owner and its requester (`get` and `list_open` in `illo/ledger/asks.py`). Its decision item is private too (`decision` in `illo/ledger/ask_workflow.py`).
 - Both ask creation tools refuse a private lane when the ask owner does not own that lane.
-- A private Slack channel starts no run and enters no index unless `team_members_only` verifies that its humans are exactly the active people (`SlackIntake.receive` in `illo/channels/slack/intake.py`). `slack_read_thread` reads it only for a member, with a live membership check (`require_member` in `illo/channels/slack/access.py`).
-- Slack caches channel privacy for 10 minutes. A failed probe keeps the index and records a failed event and a sensor error.
+- A private Slack channel answers known active people who mention Illo, with team tools only.
+  Its text enters the shared index only with proof that all active people can read it.
+  Illo applies the membership proof to unlisted channels. Listed channels use `team_members_only`.
+  `visibility: private` always keeps the text out of the shared index.
+  `slack_read_thread` requires live proof of membership in a member-only channel.
+  A channel run reads only its own private channel. It cannot read personal tools.
+  Its requested tasks remain team tasks. The context tells the model to copy no other channel text into a task.
+  A person DM keeps the existing private-read checks and approval rules.
+- Slack caches channel privacy for 10 minutes. A failed probe records a failed event and a sensor error.
+  It keeps old index rows but hides them from search until Slack gives a valid class.
 - A person routine with personal data sends its answer to another destination only as a draft (`RoutineAdapter.deliver_final` in `illo/routines/scheduler.py`).
 
 **Tests.** `tests/safety/test_rule_03_personal_destination.py`, `tests/safety/test_rule_03_ask_destination.py`, `tests/safety/test_rule_03_github_personal.py`, `tests/safety/test_rule_03_web_routines.py`, `tests/safety/test_rule_03_06_notes.py`, `tests/safety/test_review_s07_rule_03_private_asks.py`, `tests/safety/test_review_s08_rule_03_ask_privacy.py`, `tests/safety/test_review_s11_rule_03_connector_destination.py`, `tests/safety/test_review_s19_private_slack.py`.
@@ -123,7 +131,9 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 `data_text` in `illo/tools/_format.py` is the only writer of the `<outside_data>` markers. It neutralises a marker inside the data. The run manager wraps the whole message of a tainted or outsider run, and the Slack intake wraps thread context.
 - `resolve` in `illo/gateway/principal.py` marks these runs tainted: a Slack post from a bot, a webhook, or a form; a forwarded email; each signal.
-- `Gateway.context_authority` in `illo/gateway/dispatch.py` also marks a Slack run tainted when its thread context has a bot or an unknown user (`read_context` in `illo/channels/slack/threads.py`). An unknown author shows as `Outside user (<id>)`.
+- A listed team channel keeps the thread taint checks in `Gateway.context_authority` and `read_context`.
+  An unlisted channel or a member-only channel omits outside authors from the live thread context.
+  It does not grant those authors automation authority.
 - An Illo reply taints a follow-up only when the thread has the stored `slack:thread-tainted:` marker. Normal DM follow-ups keep `person_dm`.
 - `GRANT_PROFILES["tainted"]` in `illo/tools/checks.py` is the exact tool set: `github_search_issues`, `github_get_issue`, `github_create_issue`, `claims_take`, `web_read_public_page`, `connectors_list`, `connectors_call`, `skills_get`. `in_grant` refuses every other tool, even one that names the profile.
 - `create_issue` in `illo/tools/github.py` files a tainted ticket with the label `from-outside-text`, and a warning line. Code assigns trusted monitors to the default owner within the hourly triage limit. Other sources need an owner card. The server sends at most one owner card per run and six per hour. The remaining links wait for one digest at the end of the hour.
@@ -142,7 +152,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - `resolve` in `illo/gateway/principal.py` returns no authority for an unknown DM sender. `Gateway.receive` in `illo/gateway/dispatch.py` stops there, before any claim, direct action, or run.
-- In a configured channel, a human sender who is not in `people.yaml` starts no run. A Slack Connect user from another workspace counts as unknown, even with a mapped id.
+- In a member channel, a human sender who is not in `people.yaml` starts no run. A Slack Connect user from another workspace counts as unknown, even with a mapped id.
 - Email needs an explicit trusted receiver or `topmost`; a blank setting disables email.
 - A non-ASCII sender address or a defective From header gives no email authority.
 - An email sender needs one aligned DMARC pass from the trusted receiving server (`authenticated` in `illo/channels/email/parser.py`). Any other sender is an outsider. `unknown_sender` in `illo/channels/email/__init__.py` takes an outsider's email before a run.

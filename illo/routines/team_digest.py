@@ -7,6 +7,7 @@ from croniter import croniter
 
 from illo.asks.cards import escape
 from illo.channels.slack.access import channel_private
+from illo.channels.slack.channels import resolve_channel
 from illo.db import one
 from illo.ledger import ask_workflow, kv
 from illo.ledger.digest_snapshot import TEAM_STATE_KEY, team_snapshot
@@ -57,8 +58,13 @@ async def send_team_due(ctx, now=None):
     due = croniter(team.schedule, local + timedelta(microseconds=1)).get_prev(datetime)
     if local - due > timedelta(minutes=2):
         return
-    channel = next(c for c in config.slack.channels if c.name == team.channel)
     async with ctx.pool.connection() as conn:
+        try:
+            channel = await resolve_channel(ctx, team.channel, conn=conn)
+        except ValueError:
+            return
+        if channel.mode == "off":
+            return
         if await channel_private(ctx, channel.id, conn=conn):
             return
         await ask_workflow.lock_digest(conn, TEAM_STATE_KEY)
@@ -89,7 +95,7 @@ async def send_team_due(ctx, now=None):
             text = await write_brief(
                 ctx, "team_digest", key, prompt, "team", "team_snapshot", data, fallback_text, channel_id=channel.id
             )
-            sent = await deliver_routine(ctx, "channel:" + channel.id, text, delivery_key=key)
+            sent = await deliver_routine(ctx, "channel:" + channel.id, text, delivery_key=key, conn=conn)
             await kv.set(
                 conn,
                 f"slack:team-brief:{channel.id}:{sent['ts']}",

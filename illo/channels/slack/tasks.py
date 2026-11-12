@@ -7,6 +7,7 @@ from psycopg.types.json import Jsonb
 
 from illo.asks.cards import escape, task_return_card
 from illo.channels.slack.access import channel_private
+from illo.channels.slack.channels import ChannelLookupError, resolve_channel
 from illo.channels.slack.formatting import mrkdwn
 from illo.db import all_rows, one
 from illo.ledger import audit, kv, people, sensors
@@ -52,9 +53,8 @@ def message_id(kind, task_id, event_id=0):
 
 async def _channel(ctx, conn, row, entry, person):
     if row["visibility"] == "team" and entry.slack_channel:
-        channel = next((c for c in ctx.workspace.config.slack.channels
-                        if c.name == entry.slack_channel and c.mode != "off"), None)
-        if channel and not await channel_private(ctx, channel.id, conn=conn):
+        channel = await resolve_channel(ctx, entry.slack_channel, conn=conn)
+        if channel.mode != "off" and not await channel_private(ctx, channel.id, conn=conn):
             return channel.id
     if not person or not person["slack_id"]:
         raise ValueError("The task needs a person with Slack access.")
@@ -230,6 +230,22 @@ async def tick(ctx):
             async with ctx.pool.connection() as conn:
                 await _send(ctx, conn, task_id, reminder_counts)
                 await sensors.ok(conn, "tasks:slack")
+        except ChannelLookupError as exc:
+            async with ctx.pool.connection() as conn:
+                await sensors.error(conn, "slack:channel-name", str(exc))
+                await sensors.error(conn, "tasks:slack", str(exc))
+                row = await one(conn, "SELECT created_by,list_key FROM tasks WHERE id=%s", (task_id,))
+                notice = f"task:channel-notice:{task_id}"
+                if row and row["created_by"].startswith("person:") and not await kv.get(conn, notice):
+                    person = await people.get(conn, row["created_by"][7:])
+                    if person and person["slack_id"]:
+                        try:
+                            opened = await ctx.slack_client.conversations_open(users=person["slack_id"])
+                            await ctx.slack_client.chat_postMessage(channel=opened["channel"]["id"], text=str(exc))
+                        except Exception:
+                            pass
+                        else:
+                            await kv.set(conn, notice, True)
         except Exception:
             async with ctx.pool.connection() as conn:
                 await sensors.error(conn, "tasks:slack", "A task message waits for a Slack retry.")

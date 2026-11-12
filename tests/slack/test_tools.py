@@ -11,7 +11,7 @@ async def call(rpc, token, name, args):
     return read_result(response.json()["result"])
 
 
-async def test_send_dm_and_only_configured_channel(app, rpc, rpc_token, slack_client):
+async def test_send_dm_and_unlisted_member_channel(app, rpc, rpc_token, slack_client):
     _, token = rpc_token
     result = await call(
         rpc, token, "slack_send_dm", {"person": "ben", "text": "The lane is ready."}
@@ -20,8 +20,8 @@ async def test_send_dm_and_only_configured_channel(app, rpc, rpc_token, slack_cl
     assert slack_client.calls[0] == {"method": "conversations_open", "users": "U_ACME_BEN"}
     assert result["result"]["channel"] == "D_EXAMPLE"
     result = await call(rpc, token, "slack_post_channel", {"channel": "C_OTHER", "text": "Hello"})
-    assert result["decision"] == "deny"
-    assert len(slack_client.calls) == 2
+    assert result["decision"] == "allow"
+    assert slack_client.calls[-1]["channel"] == "C_OTHER"
     result = await call(
         rpc,
         token,
@@ -35,15 +35,15 @@ async def test_send_dm_and_only_configured_channel(app, rpc, rpc_token, slack_cl
     ] == "deny"
 
 
-async def test_read_only_configured_channel_or_current_dm(app, rpc, rpc_token, slack_client):
+async def test_read_member_channel_or_current_dm(app, rpc, rpc_token, slack_client):
     _, token = rpc_token
     for args, decision in [
         ({"channel": "C_ACME_TEAM", "thread_ts": "100.1"}, "allow"),
         ({"channel": "D_OTHER_PERSON", "thread_ts": "100.1"}, "deny"),
-        ({"channel": "C_UNKNOWN", "thread_ts": "100.1"}, "deny"),
+        ({"channel": "C_UNKNOWN", "thread_ts": "100.1"}, "allow"),
     ]:
         assert (await call(rpc, token, "slack_read_thread", args))["decision"] == decision
-    assert len(slack_client.calls) == 2
+    assert len(slack_client.calls) == 4
 
 
 async def test_current_dm_thread_access(intake, message, fake_brain, slack_client):

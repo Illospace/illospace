@@ -75,12 +75,18 @@ async def owner_draft(ctx, conn, run, issue, repo, event):
         source = {"kind": "signal", "name": event["payload"]["payload"].get("source", "unknown")}
     elif event and event["channel"] == "slack":
         payload = event["payload"]["payload"]
-        channel = next((c for c in ctx.workspace.config.slack.channels
-                        if c.id == payload.get("channel_id")), None)
+        channel = (ctx.workspace.config.slack.channel(payload["channel_id"])
+                   if payload.get("channel_id", "").startswith(("C", "G")) else None)
         author = await people.by_slack_id(conn, payload.get("author_slack_id", ""))
         if not author and event.get("person_id"):
             author = await one(conn, "SELECT name FROM people WHERE id=%s AND active", (event["person_id"],))
-        source = {"kind": "slack", "name": channel.name if channel else "DM",
+        from illo.channels.slack.channels import member_channels
+
+        try:
+            names = await member_channels(ctx, conn=conn) if channel else {}
+        except ValueError:
+            names = {}
+        source = {"kind": "slack", "name": names.get(channel.id, channel.name) if channel else "DM",
                   "author": author["name"] if author and not payload.get("from_automation") else "Automation"}
         try:
             link = await ctx.slack_client.chat_getPermalink(

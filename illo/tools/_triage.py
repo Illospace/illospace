@@ -20,6 +20,7 @@ def trusted(ctx, event):
         return payload.get("source") in config.triage.auto_assign.signal_sources
     if event["channel"] != "slack" or event["kind"] != "message":
         return False
+    channel = config.slack.channel(payload.get("channel_id") or "unknown")
     # A stored thread taint marker has no author proof. Keep these tickets for the owner.
     return bool(
         payload.get("from_automation") is True
@@ -28,8 +29,7 @@ def trusted(ctx, event):
         and not payload.get("contains_outside_text")
         and not payload.get("thread_ts")
         and not payload.get("form")
-        and any(c.id == payload.get("channel_id") and c.mode != "off" and c.visibility == "team"
-                for c in config.slack.channels)
+        and channel.listed and channel.mode != "off" and channel.visibility == "team"
     )
 
 

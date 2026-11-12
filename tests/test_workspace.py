@@ -195,11 +195,9 @@ def test_team_digest_body_and_no_routine(example, front):
 
 
 @pytest.mark.parametrize("channel,visibility,mode,schedule", [
-    ("missing", "team", "listen", "0 9 * * 1-5"),
     ("software", "private", "listen", "0 9 * * 1-5"),
     ("software", "team", "off", "0 9 * * 1-5"),
     ("software", "team", "listen", "0 0 9 * * 1-5"),
-    ("C_ACME_TEAM", "team", "listen", "0 9 * * 1-5"),
 ])
 async def test_team_digest_bad_config_keeps_last_workspace(app, example, channel, visibility, mode, schedule):
     path = example / "illo.yaml"

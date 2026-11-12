@@ -76,10 +76,12 @@ async def test_channel_modes_and_search_index(intake, message, fake_brain, app):
         assert len(await all_rows(conn, "SELECT * FROM items WHERE kind='slack'")) == 1
 
 
-async def test_unconfigured_and_off_channel_do_nothing(
+async def test_unlisted_channel_listens_and_off_channel_does_nothing(
     intake, message, fake_brain, app, slack_client
 ):
-    assert await intake.receive(message(channel="C_OTHER", channel_type="channel")) is None
+    result = await intake.receive(message(channel="C_OTHER", channel_type="channel"))
+    assert result["decision"] == "ignore"
+    slack_client.calls.clear()
     app.state.ctx.workspace.config.slack.channels[0].mode = "off"
     assert await intake.receive(message(channel="C_ACME_TEAM", channel_type="channel")) is None
     assert not fake_brain.requests and not slack_client.calls

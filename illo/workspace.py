@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SerializeAsAny,
     ValidationError,
     field_validator,
@@ -67,6 +68,12 @@ class PeopleFile(Model):
 
 
 class SlackChannel(Model):
+    _listed: bool = PrivateAttr(default=True)
+
+    @property
+    def listed(self) -> bool:
+        return self._listed
+
     name: str = Field(min_length=1)
     id: str = Field(min_length=1)
     mode: Literal["coordinator", "listen", "off"] = "listen"
@@ -77,6 +84,20 @@ class SlackChannel(Model):
 
 class SlackConfig(Model):
     channels: list[SlackChannel] = Field(default_factory=list)
+    default_mode: Literal["listen", "off"] = "listen"
+    default_rule_files: list[str] = Field(default_factory=list)
+
+    def channel(self, channel_id: str) -> SlackChannel:
+        """Return the listed settings or the defaults for this channel."""
+        for channel in self.channels:
+            if channel.id == channel_id:
+                return channel
+        channel = SlackChannel(
+            id=channel_id, name=channel_id, mode=self.default_mode,
+            rule_files=list(self.default_rule_files), team_members_only=True,
+        )
+        channel._listed = False
+        return channel
 
 
 class VoiceConfig(Model):
@@ -387,7 +408,7 @@ class Workspace(Model):
         self, principal: str, profile: str, channel_id: str | None
     ) -> list[RuleFile]:
         """Match rule metadata and the channel's explicit rule list."""
-        channel = next((c for c in self.config.slack.channels if c.id == channel_id), None)
+        channel = self.config.slack.channel(channel_id) if channel_id else None
         return [
             r
             for r in self.rules
@@ -592,12 +613,12 @@ def load_workspace(root: Path | str) -> Workspace:
     if len(channel_ids) != len(set(channel_ids)):
         raise WorkspaceError(f"{root / 'illo.yaml'}: slack.channels.id: duplicate channel")
     rule_paths = {r.path for r in rules}
-    for channel in config.slack.channels:
-        for path in channel.rule_files:
+    rule_lists = [("slack.default_rule_files", config.slack.default_rule_files)]
+    rule_lists.extend(("slack.channels.rule_files", c.rule_files) for c in config.slack.channels)
+    for field, paths in rule_lists:
+        for path in paths:
             if path not in rule_paths:
-                raise WorkspaceError(
-                    f"{root / 'illo.yaml'}: slack.channels.rule_files: unknown {path}"
-                )
+                raise WorkspaceError(f"{root / 'illo.yaml'}: {field}: unknown {path}")
 
     def check_destination(value, path, routine=False):
         if routine and value == "none":
@@ -607,22 +628,26 @@ def load_workspace(root: Path | str) -> Workspace:
         if (
             routine
             and value.startswith("channel:")
-            and value[8:] in {c.name for c in config.slack.channels}
+            and value[8:]
         ):
             return
         if value.startswith("person:") and value[7:] in keys:
             return
-        if value.startswith("channel:") and value[8:] in channel_ids:
+        if value.startswith("channel:") and value[8:]:
             return
         raise WorkspaceError(f"{path}: destination: use a configured person or channel")
 
     check_destination(config.digest.destination, root / "illo.yaml")
     if config.digest.team:
-        channel = next((c for c in config.slack.channels if c.name == config.digest.team.channel), None)
-        if not channel or channel.visibility != "team" or channel.mode == "off":
+        channel = next((config.slack.channel(c.id) for c in config.slack.channels
+                        if config.digest.team.channel.removeprefix("#") in {c.name, c.id}), None)
+        if channel and (channel.visibility != "team" or channel.mode == "off"):
             raise WorkspaceError(
                 f"{root / 'illo.yaml'}: digest.team.channel: use an enabled team-visible channel name"
             )
+        if not channel:
+            warnings.append(f"{root / 'illo.yaml'}: channel {config.digest.team.channel} is not listed. "
+                            "Illo checks it in Slack at run time.")
     for routine in routines:
         if routine.principal != "team" and not (
             routine.principal.startswith("person:") and routine.principal[7:] in keys

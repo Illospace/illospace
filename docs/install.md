@@ -74,7 +74,8 @@ If Slack refuses the read, Illo answers without history. Check the `slack:dm-his
    Add its bot token and app token to the environment file.
 2. Edit `people.yaml` in the workspace folder.
    Replace the example people with your team members and their real Slack IDs.
-   Edit `illo.yaml` for the team's channels, repositories, and model.
+   Edit `illo.yaml` for the team's repositories and model.
+   Add Illo to a Slack channel, then mention it. No channel entry is required.
 3. For the `claude` runtime, set `ANTHROPIC_API_KEY`.
    You can also set `ANTHROPIC_BASE_URL`.
    The runtime uses the Claude Agent SDK.
@@ -307,14 +308,27 @@ docker volume rm illo_postgres
 rm -rf illospace
 ```
 
-## Private team channels
+## Slack channel access
 
-Set `team_members_only: true` on a channel in `slack.channels` to use a Slack-private team channel.
-Keep `visibility: team`. The human members must be exactly the active people in `people.yaml`.
-Illo accepts its own bot and other bot users. A bot in the channel can read what Illo posts there.
-Illo checks all member pages and caches the result for 10 minutes.
-An unknown human, or an active person who is not a member, makes the channel private and removes its indexed messages.
-A Slack error gives no result: Illo does not handle the message, and the index stays.
-The channel sensor reports the failure without member ids.
-`visibility: private` always wins. Without the flag, Slack-private channels stay private.
-A verified channel supports normal intake, search, thread reads, channel posts, and team briefs.
+Add Illo to a channel in Slack, then mention it.
+A channel needs no entry in `illo.yaml`.
+List a channel only for coordinator mode, its own rules, or `mode: off`.
+`slack.default_mode: listen` is the default. `off` accepts only listed channels.
+`slack.default_rule_files` selects rule files for channels with no entry. Its default is an empty list.
+
+The optional join notice uses the `member_joined_channel` bot event in `deploy/slack/manifest.yaml`.
+For an existing install, add this event on the Slack app page under Event Subscriptions, Bot Events.
+All channel features work without this event.
+Illo sends the notice at most once per channel. A failed send does not block channel use.
+
+A public channel has class `team` and supports shared search and the team brief.
+For a private channel with no entry, Illo checks that its humans are exactly the active people in `people.yaml`.
+For a listed private channel, set `team_members_only: true` and keep `visibility: team` for this proof.
+Illo accepts its own bot and other bot users. Bots in the channel can read its messages.
+Illo checks all member pages and caches the class for ten minutes.
+
+Every other private channel has class `members`. `visibility: private` also selects this class.
+Illo answers known active people who mention it there. It uses team tools and no personal data.
+It does not put the channel text in shared search. A private thread read needs live proof of membership.
+Tasks that people request there go to the normal team list.
+A Slack error blocks the message and its index write. Illo records the missed event and a sensor error.

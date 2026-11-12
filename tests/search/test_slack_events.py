@@ -49,11 +49,10 @@ async def test_team_inbound_message_search_and_detail(app):
 
 @pytest.mark.parametrize("changes", [
     {"kind": "dm", "channel_id": "D_ADA", "principal": "person:ada"},
-    {"channel_id": "C_NOT_CONFIGURED"},
     {"channel": "email", "kind": "email", "principal": "person:ada"},
     {"principal": None},
 ])
-async def test_source_never_reads_dms_email_or_unconfigured_events(app, changes):
+async def test_source_never_reads_dms_email_or_untrusted_events(app, changes):
     ctx = app.state.ctx
     async with ctx.pool.connection() as conn:
         row = await event(conn, **changes)

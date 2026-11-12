@@ -24,15 +24,19 @@ async def resolve(conn, event, workspace) -> Authority | None:
             if not person or event.payload.get("bot") or event.payload.get("webhook"):
                 return None
             return Authority(f"person:{person['key']}", "person_dm", person["id"])
-        channel = next(
-            (c for c in workspace.config.slack.channels if c.id == event.payload.get("channel_id")),
-            None,
-        )
-        if not channel or channel.mode == "off":
+        if not event.payload.get("channel_id"):
+            return None
+        channel = workspace.config.slack.channel(event.payload["channel_id"])
+        if channel.mode == "off":
             return None
         if channel.mode == "listen" and not event.payload.get("mentioned"):
             return None
         tainted = any(event.payload.get(key) for key in ("bot", "bot_id", "webhook", "form"))
+        if event.payload.get("channel_class") == "members" and (
+                tainted or not person or not event.payload.get("mentioned")):
+            return None
+        if not channel.listed and (tainted or not person):
+            return None
         if not tainted and not person:
             return None
         return Authority("team", "tainted" if tainted else "team_channel", tainted=tainted)

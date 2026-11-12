@@ -78,7 +78,8 @@ async def doctor(config: Config) -> int:
         workspace.config.brain.check_runtime(config.brain_runtime)
         print("The workspace is valid.")
         for warning in workspace.warnings:
-            print(f"Warning: {warning}")
+            print(f"Note: {warning}" if "Illo checks it in Slack at run time." in warning
+                  else f"Warning: {warning}")
     except ValueError as exc:
         print(f"The workspace needs a fix: {exc}")
         failed = True

@@ -3,6 +3,7 @@
 import re
 
 from illo.channels.slack.access import channel_private
+from illo.channels.slack.channels import member_channels
 from illo.db import all_rows, one
 
 KINDS = ("message", "channel")
@@ -13,11 +14,23 @@ VISIBLE = """e.channel='slack' AND e.principal='team' AND e.kind=ANY(%s)
 
 async def channels(ctx, conn):
     """Configuration and Slack membership must permit team access."""
+    # Read IDs only here. Text stays behind the current channel proof.
+    rows = await all_rows(conn, """
+        SELECT DISTINCT payload #>> '{payload,channel_id}' AS id FROM events WHERE channel='slack'
+        UNION SELECT split_part(source_ref,':',2) AS id FROM items WHERE kind='slack'
+    """)
+    ids = {c.id for c in ctx.workspace.config.slack.channels}
+    ids.update(r["id"] for r in rows if r["id"] and r["id"].startswith(("C", "G")))
+    try:
+        names = await member_channels(ctx, conn=conn)
+    except ValueError:
+        names = {}
     allowed = {}
-    for channel in ctx.workspace.config.slack.channels:
+    for channel_id in sorted(ids):
+        channel = ctx.workspace.config.slack.channel(channel_id)
         if channel.visibility == "team" and channel.mode != "off":
             if not await channel_private(ctx, channel.id, conn=conn):
-                allowed[channel.id] = channel.name
+                allowed[channel.id] = names.get(channel.id, channel.name)
     return allowed
 
 

@@ -14,11 +14,13 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `language` | Optional team language for the team brief, for example `French`. Default: the language of the run message. |
 | `timezone` | IANA time zone for schedules. Default: `UTC`. |
 | `default_owner` | Active person key from `people.yaml`. Required. |
-| `slack.channels` | List of channel mappings. Default: empty. |
+| `slack.default_mode` | `listen` (default) or `off`. The mode for channels with no entry. |
+| `slack.default_rule_files` | Rule file paths for channels with no entry. Default: empty. Paths must name loaded rules. |
+| `slack.channels` | Optional channel overrides. List a channel for coordinator mode, its own rules, or `mode: off`. |
 | `slack.channels[].name` | Display name. |
 | `slack.channels[].id` | Unique Slack channel ID. |
 | `slack.channels[].mode` | `coordinator`, `listen`, or `off`. Default: `listen`. |
-| `slack.channels[].visibility` | `team` or `private`. Default: `team`. Illo also asks Slack. A private channel starts no run and enters no index. |
+| `slack.channels[].visibility` | `team` or `private`. Default: `team`. Illo also asks Slack. A private channel answers known active members. Only class `team` enters shared search. |
 | `slack.channels[].rule_files` | Rule paths relative to the workspace. Default: all matching rules. |
 | `github.repositories` | List of `owner/repository` names to follow. Default: empty. |
 | `digest.schedule` | Five-field cron expression in each person's time zone. Default: `0 9 * * 1-5`. |
@@ -52,7 +54,11 @@ Do not store secrets in this folder. Use the vault or boot environment.
 `coordinator` can start a run for a channel message. `listen` starts a run only
 for an explicit mention, or a reply in a thread where Illo answered. `off` ignores messages.
 A channel adapter supplies mention and bot metadata from the channel API.
-Webhook, bot, and form text uses the `tainted` profile.
+A channel needs no entry. Add Illo to the channel in Slack, then mention it.
+Only a known active person can start a run in a channel with no entry.
+Webhook, bot, and form text uses the `tainted` profile only in listed team channels.
+`slack.default_mode: off` accepts only listed channels.
+A listed channel uses its own settings and rule files.
 A message from a person who is not in `people.yaml` starts no run.
 No Slack token is required to load these files or start the HTTP app.
 
@@ -213,7 +219,7 @@ and [GPT-4o Mini Transcribe](https://developers.openai.com/api/docs/models/gpt-4
 
 The loader checks files every `ILLO_WORKSPACE_CHECK_SECONDS` seconds.
 `illo reload` requests an immediate reload. It needs `ILLO_RELOAD_TOKEN` and a loopback URL.
-File paths in channel rules must match a loaded rule. Destinations must name a configured person or channel.
+File paths in channel rules must match a loaded rule. Destinations must name a configured person or a member channel.
 
 
 ## Morning brief and routine time zones
@@ -297,8 +303,8 @@ digest:
     send_empty: false
 ```
 
-Add `software` to `slack.channels` with `visibility: team` and a mode other than `off`.
-An absent `digest.team` block disables the team brief. A bad channel blocks reload.
+Add Illo to `software` in Slack. The channel must have class `team` and a mode other than `off`.
+An absent `digest.team` block disables the team brief. Illo checks an unlisted channel in Slack at run time.
 A failed reload keeps the last valid workspace.
 The team brief runs in the team time zone, at most once per local day.
 With `send_empty: false`, it sends nothing when all four task sections are empty.
@@ -385,3 +391,21 @@ A person sets their IANA `timezone` in `people.yaml`.
 
 `agents.yaml` accepts registered wake types. Unknown types give a doctor warning.
 Known types validate their own fields. See [Agents](agents.md) and [GitHub](github.md).
+
+
+## Channels with no entry
+
+A channel name or a `C…`/`G…` ID can select a member channel for a list or the team brief.
+Illo caches member channel names for ten minutes. It reads every page from Slack.
+`illo doctor` runs no Slack check. It prints a note for a channel name with no entry.
+At run time, a missing name gives an error and a sensor error.
+
+A public channel has class `team`.
+A private channel also has class `team` when its humans are exactly the active people in `people.yaml`.
+Illo applies this proof to private channels with no entry.
+For a listed channel, keep `team_members_only: true` to use this proof.
+Other private channels have class `members`. `visibility: private` always selects this class.
+Illo answers mentions from known active people there with team tools only.
+The channel text stays out of shared search. A private thread read needs live proof of membership.
+A task that a person requests there goes to the normal team list.
+The run context tells the model to copy no other channel text into that task.

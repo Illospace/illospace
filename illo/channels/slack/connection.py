@@ -14,7 +14,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
 from illo.channels.slack.intake import SlackIntake
-from illo.ledger import sensors
+from illo.ledger import kv, sensors
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +68,8 @@ class SlackConnection:
                 try:
                     if self.socket is None:
                         auth = await ctx.slack_client.auth_test()
+                        async with ctx.pool.connection() as conn:
+                            await kv.set(conn, "slack:bot", {"name": auth.get("user"), "id": auth["user_id"]})
                         if self.intake is None:
                             self.intake = SlackIntake(
                                 ctx, auth["user_id"], bot_identity=auth.get("bot_id")

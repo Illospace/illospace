@@ -209,9 +209,9 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         from illo.connectors.github_tasks import capture
 
         payload = (event or {}).get("payload", {}).get("payload", {})
-        coordinator = event and event["channel"] == "slack" and any(
-            channel.id == payload.get("channel_id") and channel.mode == "coordinator"
-            for channel in ctx.app.workspace.config.slack.channels)
+        coordinator = (event and event["channel"] == "slack"
+                       and ctx.app.workspace.config.slack.channel(
+                           payload.get("channel_id") or "unknown").mode == "coordinator")
         is_alert = ctx.run["tainted"] or coordinator or (event and event["channel"] == "signals")
         task_id = await capture(ctx.app, ctx.conn, repo, issue, login, event) if is_alert else None
         if task_id:

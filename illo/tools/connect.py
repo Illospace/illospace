@@ -118,6 +118,7 @@ async def status(tc, args):
                 else "",
             }
         )
+    result.extend(await chat.builtin_status(tc, person_id))
     return result
 
 
