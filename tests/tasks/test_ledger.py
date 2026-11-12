@@ -190,3 +190,22 @@ async def test_parent_with_missing_proof_waits_for_a_person(conn, ws):
     parent = await tasks.add_link(conn, parent["id"], workspace=ws, viewer=ADA, links=[{"url": "https://example.com/video", "kind": "video"}])
     assert parent["state"] == "review"
     await tasks.done(conn, parent["id"], workspace=ws, viewer=ADA)
+
+
+async def test_link_on_active_work_never_starts_a_review(conn, ws):
+    row = await make(conn, ws, holder="agent:build")
+    row = await tasks.add_link(conn, row["id"], workspace=ws, viewer=ADA,
+                               links=[{"url": "https://example.com/draft", "kind": "doc"}])
+    assert row["state"] == "todo" and row["waits_for"] == "agent:build"
+
+
+async def test_cancelled_piece_does_not_block_the_whole(conn, ws):
+    parent = await make(conn, ws)
+    first = await tasks.create(conn, workspace=ws, viewer=ADA, list_key="tasks", title="One", parent_id=parent["id"])
+    second = await tasks.create(conn, workspace=ws, viewer=ADA, list_key="tasks", title="Two", parent_id=parent["id"])
+    await tasks.cancel(conn, second["id"], workspace=ws, viewer=ADA, reason="Not needed.")
+    await tasks.done(conn, first["id"], workspace=ws, viewer=ADA)
+    parent = await tasks.get(conn, parent["id"], viewer=ADA)
+    assert parent["state"] == "review"
+    parent = await tasks.done(conn, parent["id"], workspace=ws, viewer=ADA)
+    assert parent["state"] == "done"

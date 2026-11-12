@@ -74,3 +74,11 @@ async def test_final_answer_guard_runs_before_delivery(app, replay, fake_brain):
     fake_brain.final_text = "Yes—<#| >}"
     answer = await replay(text="Read my tasks.")
     assert answer["text"] == "Illo could not write a clear answer."
+
+
+def test_guard_keeps_an_answer_that_is_one_labelled_link():
+    from illo.brain.final_text import broken
+
+    assert not broken("<https://example.com/tasks/12|Task 12>")
+    assert broken("Yes—<#| >}")
+    assert broken("<https://example.com/x>")

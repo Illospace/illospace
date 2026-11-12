@@ -153,7 +153,9 @@ async def proof(conn, workspace, row, ctx=None):
     entry = next((entry for entry in workspace.lists if entry.key == row["list_key"]), None)
     rule = entry.done if entry else "person"
     names = ["person"] if rule == "person" else [*rule]
-    if "pieces" not in names and await one(conn, "SELECT id FROM tasks WHERE parent_id=%s LIMIT 1", (row["id"],)):
+    if "pieces" not in names and await one(
+        conn, "SELECT id FROM tasks WHERE parent_id=%s AND state<>'cancelled' LIMIT 1", (row["id"],)
+    ):
         names.append("pieces")
     return await checks.evaluate(ctx, conn, row, names)
 
@@ -177,8 +179,9 @@ async def _parent(conn, workspace, row, ctx=None):
     if not row["parent_id"]:
         return
     parent = await one(conn, "SELECT * FROM tasks WHERE id=%s FOR UPDATE", (row["parent_id"],))
-    children = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s", (parent["id"],))
-    if parent["state"] == "cancelled":
+    # A cancelled piece is not part of the whole.
+    children = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s AND state<>'cancelled'", (parent["id"],))
+    if parent["state"] == "cancelled" or not children:
         return
     if all(child["state"] == "done" for child in children):
         results = await proof(conn, workspace, parent, ctx)
@@ -195,9 +198,13 @@ async def _parent(conn, workspace, row, ctx=None):
         await _parent(conn, workspace, parent, ctx)
 
 
-async def _settle(conn, workspace, row, ctx=None):
+async def _settle(conn, workspace, row, ctx=None, *, active=False):
+    """Apply the Done rule. `active` is a link change on work that the holder did not return."""
     results = await proof(conn, workspace, row, ctx)
-    children = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s", (row["id"],))
+    children = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s AND state<>'cancelled'", (row["id"],))
+    if active and (children or not (results and all(r["ok"] for r in results))):
+        # Only passed checks close active work. A new link never sends it to review.
+        return row
     if children:
         if all(child["state"] == "done" for child in children):
             row = await _state(conn, workspace, row, "review", "code", "state",
@@ -292,7 +299,9 @@ async def add_link(conn, task_id, *, workspace, viewer, links, ctx=None, _defer=
     merged = row["links"] + [link for link in links if link not in row["links"]]
     row = await one(conn, "UPDATE tasks SET links=%s WHERE id=%s RETURNING *", (Jsonb(merged), task_id))
     await _event(conn, row, viewer.actor, "link", "The proof links changed.", {"links": links})
-    return await _settle(conn, workspace, row, ctx) if not _defer and row["state"] not in {"done", "cancelled"} else row
+    if _defer or row["state"] in {"done", "cancelled"}:
+        return row
+    return await _settle(conn, workspace, row, ctx, active=row["state"] != "review")
 
 
 @_mutation
@@ -316,7 +325,7 @@ async def write_result(conn, task_id, *, workspace, viewer, result=None, append=
     if returned:
         row = await return_work(conn, task_id, workspace=workspace, viewer=viewer, message=message, ctx=ctx)
     elif links:
-        row = await _settle(conn, workspace, row, ctx)
+        row = await _settle(conn, workspace, row, ctx, active=True)
     return row
 
 
@@ -358,7 +367,7 @@ async def done(conn, task_id, *, workspace, viewer, force=False, reason="", ctx=
     if row["state"] in {"done", "cancelled"}:
         raise TaskError("The task is already closed.")
     results = await proof(conn, workspace, row, ctx)
-    pieces = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s", (task_id,))
+    pieces = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s AND state<>'cancelled'", (task_id,))
     failed = any(not r["ok"] and r["name"] != "person" for r in results) or any(p["state"] != "done" for p in pieces)
     if failed and not (force and reason.strip()):
         raise TaskError("The checks do not pass. A forced confirmation needs a reason.")

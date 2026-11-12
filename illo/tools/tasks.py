@@ -6,7 +6,6 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from illo.ledger import kv
 from illo.ledger import tasks as ledger
 from illo.tasks.access import run_viewer
 from illo.tasks.views import compact, full
@@ -156,9 +155,6 @@ async def handle(ctx, name, args):
             row = await ledger.get(ctx.conn, args["id"], viewer=viewer)
             if not row:
                 raise ledger.TaskError("The task was not found.")
-            if viewer.human:
-                await kv.set(ctx.conn, f"task:show:{row['id']}", viewer.actor)
-                await kv.set(ctx.conn, f"task:pending:{row['id']}", True)
         elif name == "task_update":
             changes = {("list_key" if k == "list" else "due_at" if k == "due" else k):
                        (due(v) if k == "due" else v) for k, v in args.items()

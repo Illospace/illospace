@@ -163,7 +163,6 @@ async def test_other_person_gets_question_and_review_in_their_dm(app, slack_clie
     monkeypatch.setattr(slack_client, "conversations_open", distinct_dm)
     async with ctx.pool.connection() as conn:
         row = await tasks.create(conn, workspace=ctx.workspace, viewer=ADA, list_key="launches", title="A launch", holder="agent:build")
-        await kv.set(conn, f"task:show:{row['id']}", "person:ada")
     await surface.tick(ctx)
     async with ctx.pool.connection() as conn:
         await tasks.post(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, text="Which version?", question=True, to="person:ben")

@@ -12,7 +12,9 @@ log = logging.getLogger(__name__)
 def broken(text):
     if re.search(r'<(?:#\||\||\s+>)', text):
         return True
-    plain = re.sub(r'<[^>]*>', '', text)
+    # A link label is readable text. A bare link or mention is not.
+    plain = re.sub(r'<[^>|]*\|([^>]*)>', r'\1', text)
+    plain = re.sub(r'<[^>]*>', '', plain)
     return sum(character.isalnum() for character in plain) < 3
 
 

@@ -85,6 +85,8 @@ It returns compact rows with the next move and the number of open pieces.
 `task_done` confirms work. `task_reopen` sends it back with a reason. `task_cancel` closes it with a reason.
 A due time uses ISO 8601 with a time zone. A piece cannot move to another list.
 A private task keeps its list and visibility. Cancel does not cancel its pieces.
+A cancelled piece is not part of the whole: it never blocks its parent.
+A new link on active work can close the task when all checks pass. It never sends the task to review.
 
 An identified person's DM or team-channel run calls all task tools directly.
 These actions need no approval card. Each call has an audit row.
@@ -146,7 +148,8 @@ A parent always needs a person's confirmation of the whole task.
 
 ## Slack
 
-A task gets one thread when it needs a person or a person reads it with `task_get`.
+A task gets one thread when it needs a person: a question, returned work, or a hand-over from someone else.
+A read with `task_get` never starts a thread.
 A team list uses its configured channel when the channel passes the privacy check.
 Otherwise, the thread uses the DM of the person who must act.
 A private list always uses its owner's DM.

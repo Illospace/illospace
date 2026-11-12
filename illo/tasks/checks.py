@@ -28,7 +28,7 @@ async def evaluate(ctx, conn, task, rule) -> list[dict]:
             ok = any(link.get("kind") == name[5:] for link in task["links"])
             text = "The proof link is present." if ok else "The proof link is missing."
         elif name == "pieces":
-            rows = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s", (task["id"],))
+            rows = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s AND state<>'cancelled'", (task["id"],))
             ok = all(row["state"] == "done" for row in rows)
             text = "All pieces are done." if ok else "Some pieces are not done."
         elif name in _checks:

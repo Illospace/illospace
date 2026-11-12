@@ -79,14 +79,18 @@ async def _send(ctx, conn, task_id):
         raise ValueError("The task list is missing.")
     cursor = await kv.get(conn, f"task:sent:{task_id}") or 0
     events = await all_rows(conn, "SELECT * FROM task_events WHERE task_id=%s AND id>%s ORDER BY id", (task_id, cursor))
-    show = await kv.get(conn, f"task:show:{task_id}")
     target = row["waits_for"] if (row["waits_for"] or "").startswith("person:") else None
     if row["visibility"] == "private":
         person = await one(conn, "SELECT * FROM people WHERE id=%s AND active", (row["owner_person_id"],))
     else:
-        ref = target or show or await ledger.reviewer(conn, ctx.workspace, row)
+        ref = target or await ledger.reviewer(conn, ctx.workspace, row)
         person = await people.get(conn, ref[7:]) if ref else None
-    needs_person = show or target or any(e["kind"] in {"question", "returned"} for e in events)
+    # The thread starts only when the task needs a person: a question, returned work,
+    # or a hand-over from someone else. A read never starts it.
+    handed = [e for e in events if e["kind"] == "handed" and target
+              and e["data"].get("holder") == target and e["actor"] != target]
+    needs_person = handed or any(e["kind"] in {"question", "returned"} for e in events) or (
+        row["state"] == "review" and target)
     if not row["slack_ts"] and not needs_person:
         if events:
             await kv.set(conn, f"task:sent:{task_id}", events[-1]["id"])
@@ -115,6 +119,9 @@ async def _send(ctx, conn, task_id):
                         text=f"Task {task_id}: " + escape(row["title"]) + "\n" + escape(event["text"])
                              + f"\nReply with task {task_id} and your answer.",
                         client_msg_id=message_id("question-notice", task_id, event["id"]))
+        elif event in handed and event is handed[-1]:
+            await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
+                text=mention + "You hold this task now.", client_msg_id=message_id("handed", task_id, event["id"]))
         elif event["kind"] == "message" and event["actor"].startswith("agent:") and not returned:
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
                 text=escape(event["text"]), client_msg_id=message_id("message", task_id, event["id"]))
@@ -148,7 +155,6 @@ async def _send(ctx, conn, task_id):
         await kv.set(conn, f"task:sent:{task_id}", events[-1]["id"])
     await conn.execute("DELETE FROM kv WHERE key=%s AND value=%s",
                            (f"task:pending:{task_id}", Jsonb(pending_version)))
-    await kv.delete(conn, f"task:show:{task_id}")
 
 
 async def tick(ctx):
