@@ -150,6 +150,29 @@ class MCPClient:
             async with self.session_factory(config, bearer) as session:
                 return await self._schemas(session, config)
 
+    async def discover(self, ctx, conn, config, *, bearer=None) -> dict[str, str]:
+        """Read the bounded tool list without granting a tool."""
+        async with asyncio.timeout(config.timeout_s):
+            if bearer is None:
+                bearer = await self.bearer(ctx, conn, config)
+            async with self.session_factory(config, bearer) as session:
+                tools, cursor, seen = {}, None, set()
+                for _ in range(100):
+                    page = await session.list_tools(cursor=cursor) if cursor else await session.list_tools()
+                    for tool in page.tools:
+                        if not tool.name or len(tool.name) > 200 or any(c.isspace() or ord(c) < 32 for c in tool.name):
+                            raise ValueError("The server lists an invalid tool name")
+                        tools[tool.name] = tool.description or ""
+                    if len(json.dumps(tools).encode()) > config.max_bytes:
+                        raise ValueError("The tool list is too large")
+                    cursor = page.nextCursor
+                    if not cursor:
+                        return tools
+                    if cursor in seen:
+                        raise ValueError("The connector repeats a tool page")
+                    seen.add(cursor)
+                raise ValueError("The connector has too many tool pages")
+
     async def call(self, ctx, conn, config, name: str, arguments: dict) -> dict:
         if name not in {tool.name for tool in config.tools}:
             raise ValueError("The connector file does not list this tool")

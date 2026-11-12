@@ -32,6 +32,12 @@ def private_http_logs():
         _private_request.reset(token)
 
 
+class HTTPFailure(ValueError):
+    def __init__(self, error=None):
+        super().__init__("The connector request failed")
+        self.error = error
+
+
 class BoundedHTTP:
     def __init__(self, transport=None):
         self.transport = transport
@@ -46,15 +52,20 @@ class BoundedHTTP:
                         if attempt < 2:
                             await asyncio.sleep(0.2 * 2**attempt)
                             continue
-                    if response.status_code >= 400:
-                        raise ValueError("The connector request failed")
-                    if response.status_code >= 300:
+                    if 300 <= response.status_code < 400:
                         raise ValueError("The connector redirect is not allowed")
                     data = bytearray()
                     async for chunk in response.aiter_bytes():
                         data.extend(chunk)
                         if len(data) > max_bytes:
                             raise ValueError("The connector response is too large")
+                    if response.status_code >= 400:
+                        # Keep only a known error name. Never expose the provider's text.
+                        try:
+                            error = json.loads(data).get("error")
+                        except (ValueError, AttributeError):
+                            error = None
+                        raise HTTPFailure(error if isinstance(error, str) and error in {"invalid_client", "invalid_grant"} else None)
                     if not data:
                         return {}
                     if "json" in response.headers.get("content-type", ""):

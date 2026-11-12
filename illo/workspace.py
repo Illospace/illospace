@@ -227,6 +227,25 @@ class TasksConfig(Model):
         return value
 
 
+class ConnectConfig(Model):
+    public_url: str | None = None
+
+    @field_validator("public_url")
+    @classmethod
+    def valid_public_url(cls, value):
+        if value is not None:
+            from urllib.parse import urlsplit
+
+            from illo.connectors.config import validate_url
+
+            validate_url(value)
+            parsed = urlsplit(value)
+            if parsed.scheme != "https" or parsed.query or "?" in value:
+                raise ValueError("Use an HTTPS address without credentials or a query")
+            value = value.rstrip("/")
+        return value
+
+
 class TeamConfig(Model):
     language: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ()-]{1,39}$")
     team_name: str = Field(min_length=1)
@@ -243,6 +262,7 @@ class TeamConfig(Model):
     brain: BrainConfig = Field(default_factory=BrainConfig)
     run_limits: RunLimits = Field(default_factory=RunLimits)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    connect: ConnectConfig = Field(default_factory=ConnectConfig)
 
     email: EmailConfig = Field(default_factory=EmailConfig)
 

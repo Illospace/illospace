@@ -52,6 +52,8 @@ async def google_ready(conn, app, scope, person_id) -> bool:
 async def credentials(ctx, conn) -> tuple[str, str]:
     client_id = os.environ.get("ILLO_GOOGLE_CLIENT_ID", "")
     secret = os.environ.get("ILLO_GOOGLE_CLIENT_SECRET")
+    if not client_id:
+        client_id = await store.vault(ctx).get(conn, "google-client-id")
     if not secret:
         secret = await store.vault(ctx).get(conn, "google-client-secret")
     if not client_id or not secret:
@@ -367,11 +369,9 @@ async def setup(ctx) -> None:
 
     register = getattr(search, "register_provider", None)
     if register:
-        providers = []
-        if google_config(ctx):
-            providers.extend((("mail", mail_provider, True), ("drive", drive_provider, True)))
-        if google_config(ctx, "team"):
-            providers.append(("drive_shared", shared_provider, False))
+        # Each provider checks the current workspace. A chat connection needs no restart.
+        providers = [("mail", mail_provider, True), ("drive", drive_provider, True),
+                     ("drive_shared", shared_provider, False)]
         for name, fn, personal in providers:
             # Several app instances can share this module. Providers take their app as an argument.
             if getattr(search, "_providers", {}).get(name) != (fn, personal, False):

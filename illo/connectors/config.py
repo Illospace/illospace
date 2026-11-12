@@ -64,6 +64,8 @@ class Connector(Model):
     kind: Literal["mcp", "google", "github"]
     scope: Literal["team", "personal"]
     url: str | None = None
+    description: str = ""
+    discovered_tools: dict[str, str] = Field(default_factory=dict)
     tools: list[ConnectorTool] = Field(default_factory=list)
     auth: Auth | None = None
     scopes: list[str] = Field(default_factory=lambda: list(GOOGLE_SCOPES))
