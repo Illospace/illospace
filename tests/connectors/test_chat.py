@@ -623,3 +623,31 @@ async def test_google_setup_enables_search_without_a_restart(connect_ctx):
     ctx.google_client = FakeGoogleClient()
     hits = await search.search(ctx, "person:ada", "invoice", kinds=["mail"])
     assert hits and hits.personal_read
+
+
+@pytest.mark.parametrize("sender", ["U_ACME_ADA", "U_ACME_BEN"])
+async def test_setup_sends_exactly_one_slack_message(connect_ctx, sender):
+    from illo.channels.slack.intake import SlackIntake
+
+    ctx = connect_ctx
+    intake = SlackIntake(ctx, "U_ACME_ILLO")
+    result = await intake.receive(
+        {
+            "event": {
+                "type": "message",
+                "channel": "D_EXAMPLE",
+                "channel_type": "im",
+                "user": sender,
+                "text": "connect Google",
+                "ts": "100.001",
+            }
+        }
+    )
+    assert result["decision"] == "claimed"
+    calls = [c for c in ctx.slack_client.calls if c["method"] == "chat_postMessage"]
+    assert len(calls) == 1
+    assert calls[0]["text"] == (
+        chat.setup_text(ctx)
+        if sender == "U_ACME_ADA"
+        else "Ada must set up Google one time. Then write: connect my Google."
+    )

@@ -79,10 +79,11 @@ async def client_ready(ctx, conn):
         return False
 
 
-async def google_setup(ctx, conn, person):
+async def google_setup(ctx, conn, person, *, send=True):
     if person["role"] != "owner":
         text = await owner_notice(conn)
-        await dm(ctx, person, text)
+        if send:
+            await dm(ctx, person, text)
         return text
     ready = await client_ready(ctx, conn)
     if ready and not any(c.key == "google" for c in ctx.workspace.connectors):
@@ -111,6 +112,8 @@ async def google_setup(ctx, conn, person):
         },
     ]
     await dm(ctx, person, text, blocks)
+    if not send:
+        return ""
     return (
         "The Google setup steps are in the DM." if not ready else "The Google state is in the DM."
     )
@@ -120,11 +123,14 @@ async def start(ctx, conn, person_id, kind, scope, *, send=True):
     person = await active_person(conn, person_id)
     if kind == "google":
         if scope == "team" or not await client_ready(ctx, conn):
-            return await google_setup(ctx, conn, person)
+            return await google_setup(ctx, conn, person, send=send)
         if not google.google_config(ctx):
             if person["role"] != "owner":
-                await dm(ctx, person, await owner_notice(conn))
-                return "The owner must set up Google first."
+                text = await owner_notice(conn)
+                if send:
+                    await dm(ctx, person, text)
+                    return "The owner must set up Google first."
+                return text
             await files.save(
                 ctx, conn, Connector(key="google", kind="google", scope="personal"), create=True
             )
