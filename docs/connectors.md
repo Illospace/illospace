@@ -6,6 +6,53 @@ Team members do not need the host's credentials.
 The brain never receives a connector token, a client secret, or a sign-in code.
 The model sign-in below has a separate, per-run credential path.
 
+## Connect in chat
+
+Talk to Illo in your own Slack DM. Ask "What tools are connected?" to see the state.
+Illo shows your own sign-in state and the team's connections. It shows no other person's account details.
+
+For Google:
+
+1. The owner writes `connect Google` or `set up Google`.
+2. Illo gives the owner one numbered message with the Google console links.
+   Google requires one person to create the client one time for the whole team.
+3. The owner taps `Enter the Google client` and pastes the Client ID and Client secret in the form.
+   Illo checks the pair with Google before it replaces the saved pair.
+   A failed check keeps the old pair. No restart is needed.
+4. Each person writes `connect my Google` and opens the sign-in link.
+
+`connect my calendar`, `connect my mail`, `connect my Gmail`, `connect my Drive`, and
+`connect my Google account` start the same sign-in. Letter case and final punctuation do not matter.
+A person who is not an owner gets the owner's name when Google needs team setup.
+Write `disconnect my Google` to revoke and delete your grant.
+Write `connect Google` to see the team state or replace the client through a new form.
+If the callback address changes, Illo shows the new address to add in the Google console.
+The Google Internal audience needs a Google Workspace account.
+
+For a team MCP server:
+
+1. The owner writes `connect the MCP server at https://mcp.example.com/mcp as acme-crm`.
+2. Illo shows an `Add` / `Do not add` card with the address and sign-in method.
+3. If the server needs a key, `Add` opens a private form for it.
+4. Illo reads the tool list. A failed read adds no connector and saves no key.
+5. Illo saves `connectors/acme-crm.yaml` with no allowed tools and shows up to 30 tools in the DM.
+6. The owner names the tools to allow and labels each as read or write.
+   Illo shows an `Allow` / `Do not allow` card before it saves these permissions.
+   Each write call needs its own approval card.
+
+Only an active owner can add, allow, or remove a team connector.
+Removal needs a card. It removes the connector file and its saved key.
+The server's tool descriptions are outside data. They cannot grant a tool or change its risk.
+The file keeps all discovered names in `discovered_tools`. Only `tools` grants access.
+Connector changes make a local Git commit when the workspace is a Git repository.
+`workspace.git_push: true` also pushes that commit. A failed push leaves the file and local commit saved.
+
+Never paste a key or password in a chat message. Use only the form that Illo opens.
+Illo encrypts the values in its vault. It keeps them out of events, cards, audit values, and workspace files.
+The app needs `ILLO_VAULT_KEY`, as the installer sets it.
+No new environment variable is needed for these chat flows.
+See [the public sign-in address](install.md#the-public-sign-in-address) for a browser address separate from the internal service address.
+
 ## The model sign-in
 
 Each member can use their own ChatGPT subscription with `brain.auth: chatgpt` and `brain.runtime: openai_responses`.
@@ -66,20 +113,12 @@ Check that the provider's terms allow this use. An API key is the alternative.
 
 ## Google for a person
 
-1. Create a Google Cloud project.
-2. Enable the Gmail API, Calendar API, and Drive API.
-3. Set up the OAuth consent screen. Use Internal for a Google Workspace team.
-4. Add these three read-only scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/calendar.readonly`
-   - `https://www.googleapis.com/auth/drive.readonly`
-5. Create an OAuth client of type Web application for a public Illo address.
-6. Add `<ILLO_PUBLIC_URL>/oauth/google/callback` as its redirect URI.
-7. Set `ILLO_GOOGLE_CLIENT_ID` on the Illo host.
-8. Store the client secret with `illo secret set google-client-secret`.
-   You can instead set `ILLO_GOOGLE_CLIENT_SECRET` in the service environment.
-9. Set `ILLO_VAULT_KEY` to a Fernet key. Keep it outside every git checkout.
-10. Add `connectors/google.yaml` to the workspace:
+The chat steps above replace the manual client and file setup.
+As an alternative, set `ILLO_GOOGLE_CLIENT_ID` and `ILLO_GOOGLE_CLIENT_SECRET` in the service environment.
+Each environment value takes priority over its vault value.
+The vault names are `google-client-id` and `google-client-secret`.
+An environment change needs a service restart. A vault change does not.
+A manual personal connector file is still valid:
 
 ```yaml
 kind: google
@@ -90,7 +129,7 @@ scopes:
   - https://www.googleapis.com/auth/drive.readonly
 ```
 
-Restart Illo or reload the workspace. Send `connect my Google` in a Slack DM.
+Send `connect my Google` in a Slack DM.
 Open the one-time link. It expires after 10 minutes.
 Use HTTPS for a public callback and keep the same browser for the whole sign-in.
 Illo binds the callback to a secure, host-only browser cookie.
@@ -103,7 +142,7 @@ Send `disconnect my Google` in a DM to revoke and delete it.
 Run `illo connectors status` on the host to see owners and expiry times.
 This command shows no token or secret.
 
-For a host without a public address, create a Desktop OAuth client.
+For an existing host without a public address, the manual Desktop client setup remains available.
 Use a loopback `ILLO_PUBLIC_URL`, such as `http://127.0.0.1:8000`.
 The DM then gives you the Google sign-in address directly.
 The browser can fail at the final local redirect address. This is expected.

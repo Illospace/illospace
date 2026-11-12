@@ -64,6 +64,10 @@ Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools
 4. Give the brain a model: each member's ChatGPT sign-in, an API key, or an OpenAI-compatible endpoint.
 5. Connect your first agent machine with `illo token create --person <key> --label <machine> --scope collector` and a collector.
 
+Talk to Illo to connect your tools.
+The owner writes `connect Google` one time. Each person writes `connect my Google`.
+Ask "What tools are connected?" or give Illo an MCP server address.
+
 The full steps are in [docs/install.md](docs/install.md).
 
 ## How it works
