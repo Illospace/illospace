@@ -10,11 +10,10 @@ from illo.db import one
 from illo.ledger import github as ledger
 from illo.ledger import kv, runs, sensors
 from illo.tools.registry import ToolContext
-from illo.tools.work import refresh_statuses
 from illo.vault import Vault
 
 WRITE_TOOLS = frozenset({
-    "github_create_issue", "github_assign_issue", "github_comment_issue", "work_start",
+    "github_create_issue", "github_assign_issue", "github_comment_issue",
 })
 
 
@@ -87,7 +86,6 @@ async def poll(ctx) -> None:
                     await changed(ctx, conn, "change" if "pull_request" in item else "ticket", repo=repo, item=item)
             async with ctx.pool.connection() as conn:
                 await kv.set(conn, key, until)
-        await refresh_statuses(ctx)
     except Exception:
         async with ctx.pool.connection() as conn:
             await sensors.error(conn, "github", "The GitHub poll failed",
@@ -169,19 +167,14 @@ async def setup(ctx) -> None:
         "github_create_issue",
         "github_assign_issue",
         "github_comment_issue",
-        "work_start",
     ):
         ctx.draft_performers[name] = perform_draft
 
     async def poll_github():
         await poll(ctx)
 
-    async def refresh_work():
-        await refresh_statuses(ctx)
-
     async def owner_notices():
         await flush_owner_notices(ctx)
 
     ctx.every(60, owner_notices)
-    ctx.every(15, refresh_work)
     ctx.every(ctx.workspace.config.github.poll_seconds, poll_github)

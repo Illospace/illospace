@@ -107,15 +107,8 @@ async def write_preflight(ctx: ToolContext, args: dict) -> Decision:
         if any(label.casefold() in triggers for label in args.get("labels", [])):
             return Decision("draft", "An agent trigger label needs approval")
         return Decision("allow", "The repository is private")
-    name = (
-        "work_start"
-        if "assignee" in args and "title" in args
-        else (
-            "github_create_issue"
-            if "title" in args
-            else ("github_assign_issue" if "assignee" in args else "github_comment_issue")
-        )
-    )
+    name = ("github_create_issue" if "title" in args
+            else "github_assign_issue" if "assignee" in args else "github_comment_issue")
     tool = ctx.app.registry.tools[name]
     return check(ctx.run, replace(tool, risk="send_outside"), args)
 

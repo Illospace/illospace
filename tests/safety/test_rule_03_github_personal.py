@@ -8,7 +8,7 @@ from tests.github.test_tools import CREATE, call
 
 
 @pytest.mark.parametrize(
-    "name", ["github_create_issue", "work_start", "github_comment_issue", "github_assign_issue"]
+    "name", ["github_create_issue", "github_comment_issue", "github_assign_issue"]
 )
 async def test_rule_03_github_after_personal_read(
     app, rpc, rpc_token, github_client, slack_client, name
@@ -25,7 +25,7 @@ async def test_rule_03_github_after_personal_read(
     assert (await call(rpc, token, "mail_search", {}))["decision"] == "allow"
     args = (
         CREATE
-        if name in {"github_create_issue", "work_start"}
+        if name in {"github_create_issue"}
         else {
             "repo": CREATE["repo"],
             "number": 1,

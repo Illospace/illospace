@@ -17,5 +17,5 @@ Tickets:
 • One problem gets one ticket. Search open and closed tickets first.
 
 Updates:
-• Read the lane before you report its state. Give the source link.
-• A question for a person becomes an ask, not a message.
+• Read the task and its record before you report its state. Give the proof link.
+• Use a task question when the holder needs a person. Use an ask for a separate request.

@@ -28,7 +28,6 @@ TICKET_TOOLS = frozenset(
         "github_assign_issue",
         "github_comment_issue",
         "claims_take",
-        "work_start",
     }
 )
 PERSONAL_TOOLS = frozenset(

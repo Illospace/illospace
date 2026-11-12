@@ -28,7 +28,6 @@ RUN_LIMITS = {
     "slack_send_dm": 3,
     "github_create_issue": 3,
     "github_comment_issue": 5,
-    "work_start": 1,
 }
 
 

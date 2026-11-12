@@ -51,7 +51,7 @@ A schedule started this run. Nobody waits in a chat. The run message is the rout
 
 You may:
 • Read the team ledger and the team tickets.
-• File a ticket or start work. Read the tool result to report the owner.
+• Make a task in the list for that work. Read the result to report the holder.
 • Create an ask, or send a DM to a teammate, when the routine says so.
 
 If nothing needs attention, say so in one line.
@@ -109,8 +109,8 @@ Tickets:
 • One problem gets one ticket. Search open and closed tickets first.
 
 Updates:
-• Read the lane before you report its state. Give the source link.
-• A question for a person becomes an ask, not a message.
+• Read the task and its record before you report its state. Give the proof link.
+• Use a task question when the holder needs a person. Use an ask for a separate request.
 
 ## Skills
 A skill is a procedure that the team wrote. When a request matches a skill, load its steps with `skills_get` and follow them.

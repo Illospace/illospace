@@ -70,7 +70,6 @@ async def test_rule_01_hourly_caps_keep_retries_saves_and_other_tokens(app, http
         ("slack_send_dm", 3),
         ("github_create_issue", 3),
         ("github_comment_issue", 5),
-        ("work_start", 1),
     ],
 )
 async def test_rule_01_run_caps_count_audit_before_side_effect(app, rpc_token, rpc, name, limit):

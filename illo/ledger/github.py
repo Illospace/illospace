@@ -1,11 +1,11 @@
-"""Keep GitHub snapshots and status messages in the ledger."""
+"""Keep GitHub run evidence in the ledger."""
 
 import re
 from datetime import UTC, datetime
 
 from psycopg.types.json import Jsonb
 
-from illo.db import Connection, all_rows, one
+from illo.db import Connection, one
 from illo.ledger import lanes, people
 
 
@@ -87,7 +87,7 @@ async def sync_item(conn: Connection, repo: str, item: dict, label_map: dict[str
             {"from": old["state"] if old else None, "to": state},
         )
     if old and owner and old["owner_person_id"] != owner["id"]:
-        # The status message shows the last event. A new owner replaces an older owner note.
+        # Keep the owner change as source evidence.
         await lanes.add_event(conn, row["id"], "owner", f"Owner: {owner['key']}")
     # Resolve links even when the pull request arrived before its issue.
     await conn.execute(
@@ -114,23 +114,6 @@ def item_state(item: dict, label_map: dict[str, str]) -> str:
     if item.get("requested_reviewers") or item.get("requested_teams"):
         return "review"
     return "open" if item.get("state") == "open" else "unknown"
-
-
-async def statuses(conn: Connection) -> list[dict]:
-    return await all_rows(
-        conn,
-        """SELECT l.*,
-        (SELECT text FROM lane_events WHERE lane_id=l.id ORDER BY at DESC,id DESC LIMIT 1) AS last_event
-        FROM lanes l WHERE source='github' AND (slack_ts IS NOT NULL OR EXISTS
-        (SELECT 1 FROM kv WHERE key='github:pending-status:' || l.id::text))
-        ORDER BY id FOR UPDATE OF l SKIP LOCKED""",
-    )
-
-
-async def status_sent(conn: Connection, lane_id: int, channel: str, ts: str) -> None:
-    await conn.execute(
-        "UPDATE lanes SET slack_channel=%s,slack_ts=%s WHERE id=%s", (channel, ts, lane_id)
-    )
 
 
 async def latest_run(conn: Connection) -> dict | None:
