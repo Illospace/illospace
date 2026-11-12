@@ -161,7 +161,6 @@ async def compact_search(
     repo=None,
     limit=15,
     stale_minutes=None,
-    attention=False,
 ):
     """Filter visible rows and counts in SQL before any compact text reaches the model."""
     params = (principal, owner, owner, repo, repo, query, f"%{query}%", f"%{query}%")
@@ -181,12 +180,7 @@ async def compact_search(
         + " GROUP BY l.state",
         params,
     )
-    if attention:
-        selection = """AND (l.state IN ('waiting_person','blocked','failed','review') OR
-          (l.state='working' AND l.last_signal_at<now()-
-          COALESCE((%s::jsonb->>l.source)::integer,30)*interval '1 minute'))"""
-        selected_params = (Jsonb(stale_minutes or DEFAULT_STALE_MINUTES),)
-    elif state:
+    if state:
         selection, selected_params = "AND l.state=%s", (state,)
     elif query.strip():
         selection, selected_params = "", ()

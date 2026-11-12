@@ -142,7 +142,7 @@ class Registry:
         return [
             tool.declaration()
             for _, tool in sorted(self.tools.items())
-            if tool.name not in {"asks_digest", "lanes_attention"}
+            if tool.name not in {"asks_digest"}
             and not (tool.risk == "send_outside" and run.get("person_id") is None)
             and scope(run, tool).outcome == "allow"
         ]
@@ -247,7 +247,7 @@ class Registry:
         envelope = {"decision": decision, "reason": reason, "result": result}
         # Personal snapshots keep complete JSON across all attention aliases.
         if (
-            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "lanes_attention"}
+            name not in {"digest_snapshot", "team_snapshot", "asks_digest"}
             and len(json_text(envelope)) > MAX_RESULT_CHARS
         ):
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."

@@ -28,7 +28,7 @@ async def test_default_read_results_on_live_shape(app, monkeypatch):
         assert result["decision"] == "allow", name
     for name in LIST_TOOLS:
         # The personal snapshot keeps complete JSON for the morning brief.
-        if name not in {"asks_digest", "lanes_attention", "digest_snapshot"}:
+        if name not in {"asks_digest", "digest_snapshot"}:
             assert measured[name]["characters"] <= MAX_RESULT_CHARS, (name, measured[name])
     # The largest normal question paths leave room for prompt and tool declarations.
     assert sum(measured[name]["tokens"] for name in

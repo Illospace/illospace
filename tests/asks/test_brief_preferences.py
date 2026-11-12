@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from illo.db import one
-from illo.ledger import asks, lanes, people, runs, sensors
+from illo.ledger import asks, people, runs, sensors, tasks
 from illo.routines.digest import FIRST_BRIEF, send_due
 from tests.asks.test_digest import NOW, only_ada, posts
 from tests.tool_results import read_result
@@ -148,7 +148,7 @@ async def test_person_time_off_on_and_no_second_send_same_day(app, rpc, fake_bra
     assert len(posts(slack_client)) == 2
 
 
-@pytest.mark.parametrize("trigger", ["ask", "stuck", "fault"])
+@pytest.mark.parametrize("trigger", ["ask", "task", "fault"])
 async def test_needs_mode_records_finished_only_day_then_sends_for_work(
     app, fake_brain, slack_client, trigger
 ):
@@ -158,17 +158,11 @@ async def test_needs_mode_records_finished_only_day_then_sends_for_work(
     ctx.workspace.config.digest.personal = "needs"
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
-        row = await lanes.upsert(
-            conn,
-            source="github",
-            external_id="closed",
-            title="Closed work",
-            state="done",
-            owner_person_id=ada["id"],
-        )
-        await conn.execute(
-            "UPDATE lanes SET closed_at=%s WHERE id=%s", (NOW - timedelta(hours=1), row["id"])
-        )
+        viewer = tasks.Viewer("ada", "person:ada", human=True)
+        row = await tasks.create(conn, workspace=ctx.workspace, viewer=viewer,
+                                 list_key="launches", title="Closed work")
+        await tasks.done(conn, row["id"], workspace=ctx.workspace, viewer=viewer)
+        await conn.execute("UPDATE tasks SET done_at=%s WHERE id=%s", (NOW - timedelta(hours=1), row["id"]))
     await send_due(ctx, NOW)
     assert not posts(slack_client) and not fake_brain.requests
     async with ctx.pool.connection() as conn:
@@ -176,15 +170,9 @@ async def test_needs_mode_records_finished_only_day_then_sends_for_work(
         assert state["last_status"] == "skipped" and state["last_run_at"] == NOW
         if trigger == "ask":
             await asks.create(conn, owner_person_id=ada["id"], question="Which plan?")
-        elif trigger == "stuck":
-            await lanes.upsert(
-                conn,
-                source="manual",
-                external_id="blocked",
-                title="Blocked work",
-                state="blocked",
-                owner_person_id=ada["id"],
-            )
+        elif trigger == "task":
+            await tasks.create(conn, workspace=ctx.workspace, viewer=viewer,
+                               list_key="launches", title="Read the plan", holder="person:ada")
         else:
             await sensors.error(conn, "github", "Example failure")
     await send_due(ctx, NOW + timedelta(minutes=1))
@@ -213,7 +201,7 @@ async def test_first_brief_notice_only_once(app, fake_brain, slack_client, monke
     assert FIRST_BRIEF not in posts(slack_client)[1]["text"]
     if fallback:
         assert (
-            "Do you want me to coordinate something today? Tell me here."
+            "Morning, Ada. Nothing needs you."
             in posts(slack_client)[0]["text"]
         )
 

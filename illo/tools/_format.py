@@ -64,8 +64,7 @@ def rows(values, render, *, total=None, hint="Narrow the query, or pass limit=."
 def lane(row, *, reason=True):
     link = first_link(row.get("links")) or f"lane:{row['id']}"
     repo = row.get("repo")
-    your_move = row.get("source") == "t3" and row["state"] == "review"
-    label = "your_move" if your_move else row["state"]
+    label = row["state"]
     text = line(label + (" stale" if row.get("stale") else ""),
                 short(row["title"], 90), row.get("owner"), row["source"],
                 short(repo, 100) if repo and repo.lower() not in link.lower() else None,
@@ -73,10 +72,8 @@ def lane(row, *, reason=True):
                 link, f"id {row['id']}")
     if row.get("is_step"):
         text += " · agent step"
-    if your_move:
-        text += " · the agent stopped and waits for you"
     if reason and row["state"] in {"waiting_person", "blocked", "failed", "review"}:
-        why = short(row.get("summary") if your_move else row.get("last_event") or row.get("summary"), 200)
+        why = short(row.get("last_event") or row.get("summary"), 200)
         if why:
             text += "\n  " + why
     return text

@@ -12,7 +12,7 @@ github_get_pull: Read one pull request by `repo` and `number`: its body, merge s
 github_search_issues: Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.
 lanes_get: Read one lane by `id`: its summary, links, and last 5 events.
 lanes_mine: Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.
-lanes_search: Search the lanes that this run can see: agent or ticket work with a state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
+lanes_search: Search the lanes that this run can see: raw evidence from agent runs and GitHub with a source state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
 lists: Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work.
 notes_search: Search the team notes only. For anything else, use `search_all`.
 people_get: Read one active team member by their `key`.
@@ -32,5 +32,5 @@ task_post: Add a task message. A holder can ask a blocking question with questio
 task_reopen: Send a task back to its holder with a reason. The state becomes todo and waits_for names the holder. The record keeps the reason.
 task_update: Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility.
 task_wake: Wake the agent holder and record the person who requests the restart.
-team_snapshot: Read the team's state for the team brief: what shipped, what is stuck, and what waits for whom. It holds team-visible data only, never a private lane or a private ask.
+team_snapshot: Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.
 web_read_public_page: Read one public web page whose URL is in the run message, or the root page of that host. In a run from outside text, only the first URL of the message, once. Refused after this run read personal data.

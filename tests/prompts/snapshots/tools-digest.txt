@@ -1,1 +1,1 @@
-digest_snapshot: Read what needs this person now: their open asks, reviews, agent threads that wait for them (kind `your_move`), stuck work, work in progress, finished work, and service faults. Call it first for 'what needs me?'. It counts as a personal read.
+digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.

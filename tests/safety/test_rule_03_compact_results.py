@@ -7,7 +7,7 @@ from illo.ledger import asks, lanes, people, runs
 from illo.tools.registry import ToolContext
 
 
-@pytest.mark.parametrize("name", ["lanes_search", "lanes_mine", "lanes_attention",
+@pytest.mark.parametrize("name", ["lanes_search", "lanes_mine", "digest_snapshot",
                                   "asks_list", "asks_digest"])
 async def test_rule_03_compact_private_read_marks_run(app, name):
     ctx = app.state.ctx
@@ -65,14 +65,14 @@ async def test_rule_03_attention_person_routine_and_team_visibility(app):
             ("team","routine",None,"deny"), ("person:ada","routine",ada["id"],"deny")):
             run = await runs.create(conn,principal=principal,person_id=person_id,profile=profile,
                                     runtime="fake",model="fake")
-            result = await ctx.registry.call(ToolContext(conn,run,ctx),"lanes_attention",{})
+            result = await ctx.registry.call(ToolContext(conn,run,ctx),"digest_snapshot",{})
             assert result["decision"] == expected
             assert "Private work" not in str(result)
 
 
 @pytest.mark.parametrize("principal,profile,name", [
     ("person:ada", "person_dm", name) for name in
-    ("lanes_search", "lanes_mine", "lanes_attention", "asks_list", "asks_digest")
+    ("lanes_search", "lanes_mine", "digest_snapshot", "asks_list", "asks_digest")
 ] + [("team", "team_channel", name) for name in ("lanes_search", "asks_list")])
 async def test_rule_03_hidden_rows_do_not_change_compact_text_or_counts(app, principal, profile, name):
     ctx = app.state.ctx
@@ -94,4 +94,4 @@ async def test_rule_03_hidden_rows_do_not_change_compact_text_or_counts(app, pri
         assert after["decision"] == before["decision"] == "allow"
         assert after["result"] == before["result"]
         # The digest always marks a personal read, including an empty result.
-        assert (await runs.get(conn, run["id"]))["personal_read"] == (name in {"asks_digest", "lanes_attention"})
+        assert (await runs.get(conn, run["id"]))["personal_read"] == (name in {"asks_digest", "digest_snapshot"})

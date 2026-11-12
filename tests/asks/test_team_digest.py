@@ -7,10 +7,10 @@ import pytest
 
 from illo.brain.client import BrainEvent, ProviderAuth
 from illo.db import one
-from illo.ledger import asks, lanes, people, sensors
-from illo.ledger.digest_snapshot import TEAM_STATE_KEY, team_snapshot
+from illo.ledger import tasks
+from illo.ledger.digest_snapshot import TEAM_STATE_KEY
 from illo.routines.scheduler import tick_routines
-from illo.routines.team_digest import DEFAULT_INSTRUCTIONS, fallback_text, send_team_due
+from illo.routines.team_digest import DEFAULT_INSTRUCTIONS, send_team_due
 from illo.tools.checks import in_grant
 from illo.workspace import Routine, TeamDigestConfig
 from tests.asks.test_digest import NOW, posts
@@ -25,122 +25,19 @@ def configure(ctx):
     return ctx.workspace.config
 
 
-async def lane(
-    conn, owner, title, *, age=1, source="t3", state="working", visibility="team", step=False
-):
-    row = await lanes.upsert(
-        conn,
-        source=source,
-        external_id=title,
-        title=title,
-        state=state,
-        owner_person_id=owner["id"] if owner else None,
-        visibility=visibility,
-        links=["example://app/1", {"url": "https://example.com/" + title}],
-        is_step=step,
-    )
-    await conn.execute(
-        "UPDATE lanes SET last_signal_at=%s,closed_at=%s WHERE id=%s",
-        (
-            NOW - timedelta(hours=age),
-            NOW - timedelta(hours=age) if state in {"done", "failed"} else None,
-            row["id"],
-        ),
-    )
+async def team_task(conn, workspace, title, *, done=False, due=None):
+    viewer = tasks.Viewer("ada", "person:ada", human=True)
+    row = await tasks.create(conn, workspace=workspace, viewer=viewer, list_key="launches",
+                             title=title, holder="person:ada", due_at=due)
+    if done:
+        await tasks.done(conn, row["id"], workspace=workspace, viewer=viewer)
+        await conn.execute("UPDATE tasks SET done_at=%s WHERE id=%s", (NOW - timedelta(hours=1), row["id"]))
     return row
-
-
-async def test_team_snapshot_visibility_waiting_stale_steps_and_faults(conn, ada, ben, workspace):
-    config = workspace.config.model_copy(deep=True)
-    config.brain.team_credential = "ben"
-    private = await lane(conn, ada, "Private-lane", state="blocked", visibility="private")
-    public = await lane(conn, ada, "Public-lane", state="working", age=2)
-    await lane(conn, ben, "Recent-GitHub", source="github", age=11)
-    await lane(conn, ada, "Recent-T3", age=0)
-    await lane(conn, None, "No-owner", state="blocked", age=30)
-    await lanes.add_event(conn, public["id"], "update", "The agent needs access.")
-    await conn.execute(
-        "UPDATE lanes SET last_signal_at=%s WHERE id=%s", (NOW - timedelta(hours=2), public["id"])
-    )
-    await asks.create(
-        conn, owner_person_id=ada["id"], lane_id=private["id"], question="Private question"
-    )
-    await asks.create(conn, owner_person_id=ada["id"], question="Question without a lane")
-    for owner in (ada, ada, ben):
-        ask = await asks.create(
-            conn, owner_person_id=owner["id"], lane_id=public["id"], question="Sensitive question"
-        )
-        await conn.execute(
-            "UPDATE asks SET created_at=%s WHERE id=%s", (NOW - timedelta(hours=30), ask["id"])
-        )
-    for source in ("github", "t3"):
-        review = await lane(conn, ben, "Review-" + source, source=source, state="review", age=1)
-        await conn.execute(
-            "INSERT INTO lane_events (lane_id,kind,text,at) VALUES (%s,'state','Review',%s)",
-            (review["id"], NOW - timedelta(hours=20)),
-        )
-    for title, state, step, visibility in (
-        ("Done", "done", False, "team"),
-        ("Failed", "failed", False, "team"),
-        ("Step", "done", True, "team"),
-        ("Failed-step", "failed", True, "team"),
-        ("Private-done", "done", False, "private"),
-    ):
-        await lane(conn, ada, title, state=state, step=step, visibility=visibility)
-    for key in ("chatgpt:ada", "chatgpt:ben", "github", "asks:slack"):
-        await sensors.error(conn, key, "Example failure")
-    await sensors.ok(conn, "asks:slack")
-    data = await team_snapshot(conn, config, NOW)
-    assert "Private" not in str(data) and "question" not in str(data)
-    assert data["shipped_total"] == 1 and data["shipped_steps"] == 1
-    assert data["closed_not_done"] == 2
-    assert {r["state"] for r in data["shipped"]} == {"done"}
-    assert all(
-        r["owner"] == "Ada" and r["source"] == "t3" and r["link"].startswith("https:")
-        for r in data["shipped"]
-    )
-    assert {r["title"] for r in data["stuck"]} == {"Public-lane", "No-owner"}
-    assert data["stuck"][1]["last_event"] == "The agent needs access."
-    assert data["in_progress"] == {"Ben": 1, "Ada": 1}
-    waiting = {r["key"]: r for r in data["waiting"]}
-    assert waiting["ada"]["asks"] == 2 and waiting["ada"]["oldest_hours"] == 30
-    assert waiting["ben"]["asks"] == 1 and waiting["ben"]["your_moves"] == 1
-    assert waiting["ben"]["reviews"][0]["hours"] == 20
-    assert waiting["ben"]["slack_id"] == ben["slack_id"]
-    assert data["team"] == "Acme" and data["people"]["Ada"] == ada["slack_id"]
-    assert [r["key"] for r in data["faults"]] == ["chatgpt:ben", "github"]
-    config.stale_minutes.github = 600
-    assert "Recent-GitHub" in {
-        r["title"] for r in (await team_snapshot(conn, config, NOW))["stuck"]
-    }
-
-
-async def test_team_window_is_separate_and_keeps_full_titles_and_counts(conn, ada, workspace):
-    full = "The full title of the example work with all details " * 5
-    for i in range(24):
-        await lane(conn, ada, full + str(i), state="done", age=1)
-    await lane(conn, ada, "Old", state="done", age=25)
-    await conn.execute(
-        "INSERT INTO routine_state (key,last_run_at) VALUES ('digest:ada',%s)", (NOW,)
-    )
-    data = await team_snapshot(conn, workspace.config, NOW)
-    assert data["shipped_total"] == 24 and len(data["shipped"]) == 20
-    assert all(r["title"].startswith(full) for r in data["shipped"])
-    await conn.execute(
-        "INSERT INTO routine_state (key,last_run_at) VALUES (%s,%s)",
-        (TEAM_STATE_KEY, NOW - timedelta(hours=26)),
-    )
-    assert (await team_snapshot(conn, workspace.config, NOW))["shipped_total"] == 25
-    await conn.execute(
-        "UPDATE routine_state SET last_run_at=%s WHERE key=%s", (NOW, TEAM_STATE_KEY)
-    )
-    assert (await team_snapshot(conn, workspace.config, NOW))["shipped"] == []
 
 
 async def seed_team(ctx):
     async with ctx.pool.connection() as conn:
-        ada = await people.get(conn, "ada")
-        await lane(conn, ada, "Check-plan", state="blocked")
+        await team_task(conn, ctx.workspace, "Check-plan", due=NOW - timedelta(hours=1))
 
 
 async def test_team_model_principal_credential_single_tool_and_once_per_local_day(
@@ -236,11 +133,9 @@ async def test_team_fallback_on_failure_and_timeout(
     await send_team_due(ctx, due)
     assert len(posts(slack_client)) == 1
     assert posts(slack_client)[0]["text"].startswith(
-        "Morning, team.\nStuck:\n• <https://example.com/Check-plan|Check-plan> — Ada, no signal for 6 h"
+        "Morning, team.\nWaiting on people:"
     )
-    assert posts(slack_client)[0]["text"].endswith(
-        "Reply in this thread if you want me to coordinate something."
-    )
+    assert "Stuck:\n• #1 Check-plan: past the due time. Ada must act." in posts(slack_client)[0]["text"]
 
 
 async def test_empty_team_day_is_recorded_without_model_or_delivery(app, fake_brain, slack_client):
@@ -248,9 +143,9 @@ async def test_empty_team_day_is_recorded_without_model_or_delivery(app, fake_br
     configure(ctx)
     due = NOW + timedelta(hours=5)
     async with ctx.pool.connection() as conn:
-        ada = await people.get(conn, "ada")
-        await lane(conn, ada, "Working", age=0)
-        await conn.execute("UPDATE lanes SET last_signal_at=%s", (due,))
+        from illo.ledger import lanes
+
+        await lanes.upsert(conn, source="t3", external_id="working", title="Working", state="working")
     await send_team_due(ctx, due)
     await seed_team(ctx)
     await send_team_due(ctx, due + timedelta(minutes=1))
@@ -282,7 +177,7 @@ async def test_team_retry_uses_frozen_snapshot_text_and_delivery_key(
 
         async def change(request):
             async with ctx.pool.connection() as conn:
-                await conn.execute("UPDATE lanes SET title='Changed after snapshot'")
+                await conn.execute("UPDATE tasks SET title='Changed after snapshot'")
             async for event in original(request):
                 yield event
 
@@ -301,7 +196,7 @@ async def test_team_retry_uses_frozen_snapshot_text_and_delivery_key(
     with pytest.raises(RuntimeError):
         await send_team_due(ctx, due)
     async with ctx.pool.connection() as conn:
-        await conn.execute("DELETE FROM lanes")
+        await conn.execute("TRUNCATE tasks CASCADE")
     await send_team_due(ctx, due)
     assert attempts[0] == attempts[1] and attempts[0]["client_msg_id"]
     assert len(posts(slack_client)) == 1
@@ -340,34 +235,6 @@ async def test_team_instruction_file_and_no_separate_routine(app, fake_brain, tm
     assert fake_brain.requests[0].user_message == text.replace("{team}", "Acme")
     async with ctx.pool.connection() as conn:
         assert not await one(conn, "SELECT 1 FROM events WHERE channel='routine'")
-
-
-def test_team_fallback_words_limits_and_singular_forms():
-    item = {
-        "title": "A & B",
-        "link": "https://example.com/plan",
-        "owner": "Ada",
-        "hours_since_signal": 30,
-    }
-    text = fallback_text(
-        {
-            "stuck": [item] * 5,
-            "waiting": [
-                {"name": "Ben", "asks": 1, "reviews": [{}, {}], "your_moves": 1},
-                {"name": "Ada", "asks": 0, "reviews": [], "your_moves": 2},
-            ],
-            "shipped_total": 23,
-            "shipped": [item] * 20,
-            "faults": [{"what": "The last GitHub request failed."}],
-        }
-    )
-    assert text == (
-        "Morning, team.\nStuck:\n"
-        + "• <https://example.com/plan|A &amp; B> — Ada, no signal for 30 h\n" * 3
-        + "and 2 more\nWaiting:\n• Ben: 1 decision, 2 reviews, 1 thread\n• Ada: 2 threads\nShipped: 23.\n"
-        + "• <https://example.com/plan|A &amp; B>\n" * 3
-        + "Not working:\nThe last GitHub request failed.\nReply in this thread if you want me to coordinate something."
-    )
 
 
 async def test_team_tool_list_and_denials_use_actual_http(app, fake_brain, monkeypatch):
@@ -424,9 +291,8 @@ async def test_team_tool_keeps_complete_large_snapshot(app, rpc, rpc_token, monk
     monkeypatch.setattr("illo.tools.digest.datetime", Clock)
     ctx = app.state.ctx
     async with ctx.pool.connection() as conn:
-        ada = await people.get(conn, "ada")
         for i in range(20):
-            await lane(conn, ada, ("The complete example title " * 30) + str(i), state="done")
+            await team_task(conn, ctx.workspace, ("The complete example title " * 30) + str(i), done=True)
     _, token = rpc_token
     result = read_result(
         (await rpc(token, "tools/call", {"name": "team_snapshot", "arguments": {}})).json()[
@@ -435,8 +301,8 @@ async def test_team_tool_keeps_complete_large_snapshot(app, rpc, rpc_token, monk
     )
     assert result["decision"] == "allow"
     data = snapshot_data(result["result"])
-    assert len(data["shipped"]) == 20
-    assert all(len(r["title"]) > 700 for r in data["shipped"])
+    assert len(data["finished"]) == 7 and data["finished_total"] == 20
+    assert all(len(r["title"]) > 700 for r in data["finished"])
 
 
 async def test_team_channel_delivery_uses_mrkdwn_chunks_and_stable_part_keys(

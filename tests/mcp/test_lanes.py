@@ -169,10 +169,8 @@ async def test_step_fields_are_optional_and_preserved(app, http):
 
 
 async def test_reopened_lane_clears_closure_and_saved_summary(app, http):
-    from datetime import UTC, datetime
-
     from illo.asks.service import is_live
-    from illo.ledger import ask_workflow, asks, digest_snapshot, lanes, people
+    from illo.ledger import ask_workflow, asks
 
     agent = await AgentClient.create(app, http)
     ref = {"source": "t3", "external_id": "thread-a"}
@@ -186,13 +184,6 @@ async def test_reopened_lane_clears_closure_and_saved_summary(app, http):
         await ask_workflow.record_decisions(conn)
         assert await one(conn, "SELECT * FROM items WHERE source_ref=%s",
                          (f"lane:{lane['id']}:end",)) is None
-        data = await digest_snapshot.build(conn, await people.get(conn, "ada"), datetime.now(UTC))
-        assert data["finished"] == [] and data["finished_total"] == 0
-        assert data["needs_you"][0]["kind"] == "your_move"
-        rows, _, _ = await lanes.compact_search(
-            conn, principal="person:ada", attention=True,
-        )
-        assert [row["id"] for row in rows] == [lane["id"]]
         ask = await asks.create(conn, lane_id=lane["id"], owner_person_id=lane["owner_person_id"],
                                 question="Which check comes next?", source_ref="t3:thread-a:request-a")
         assert await is_live(conn, ask)

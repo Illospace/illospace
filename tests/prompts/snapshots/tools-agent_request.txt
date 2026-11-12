@@ -16,7 +16,7 @@ github_get_pull: Read one pull request by `repo` and `number`: its body, merge s
 github_search_issues: Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.
 lanes_get: Read one lane by `id`: its summary, links, and last 5 events.
 lanes_mine: Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.
-lanes_search: Search the lanes that this run can see: agent or ticket work with a state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
+lanes_search: Search the lanes that this run can see: raw evidence from agent runs and GitHub with a source state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
 lists: Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work.
 notes_propose: Propose a team note with `title` and `text`. The person you act for gets a card, and the note is saved only when they tap Keep; until then the result is pending, so say that the note waits for their approval.
 notes_search: Search the team notes only. For anything else, use `search_all`.

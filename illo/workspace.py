@@ -115,6 +115,7 @@ class GitHubConfig(Model):
 
 
 class TeamDigestConfig(Model):
+    send_empty: bool = False
     channel: str
     schedule: str = "0 9 * * 1-5"
 

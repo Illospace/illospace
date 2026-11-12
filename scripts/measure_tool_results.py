@@ -35,7 +35,7 @@ from tests.fakes import FakeGitHubClient, FakeGoogleClient, FakeMCPSession, Fake
 ROOT = Path(__file__).resolve().parents[1]
 TYPICAL_ARGS = {
     "lanes_search": {}, "lanes_mine": {}, "lanes_get": {"id": 781},
-    "lanes_attention": {}, "asks_list": {}, "asks_digest": {}, "asks_get": {"id": 1},
+    "asks_list": {}, "asks_digest": {}, "asks_get": {"id": 1},
     "search_all": {"query": "mobile app"}, "search_get": {"source_ref": "archive:1"},
     "notes_search": {"query": "mobile app"}, "people_list": {}, "people_get": {"key": "ada"},
     "rules_list": {}, "connectors_list": {}, "skills_get": {"name": "missing"},
@@ -53,7 +53,7 @@ TYPICAL_ARGS = {
     "connectors_call": {"connector": "docs", "tool": "read"},
 }
 LIST_TOOLS = {
-    "lanes_search", "lanes_mine", "lanes_attention", "asks_list", "asks_digest",
+    "lanes_search", "lanes_mine", "asks_list", "asks_digest",
     "search_all", "notes_search", "github_search_issues", "people_list", "rules_list",
     "lists", "task_list", "connectors_list", "mail_search", "drive_search", "drive_shared_search", "calendar_list",
 }

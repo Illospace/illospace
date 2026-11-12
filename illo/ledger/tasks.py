@@ -114,6 +114,8 @@ async def _event(conn, row, actor, kind, text="", data=None):
     if actor == row.get("holder") or kind == "reopened":
         await conn.execute("UPDATE tasks SET stopped_at=NULL WHERE id=%s", (row["id"],))
     data = {**(data or {}), "waits_for": row["waits_for"]}
+    if kind == "released":
+        data["holder"] = row["holder"]
     event = await one(conn, """INSERT INTO task_events (task_id,actor,kind,text,data)
         VALUES (%s,%s,%s,%s,%s) RETURNING *""", (row["id"], actor, kind, text, Jsonb(data)))
     await kv.set(conn, f"task:pending:{row['id']}", {"event": event["id"]})

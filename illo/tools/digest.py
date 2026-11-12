@@ -23,7 +23,7 @@ async def digest_snapshot_read(ctx, args):
     else:
         snapshot = await digest_snapshot.build(
             ctx.conn, person, datetime.now(UTC),
-            ctx.app.workspace.config.stale_minutes.model_dump(by_alias=True),
+            ctx.app.workspace,
         )
     return data_text("snapshot", json_text(snapshot))
 
@@ -37,7 +37,7 @@ async def team_snapshot_read(ctx, args):
         snapshot = event["payload"]["payload"]["team_snapshot"]
     else:
         snapshot = await digest_snapshot.team_snapshot(
-            ctx.conn, ctx.app.workspace.config, datetime.now(UTC)
+            ctx.conn, ctx.app.workspace, datetime.now(UTC)
         )
     return data_text("team-snapshot", json_text(snapshot))
 
@@ -87,7 +87,7 @@ def register(registry):
             lambda args: "ledger",
             True,
             digest_snapshot_read,
-            "Read what needs this person now: their open asks, reviews, agent threads that wait for them (kind `your_move`), stuck work, work in progress, finished work, and service faults. Call it first for 'what needs me?'. It counts as a personal read.",
+            "Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.",
             Arguments,
             profiles=frozenset({"person_dm"}),
         )
@@ -101,7 +101,7 @@ def register(registry):
             lambda args: "ledger",
             False,
             team_snapshot_read,
-            "Read the team's state for the team brief: what shipped, what is stuck, and what waits for whom. It holds team-visible data only, never a private lane or a private ask.",
+            "Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.",
             Arguments,
             profiles=frozenset({"routine", "team_channel", "person_dm"}),
         )
