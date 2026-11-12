@@ -10,6 +10,7 @@ Lists hold each team's instructions and Done rules. People and outside agents do
 The task list is the picture of work. Lanes are run evidence from collectors.
 Asks, alerts, and knowledge tools stay available.
 See [Lists and tasks](tasks.md) for the task contract.
+See [Team memory](memory.md) for chat saves, correction buttons, and memory limits.
 
 Design goals, in order:
 1. **Safe by code, not by prompt.** The ten safety rules of section 4 live in server code and have tests.
@@ -100,8 +101,8 @@ The gateway gives each run one profile. The profile decides the tool list. `illo
 
 | Profile | When | Principal | Tools |
 |---|---|---|---|
-| `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | all tools |
-| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `asks_create`, `slack_read_thread` |
+| `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | personal and team tools, including `note_save` and `list_save`; no `notes_propose` |
+| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `asks_create`, `slack_read_thread`, `note_save`, `list_save` |
 | `routine` | a team routine | `team` | team reads, create an unassigned issue, `asks_create`, `slack_send_dm` |
 | `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, create an unassigned issue, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
 | `tainted` | a bot, webhook, or form post; a forwarded email; a signal; a Slack thread with outside text | `team`, or the person of a forwarded email | up to 8 tools (below) |
@@ -168,6 +169,7 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `asks`: `lane_id` (nullable), `kind` (`decision`, `action`, `review`, `reminder`), `requester_token_id` (nullable), `requester_person_id` (nullable), `owner_person_id`, `question`, `options jsonb` (list of `{id, label, detail}`), `recommended_option`, `proof jsonb` (text and links), `due_at`, `expires_at`, `state` (`open`, `answered`, `expired`, `cancelled`), `answer_option`, `answer_text`, `answered_by_person_id`, `answered_via` (`person`, `rule`, `approved_draft`), `rule_id`, `answered_at`, `delivery_state` (`none`, `pending`, `delivered`, `acked`, `failed`), `delivery_attempts`, `delivered_at`, `acked_at`, `slack_channel`, `slack_ts`, `reminded_at`, `source_ref` (the thing in the source system that this ask mirrors, for the stale check).
 - `rules`: `owner_person_id`, `scope` (`person`, `team`), `kind` (`always_allow`, `standing_answer`), `match jsonb` (ask kind, lane source, repository, requester, a question pattern), `answer_option_id`, `answer_option_label`, `answer_option_detail`, `text`, `origin` (`card`, `file`, `proposal`), `uses`, `removed_at`.
 - `items`: the search table. `kind` (`saved`, `decision`, `note`, `lane_summary`, `archive`, `slack`, `github`, `doc`), `source_ref` (unique), `title`, `body`, `summary`, `owner_person_id`, `visibility` (`team`, `private`), `links jsonb`, `meta jsonb`, `source_at`, `tsv tsvector` (generated from title, summary, body; GIN index).
+- `memory_changes`: note and list changes, with the person, run, earlier text, saved text, state, and Slack correction thread.
 - `submissions`: the receipts of `illo_submit`. `event_id text` (unique, opaque), `token_id`, `idempotency_key`, unique (`token_id`, `idempotency_key`), `desired_outcome`, `envelope jsonb`, `envelope_digest`, `status`, `result jsonb`, `completed_at`, `run_id`.
 - `drafts`: `run_id`, `approver_person_id`, `kind`, `destination`, `content jsonb`, `state` (`pending`, `approved`, `rejected`, `sent`, `expired`), `slack_channel`, `slack_ts`, `decided_at`.
 - `signals`: `token_id`, `source`, `dedupe_key`, unique (`source`, `dedupe_key`), `severity`, `title`, `body`, `data jsonb`, `status` (`received`, `ticketed`, `ignored`), `ticket_url`.
@@ -220,6 +222,7 @@ Tool names use `family_verb`. Each family is one file in `illo/tools/`. The regi
 | `skills` | `skills_get` |
 | `rules` | `rules_list`, `rules_remove_mine` |
 | `notes` | `notes_search`, `notes_propose` |
+| `memory` | `note_save`, `list_save` |
 | `web` | `web_read_public_page` (a URL of the event text or the root of its host; text only; no private address) |
 | `connectors` | `connectors_list`, `connectors_call` (a team connector through the MCP client, with a risk level for each tool) |
 | `personal` | `mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get` (personal connectors, read-only), `drive_shared_search`, `drive_shared_get` (the team shared drive) |

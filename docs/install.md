@@ -1,5 +1,12 @@
 # Install Illo
 
+## Push the workspace from the host
+
+Memory changes make local commits in the workspace repository.
+The container holds no git credential. The host pushes the workspace.
+Use `git -C <workspace> push` in a host timer with the host's own git sign-in.
+`workspace.git_push` stays off by default. See [Team memory](memory.md).
+
 Use one Linux host with Git, Bash, Python 3.9 or later, and Docker Engine.
 Give the Docker user access to Docker before you start.
 Allow at least 3 GB of memory and outbound HTTPS.

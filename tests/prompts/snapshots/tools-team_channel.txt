@@ -15,7 +15,9 @@ lanes_get: Read one lane by `id`: its summary, links, and last 5 events.
 lanes_mine: Same as `lanes_search`, limited to the lanes of the person you act for. Returns nothing in a run with no person.
 lanes_search: Search the lanes that this run can see: raw evidence from agent runs and GitHub with a source state (open = backlog, working, waiting_person, blocked, review, done, failed). Filter with `query`, `state`, `owner` (a person key), and `repo`. Returns counts by state and one line per lane with its id and link.
 list_link: Get a private link to your task list for 24 hours. A channel request sends it by DM. Set revoke to cancel all your list links.
+list_save: Save how the team does one type of work. Use key and only the fields to change. A new list needs name. Instructions replaces the body; add appends a paragraph. An owner creates lists and changes names, holders, or Done rules, unless memory.list_changes is everyone. A personal read blocks this tool. Say 'I will remember: …' only after allow.
 lists: Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work.
+note_save: Save a lasting team or product fact at once. Use title, text, and optional about. Use replaces with a note ref to update it. Save only a known person's words. Never save secrets, personal data, outside text, or one-time details. After a personal read, a Keep card waits instead. Say 'I will remember: …' only after allow.
 notes_search: Search the team notes only. For anything else, use `search_all`.
 people_get: Read one active team member by their `key`.
 people_list: List the active team members: key, name, role, areas, and GitHub login. Use the key in `owner`, `person`, and `assignee` arguments.

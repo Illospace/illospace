@@ -5,11 +5,12 @@ import tempfile
 from pathlib import Path
 
 
-def file_path(root: Path, folder_name: str, file_name: str) -> Path:
+def file_path(root: Path, folder_name: str, file_name: str, *, create=True) -> Path:
     folder = root / folder_name
     if folder.is_symlink() or Path(file_name).name != file_name:
         raise ValueError("The workspace path is invalid")
-    folder.mkdir(exist_ok=True)
+    if create:
+        folder.mkdir(exist_ok=True)
     path = folder / file_name
     if path.is_symlink() or path.resolve().parent != folder.resolve():
         raise ValueError("The workspace path is invalid")

@@ -7,6 +7,7 @@ import pytest
 
 from illo.cli import parser
 from illo.workspace import WorkspaceError, fingerprint, load_workspace
+from tests.workspaces import task_workspace
 
 ROOT = Path(__file__).parents[2]
 
@@ -14,7 +15,7 @@ ROOT = Path(__file__).parents[2]
 @pytest.fixture
 def root(tmp_path):
     shutil.copytree(ROOT / "workspace.example", tmp_path / "workspace")
-    return tmp_path / "workspace"
+    return task_workspace(tmp_path / "workspace")
 
 
 def test_lists_agents_and_default_list(root):
@@ -83,6 +84,7 @@ def test_effort_config_defaults_and_validation():
 async def test_live_reload_keeps_old_lists_on_error(app, tmp_path):
     ctx = app.state.ctx
     shutil.copytree(ROOT / "workspace.example", tmp_path / "workspace")
+    task_workspace(tmp_path / "workspace")
     ctx.config.workspace_dir = tmp_path / "workspace"
     old = ctx.workspace
     (ctx.config.workspace_dir / "lists/bad.md").write_text("---\nname: Bad\ndone: []\n---\nText")

@@ -209,10 +209,9 @@ async def test_team_instruction_file_and_no_separate_routine(app, fake_brain, tm
     import shutil
 
     from illo.workspace import load_workspace
-    from tests.conftest import ROOT
 
     root = tmp_path / "workspace"
-    shutil.copytree(ROOT / "workspace.example", root)
+    shutil.copytree(app.state.ctx.workspace.root, root)
     text = "Write for {team}. Call team_snapshot."
     (root / "routines/team-digest.md").write_text(text)
     ctx = app.state.ctx

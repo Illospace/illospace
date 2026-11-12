@@ -24,6 +24,11 @@ class Gateway:
         self.claims = []
         self.preparers = []
         self.payload_filters = []
+        self.finalizers = []
+
+    def register_finalizer(self, fn) -> None:
+        """Run a code notice after the channel delivers the answer."""
+        self.finalizers.append(fn)
 
     def register(self, channel: str, adapter: ChannelAdapter) -> None:
         """A channel's setup hook registers its delivery adapter."""
@@ -155,6 +160,8 @@ class Gateway:
 
                 text = await self.run_manager.execute(event, authority, row["id"], relay)
             await adapter.deliver_final(event, text)
+            for finalize in self.finalizers:
+                await finalize(ctx, event, row["id"])
             async with ctx.pool.connection() as conn:
                 await conn.execute(
                     """

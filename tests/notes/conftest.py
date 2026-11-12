@@ -19,6 +19,15 @@ async def note_ctx(app, tmp_path):
 
 
 @pytest.fixture
+async def rpc_token(rpc_token, app):
+    run, token = rpc_token
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE runs SET profile='agent_request' WHERE id=%s", (run["id"],))
+    run["profile"] = "agent_request"
+    return run, token
+
+
+@pytest.fixture
 async def proposal(note_ctx, rpc, rpc_token):
     run, token = rpc_token
     response = await rpc(

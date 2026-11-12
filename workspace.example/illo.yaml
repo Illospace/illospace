@@ -17,7 +17,6 @@ slack:
       mode: coordinator
       rule_files: [rules/team.md, rules/alerts-coordinator.md]
 github:
-  task_list: bugs
   repositories: [acme-example/engine]
 digest:
   schedule: '0 9 * * 1-5'

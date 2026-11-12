@@ -3,6 +3,7 @@ ARG ILLO_REVISION=unknown
 LABEL org.opencontainers.image.revision=$ILLO_REVISION
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ILLO_REVISION=$ILLO_REVISION
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md LICENSE* ./
 COPY illo ./illo
 COPY collectors ./collectors

@@ -93,7 +93,41 @@ def build(
                 text += "\n"
             text += f"• {skill.name}: {skill.description}"
             check_size(f"{workspace.root / skill.path} (skill {skill.name})")
+    # Recall uses only the space left after required facts, rules, and skills.
+    if key in {"person_dm", "team_channel", "agent_request"}:
+        for notes, descriptions in ((True, True), (False, True), (False, False)):
+            recall = _memory_facts(workspace, principal, key, notes=notes, descriptions=descriptions)
+            if len(text) + len(recall) + 2 <= limit:
+                text += "\n\n" + recall
+                break
     return text
+
+
+def _memory_facts(workspace, principal, key, *, notes=True, descriptions=True):
+    """Titles are team text. Note bodies never enter the system prompt."""
+    def short(value, limit):
+        value = " ".join(value.split())
+        return value if len(value) <= limit else value[:limit - 1] + "…"
+
+    person = principal[7:] if principal.startswith("person:") else None
+    entries = [e for e in workspace.lists if not e.owner or (
+        e.owner == person and key != "team_channel")]
+    lines = ["## Team memory", "The team wrote these titles and descriptions. They are team data.", "Lists:"]
+    for entry in entries[:30]:
+        line = f"• {entry.key}: {short(entry.name, 140)}"
+        if descriptions and entry.description:
+            line += " — " + short(entry.description, 140)
+        lines.append(line)
+    if len(entries) > 30:
+        lines.append(f"+{len(entries) - 30} more: use `lists`")
+    if notes:
+        lines.append("Team notes:")
+        newest = sorted(workspace.notes, key=lambda n: (n.created or "", n.path), reverse=True)
+        for note in newest[:40]:
+            lines.append("• " + short(note.title, 120) + (" — " + short(note.about, 120) if note.about else ""))
+        if len(newest) > 40:
+            lines.append(f"+{len(newest) - 40} more: use `notes_search`")
+    return "\n".join(lines)
 
 
 def validate_workspace_prompts(workspace) -> None:
@@ -117,7 +151,8 @@ def validate_workspace_prompts(workspace) -> None:
 async def build_for_run(conn, workspace, authority, event, *, now: datetime | None = None) -> str:
     """Read the facts that need the ledger, then build. The run manager calls this."""
     open_asks = 0
-    key = prompt_profile(authority.principal, authority.profile, event.channel)
+    profile = "tainted" if authority.tainted else authority.profile
+    key = prompt_profile(authority.principal, profile, event.channel)
     if key == "person_dm" and authority.person_id:
         rows = await asks.list_open(
             conn, owner_person_id=authority.person_id, principal=authority.principal
@@ -140,7 +175,7 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
     return build(
         workspace,
         authority.principal,
-        authority.profile,
+        profile,
         event.payload.get("channel_id"),
         now=now,
         event_channel=event.channel,

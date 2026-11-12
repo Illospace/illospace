@@ -53,6 +53,11 @@ A dry run changes no rows. Repeated imports update the same item.
 
 ## Keep a note
 
+People save team notes at once with `note_save` in a DM or team channel.
+Code posts Correct and Forget buttons after the answer. See [Team memory](memory.md).
+After a personal read, `note_save` sends the Keep card below and returns `draft`.
+`notes_propose` remains available only to agent requests.
+
 `notes_search(query)` reads confirmed team notes.
 `notes_propose(title, text, about)` sends the requester a DM card.
 The card says `I noted: <text>` and has Keep, Correct…, and Remove buttons.
@@ -60,8 +65,7 @@ Keep writes the file. Correct… requests the replacement text in that DM thread
 The owner's next reply in that thread writes the corrected file. Remove deletes the proposal.
 A button must belong to that owner and that card in the DM.
 
-A team or tainted run cannot propose a note.
-A run that reads personal data first creates a draft for the requester.
+An agent run that reads personal data first creates a draft for the requester.
 Draft approval permits a proposal; Keep still confirms the team note.
 A note always has team visibility.
 
@@ -89,6 +93,8 @@ workspace:
   git_push: true
 ```
 
-The default is false. The workspace needs a Git checkout and a remote.
+The default is false. Direct memory saves still make local commits.
+The host pushes them with `git -C <workspace> push`. The container holds no git credential.
+Automatic pushes need a Git checkout and a remote.
 The commit contains only the note. A failed commit or push leaves the file in place.
 The `workspace` sensor reports the failure. Git credentials stay outside the workspace.

@@ -77,6 +77,8 @@ class Tool:
     available: Callable[[ToolContext], Awaitable[bool]] | None = None
     # Patch tools need to distinguish an omitted field from an explicit null.
     exclude_unset: bool = False
+    # Some team writes use an existing confirmation flow after a private read.
+    draft_handler: Callable[[ToolContext, dict], Awaitable[Any]] | None = None
 
     @property
     def json_schema(self) -> dict:
@@ -189,7 +191,15 @@ class Registry:
                     verdict = Decision("deny", "The tool declaration is invalid")
                 decision, reason = verdict.outcome, verdict.reason
                 if decision == "draft":
-                    if ctx.run["person_id"] is None:
+                    if tool.draft_handler:
+                        try:
+                            async with ctx.conn.transaction():
+                                result = await tool.draft_handler(ctx, validated)
+                        except Refusal as exc:
+                            decision, reason = "deny", f"The tool refused the call: {exc}"
+                        except Exception:
+                            decision, reason = "deny", "The tool failed"
+                    elif ctx.run["person_id"] is None:
                         decision, reason = "deny", "A draft needs a person to approve it"
                     else:
                         row = await drafts.create(
@@ -237,6 +247,8 @@ class Registry:
             decision=decision,
             reason=reason,
             target=(f"draft {result['draft_id']}" if isinstance(result, dict) and result.get("draft_id")
+                    else f"memory:{result['change_id']}" if tool and tool.family == "memory"
+                    and isinstance(result, dict) and isinstance(result.get("change_id"), int)
                     else f"task {result['id']}" if tool and tool.family == "tasks"
                     and isinstance(result, dict) and isinstance(result.get("id"), int) else None),
         )
