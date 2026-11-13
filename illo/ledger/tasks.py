@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from illo.db import all_rows, one
 from illo.ledger import kv
-from illo.tasks import checks
+from illo.tasks import checks, connectors
 
 
 class TaskError(ValueError):
@@ -266,6 +266,7 @@ async def create(conn, *, workspace, viewer, list_key, title, brief="", holder=N
     entry = list_config(workspace, list_key, viewer)
     holder = (holder or entry.default_holder) if use_default else holder
     await _holder(conn, workspace, entry, holder)
+    connectors.validate_handover(workspace, holder, links or [])
     parent = await _require(conn, parent_id, viewer) if parent_id else None
     if parent:
         if parent["state"] in {"done", "cancelled"}:
@@ -316,15 +317,18 @@ async def update(conn, task_id, *, workspace, viewer, **changes):
 
 
 @_mutation
-async def hand(conn, task_id, *, workspace, viewer, holder):
+async def hand(conn, task_id, *, workspace, viewer, holder, links=None):
     _person(viewer)
     row = await _require(conn, task_id, viewer)
     if row["state"] in {"done", "cancelled"}:
         raise TaskError("Reopen the task before you hand it over.")
     entry = list_config(workspace, row["list_key"], viewer)
     await _holder(conn, workspace, entry, holder)
-    row = await one(conn, """UPDATE tasks SET holder=%s,holder_since=CASE WHEN %s::text IS NOT NULL
-        THEN now() END,handed_by=%s,alive_at=NULL,stopped_at=NULL WHERE id=%s RETURNING *""", (holder, holder, viewer.actor, task_id))
+    merged = row["links"] + [link for link in (links or []) if link not in row["links"]]
+    connectors.validate_handover(workspace, holder, merged)
+    row = await one(conn, """UPDATE tasks SET links=%s,holder=%s,holder_since=CASE WHEN %s::text IS NOT NULL
+        THEN now() END,handed_by=%s,alive_at=NULL,stopped_at=NULL WHERE id=%s RETURNING *""", (Jsonb(merged), holder, holder, viewer.actor, task_id))
+    await _ticket_links(conn, row)
     return await _state(conn, workspace, row, "todo", viewer.actor, "handed",
                         "The task has a new holder.", {"holder": holder})
 

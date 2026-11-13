@@ -28,18 +28,31 @@ class WakeResult:
     ok: bool
     text: str
     links: list = field(default_factory=list)
+    retry: bool = True
+    guidance: str | None = None
 
 
 wake_types = {}
+handover_checks = {}
 link_watchers = {}
 signal_handlers = {}
 lane_handlers = []
 
 
-def register_wake(name, model, function):
+def register_wake(name, model, function, *, handover=None):
     if name in wake_types:
         raise ValueError("The wake type is already present.")
     wake_types[name] = (model, function)
+    if handover:
+        handover_checks[name] = handover
+
+
+def validate_handover(workspace, holder, links):
+    if not holder or not holder.startswith("agent:"):
+        return
+    agent = next((a for a in workspace.agents if a.key == holder[6:]), None)
+    if agent and (check := handover_checks.get(agent.wake.type)):
+        check(agent, links)
 
 
 def register_links(kind, function):

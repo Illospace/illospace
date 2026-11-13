@@ -87,9 +87,8 @@ async def test_repo_choice_and_missing_repo_reason(ctx, github_client):
     await wake.tick(ctx)
     assert github_client.issues[0]["repo"] == "acme/other"
     config.default_repo = None
-    missing = await make(ctx)
-    await wake.tick(ctx)
-    assert (await events(ctx, missing["id"]))[-1]["text"] == "Add a link of kind repo to the task."
+    with pytest.raises(tasks.TaskError, match="need a repository"):
+        await make(ctx)
     assert (await get(ctx, row["id"]))["links"][-1]["kind"] == "ticket"
 
 

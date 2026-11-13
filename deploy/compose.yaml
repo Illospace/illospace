@@ -29,17 +29,20 @@ services:
       ILLO_WORKSPACE_DIR: /workspace
       ILLO_PUBLIC_URL: http://illo:8080
       ILLO_BRAIN_URL: http://brain:8080
+      ILLO_SANDBOX_URL: http://sandbox:8600
+      ILLO_REPOS_DIR: /repos
       ILLO_REVISION: ${ILLO_REVISION:-local}
       ILLO_MIGRATE_ON_START: ${ILLO_MIGRATE_ON_START:-1}
     user: '${ILLO_UID:-10001}:${ILLO_GID:-10001}'
     volumes:
       - ${ILLO_WORKSPACE_DIR:?Set ILLO_WORKSPACE_DIR to an absolute host folder}:/workspace:rw
+      - repos:/repos:rw
     ports:
       - '127.0.0.1:${ILLO_PORT:-8484}:8080'
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [db, brainnet, default]
+    networks: [db, brainnet, sandboxnet, default]
     restart: unless-stopped
     mem_limit: ${ILLO_MEMORY:-768m}
     cpus: ${ILLO_CPUS:-1.0}
@@ -73,11 +76,37 @@ services:
     cpus: ${ILLO_BRAIN_CPUS:-1.0}
     init: true
     pids_limit: ${ILLO_BRAIN_PIDS:-128}
+  sandbox:
+    image: ${ILLO_IMAGE_PREFIX:-illo}/sandbox:${ILLO_REVISION:-local}
+    build:
+      context: ../sandbox
+      dockerfile: Dockerfile
+      args:
+        ILLO_REVISION: ${ILLO_REVISION:-local}
+    user: '10002:10002'
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+      - /work:rw,noexec,nosuid,nodev,size=2g,uid=10002,gid=10002,mode=0700
+    volumes:
+      - repos:/repos:ro
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [sandboxnet]
+    restart: unless-stopped
+    mem_limit: 3g
+    cpus: '2'
+    init: true
+    pids_limit: 256
+
 networks:
   db:
+    internal: true
+  sandboxnet:
     internal: true
   brainnet:
     internal: true
   default: {}
 volumes:
   postgres: {}
+  repos: {}

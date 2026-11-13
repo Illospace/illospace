@@ -54,7 +54,7 @@ update_once() {
     export ILLO_REVISION=$target
     export ILLO_MIGRATE_ON_START=0
     stage=build
-    if compose build illo brain; then
+    if compose build illo brain sandbox; then
         stage=database
         if compose up -d --no-build --wait postgres; then
             stage=migration

@@ -281,6 +281,34 @@ class MemoryConfig(Model):
     list_changes: Literal["owners", "everyone"] = "owners"
 
 
+class SandboxConfig(Model):
+    repositories: list[str] | None = None
+    branches: list[str] = Field(default_factory=list)
+    depth: int = Field(default=50, ge=1, le=1000)
+    sync_minutes: int = Field(default=30, ge=5)
+    max_repo_mb: int = Field(default=1500, ge=1)
+
+    @field_validator("repositories")
+    @classmethod
+    def valid_repositories(cls, values):
+        from illo.sandbox.repos import REPO
+
+        if values is not None and any(not REPO.fullmatch(v) for v in values):
+            raise ValueError("Use owner/repository")
+        return values
+
+    @field_validator("branches")
+    @classmethod
+    def valid_branches(cls, values):
+        import re
+
+        if any(not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", v)
+               or any(part == "" or part.startswith(".") or part.endswith(".lock") for part in v.split("/"))
+               or ".." in v or "//" in v or v.endswith((".", "/")) for v in values):
+            raise ValueError("Use a valid Git branch name")
+        return values
+
+
 class TeamConfig(Model):
     language: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z ()-]{1,39}$")
     team_name: str = Field(min_length=1)
@@ -288,6 +316,7 @@ class TeamConfig(Model):
     default_owner: str
     slack: SlackConfig = Field(default_factory=SlackConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)

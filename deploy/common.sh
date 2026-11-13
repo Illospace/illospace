@@ -52,6 +52,16 @@ compose() {
         -f "${compose_file:-$DEPLOY_DIR/compose.yaml}" "$@"
 }
 
+sandbox_health() {
+    # Saved layouts from older revisions have no sandbox service.
+    if ! grep -q '^  sandbox:' "${compose_file:-$DEPLOY_DIR/compose.yaml}"; then
+        return 0
+    fi
+    compose exec -T illo python -c \
+        'import json,urllib.request; assert json.load(urllib.request.urlopen("http://sandbox:8600/healthz",timeout=3))["status"]=="ok"' \
+        >/dev/null 2>&1
+}
+
 wait_health() {
     local attempt
     for ((attempt=0; attempt<ILLO_HEALTH_ATTEMPTS; attempt++)); do
@@ -59,7 +69,7 @@ wait_health() {
             'import json,os,urllib.request; h=json.load(urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=3)); assert h["status"]=="ok" and h["revision"]==os.environ["ILLO_REVISION"]' \
             >/dev/null 2>&1 && compose exec -T brain python -c \
             'import json,urllib.request; assert json.load(urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=3))["status"]=="ok"' \
-            >/dev/null 2>&1; then
+            >/dev/null 2>&1 && sandbox_health; then
             return 0
         fi
         sleep "$ILLO_HEALTH_INTERVAL"

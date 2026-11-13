@@ -98,13 +98,13 @@ async def deliver(ctx, claimed, now):
             return
         if result.ok:
             await conn.execute("UPDATE tasks SET stopped_at=NULL WHERE id=%s", (row["id"],))
-        final = result.ok or pending["attempts"] >= 3
+        final = result.ok or not result.retry or pending["attempts"] >= 3
         if final and not result.ok and row["waits_for"] == pending["holder"]:
             target = await tasks.reviewer(conn, ctx.workspace, row)
             await conn.execute("UPDATE tasks SET waits_for=%s WHERE id=%s", (target, row["id"]))
         await tasks._event(conn, row, "code", "woken" if result.ok else "wake_failed", result.text,
                            {"event_id": event["id"], "attempt": min(3, pending["attempts"]), "final": final,
-                            "holder": row["holder"], "links": result.links})
+                            "holder": row["holder"], "links": result.links, "guidance": result.guidance})
         await conn.execute("""UPDATE task_wakes SET due_at=%s,finished_at=%s
             WHERE event_id=%s""", (now + timedelta(seconds=5 * pending["attempts"]), now if final else None, event["id"]))
 

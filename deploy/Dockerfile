@@ -8,6 +8,7 @@ COPY pyproject.toml README.md LICENSE* ./
 COPY illo ./illo
 COPY collectors ./collectors
 RUN pip install --no-cache-dir . && chmod -R a+rX /app && groupadd --gid 10001 illo && useradd --uid 10001 --gid illo --create-home illo
+RUN mkdir -p /repos && chown 10001:10001 /repos && chmod 755 /repos
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=5s --timeout=5s --start-period=30s --retries=12 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]

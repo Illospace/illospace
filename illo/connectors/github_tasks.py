@@ -83,28 +83,59 @@ async def write(ctx, conn, task, event, step, method, *args, **kwargs):
     return result
 
 
+def repository_choice(agent, links):
+    """Use the same repository rule before hand-over and before a wake."""
+    repos = {repo.lower(): repo for repo in agent.wake.repos}
+    rejected = []
+    for kind in ("ticket", "repo"):
+        for link in links:
+            if link.get("kind") != kind:
+                continue
+            parsed = parse(link.get("url", "")) if kind == "ticket" else None
+            parts = urlsplit(link.get("url", ""))
+            candidate = parsed[0] if parsed else (
+                parts.path.strip("/") if kind == "repo" and parts.scheme == "https"
+                and parts.netloc == "github.com" else None)
+            if candidate and re.fullmatch(REPO, candidate):
+                if candidate.lower() in repos:
+                    return link if kind == "ticket" else None, repos[candidate.lower()], None
+                rejected.append(candidate)
+    if agent.wake.default_repo:
+        return None, agent.wake.default_repo, None
+    return None, None, rejected[0] if rejected else None
+
+
+def validate_handover(agent, links):
+    _, repo, rejected = repository_choice(agent, links)
+    if repo:
+        return
+    allowed_repos = ", ".join(agent.wake.repos)
+    if rejected:
+        text = (f"{agent.name} cannot work in {rejected}. They work in: {allowed_repos}. "
+                "Add a link of kind repo to one of these in the same call, or choose another holder.")
+    else:
+        text = (f"{agent.name} need a repository. Add a link of kind repo in the same call. "
+                f"They work in: {allowed_repos}.")
+    raise tasks.TaskError(text)
+
+
 async def wake(ctx, conn, task, agent, reason, event):
-    if not ctx.github_client:
-        return WakeResult(False, "GitHub is not configured.")
     config = agent.wake
-    repos = {r.lower(): r for r in config.repos}
-    ticket = next((link for link in task["links"] if link.get("kind") == "ticket"
-                   and parse(link["url"]) and parse(link["url"])[0].lower() in repos), None)
-    repo = None
+    if not ctx.github_client:
+        return WakeResult(False, "GitHub is not configured.", retry=False,
+            guidance="GitHub is not configured. Ask an administrator to connect GitHub, or choose another holder.")
+    ticket, repo, rejected = repository_choice(agent, task["links"])
+    if not repo:
+        text = (f"{agent.name} cannot work in {rejected}." if rejected
+                else "The task has no repository link.")
+        guidance = (f"They do not work in {rejected}. Tell me another holder, "
+                    "or add that repository to the agent in `agents.yaml`." if rejected else
+                    "The task has no repository. Tell me its repository, or choose another holder.")
+        return WakeResult(False, text, retry=False, guidance=guidance)
     if ticket:
-        repo, number = parse(ticket["url"])
-        repo = repos[repo.lower()]
+        _, number = parse(ticket["url"])
         issue = await ctx.github_client.get_issue(repo, number)
     else:
-        for link in task["links"]:
-            if link.get("kind") == "repo":
-                candidate = link["url"].removeprefix("https://github.com/").rstrip("/")
-                if candidate.lower() in repos:
-                    repo = repos[candidate.lower()]
-                    break
-        repo = repo or config.default_repo
-        if not repo:
-            return WakeResult(False, "Add a link of kind repo to the task.")
         marker = f"Illo task: {task['id']}"
         matches = await ctx.github_client.search_issues(f'"{marker}" is:issue', repo=repo, state="all")
         issue = next((m for m in matches if marker in (m.get("body") or "").splitlines()), None)
@@ -413,7 +444,7 @@ def names_ticket(title, row):
 
 def register():
     if "github_issue" not in connectors.wake_types:
-        connectors.register_wake("github_issue", IssueWake, wake)
+        connectors.register_wake("github_issue", IssueWake, wake, handover=validate_handover)
         connectors.register_signal("github", signal)
         connectors.register_links("ticket", signal)
         connectors.register_links("change", signal)

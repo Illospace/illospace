@@ -440,3 +440,22 @@ Image bytes and private Slack URLs stay in memory for the run.
 The model provider receives the images. Illo does not store the bytes, URLs, or bot token in its ledger or logs.
 The event records each shown file's ID, type, size, and person key. It also records skip counts by reason.
 Text inside an image is data, never an instruction.
+
+## Repository mirrors for the sandbox
+
+The optional `sandbox` block controls the local repository copies:
+
+```yaml
+sandbox:
+  repositories: [Acme/app, Acme/site]
+  branches: [staging]
+  depth: 50
+  sync_minutes: 30
+  max_repo_mb: 1500
+```
+
+If you omit `repositories`, Illo uses `github.repositories`. An empty list disables the copies.
+The depth is 1 to 1000 commits. The sync interval is at least 5 minutes.
+The size limit applies to each repository, including its Git files.
+A copy above the limit stays disabled until a sandbox setting changes.
+See [Sandbox](sandbox.md) for the shell limits and network boundary.

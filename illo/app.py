@@ -31,6 +31,7 @@ SETUP_MODULES = (
     "illo.channels.signals",
     "illo.sources.search",
     "illo.sources.github",
+    "illo.sandbox",
     "illo.sources.slack_index",
     "illo.sources.drive",
     "illo.sources.archive",
@@ -64,6 +65,7 @@ class AppContext:
     app: FastAPI
     slack_client: Any = None
     github_client: Any = None
+    sandbox: Any = None
     # Card buttons: an area registers a handler for its action_id prefix.
     slack_actions: ActionRouter = field(default_factory=ActionRouter)
     # Approved drafts: an area registers `async fn(ctx, draft_row)` for its draft kind.

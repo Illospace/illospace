@@ -19,3 +19,5 @@ Read the pages in this order.
 15. [builders.md](builders.md): how to add a tool, a migration, a channel, or a test.
 
 Read [tasks.md](tasks.md) for lists, tasks, agent work, proof, and task threads.
+
+- [Sandbox](sandbox.md): shell commands, repository copies, and resource limits.

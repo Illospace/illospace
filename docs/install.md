@@ -339,3 +339,8 @@ Illo answers known active people who mention it there. It uses team tools and no
 It does not put the channel text in shared search. A private thread read needs live proof of membership.
 Tasks that people request there go to the normal team list.
 A Slack error blocks the message and its index write. Illo records the missed event and a sensor error.
+
+## Optional shell sandbox
+
+Compose builds the sandbox with the gateway and brain. The sandbox uses no credentials.
+The gateway keeps repository copies on a shared volume. See [Sandbox](sandbox.md) for settings, limits, and disable steps.

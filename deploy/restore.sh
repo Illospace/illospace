@@ -12,6 +12,6 @@ compose up -d --wait postgres
 tables=$(compose exec -T postgres psql -U illo -d illo -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')")
 [ "$tables" = 0 ] || fail 'The database is not fresh. Restore into a new Compose project and volume.'
-compose stop illo brain
+compose stop illo brain sandbox
 compose exec -T postgres pg_restore -U illo -d illo --exit-on-error --single-transaction < "$backup"
 printf 'The database is restored. Restore its vault key and workspace, then start Illo.\n'
