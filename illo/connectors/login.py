@@ -1,53 +1,29 @@
 """Host commands for connector status and MCP OAuth sign-in."""
 
-import base64
 import getpass
-import hashlib
 import secrets
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from illo.connectors import store
-from illo.connectors.config import validate_url
+from illo.connectors.discovery import (
+    authorization_url,
+    metadata,
+    register,
+    token_auth_method,
+    token_request,
+)
 from illo.connectors.http import BoundedHTTP
 from illo.workspace import load_workspace
 
 
-async def metadata(http, config) -> dict:
-    auth = config.auth
-    if auth.authorization_url and auth.token_url:
-        return {"authorization_endpoint": auth.authorization_url, "token_endpoint": auth.token_url}
-    parts = urlsplit(config.url)
-    origin = f"{parts.scheme}://{parts.netloc}"
-    resource_url = origin + "/.well-known/oauth-protected-resource" + parts.path.rstrip("/")
-    try:
-        resource = await http.request("GET", resource_url)
-    except ValueError:
-        resource = await http.request("GET", origin + "/.well-known/oauth-protected-resource")
-    issuer = resource["authorization_servers"][0].rstrip("/")
-    validate_url(issuer)
-    issuer_parts = urlsplit(issuer)
-    authorization_metadata = (
-        f"{issuer_parts.scheme}://{issuer_parts.netloc}"
-        + "/.well-known/oauth-authorization-server"
-        + issuer_parts.path
-    )
-    result = await http.request("GET", authorization_metadata)
-    if result.get("issuer", issuer).rstrip("/") != issuer:
-        raise ValueError("The OAuth issuer does not match its metadata")
-    for key in ("authorization_endpoint", "token_endpoint", "registration_endpoint"):
-        if result.get(key):
-            validate_url(result[key])
-    return result
-
-
 async def login(conn, ctx, config, *, http=None, prompt=None) -> None:
-    http = http or BoundedHTTP()
+    http = http or BoundedHTTP(public=True)
     prompt = prompt or getpass.getpass
     auth = config.auth
     if config.kind != "mcp" or not auth or auth.type != "oauth":
         raise ValueError("This connector does not use MCP OAuth")
-    info = await metadata(http, config)
+    info = await metadata(http, config, probe=True)
     client_id = auth.client_id
     client_secret = (
         await store.vault(ctx).get(conn, auth.client_secret) if auth.client_secret else None
@@ -56,38 +32,16 @@ async def login(conn, ctx, config, *, http=None, prompt=None) -> None:
         endpoint = info.get("registration_endpoint")
         if not endpoint:
             raise ValueError("Set an OAuth client ID in the connector file")
-        registered = await http.request(
-            "POST",
-            endpoint,
-            json={
-                "client_name": "Illo",
-                "redirect_uris": [auth.redirect_uri],
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-                "token_endpoint_auth_method": "none",
-            },
-        )
+        registered = await register(http, info, auth.redirect_uri)
         client_id = registered["client_id"]
+        client_secret = registered.get("client_secret", client_secret)
+        info["token_endpoint_auth_method"] = registered.get("token_endpoint_auth_method", "none")
+    config = config.model_copy(deep=True)
+    config.auth.client_id = client_id
+    if not config.auth.scopes:
+        config.auth.scopes = info.get("scopes_supported", [])
     state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
-    challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    )
-    url = (
-        info["authorization_endpoint"]
-        + "?"
-        + urlencode(
-            {
-                "response_type": "code",
-                "client_id": client_id,
-                "redirect_uri": auth.redirect_uri,
-                "scope": " ".join(auth.scopes),
-                "state": state,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "resource": config.url,
-            }
-        )
-    )
+    url = authorization_url(info, config, state, verifier)
     print("Open this sign-in address:")
     print(url)
     pasted = prompt("Paste the final redirect address (hidden): ")
@@ -109,16 +63,21 @@ async def login(conn, ctx, config, *, http=None, prompt=None) -> None:
         "redirect_uri": auth.redirect_uri,
         "code": query["code"][0],
         "code_verifier": verifier,
-        "resource": config.url,
+        "resource": info.get("resource", config.url),
     }
-    if client_secret:
-        data["client_secret"] = client_secret
-    token = await http.request("POST", info["token_endpoint"], data=data)
+    token = await token_request(http, info, data, client_secret)
     if not token.get("access_token"):
         raise ValueError("The OAuth server did not return a token")
-    token.update(token_url=info["token_endpoint"], client_id=client_id)
+    token.update(
+        token_url=info["token_endpoint"],
+        client_id=client_id,
+        resource=info.get("resource", config.url),
+        token_auth_method=token_auth_method(info, client_secret),
+    )
+    if client_secret and not auth.client_secret:
+        token["client_secret"] = client_secret
     await store.save(
-        conn, ctx, config.key, None, token, token.get("scope", " ".join(auth.scopes)).split()
+        conn, ctx, config.key, None, token, token.get("scope", " ".join(config.auth.scopes)).split()
     )
     print("The connector is connected.")
 
@@ -128,7 +87,7 @@ async def execute(conn, args, config) -> None:
     if args.command == "connectors":
         for row in await store.status(conn):
             owner = row["person"] or "team"
-            state = "revoked" if row["revoked_at"] else "connected"
+            state = "revoked" if row["revoked_at"] else "ended" if row["broken_at"] else "connected"
             print(f"{row['connector_key']}  {owner}  {state}  expiry {row['expires_at'] or 'none'}")
         return
     connector = next((c for c in ctx.workspace.connectors if c.key == args.name), None)

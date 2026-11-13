@@ -48,8 +48,8 @@ async def issue(ctx, person_id, event, *, conn=None):
         )
         await conn.execute(
             """INSERT INTO connector_oauth_states
-            (state_hash,connector_key,person_id,secret,expires_at)
-            VALUES (%s,'chatgpt',%s,%s,clock_timestamp()+interval '10 minutes')""",
+            (state_hash,connector_key,person_id,secret,expires_at,provider)
+            VALUES (%s,'chatgpt',%s,%s,clock_timestamp()+interval '10 minutes','chatgpt')""",
             (oauth.digest(state), person_id, vault(ctx).encrypt(json.dumps(details))),
         )
         return state

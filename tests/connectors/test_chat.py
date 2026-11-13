@@ -36,6 +36,7 @@ SERVER_KEY = "test-private-mcp-value"
 @pytest.fixture
 async def connect_ctx(app, tmp_path, monkeypatch):
     ctx = app.state.ctx
+    ctx.mcp_client.http = BoundedHTTP(httpx.MockTransport(lambda r: httpx.Response(404)))
     root = tmp_path / "workspace"
     shutil.copytree(ctx.workspace.root, root)
     ctx.workspace = load_workspace(root)
@@ -323,7 +324,7 @@ def fake_mcp(ctx, *, fail=False, count=2, echo=None):
             list_tools=AsyncMock(return_value=SimpleNamespace(tools=tools, nextCursor=None))
         )
 
-    ctx.mcp_client = MCPClient(session_factory=session)
+    ctx.mcp_client = MCPClient(session_factory=session, http=BoundedHTTP(httpx.MockTransport(lambda r: httpx.Response(404))))
     return seen
 
 

@@ -1,4 +1,4 @@
-"""One-use Google sign-in. Codes never enter a brain run or the event ledger."""
+"""One-use browser sign-in. Codes never enter a brain run or the event ledger."""
 
 import hashlib
 import json
@@ -8,7 +8,7 @@ import secrets
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from illo.connectors import google, store
@@ -38,54 +38,81 @@ async def connection(ctx, conn):
             yield opened
 
 
+async def issue_state(ctx, conn, key, person_id, details, *, provider="google"):
+    state = (
+        store.vault(ctx)
+        .encrypt(json.dumps({"person": person_id, "nonce": secrets.token_urlsafe(32)}))
+        .decode()
+    )
+    await conn.execute(
+        """INSERT INTO connector_oauth_states
+        (state_hash,connector_key,person_id,secret,expires_at,provider)
+        VALUES (%s,%s,%s,%s,clock_timestamp()+interval '10 minutes',%s)""",
+        (digest(state), key, person_id, store.vault(ctx).encrypt(json.dumps(details)), provider),
+    )
+    return public_url(ctx) + f"/oauth/{provider}/start?" + urlencode({"state": state})
+
+
+async def open_state(ctx, conn, state, browser_nonce, *, provider="google"):
+    row = await one(
+        conn,
+        """UPDATE connector_oauth_states SET started_at=clock_timestamp()
+        WHERE state_hash=%s AND provider=%s AND expires_at>clock_timestamp()
+        AND started_at IS NULL AND consumed_at IS NULL
+        AND EXISTS (SELECT 1 FROM people WHERE id=person_id AND active) RETURNING *""",
+        (digest(state), provider),
+    )
+    if not row:
+        raise ValueError("The sign-in link is invalid or expired")
+    details = json.loads(store.vault(ctx).decrypt(row["secret"]))
+    if browser_nonce:
+        details["browser_hash"] = digest(browser_nonce)
+        await conn.execute(
+            "UPDATE connector_oauth_states SET secret=%s WHERE state_hash=%s",
+            (store.vault(ctx).encrypt(json.dumps(details)), digest(state)),
+        )
+    return row, details
+
+
+async def consume_state(ctx, conn, state, person_id, browser_nonce, *, provider="google"):
+    row = await one(
+        conn,
+        """UPDATE connector_oauth_states SET consumed_at=clock_timestamp()
+        WHERE state_hash=%s AND provider=%s AND consumed_at IS NULL AND started_at IS NOT NULL
+        AND expires_at>clock_timestamp() AND (%s::bigint IS NULL OR person_id=%s)
+        AND EXISTS (SELECT 1 FROM people WHERE id=person_id AND active) RETURNING *""",
+        (digest(state), provider, person_id, person_id),
+    )
+    if not row:
+        raise ValueError("The sign-in state is invalid or expired")
+    details = json.loads(store.vault(ctx).decrypt(row["secret"]))
+    if person_id is None and (
+        not browser_nonce
+        or not details.get("browser_hash")
+        or not secrets.compare_digest(details["browser_hash"], digest(browser_nonce))
+    ):
+        raise ValueError("Use the browser that opened the sign-in link")
+    return row, details
+
+
 async def issue(ctx, person_id: int, *, conn=None) -> str:
     config = google.google_config(ctx)
     if not config:
         raise ValueError("The Google connector is not enabled")
     async with connection(ctx, conn) as conn:
         await google.credentials(ctx, conn)
-        verifier = secrets.token_urlsafe(48)
-        # The encrypted state authenticates its owner and nonce. The ledger enforces one use.
-        state = (
-            store.vault(ctx)
-            .encrypt(json.dumps({"person": person_id, "nonce": secrets.token_urlsafe(32)}))
-            .decode()
+        return await issue_state(
+            ctx,
+            conn,
+            config.key,
+            person_id,
+            {"verifier": secrets.token_urlsafe(48), "redirect_uri": callback_url(ctx)},
         )
-        await conn.execute(
-            """INSERT INTO connector_oauth_states
-            (state_hash,connector_key,person_id,secret,expires_at)
-            VALUES (%s,%s,%s,%s,clock_timestamp()+interval '10 minutes')""",
-            (
-                digest(state),
-                config.key,
-                person_id,
-                store.vault(ctx).encrypt(
-                    json.dumps({"verifier": verifier, "redirect_uri": callback_url(ctx)})
-                ),
-            ),
-        )
-    return public_url(ctx) + "/oauth/google/start?" + urlencode({"state": state})
 
 
 async def start(ctx, state: str, *, browser_nonce: str | None = None, conn=None) -> str:
     async with connection(ctx, conn) as conn:
-        row = await one(
-            conn,
-            """UPDATE connector_oauth_states SET started_at=clock_timestamp()
-            WHERE state_hash=%s AND expires_at>clock_timestamp() AND started_at IS NULL
-            AND consumed_at IS NULL AND EXISTS (SELECT 1 FROM people WHERE id=person_id AND active)
-            RETURNING *""",
-            (digest(state),),
-        )
-        if not row:
-            raise ValueError("The sign-in link is invalid or expired")
-        details = json.loads(store.vault(ctx).decrypt(row["secret"]))
-        if browser_nonce:
-            details["browser_hash"] = digest(browser_nonce)
-            await conn.execute(
-                "UPDATE connector_oauth_states SET secret=%s WHERE state_hash=%s",
-                (store.vault(ctx).encrypt(json.dumps(details)), digest(state)),
-            )
+        _, details = await open_state(ctx, conn, state, browser_nonce)
         client_id, _ = await google.credentials(ctx, conn)
     config = google.google_config(ctx)
     import base64
@@ -119,23 +146,7 @@ async def complete(
 ) -> str:
     # Consume before the network call. A failed exchange cannot replay the code.
     async with ctx.pool.connection() as conn:
-        row = await one(
-            conn,
-            """UPDATE connector_oauth_states SET consumed_at=clock_timestamp()
-            WHERE state_hash=%s AND consumed_at IS NULL AND started_at IS NOT NULL
-            AND expires_at>clock_timestamp() AND (%s::bigint IS NULL OR person_id=%s)
-            AND EXISTS (SELECT 1 FROM people WHERE id=person_id AND active) RETURNING *""",
-            (digest(state), person_id, person_id),
-        )
-        if not row:
-            raise ValueError("The sign-in state is invalid or expired")
-        details = json.loads(store.vault(ctx).decrypt(row["secret"]))
-        if person_id is None and (
-            not browser_nonce
-            or not details.get("browser_hash")
-            or not secrets.compare_digest(details["browser_hash"], digest(browser_nonce))
-        ):
-            raise ValueError("Use the browser that opened the sign-in link")
+        row, details = await consume_state(ctx, conn, state, person_id, browser_nonce)
         client_id, client_secret = await google.credentials(ctx, conn)
     config = google.google_config(ctx)
     if not config or config.key != row["connector_key"]:
@@ -236,7 +247,7 @@ class OAuthLogFilter(logging.Filter):
     def filter(self, record):
         # Access loggers include the query string. Drop OAuth requests before formatting.
         message = record.getMessage()
-        return not ("/oauth/google/" in message or "code=" in message or "state=" in message)
+        return not ("/oauth/" in message or "code=" in message or "state=" in message)
 
 
 async def claim(ctx, event, authority) -> str | None:
@@ -247,7 +258,11 @@ async def claim(ctx, event, authority) -> str | None:
     text = event.text.strip().lower().rstrip(".!?")
     pasted = callback_address(event.text, callback_url(ctx))
     if not pasted and text not in chat.PERSONAL_PHRASES | {
-        "connect google", "set up google", "disconnect my google", "connect aws", "disconnect aws",
+        "connect google",
+        "set up google",
+        "disconnect my google",
+        "connect aws",
+        "disconnect aws",
     }:
         return None
     try:
@@ -267,9 +282,14 @@ async def claim(ctx, event, authority) -> str | None:
             )
         if text != "disconnect my google":
             async with ctx.pool.connection() as conn:
-                return await chat.start(ctx, conn, authority.person_id, "google",
-                                        "personal" if text in chat.PERSONAL_PHRASES else "team",
-                                        send=False)
+                return await chat.start(
+                    ctx,
+                    conn,
+                    authority.person_id,
+                    "google",
+                    "personal" if text in chat.PERSONAL_PHRASES else "team",
+                    send=False,
+                )
         async with ctx.pool.connection() as conn:
             revoked = await ctx.google_client.disconnect(
                 conn, ctx, google.google_config(ctx), authority.person_id
@@ -302,45 +322,56 @@ async def setup(ctx) -> None:
     for name in ("uvicorn.access", "httpx", "httpcore"):
         logging.getLogger(name).addFilter(OAuthLogFilter())
 
+    add_browser_routes(
+        ctx, "google", start, complete, BROWSER_COOKIE, failure="Google sign-in did not finish"
+    )
+    from illo.connectors import mcp_oauth
+
+    await mcp_oauth.setup(ctx)
+
+
+def browser_response(text, *, status=200):
+    return PlainTextResponse(
+        text,
+        status_code=status,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+
+
+def add_browser_routes(ctx, provider, begin, finish, cookie, *, failure):
     async def start_route(request: Request):
         try:
             nonce = secrets.token_urlsafe(32)
-            url = await start(ctx, request.query_params.get("state", ""), browser_nonce=nonce)
+            url = await begin(ctx, request.query_params.get("state", ""), browser_nonce=nonce)
             response = RedirectResponse(
                 url, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
             )
             response.set_cookie(
-                BROWSER_COOKIE,
-                nonce,
-                max_age=600,
-                secure=True,
-                httponly=True,
-                samesite="lax",
-                path="/",
+                cookie, nonce, max_age=600, secure=True, httponly=True, samesite="lax", path="/"
             )
             return response
         except Exception:
-            raise HTTPException(400, "The sign-in link is invalid or expired") from None
+            return browser_response(failure, status=400)
 
     async def callback_route(request: Request):
         try:
             if request.query_params.get("error"):
-                raise ValueError("Google sign-in was cancelled")
-            text = await complete(
+                raise ValueError("The sign-in was cancelled")
+            if any(len(request.query_params.getlist(key)) != 1 for key in ("state", "code")):
+                raise ValueError("The callback is invalid")
+            text = await finish(
                 ctx,
-                request.query_params.get("state", ""),
-                request.query_params.get("code", ""),
-                browser_nonce=request.cookies.get(BROWSER_COOKIE),
+                request.query_params["state"],
+                request.query_params["code"],
+                browser_nonce=request.cookies.get(cookie),
             )
-            response = PlainTextResponse(
-                text, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
-            )
-            response.delete_cookie(BROWSER_COOKIE, secure=True, httponly=True, samesite="lax")
-            return response
+            response = browser_response(text)
         except google.GoogleAccountMismatch:
-            raise HTTPException(400, google.ACCOUNT_MISMATCH) from None
+            response = browser_response(google.ACCOUNT_MISMATCH, status=400)
         except Exception:
-            raise HTTPException(400, "Google sign-in did not finish") from None
+            response = browser_response(failure, status=400)
+        response.delete_cookie(cookie, secure=True, httponly=True, samesite="lax")
+        return response
 
-    ctx.app.add_api_route("/oauth/google/start", start_route, methods=["GET"])
-    ctx.app.add_api_route("/oauth/google/callback", callback_route, methods=["GET"])
+    ctx.app.add_api_route(f"/oauth/{provider}/start", start_route, methods=["GET"])
+    ctx.app.add_api_route(f"/oauth/{provider}/callback", callback_route, methods=["GET"])

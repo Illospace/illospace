@@ -48,6 +48,7 @@ async def open_form(ctx, person, trigger_id, kind, fields, *, draft_id=None, ini
                 {
                     "type": "input",
                     "block_id": key,
+                    "optional": kind == "mcp_client" and key == "secret",
                     "label": {"type": "plain_text", "text": label},
                     "element": {"type": "plain_text_input", "action_id": "value",
                                 **({"initial_value": initial_values[key]}

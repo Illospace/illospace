@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import Field
 
+from illo.connectors.mcp_client import SignInEnded, record_ended
 from illo.ledger import sensors
 from illo.tools._format import data_text, json_text, line, outside_result, rows
 from illo.tools.registry import Arguments, Tool
@@ -53,6 +54,8 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
             try:
                 schemas = await ctx.app.mcp_client.catalog(ctx.app, ctx.conn, config)
                 await sensors.ok(ctx.conn, f"connector:{config.key}")
+            except SignInEnded:
+                await sensors.error(ctx.conn, f"connector:{config.key}", "The connector sign-in ended")
             except Exception:
                 await sensors.error(
                     ctx.conn, f"connector:{config.key}", "The connector catalog failed"
@@ -100,7 +103,11 @@ async def call_connector(ctx, args: dict, *, approved=False) -> dict:
     if config.customer_data:
         await ctx.conn.execute("UPDATE runs SET customer_read=true WHERE id=%s", (ctx.run["id"],))
         ctx.run["customer_read"] = True
-    return outside_result(await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"]))
+    try:
+        return outside_result(await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"]))
+    except SignInEnded as exc:
+        ctx.ended_mcp = exc
+        raise
 
 
 def resolve(ctx, args: dict) -> Tool:
@@ -120,7 +127,21 @@ def resolve(ctx, args: dict) -> Tool:
 async def call_failed(ctx, args: dict) -> None:
     # The registry calls this after the handler savepoint rolls back.
     # Reuse its connection so a pool with one connection cannot deadlock.
-    await sensors.error(ctx.conn, f"connector:{args['connector']}", "The connector call failed")
+    failure = getattr(ctx, "ended_mcp", None)
+    if failure:
+        config, _ = find(ctx.app, args)
+        await record_ended(ctx.app, ctx.conn, config, failure)
+        from illo.connectors.mcp_oauth import notify_ended
+
+        try:
+            async with ctx.conn.transaction():
+                await notify_ended(ctx.app, ctx.conn, config.key)
+        except Exception:
+            # The timer retries a notice after a temporary provider failure.
+            pass
+        del ctx.ended_mcp
+    else:
+        await sensors.error(ctx.conn, f"connector:{args['connector']}", "The connector call failed")
 
 
 async def connector_available(ctx):

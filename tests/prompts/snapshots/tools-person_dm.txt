@@ -10,7 +10,7 @@ calendar_list: List this person's calendar events between `from` and `to`: ISO t
 chatgpt_status: Check the ChatGPT sign-in that pays for this person's runs. Returns one status sentence that you can pass on. Use it when the person asks about their sign-in.
 claims_take: Lock an item so that only one run handles it, for example an alert that arrives twice. `key` must be identical for each copy; use the format of a team rule if one gives it. Returns true when this run has the claim; false means that another run has it, so stop. A claim lasts 24 hours.
 connect_allow_tools: Propose tool permissions for the owner's approval card. Use only names from the server's tool list. Each write needs approval.
-connect_propose_mcp: Propose a team MCP server for the owner's approval card. Enter its HTTPS address without a key. A private form accepts the key.
+connect_propose_mcp: Propose a team MCP server for the owner's approval card. Illo checks its sign-in method. Enter its HTTPS address without a key. OAuth uses a browser link. A private form accepts a key.
 connect_remove: Propose removal of a team MCP connector and its saved key. Only the owner can approve the card in their DM.
 connect_start: Start a connection for this person. Send fixed steps or a sign-in link in their DM. Never ask for a key in chat.
 connect_status: Show the team connections and this person's sign-in state. Show no keys or another person's sign-in details.

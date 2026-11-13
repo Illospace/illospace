@@ -8,8 +8,12 @@ from illo.notes.files import file_path, write
 from illo.workspace import load_workspace
 
 
-async def save(ctx, conn, config: Connector, *, create=False):
+async def save(ctx, conn, config: Connector, *, create=False, expected=None):
     async with ctx.reload_lock:
+        if expected is not None and expected != next(
+            (c for c in ctx.workspace.connectors if c.key == config.key), None
+        ):
+            raise ValueError("The connector changed. Ask Illo for a new link.")
         path = file_path(ctx.workspace.root, "connectors", config.key + ".yaml")
         if create and path.exists():
             raise ValueError("This connector already exists")
