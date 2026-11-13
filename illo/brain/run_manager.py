@@ -26,6 +26,8 @@ class RunOptions:
     timeout_s: float
     max_output_tokens: int
     web_search: bool = False
+    customer_read: bool = False
+    personal_read: bool = False
 
 
 def credential_person(authority, workspace):
@@ -163,8 +165,8 @@ class RunManager:
                 model=model,
             )
             if overrides:
-                await conn.execute("UPDATE runs SET deep_run_id=%s,deep_kind=%s,tool_limit=%s WHERE id=%s",
-                                   (overrides.deep_run_id, overrides.kind, overrides.max_turns, row["id"]))
+                await conn.execute("UPDATE runs SET deep_run_id=%s,deep_kind=%s,tool_limit=%s,customer_read=%s,personal_read=%s WHERE id=%s",
+                                   (overrides.deep_run_id, overrides.kind, overrides.max_turns, overrides.customer_read, overrides.personal_read, row["id"]))
                 await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (row["id"], overrides.deep_run_id))
             token = await runs.mint_token(conn, row["id"], limits.timeout_s)
             system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
@@ -187,7 +189,7 @@ class RunManager:
             effort=overrides.effort if overrides else config.effort_for(authority.profile),
             deep=overrides is not None,
             max_output_tokens=overrides.max_output_tokens if overrides else None,
-            web_search=overrides.web_search if overrides else False,
+            web_search=(overrides.web_search and not overrides.customer_read and not overrides.personal_read) if overrides else False,
             provider_auth=auth,
             api_key_fallback=config.api_key_fallback,
         )

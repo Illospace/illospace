@@ -59,7 +59,10 @@ def stream(output):
 
 class Session:
     async def call_tool(self, *args):
-        return CallToolResult(content=[TextContent(type="text", text="read result")])
+        return CallToolResult(
+            content=[TextContent(type="text", text="read result")],
+            structuredContent={"run_flags": {"customer_read": False, "personal_read": False}},
+        )
 
 
 @pytest.mark.parametrize("auth", ["api_key", "chatgpt"])

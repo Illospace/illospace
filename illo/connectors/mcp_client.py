@@ -210,7 +210,7 @@ async def perform_draft(ctx, draft: dict) -> dict:
         tc = ToolContext(conn, run, ctx)
         if resolve(tc, args).destination(args) != draft["destination"]:
             raise ValueError("The draft destination does not match the stored action")
-        return await call_connector(tc, args)
+        return await call_connector(tc, args, approved=True)
 
 
 async def setup(ctx) -> None:

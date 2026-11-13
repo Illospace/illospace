@@ -22,7 +22,7 @@ class FormLogFilter(logging.Filter):
 logging.getLogger("slack_sdk.socket_mode.aiohttp").addFilter(FormLogFilter())
 
 
-async def open_form(ctx, person, trigger_id, kind, fields, *, draft_id=None):
+async def open_form(ctx, person, trigger_id, kind, fields, *, draft_id=None, initial_values=None):
     nonce = secrets.token_urlsafe(32)
     async with ctx.pool.connection() as conn:
         await kv.set(
@@ -49,7 +49,9 @@ async def open_form(ctx, person, trigger_id, kind, fields, *, draft_id=None):
                     "type": "input",
                     "block_id": key,
                     "label": {"type": "plain_text", "text": label},
-                    "element": {"type": "plain_text_input", "action_id": "value"},
+                    "element": {"type": "plain_text_input", "action_id": "value",
+                                **({"initial_value": initial_values[key]}
+                                   if initial_values and key in initial_values else {})},
                 }
                 for key, label in fields
             ],

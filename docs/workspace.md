@@ -275,7 +275,8 @@ The scheduler never runs either file as a separate routine. The built-in brief o
 Use `{name}` for the person's name. Without either file, Illo uses its default instructions.
 
 The run uses the same personal grant and model credential rules as a person routine.
-It starts with `digest_snapshot`. By default, a deep run can also read tasks, tickets, repositories, and personal data.
+It starts with `digest_snapshot`. By default, a deep run can also read tasks, tickets, repositories, and team read connectors.
+Its private ledger snapshot keeps the owner checks. It cannot read personal Google connectors.
 With `digest.deep: false`, it can call only `digest_snapshot`.
 It cannot send messages or change data. The gateway captures the final reply.
 The digest sends that reply with its normal daily delivery key.
@@ -484,3 +485,9 @@ See [Sandbox](sandbox.md) for the shell limits and network boundary.
 ## Deep work and the scout
 
 See [Deep work](deep.md) for read limits, the scout buttons, settings, and costs.
+
+Team MCP and AWS connector files accept `customer_data`, which defaults to `true`.
+Google connectors keep their personal-read rules and do not accept this field.
+AWS files also accept `region` and `services`. See [Connectors](connectors.md#aws).
+Customer data closes web fetch and provider search for the rest of a run.
+Deep work inherits this limit from its parent run.

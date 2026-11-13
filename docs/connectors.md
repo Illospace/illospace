@@ -53,6 +53,55 @@ The app needs `ILLO_VAULT_KEY`, as the installer sets it.
 No new environment variable is needed for these chat flows.
 See [the public sign-in address](install.md#the-public-sign-in-address) for a browser address separate from the internal service address.
 
+## AWS
+
+The owner writes `connect AWS` in their own Slack DM.
+Illo shows `Enter the AWS key`. The button opens a private form.
+Enter the Access key ID, Secret access key, and Region. The default region is `us-east-1`.
+Use an IAM user key with only the reads that the team needs.
+Illo checks `sts:GetCallerIdentity` before it saves the key. A failed check saves nothing.
+This check confirms the key's identity. It does not prove that its IAM policy allows only reads.
+Illo stores the key in the encrypted vault and makes a local commit for `connectors/aws.yaml`.
+A person who is not an owner gets the owner's name.
+Write `disconnect AWS` and approve the removal card to delete the file and the saved key.
+
+The saved configuration has this form:
+
+```yaml
+kind: aws
+scope: team
+region: us-east-1
+customer_data: true
+auth:
+  type: access_key
+  secret: aws-illo
+services: [logs, cloudwatch, autoscaling, elbv2, codebuild, ecs, lambda, rds]
+```
+
+The vault value is JSON with `access_key_id` and `secret_access_key`.
+No host AWS profile, environment credential, shared credential file, or instance credential supplies a key.
+No new environment setting is needed. `ILLO_VAULT_KEY` keeps its existing role.
+The connector accepts only the eight services above. The owner can choose a smaller list.
+Services that expose secrets or bulk customer files are refused, including S3, SSM, IAM, and Secrets Manager.
+
+`aws_read` takes `service`, `operation`, `parameters`, and an optional `region`.
+Use API names such as `DescribeLogGroups`, `FilterLogEvents`, `GetMetricData`, or `DescribeTargetHealth`.
+For Logs Insights, call `StartQuery`, then `GetQueryResults` with the query ID.
+Illo also allows `StopQuery` on logs. Other operation names must start with
+`Describe`, `Get`, `List`, `Filter`, `BatchGet`, or `Lookup`.
+Illo removes Lambda code links and environment values, RDS passwords, CodeBuild environment values,
+and ECS environment and secret values. Lambda layer code downloads are refused.
+Unknown operations get a fixed refusal. The IAM policy of the key is the main access limit.
+
+Each call reads one page. Keep the returned page token to request the next page.
+The result has outside-data markers. A page over 262144 bytes has `truncated: true` and keeps its page token.
+Calls use a worker thread, 5-second connect and 20-second read timeouts, and at most two retries.
+AWS error text never reaches the model. Fixed messages can include a safe AWS error code.
+The sensor is `connector:aws`. `connectors_list` shows the region and services, never the key ID.
+Person DMs, team channels, routines, and deep runs can read AWS. Tainted runs, outsiders, and agent requests cannot.
+An AWS call closes the web for the rest of the run, even with `customer_data: false`.
+Read the web before AWS when a question needs both sources.
+
 ## The model sign-in
 
 Each member can use their own ChatGPT subscription with `brain.auth: chatgpt` and `brain.runtime: openai_responses`.
@@ -160,7 +209,7 @@ Drive exports Docs and Slides as plain text. It exports Sheets as CSV.
 For other files, it returns the name, type, and link.
 Results are marked as outside data.
 A later write to a shared destination becomes a draft for the same person.
-After such a read, a connector call is a draft, and the web tool refuses a page.
+After such a read, a connector call is refused, and the web tool refuses a page.
 
 ## Team MCP connectors
 
@@ -200,9 +249,18 @@ The response has a structured `outside_data` boundary with `trusted: false`.
 The call has a time limit and a byte limit, including the wire response.
 The sensor is `connector:<key>`.
 
+`customer_data` defaults to `true` for MCP and AWS connectors.
+Set `customer_data: false` only for a server with public or team-only content.
+The field does not apply to Google connectors, which keep their personal-read rules.
+A customer-data connector call closes public page reads and provider web search for the rest of that run.
+After that call, another customer-data connector stays available.
+A non-customer connector needs a draft that the requester approves. Without a person, Illo refuses the call.
+An internal deep run inherits the flag when its parent read customer data.
+Deep scouts, requests, and briefs can call team MCP read tools. They cannot call connector writes or personal Google tools.
+
 The file supplies the risk before the tool server runs its three checks.
 Every call uses destination `outside:<key>`, including a read with remote arguments.
-After a personal read, a connector call needs a draft that the requester approves.
+After a personal read, a connector call is refused.
 The tool handler also refuses a direct call after a personal read.
 `send_outside` creates a draft. A run without a person cannot create that draft.
 An approved `connectors_call` draft uses the registered connector performer.

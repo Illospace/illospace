@@ -12,7 +12,7 @@ from pydantic import Field
 
 from illo.db import one
 from illo.tools._format import data_text
-from illo.tools.registry import Arguments, Tool
+from illo.tools.registry import Arguments, Refusal, Tool
 
 MAX_BYTES = 2 * 1024 * 1024
 MAX_TEXT = 15000
@@ -163,6 +163,8 @@ async def fetch_page(url: httpx.URL, *, allow_http: bool = False) -> str:
 
 
 async def read_page(ctx, args):
+    if ctx.run.get("customer_read"):
+        raise Refusal("This run read customer data. The web is closed for this run.")
     if ctx.run["personal_read"]:
         raise ValueError("A run with personal data cannot read a public page")
     allow_http = ctx.app.config.web_allow_http

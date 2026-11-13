@@ -10,6 +10,9 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+AWS_SERVICES = ("logs", "cloudwatch", "autoscaling", "elbv2", "codebuild", "ecs", "lambda", "rds")
+
+
 GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -31,7 +34,7 @@ class ConnectorTool(Model):
 
 
 class Auth(Model):
-    type: Literal["bearer", "oauth", "service_account"] = "bearer"
+    type: Literal["bearer", "oauth", "service_account", "access_key"] = "bearer"
     secret: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
@@ -61,8 +64,11 @@ def validate_url(value):
 
 class Connector(Model):
     key: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
-    kind: Literal["mcp", "google", "github"]
+    kind: Literal["mcp", "google", "github", "aws"]
     scope: Literal["team", "personal"]
+    customer_data: bool | None = None
+    region: str = Field(default="us-east-1", pattern=r"^[a-z]{2}(?:-[a-z]+)+-\d+$")
+    services: list[str] = Field(default_factory=lambda: list(AWS_SERVICES))
     url: str | None = None
     description: str = ""
     discovered_tools: dict[str, str] = Field(default_factory=dict)
@@ -89,6 +95,17 @@ class Connector(Model):
 
     @model_validator(mode="after")
     def valid_connector(self):
+        if self.kind in {"mcp", "aws"} and self.customer_data is None:
+            self.customer_data = True
+        if self.kind == "google" and self.customer_data is not None:
+            raise ValueError("Google connectors use the personal data rules")
+        if self.kind == "aws":
+            if self.key != "aws" or self.scope != "team":
+                raise ValueError("Use the team AWS connector with key aws")
+            if not self.auth or self.auth.type != "access_key" or not self.auth.secret:
+                raise ValueError("AWS needs an access key in the vault")
+            if not self.services or not set(self.services) <= set(AWS_SERVICES):
+                raise ValueError("Use only the supported AWS read services")
         names = [t.name for t in self.tools]
         if len(names) != len(set(names)):
             raise ValueError("Use unique tool names")

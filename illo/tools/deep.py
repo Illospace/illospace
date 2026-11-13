@@ -53,6 +53,8 @@ async def shell(ctx, args):
 
 
 async def web_fetch(ctx, args):
+    if ctx.run.get("customer_read"):
+        raise Refusal("This run read customer data. The web is closed for this run.")
     if ctx.app.workspace.config.web.fetch == "off":
         raise Refusal("Web fetch is off for this team.")
     # Mark before I/O. A failed request may still have reached a public server.

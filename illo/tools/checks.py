@@ -99,6 +99,10 @@ def in_grant(run: dict, tool) -> bool:
             if tool.name == "web_fetch":
                 return run["deep_kind"] != "brief"
             return tool.name not in {"findings_list", "finding_add"} or run["deep_kind"] == "scout"
+        if tool.name in {"connectors_list", "connectors_call", "aws_read"} and tool.risk == "read":
+            return True
+        if tool.personal and tool.name not in {"digest_snapshot", "asks_digest"}:
+            return False
         if tool.name in {"web_read_public_page", "brief_settings"} or tool.family in {"connect", "connectors", "memory"}:
             return False
         if tool.risk != "read":
@@ -119,7 +123,9 @@ def in_grant(run: dict, tool) -> bool:
 def scope(run: dict, tool) -> Decision:
     """Check 1: a registered tool must be in the run grant."""
     deep = run.get("deep_kind")
-    if tool.name == "deep_start" and (run.get("outside_read") or run.get("web_read")):
+    if tool.name in {"web_fetch", "web_read_public_page"} and run.get("customer_read"):
+        return Decision("deny", "This run read customer data. The web is closed for this run.")
+    if tool.name == "deep_start" and not run.get("customer_read") and (run.get("outside_read") or run.get("web_read")):
         return Decision("deny", "Deep work needs a team request that has not read outside text.")
     if deep and (run["tainted"] or run["principal"] == "outsider"):
         return Decision("deny", "A deep run needs team authority.")
@@ -149,6 +155,8 @@ def destination(run: dict, tool, args: dict) -> Decision:
     target = tool.destination(args)
     if run["personal_read"] and tool.family == "connectors" and target.startswith("outside:"):
         return Decision("deny", "This run read personal data, so it cannot call a connector.")
+    if run.get("customer_read") and tool.family == "connectors" and target.startswith("outside:") and not tool.customer_data:
+        return Decision("draft", "Customer data needs approval for this connector")
     if tool.risk == "read" and not target.startswith("outside:"):
         return Decision("allow", "The tool does not write")
     if not target or not (

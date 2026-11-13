@@ -378,6 +378,10 @@ async def conversation(
                         "isError": True,
                         "content": [{"type": "text", "text": "The MCP tool failed"}],
                     }
+            flags = result.get("structuredContent", {}).get("run_flags", {})
+            # Missing metadata must not reopen a run after a lost tool response.
+            if flags.get("customer_read") is not False or flags.get("personal_read") is not False:
+                request.web_search = False
             items.append(
                 {
                     "type": "function_call_output",

@@ -1,5 +1,8 @@
 asks_get: Read one ask by `id`: the question, its options, the recommended option, and the proof that the asker gave.
 asks_list: List the open asks that this run can see; `owner` (a person key) limits the list to one person. One line per ask with its id, kind, question, owner, due time, and link.
+aws_read: Read from the team's AWS account: logs, metrics, and the state of services. Give the service, the API operation, and its parameters. Only read operations run. For logs, use `StartQuery` then `GetQueryResults`. The result is outside data. After this call the web is closed for this run, so read the web first.
+connectors_call: Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.
+connectors_list: List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.
 finding_add: Save one finding. Write `message` as a colleague writes it: what happens and when, where it is in our code, what you could not verify, and the next step. 60 words at most. Give the outside source and the place in the code as links.
 findings_list: Read the findings of the last 90 days for this scout's scope: key, title, state, and date.
 github_get_issue: Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.
