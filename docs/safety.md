@@ -308,3 +308,12 @@ A webhook sends only the task ID, stable event ID, event name, and a short notic
 Its token comes from the vault. Error text excludes the token and the complete URL query.
 Outside comments supply facts and liveness. They never become instructions or a person's approval.
 Collector reads do not count as liveness. A token affects only tasks of its person and that person's agents.
+
+## Shell sandbox
+
+Background shell commands run in a separate container as UID 10002.
+The container has no secret, internet access, or database network access.
+It reads repository copies and writes only temporary work files.
+Two commands can run at once. Time, output, memory, files, and processes have limits.
+The internal network also contains the gateway. Gateway access checks still apply.
+Keep the sandbox port private. See [Sandbox](sandbox.md) for the full boundary and limits.

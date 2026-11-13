@@ -69,6 +69,7 @@ class Update(Arguments):
 class Hand(Arguments):
     id: int = Field(ge=1)
     holder: str | None
+    links: builtins.list[Link] = Field(default_factory=builtins.list, max_length=30)
 
 
 class Post(Arguments):
@@ -185,7 +186,7 @@ def register(registry):
         ("task_list", ListArgs, READ, "read", "Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold."),
         ("task_get", Get, READ, "read", "Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer."),
         ("task_update", Update, WRITE, "write_internal", "Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility."),
-        ("task_hand", Hand, WRITE, "write_internal", "Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo."),
+        ("task_hand", Hand, WRITE, "write_internal", "Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo. Give required links in the same call."),
         ("task_post", Post, CAPTURE, "write_internal", "Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder."),
         ("task_done", Done, WRITE, "write_internal", "Confirm a task for the person who made this request. The Done checks must pass. Use force true and a reason to override failed checks."),
         ("task_reopen", Reason, WRITE, "write_internal", "Send a task back to its holder with a reason. The state becomes todo and waits_for names the holder. The record keeps the reason."),

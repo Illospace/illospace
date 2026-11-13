@@ -258,3 +258,15 @@ The personal brief has Needs you, Your agents, Done since the last brief, and Du
 The team brief has Done, Waiting on people, Stuck, and In work.
 A quiet ticket alone never means Stuck. Private tasks stay in their owner's brief.
 See [Workspace](workspace.md#morning-brief-and-routine-time-zones) for sections, limits, and send rules.
+
+## Repository checks at hand-over
+
+An agent with `wake.type: github_issue` needs a repository it can use before hand-over.
+Illo accepts a ticket link, a repository link, or the agent's `default_repo`.
+The repository must be in the agent's `repos` list. Give the links in the same create or hand-over call.
+Illo refuses the hand-over before it changes the task if no repository matches.
+Agents with wake type `poll` or `none`, and people, keep the same behavior.
+
+A missing repository or GitHub configuration ends a wake after one attempt.
+Network faults, GitHub server faults, and the hourly write limit still get up to three attempts.
+A final failure gives the wait back to a person. The Slack notice names the task and gives a next step.

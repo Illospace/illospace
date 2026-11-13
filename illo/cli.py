@@ -94,9 +94,21 @@ async def doctor(config: Config) -> int:
                 failed = True
             else:
                 print("The database is ready.")
+                from illo.sandbox.repos import status
+
+                print(await status(conn))
     except Exception:
         print("The database is unavailable. Check ILLO_DATABASE_URL and the database service.")
+        print("Repository mirrors: count and last sync are unavailable.")
         failed = True
+    from illo.sandbox.client import SandboxClient
+
+    if config.sandbox_url:
+        healthy = await SandboxClient(config.sandbox_url).healthy()
+        print("The sandbox is reachable." if healthy else "The sandbox is unavailable.")
+        failed = failed or not healthy
+    else:
+        print("The sandbox is not configured.")
     if config.vault_key:
         try:
             Vault(config.vault_key.get_secret_value())

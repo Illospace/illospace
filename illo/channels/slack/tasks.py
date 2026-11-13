@@ -157,7 +157,7 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
             text = event["text"]
             name = await holder_name(ctx, conn, event["data"].get("holder") or row["holder"])
             if event["kind"] == "wake_failed":
-                text = f"Illo could not wake {name}. Reason: {text}"
+                text = wake_failure_text(name, row["id"], text, event["data"].get("guidance"))
             elif event["data"].get("escalated"):
                 text += f" Holder: {name}. Silence: {event['data']['hours']} hours. Illo tried {event['data']['restarts']} restarts."
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
@@ -349,3 +349,8 @@ async def setup(ctx):
         await tick(ctx)
 
     ctx.every(2, check_tasks)
+
+
+def wake_failure_text(name, task_id, reason, guidance=None):
+    detail = guidance or reason + " Try again, or tell me another holder."
+    return f"I could not start {name} on task #{task_id}. {detail}"

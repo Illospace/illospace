@@ -31,14 +31,14 @@ cleanup() {
     local result=$?
     trap - EXIT
     if [ "$result" -ne 0 ]; then
-        compose logs --no-color --tail 60 illo brain >&2 || true
+        compose logs --no-color --tail 60 illo brain sandbox >&2 || true
     fi
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
     rm -rf "$tmp"
     exit "$result"
 }
 trap cleanup EXIT
-compose build illo brain
+compose build illo brain sandbox
 compose up -d
 wait_health || fail 'The deployment smoke test did not become healthy.'
 compose exec -T illo illo doctor

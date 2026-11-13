@@ -15,6 +15,8 @@ class Config(BaseModel):
     workspace_dir: Path = Path("workspace.example")
     vault_key: SecretStr | None = None
     public_url: str = "http://127.0.0.1:8000"
+    sandbox_url: str | None = None
+    repos_dir: Path | None = None
     brain_url: str = "http://127.0.0.1:8001"
     brain_runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] | None = None
     brain_model: str | None = None

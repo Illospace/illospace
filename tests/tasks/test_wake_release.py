@@ -113,7 +113,7 @@ async def test_failed_wake_three_tries_then_slack_notice(ctx):
     assert "private=query" not in str(failures) and "example-bearer" not in str(failures)
     await surface.tick(ctx)
     posts = [call["text"] for call in ctx.slack_client.calls if call["method"] == "chat_postMessage"]
-    assert any("Illo could not wake Build agents. Reason:" in text for text in posts)
+    assert any(f"I could not start Build agents on task #{row['id']}." in text for text in posts)
     assert any("Build agents" in text and "agent:build" not in text for text in posts)
 
 
