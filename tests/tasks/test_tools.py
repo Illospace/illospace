@@ -236,10 +236,13 @@ async def test_task_wake_tool_and_read_fields(app):
     from illo.tasks import wake
 
     row = await operator(app, "task_create", list="launches", title="Restart the check", holder="agent:build")
+    # The wake runs later. The result says so, and a run does not file a second ticket.
+    assert "Do not file a ticket for this task." in row["wake_pending"]
     row = await operator(app, "task_wake", id=row["id"])
     assert row["holder"] == "agent:build"
     await wake.tick(app.state.ctx)
     read = await operator(app, "task_get", id=row["id"])
+    assert "wake_pending" not in read
     assert read["silent_hours"] == 0.0
     assert "The ticket is assigned." in read["wake"]
     assert any(event["kind"] == "released" and "person:ada" == event["actor"] for event in read["events"])

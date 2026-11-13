@@ -6,6 +6,9 @@ from illo.db import all_rows, one
 from illo.ledger import tasks
 from illo.tools._format import data_text
 
+WAKE_PENDING = ("Illo starts this agent in the next minute. If the agent needs a ticket, Illo files it "
+                "and adds the link. Do not file a ticket for this task.")
+
 
 def compact(row):
     return {key: (data_text("task-title", row[key]) if key == "title" else row.get(key))
@@ -17,6 +20,10 @@ async def full(conn, workspace, row, viewer, *, limit=20, ctx=None):
     latest = await one(conn, """SELECT text FROM task_events WHERE task_id=%s
         AND kind IN ('woken','wake_failed') ORDER BY id DESC LIMIT 1""", (row["id"],))
     result["wake"] = data_text("task-wake", latest["text"]) if latest else None
+    agent = next((a for a in workspace.agents if "agent:" + a.key == row["holder"]), None)
+    if agent and await one(conn, "SELECT 1 FROM task_wakes WHERE task_id=%s AND finished_at IS NULL", (row["id"],)):
+        # The wake runs after this result. Without this fact, a run files a second ticket for the same work.
+        result["wake_pending"] = WAKE_PENDING
     result["title"] = data_text("task-title", row["title"])
     if not row["created_by"].startswith("person:"):
         result["brief"] = data_text("task-brief", row["brief"])

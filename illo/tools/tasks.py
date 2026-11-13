@@ -187,7 +187,7 @@ async def handle(ctx, name, args):
 def register(registry):
     entries = [
         ("lists", Lists, READ, "read", "Read the visible lists and their Done rules. Give a key to read the list instructions before you split or hand over work."),
-        ("task_create", Create, CAPTURE, "write_internal", "Create a task from the person's words. Give a list, title, and brief. A holder is `person:<key>` or `agent:<key>`. A pieces array creates the parent and its pieces in one call."),
+        ("task_create", Create, CAPTURE, "write_internal", "Create a task from the person's words. Give a list, title, and brief. A holder is `person:<key>` or `agent:<key>`. Illo starts an agent holder itself and files its ticket: never file one for the task. A pieces array creates the parent and its pieces in one call."),
         ("task_list", ListArgs, READ, "read", "Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold."),
         ("task_get", Get, READ, "read", "Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer."),
         ("task_update", Update, WRITE, "write_internal", "Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility."),
