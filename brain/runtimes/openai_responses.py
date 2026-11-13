@@ -50,9 +50,11 @@ def build_request(
         "stream": True,
         "store": False,
         "include": ["reasoning.encrypted_content"],
-        "max_output_tokens": 4096,
+        "max_output_tokens": request.max_output_tokens or 4096,
         "parallel_tool_calls": True,
     }
+    if request.web_search:
+        catalog.append({"type": "web_search"})
     if request.provider_auth.kind == "chatgpt":
         del payload["max_output_tokens"]
         payload["tool_choice"] = "auto"
@@ -80,8 +82,10 @@ def auth_headers(request):
     return {"Authorization": "Bearer " + key}
 
 
-def check_item(item: dict, names: set[str]) -> None:
+def check_item(item: dict, names: set[str], *, web_search=False) -> None:
     kind = item.get("type")
+    if kind == "web_search_call" and web_search:
+        return
     if kind not in ("message", "reasoning", "function_call"):
         raise RunError("runtime", "The model returned a tool outside the run catalog")
     if kind == "function_call" and item.get("name") not in names:
@@ -94,6 +98,8 @@ def used_fields(item):
     Provider metadata can differ between events. A reasoning item is opaque: the provider can
     encode it again in the final event, so only its type takes part in the comparison.
     """
+    if item.get("type") == "web_search_call":
+        return item
     fields = {key: item.get(key) for key in ("type", "call_id", "name", "arguments")}
     if item.get("type") == "message":
         fields["content"] = [
@@ -133,13 +139,32 @@ def drop_images(items: list[dict]) -> bool:
     return True
 
 
+WEB_UNAVAILABLE = "\n\nWeb search is not available in this run. Use `web_fetch` on addresses that you know."
+
+
+def drop_web_search(request, payload, items):
+    request.web_search = False
+    payload["tools"] = [tool for tool in payload["tools"] if tool["type"] != "web_search"]
+    content = items[0]["content"]
+    if isinstance(content, list):
+        content.append({"type": "input_text", "text": WEB_UNAVAILABLE})
+    else:
+        items[0]["content"] += WEB_UNAVAILABLE
+
+
+def web_search_rejected(error):
+    param = str(error.get("param", ""))
+    message = str(error.get("message", "")).lower()
+    return "web_search" in message or "web search" in message or param.startswith("tools")
+
+
 async def response_chunks(request, tools, items, http, *, tools_disabled=False):
     base = address(request)
     cache_key = (base, request.model)
     payload = build_request(request, tools, items, tools_disabled=tools_disabled)
     if cache_key not in _without_effort:
         payload["reasoning"] = {"effort": run_effort(request)}
-    effort_retry = image_retry = True
+    effort_retry = image_retry = web_retry = True
     while True:
         async with http.stream(
             "POST", base + "/responses", json=payload, headers=auth_headers(request)
@@ -162,6 +187,11 @@ async def response_chunks(request, tools, items, http, *, tools_disabled=False):
                     effort_retry = False
                     _without_effort.add(cache_key)
                     del payload["reasoning"]
+                    continue
+                if (400 <= response.status_code < 500 and web_retry and request.web_search
+                        and web_search_rejected(error)):
+                    web_retry = False
+                    drop_web_search(request, payload, items)
                     continue
                 if response.status_code in (400, 413, 415, 422) and image_retry and drop_images(items):
                     # The answer matters more than the images. The model tells the person.
@@ -201,6 +231,7 @@ async def conversation(
     subscription_limit = None
     tool_calls = 0
     limited = False
+    searches_seen = set()
     while True:
         completed = None
         for attempt in range(2):
@@ -214,7 +245,11 @@ async def conversation(
                     if kind == "response.output_text.delta":
                         text_deltas.append(chunk["delta"])
                     elif kind in ("response.output_item.added", "response.output_item.done"):
-                        check_item(chunk["item"], names)
+                        check_item(chunk["item"], names, web_search=request.web_search)
+                        search = chunk["item"]
+                        if search.get("type") == "web_search_call" and search["id"] not in searches_seen:
+                            searches_seen.add(search["id"])
+                            yield event("web_search", call_id=search["id"])
                         if kind == "response.output_item.done":
                             done_items[chunk["output_index"]] = chunk["item"]
                     elif kind in ("error", "response.failed"):
@@ -254,7 +289,7 @@ async def conversation(
                 ):
                     raise
                 items = [
-                    {key: value for key, value in item.items() if key != "id"}
+                    {key: value for key, value in item.items() if key != "id" or item.get("type") == "web_search_call"}
                     for item in items if item.get("type") != "reasoning"
                 ]
                 # Resume the current turn with its tool results. Never replay an MCP write.
@@ -283,7 +318,10 @@ async def conversation(
                 "The model returned conflicting output items: " + ", ".join(differs)[:80],
             )
         for item in output:
-            check_item(item, names)
+            check_item(item, names, web_search=request.web_search)
+            if item.get("type") == "web_search_call" and item["id"] not in searches_seen:
+                searches_seen.add(item["id"])
+                yield event("web_search", call_id=item["id"])
         calls = [item for item in output if item["type"] == "function_call"]
         if not calls or limited:
             answer = "".join(

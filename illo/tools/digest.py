@@ -18,7 +18,7 @@ async def digest_snapshot_read(ctx, args):
     event = await one(
         ctx.conn, "SELECT channel,payload FROM events WHERE id=%s", (ctx.run.get("event_id"),)
     )
-    if event and event["channel"] == "digest":
+    if event and event["channel"] in {"digest", "deep"} and "digest_snapshot" in event["payload"].get("payload", {}):
         snapshot = event["payload"]["payload"]["digest_snapshot"]
     else:
         snapshot = await digest_snapshot.build(
@@ -33,7 +33,7 @@ async def team_snapshot_read(ctx, args):
     event = await one(
         ctx.conn, "SELECT channel,payload FROM events WHERE id=%s", (ctx.run.get("event_id"),)
     )
-    if event and event["channel"] in {"digest", "team_digest"}:
+    if event and event["channel"] in {"digest", "team_digest", "deep"} and "team_snapshot" in event["payload"].get("payload", {}):
         snapshot = event["payload"]["payload"]["team_snapshot"]
     else:
         snapshot = await digest_snapshot.team_snapshot(

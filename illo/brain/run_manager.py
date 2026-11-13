@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import aclosing
+from dataclasses import dataclass
 
 import httpx
 
@@ -13,6 +14,18 @@ from illo.db import one
 from illo.gateway.replies import RunFailure, failure_category
 from illo.ledger import runs, sensors
 from illo.tools._format import data_text
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    deep_run_id: int
+    kind: str
+    model: str
+    effort: str
+    max_turns: int
+    timeout_s: float
+    max_output_tokens: int
+    web_search: bool = False
 
 
 def credential_person(authority, workspace):
@@ -91,7 +104,7 @@ class RunManager:
         self.capacity = asyncio.Condition()
         self.active = 0
 
-    async def execute(self, event, authority, event_id: int, on_event=None) -> str:
+    async def execute(self, event, authority, event_id: int, on_event=None, *, overrides: RunOptions | None = None) -> str:
         """The channel can relay progress. Only final text leaves through the gateway."""
         async with self.capacity:
             await self.capacity.wait_for(
@@ -99,25 +112,26 @@ class RunManager:
             )
             self.active += 1
         try:
-            return await self._execute(event, authority, event_id, on_event)
+            return await self._execute(event, authority, event_id, on_event, overrides)
         finally:
             async with self.capacity:
                 self.active -= 1
                 self.capacity.notify_all()
 
-    async def _execute(self, event, authority, event_id, on_event):
+    async def _execute(self, event, authority, event_id, on_event, overrides):
         ctx = self.ctx
         config = ctx.workspace.config.brain
+        limits = overrides or config
         runtime = ctx.config.brain_runtime or config.runtime
-        model = ctx.config.brain_model or config.model
+        model = overrides.model if overrides else (ctx.config.brain_model or config.model)
         try:
-            auth = await provider_auth(ctx, authority, runtime, notify=event.channel not in {"digest", "team_digest"})
+            auth = await provider_auth(ctx, authority, runtime, notify=event.channel not in {"digest", "team_digest", "deep"})
         except chatgpt.TemporaryRefresh:
-            if event.channel in {"digest", "team_digest"}:
+            if event.channel in {"digest", "team_digest", "deep"}:
                 raise RunFailure("provider") from None
             return chatgpt.TEMPORARY
         if auth is None:
-            if event.channel in {"digest", "team_digest"}:
+            if event.channel in {"digest", "team_digest", "deep"}:
                 raise RunFailure("provider")
             if authority.tainted or authority.profile == "tainted":
                 async with ctx.pool.connection() as conn:
@@ -148,7 +162,11 @@ class RunManager:
                 runtime=runtime,
                 model=model,
             )
-            token = await runs.mint_token(conn, row["id"], config.timeout_s)
+            if overrides:
+                await conn.execute("UPDATE runs SET deep_run_id=%s,deep_kind=%s,tool_limit=%s WHERE id=%s",
+                                   (overrides.deep_run_id, overrides.kind, overrides.max_turns, row["id"]))
+                await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (row["id"], overrides.deep_run_id))
+            token = await runs.mint_token(conn, row["id"], limits.timeout_s)
             system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
         from illo.channels.slack.images import for_run
 
@@ -164,9 +182,12 @@ class RunManager:
             mcp_token=token,
             runtime=runtime,
             model=model,
-            max_turns=config.max_turns,
-            timeout_s=config.timeout_s,
-            effort=config.effort_for(authority.profile),
+            max_turns=limits.max_turns,
+            timeout_s=limits.timeout_s,
+            effort=overrides.effort if overrides else config.effort_for(authority.profile),
+            deep=overrides is not None,
+            max_output_tokens=overrides.max_output_tokens if overrides else None,
+            web_search=overrides.web_search if overrides else False,
             provider_auth=auth,
             api_key_fallback=config.api_key_fallback,
         )
@@ -182,13 +203,16 @@ class RunManager:
                 usage["credential_person"] = credential_person(authority, ctx.workspace)
         failure = "internal"
         try:
-            async with asyncio.timeout(config.timeout_s):
+            async with asyncio.timeout(limits.timeout_s):
                 turns = 0
                 for attempt in range(2):
                     retry = False
                     async with aclosing(ctx.brain_client.run(request)) as stream:
                         async for item in stream:
                             item = safe_event(item, auth, request.images)
+                            if item.type == "web_search":
+                                async with ctx.pool.connection() as conn:
+                                    await conn.execute("UPDATE runs SET web_read=true,outside_read=true,usage=jsonb_set(usage,'{web_search_calls}',to_jsonb(COALESCE((usage->>'web_search_calls')::int,0)+1)) WHERE id=%s", (row["id"],))
                             if item.type == "tool_call":
                                 turns += 1
                             if (
@@ -204,7 +228,7 @@ class RunManager:
                                     runtime,
                                     force=True,
                                     rejected_token=auth.access_token.get_secret_value(),
-                                    notify=event.channel not in {"digest", "team_digest"},
+                                    notify=event.channel not in {"digest", "team_digest", "deep"},
                                 )
                                 if fresh is not None:
                                     auth = fresh
@@ -251,7 +275,7 @@ class RunManager:
                                     status = "timeout"
                                 raise RunFailure(failure)
                             if item.type == "final":
-                                if turns > config.max_turns and item.usage.get("limited") is not True:
+                                if turns > limits.max_turns and item.usage.get("limited") is not True:
                                     raise RunFailure("limit")
                                 final, usage, status = item.text, {**usage, **item.usage}, "completed"
                                 if usage.get("auth_kind") == "api_key":
@@ -262,7 +286,7 @@ class RunManager:
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
         except chatgpt.TemporaryRefresh:
-            if event.channel in {"digest", "team_digest"}:
+            if event.channel in {"digest", "team_digest", "deep"}:
                 error = "The model sign-in service is unavailable"
                 failure = "provider"
                 raise RunFailure("provider") from None
@@ -288,9 +312,9 @@ class RunManager:
                     await sensors.ok(conn, "brain")
                 else:
                     await sensors.error(conn, "brain", error or "The brain run failed")
-        if event.channel in {"digest", "team_digest"} and status != "completed":
+        if event.channel in {"digest", "team_digest", "deep"} and status != "completed":
             raise RunFailure(failure)
-        if event.channel in {"slack", "email", "routine", "digest", "team_digest"}:
+        if event.channel in {"slack", "email", "routine", "digest", "team_digest", "deep"}:
             from illo.brain.final_text import guard
 
             async with ctx.pool.connection() as conn:

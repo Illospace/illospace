@@ -48,8 +48,24 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs and needs `auth: chatgpt`. |
 | `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
 | `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
-| `brain.effort` | Optional profile-to-effort map: `low`, `medium`, or `high`. Person DM, team channel, and agent request default to `medium`; others default to `low`. This setting wins over `ILLO_BRAIN_EFFORT`. |
-| `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
+| `brain.effort` | Optional profile-to-effort map: `low`, `medium`, `high`, or `xhigh`. Person DM, team channel, and agent request default to `medium`; others default to `low`. This setting wins over `ILLO_BRAIN_EFFORT`. |
+| `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50. |
+| `brain.deep.model` | Deep model. Default: `brain.model`. |
+| `brain.deep.effort` | Deep effort. Default: `high`; also accepts `low`, `medium`, and `xhigh`. |
+| `brain.deep.max_turns` | Deep tool limit. Default: 80. Range: 1–200. |
+| `brain.deep.timeout_s` | Deep timeout. Default: 1200 seconds. Maximum: 3600. |
+| `brain.deep.max_output_tokens` | API-key Responses output cap. Default: 16000. |
+| `deep.enabled` | Allow deep work. Default: `true`. A sandbox is optional. |
+| `deep.max_per_person_per_day` | Daily limit for each person, in UTC. Default: 20. |
+| `deep.max_queue` | Maximum queued deep runs. Default: 10. |
+| `web.search` | Provider search: `provider` or `off`. Default: `provider`. |
+| `web.fetch` | Public page reads: `on` or `off`. Default: `on`. |
+| `scout.team` | Team scout: `on` or `off`. Default: `off`. |
+| `scout.schedule` | Five-field cron in the scope's time zone. Default: `0 7 * * 1-5`. |
+| `scout.destination` | Channel ID. Default: team brief channel, else the default owner's DM. |
+| `scout.max_findings` | Findings for each scout run. Default: 2. Range: 1–5. |
+| `scout.people` | Person keys for personal scouts. Default: `[]`. Each delivers only to that person's DM. |
+| `digest.deep` | Use deep work for both briefs. Default: `true`. `false` keeps the snapshot-only path. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |
 | `memory.list_changes` | `owners` (default) or `everyone`. Controls who creates lists and changes holders or Done rules. |
@@ -259,7 +275,8 @@ The scheduler never runs either file as a separate routine. The built-in brief o
 Use `{name}` for the person's name. Without either file, Illo uses its default instructions.
 
 The run uses the same personal grant and model credential rules as a person routine.
-It can call only `digest_snapshot`. That tool returns the snapshot that the brief starts with.
+It starts with `digest_snapshot`. By default, a deep run can also read tasks, tickets, repositories, and personal data.
+With `digest.deep: false`, it can call only `digest_snapshot`.
 It cannot send messages or change data. The gateway captures the final reply.
 The digest sends that reply with its normal daily delivery key.
 A model failure, timeout, or missing credential gives a plain brief from the same snapshot.
@@ -320,7 +337,9 @@ Illo records a skipped day. Held tasks alone cause an In work line.
 Use `{team}` for the team name. Without that file, Illo uses the default instructions.
 The scheduler never runs this instruction file as a separate routine.
 The run has principal `team`, profile `routine`, and the normal team model credential.
-It can call only `team_snapshot`. It has no personal connector access and cannot send through a tool.
+It starts with `team_snapshot`. By default, a deep run also reads tasks, tickets, team memory, and repositories.
+It has no personal connector access, no web access, and no send tools.
+With `digest.deep: false`, it can call only `team_snapshot`.
 The event stores the snapshot so a delivery retry uses the same data.
 A model failure or timeout sends a plain brief from that snapshot.
 The normal channel path converts links to Slack format and splits long text into thread replies.
@@ -329,11 +348,13 @@ Each part has a stable delivery key.
 The team snapshot reads only team-visible tasks. It excludes private tasks, asks, and service faults.
 Its sections appear in this order:
 
-1. **Done:** the count and at most seven titles, with each holder and proof.
-2. **Waiting on people:** each person's task count, oldest wait, and single oldest task.
-3. **Stuck:** a final failed wake, silence after the restart limit, no holder for more than 24 hours, or an overdue task.
-   Each item names the fact and who must act. A quiet ticket alone is not stuck.
-4. **In work:** one line with how many tasks agents hold and how many people hold.
+1. Each person's next actions, one line for each task, in task number order.
+2. Done since the last brief: the count and 7 titles at most, each with proof.
+3. In work: one line.
+
+The deep run checks each waiting or stuck task before it speaks.
+It says stuck only after it checks that a person must act.
+The snapshot-only path keeps the earlier section order.
 
 The first brief uses 24 hours. Later briefs use the separate `digest-team` state.
 The text uses neutral facts about tasks. It does not judge a person's work.
@@ -459,3 +480,7 @@ The depth is 1 to 1000 commits. The sync interval is at least 5 minutes.
 The size limit applies to each repository, including its Git files.
 A copy above the limit stays disabled until a sandbox setting changes.
 See [Sandbox](sandbox.md) for the shell limits and network boundary.
+
+## Deep work and the scout
+
+See [Deep work](deep.md) for read limits, the scout buttons, settings, and costs.

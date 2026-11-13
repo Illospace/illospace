@@ -33,6 +33,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("stats")
     commands.add_parser("reload")
     commands.add_parser("routines").add_subparsers(dest="action", required=True).add_parser("list")
+    scout = commands.add_parser("scout").add_subparsers(dest="action", required=True)
+    scout.add_parser("run").add_argument("--person")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -158,6 +160,14 @@ async def execute(args, config: Config) -> int:
         if args.command == "migrate":
             applied = await migrate(conn)
             print(f"Applied {len(applied)} migration(s).")
+        elif args.command == "scout":
+            from types import SimpleNamespace
+
+            from illo.routines.scout import queue
+
+            workspace = load_workspace(config.workspace_dir)
+            await workspace.sync_people(conn)
+            print(await queue(SimpleNamespace(workspace=workspace), conn, person_key=args.person))
         elif args.command == "import-archive":
             from illo.sources.archive import import_archive
 

@@ -159,6 +159,7 @@ class TeamDigestConfig(Model):
 
 
 class DigestConfig(Model):
+    deep: bool = True
     schedule: str = "0 9 * * 1-5"
     destination: str
     personal: Literal["always", "needs"] = "always"
@@ -172,12 +173,48 @@ class DigestConfig(Model):
         return value
 
 
+class DeepBrainConfig(Model):
+    model: str | None = None
+    effort: Literal["low", "medium", "high", "xhigh"] = "high"
+    max_turns: int = Field(default=80, ge=1, le=200)
+    timeout_s: float = Field(default=1200, gt=0, le=3600)
+    max_output_tokens: int = Field(default=16000, ge=1)
+
+
+class DeepConfig(Model):
+    enabled: bool = True
+    max_per_person_per_day: int = Field(default=20, ge=1)
+    max_queue: int = Field(default=10, ge=1)
+
+
+class WebConfig(Model):
+    search: Literal["provider", "off"] = "provider"
+    fetch: Literal["on", "off"] = "on"
+
+    @field_validator("fetch", mode="before")
+    @classmethod
+    def yaml_switch(cls, value):
+        return "on" if value is True else "off" if value is False else value
+
+
+class ScoutConfig(Model):
+    team: Literal["on", "off"] = "off"
+    schedule: str = "0 7 * * 1-5"
+    destination: str | None = None
+    max_findings: int = Field(default=2, ge=1, le=5)
+    people: list[str] = Field(default_factory=list)
+
+    _schedule = field_validator("schedule")(TeamDigestConfig.valid_cron.__func__)
+    _team = field_validator("team", mode="before")(WebConfig.yaml_switch.__func__)
+
+
 class BrainConfig(Model):
+    deep: DeepBrainConfig = Field(default_factory=DeepBrainConfig)
     runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] = "claude"
     model: str = "default"
     max_turns: int = Field(default=12, ge=1, le=50)
     timeout_s: float = Field(default=300, gt=0, le=3600)
-    effort: dict[Profile | Literal["outsider"], Literal["low", "medium", "high"]] = Field(
+    effort: dict[Profile | Literal["outsider"], Literal["low", "medium", "high", "xhigh"]] = Field(
         default_factory=lambda: {"person_dm": "medium", "team_channel": "medium", "agent_request": "medium"}
     )
     auth: Literal["chatgpt", "api_key"] = "api_key"
@@ -324,6 +361,9 @@ class TeamConfig(Model):
     digest: DigestConfig
     stale_minutes: StaleLimits = Field(default_factory=StaleLimits)
     brain: BrainConfig = Field(default_factory=BrainConfig)
+    deep: DeepConfig = Field(default_factory=DeepConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
+    scout: ScoutConfig = Field(default_factory=ScoutConfig)
     run_limits: RunLimits = Field(default_factory=RunLimits)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     connect: ConnectConfig = Field(default_factory=ConnectConfig)

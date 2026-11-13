@@ -1,6 +1,7 @@
 """Tools for the Operator's task list. A task change needs no approval card."""
 
 import builtins
+import inspect
 from datetime import datetime
 from typing import Literal
 
@@ -10,6 +11,8 @@ from illo.ledger import tasks as ledger
 from illo.tasks.access import run_viewer
 from illo.tasks.views import compact, full
 from illo.tools.registry import Arguments, Refusal, Tool
+
+_HAND_LINKS = "links" in inspect.signature(ledger.hand).parameters
 
 READ = frozenset({"person_dm", "team_channel", "routine", "agent_request"})
 WRITE = frozenset({"person_dm", "team_channel"})
@@ -173,6 +176,8 @@ async def handle(ctx, name, args):
             fn = {"task_hand": ledger.hand, "task_post": ledger.post, "task_done": ledger.done,
                   "task_reopen": ledger.reopen, "task_wake": ledger.wake, "task_cancel": ledger.cancel}[name]
             values = {k: v for k, v in args.items() if k not in {"id", "events"}}
+            if name == "task_hand" and not _HAND_LINKS:
+                values.pop("links", None)
             row = await fn(ctx.conn, args["id"], **common, **values, **({"ctx": ctx} if name == "task_done" else {}))
         return await full(ctx.conn, ctx.app.workspace, row, viewer, limit=args.get("events", 20), ctx=ctx)
     except ledger.TaskError as exc:

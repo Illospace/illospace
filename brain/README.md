@@ -65,6 +65,17 @@ Current official API documentation checked on 2026-11-10:
 - [Streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses)
 - [Reasoning and stateless conversations](https://developers.openai.com/api/docs/guides/reasoning)
 
+### Provider web search
+
+With `web_search: true`, Responses requests include `{"type": "web_search"}` for both sign-ins.
+The loop replays complete `web_search_call` items and message annotations with `store: false`.
+It emits one `web_search` event for each provider call. The gateway records that the run read the web.
+A 4xx tool rejection gets one retry without search. The first user turn then states that search is unavailable.
+No live provider call forms part of the tests.
+The wire tests use the OpenAI Python 3.50.0 input types and the
+[official web search guide](https://developers.openai.com/api/docs/guides/tools-web-search).
+The subscription endpoint can still reject this tool. The retry applies there too.
+
 ### ChatGPT subscriptions
 
 The same `openai_responses` loop also supports `provider_auth.kind: chatgpt`.
@@ -264,8 +275,12 @@ Its JSON body has these fields:
 | `mcp_token` | The bearer token for this run. |
 | `runtime` | `claude`, `openai_responses`, `openai_compat`, or `echo`. Default: `claude`. |
 | `model` | The model name. Default: `ILLO_BRAIN_MODEL`, then `claude-opus-5-5`. |
-| `max_turns` | Maximum tool calls for Responses, from 1 to 50. Default: 8. Other runtimes count their turns. |
-| `timeout_s` | Active run deadline in seconds, up to 3600. Default: 120. |
+| `max_turns` | Maximum tool calls for Responses, from 1 to 200. Default: 8. Other runtimes count their turns. |
+| `deep` | Use the separate deep timeout cap. Default: `false`. |
+| `effort` | `low`, `medium`, `high`, or `xhigh`. Default: `low`. |
+| `max_output_tokens` | Optional output cap for the API-key Responses path. The ChatGPT path omits it. |
+| `web_search` | Add the provider web search tool in Responses. Default: `false`. |
+| `timeout_s` | Active run deadline in seconds, up to 3600. Default: 300. |
 
 The response uses `application/x-ndjson`. Each line is one JSON object with `type` and `run_id`.
 
@@ -296,7 +311,8 @@ Validation errors and provider exceptions do not echo the request or secrets.
 | --- | --- | --- |
 | `ILLO_BRAIN_SECRET` | Required | Shared secret for the gateway. |
 | `ILLO_BRAIN_CONCURRENCY` | `4` | Maximum active workers. Other requests wait. |
-| `ILLO_BRAIN_TIMEOUT_S` | `120` | Maximum active duration, capped further by `timeout_s`. |
+| `ILLO_BRAIN_TIMEOUT_S` | `300` | Maximum active duration for normal runs, also capped by `timeout_s`. |
+| `ILLO_BRAIN_DEEP_TIMEOUT_S` | `1800` | Maximum active duration when `deep: true`, also capped by `timeout_s`. |
 | `ILLO_BRAIN_MODEL` | `claude-opus-5-5` | Model when the request omits it. |
 | `ILLO_BRAIN_EFFORT` | Unset | Default effort for a request that names none. The request's effort wins. |
 | `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` | Unset | Optional Chat Completions `reasoning_effort`. |

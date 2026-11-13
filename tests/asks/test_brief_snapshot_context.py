@@ -100,6 +100,9 @@ def test_brief_instructions_match_the_example_files():
     root = Path(__file__).resolve().parents[2]
     assert (root / "workspace.example/routines/digest.md").read_text().strip() == personal
     assert (root / "workspace.example/routines/team-digest.md").read_text().strip() == team
-    for text in (personal, team):
-        assert "recent_openings" in text
-        assert "Every number" in text
+    from illo.brain.prompts import PROFILE_TEXTS
+
+    assert "recent_openings" in personal
+    assert "Every number" in personal
+    assert "recent_openings" in PROFILE_TEXTS["team_digest"]
+    assert "Every claim comes from a tool result of this run." in team

@@ -32,6 +32,7 @@ SETUP_MODULES = (
     "illo.sources.search",
     "illo.sources.github",
     "illo.sandbox",
+    "illo.deep",
     "illo.sources.slack_index",
     "illo.sources.drive",
     "illo.sources.archive",

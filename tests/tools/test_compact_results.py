@@ -23,6 +23,10 @@ async def test_default_read_results_on_live_shape(app, monkeypatch):
     async def page(*args, **kwargs):
         return data_text("web", "Outside data.")
     monkeypatch.setattr("illo.tools.web.fetch_page", page)
+    # This benchmark measures normal runs. Deep tools have their own tests.
+    monkeypatch.setattr(ctx.registry, "tools", {
+        name: tool for name, tool in ctx.registry.tools.items() if tool.profiles != frozenset()
+    })
     measured = await measure(ctx)
     for name, result in measured.items():
         assert result["decision"] == "allow", name

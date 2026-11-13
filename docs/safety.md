@@ -38,7 +38,8 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - The team brief has principal `team` and profile `routine`. It uses the normal team model credential.
-  It can call only `team_snapshot`. The personal brief can call only `digest_snapshot`.
+  Deep briefs keep read tools and have no web or write tools.
+  With `digest.deep: false`, only `team_snapshot` or `digest_snapshot` is available.
   Each event stores its snapshot. A delivery retry reads the same snapshot.
   The team snapshot reads only team-visible tasks. It excludes private tasks, asks, and service faults.
   It reads no personal connector. Only a workspace owner gets service faults in the personal brief.
@@ -317,3 +318,19 @@ It reads repository copies and writes only temporary work files.
 Two commands can run at once. Time, output, memory, files, and processes have limits.
 The internal network also contains the gateway. Gateway access checks still apply.
 Keep the sandbox port private. See [Sandbox](sandbox.md) for the full boundary and limits.
+
+## Deep work
+
+Deep work keeps the authority of the request. Outside text cannot start a deep run.
+Code refuses outside writes, including memory saves and Slack messages.
+Only a person-requested deep run can change tasks, and only before it reads the web.
+`runs.web_read` records that limit. `runs.personal_read` blocks web reads after private data.
+Scouts and briefs never change tasks. Briefs never read the web.
+Shell output and page text have outside-data markers. They do not remove the run's read tools.
+The queue lease prevents a crashed run from a second execution.
+See [Deep work](deep.md) and `tests/deep/` for the full rules and tests.
+
+A deep run reads private repositories and can then read the web. A web page can hold a hidden instruction.
+Three limits reduce what such an instruction can do: the sandbox has no network, a deep run cannot write outside the task list,
+and a web address is 400 characters at most. A risk stays: a short address can still carry a small text to an outside server.
+Read the `web_fetch` lines of the audit when you review a deep run.
