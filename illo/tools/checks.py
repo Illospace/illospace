@@ -92,10 +92,21 @@ def in_grant(run: dict, tool) -> bool:
 
     A tool family states `profiles` on its own tools, so two builders never edit one list.
     """
+    if run.get("deep_kind"):
+        if tool.name == "deep_start":
+            return False
+        if tool.name in {"shell", "web_fetch", "findings_list", "finding_add"}:
+            if tool.name == "web_fetch":
+                return run["deep_kind"] != "brief"
+            return tool.name not in {"findings_list", "finding_add"} or run["deep_kind"] == "scout"
+        if tool.name in {"web_read_public_page", "brief_settings"} or tool.family in {"connect", "connectors", "memory"}:
+            return False
+        if tool.risk != "read":
+            return tool.family == "tasks" and run["deep_kind"] == "request"
     # Outside text has one closed grant, including tools with explicit profiles.
     if effective_profile(run) == "tainted" and tool.name not in GRANT_PROFILES["tainted"]:
         return False
-    if run.get("event_channel") in {"digest", "team_digest"}:
+    if not run.get("deep_kind") and run.get("event_channel") in {"digest", "team_digest"}:
         allowed = "team_snapshot" if run["principal"] == "team" else "digest_snapshot"
         if tool.name != allowed:
             return False
@@ -107,6 +118,21 @@ def in_grant(run: dict, tool) -> bool:
 
 def scope(run: dict, tool) -> Decision:
     """Check 1: a registered tool must be in the run grant."""
+    deep = run.get("deep_kind")
+    if tool.name == "deep_start" and (run.get("outside_read") or run.get("web_read")):
+        return Decision("deny", "Deep work needs a team request that has not read outside text.")
+    if deep and (run["tainted"] or run["principal"] == "outsider"):
+        return Decision("deny", "A deep run needs team authority.")
+    if deep and tool.risk != "read" and tool.name != "finding_add":
+        if not (tool.family == "tasks" and deep == "request"):
+            return Decision("deny", "A deep run only reads. Put the proposal in your answer.")
+        if run.get("web_read"):
+            return Decision("deny", "This run read the web. Code refuses task writes after that. Put the proposal in your answer.")
+    if deep and tool.name in {"web_fetch", "web_read_public_page"}:
+        if deep == "brief":
+            return Decision("deny", "A brief does not read the web.")
+        if run.get("personal_read"):
+            return Decision("deny", "This run read private data. Code refuses the web after that.")
     if not in_grant(run, tool):
         return Decision("deny", "The run grant does not include this tool")
     if tool.personal and (

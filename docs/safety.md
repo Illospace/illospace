@@ -38,7 +38,8 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - The team brief has principal `team` and profile `routine`. It uses the normal team model credential.
-  It can call only `team_snapshot`. The personal brief can call only `digest_snapshot`.
+  Deep briefs keep read tools and have no web or write tools.
+  With `digest.deep: false`, only `team_snapshot` or `digest_snapshot` is available.
   Each event stores its snapshot. A delivery retry reads the same snapshot.
   The team snapshot reads only team-visible tasks. It excludes private tasks, asks, and service faults.
   It reads no personal connector. Only a workspace owner gets service faults in the personal brief.
@@ -308,3 +309,14 @@ A webhook sends only the task ID, stable event ID, event name, and a short notic
 Its token comes from the vault. Error text excludes the token and the complete URL query.
 Outside comments supply facts and liveness. They never become instructions or a person's approval.
 Collector reads do not count as liveness. A token affects only tasks of its person and that person's agents.
+
+## Deep work
+
+Deep work keeps the authority of the request. Outside text cannot start a deep run.
+Code refuses outside writes, including memory saves and Slack messages.
+Only a person-requested deep run can change tasks, and only before it reads the web.
+`runs.web_read` records that limit. `runs.personal_read` blocks web reads after private data.
+Scouts and briefs never change tasks. Briefs never read the web.
+Shell output and page text have outside-data markers. They do not remove the run's read tools.
+The queue lease prevents a crashed run from a second execution.
+See [Deep work](deep.md) and `tests/deep/` for the full rules and tests.

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from illo.db import Connection, one
@@ -220,6 +221,9 @@ class Registry:
                     try:
                         async with ctx.conn.transaction():
                             result = await tool.handler(ctx, validated)
+                            if tool.risk == "read" and '<outside_data source=' in json_text(result):
+                                await ctx.conn.execute("UPDATE runs SET outside_read=true WHERE id=%s", (ctx.run["id"],))
+                                ctx.run["outside_read"] = True
                             if tool.risk == "read" and _has_private_data(result):
                                 await ctx.conn.execute(
                                     "UPDATE runs SET personal_read=true WHERE id=%s",
@@ -252,6 +256,9 @@ class Registry:
                     else f"task {result['id']}" if tool and tool.family == "tasks"
                     and isinstance(result, dict) and isinstance(result.get("id"), int) else None),
         )
+        if name == "shell" and isinstance(args.get("command"), str):
+            await ctx.conn.execute("UPDATE audit SET args=jsonb_set(args,'{command}',%s) WHERE id=(SELECT max(id) FROM audit WHERE run_id=%s AND tool='shell')",
+                                   (Jsonb(args["command"][:300]), ctx.run["id"]))
         if isinstance(result, Compact):
             result = result.text
         # Apply the cap after privacy checks, including rows beyond the cut.
@@ -259,7 +266,7 @@ class Registry:
         envelope = {"decision": decision, "reason": reason, "result": result}
         # Personal snapshots keep complete JSON across all attention aliases.
         if (
-            name not in {"digest_snapshot", "team_snapshot", "asks_digest"}
+            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "web_fetch"}
             and len(json_text(envelope)) > MAX_RESULT_CHARS
         ):
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."

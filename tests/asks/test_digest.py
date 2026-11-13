@@ -11,6 +11,7 @@ from illo.gateway.principal import Authority
 from illo.ledger import lanes, people
 from illo.ledger.digest_snapshot import sensor_fault
 from illo.routines.digest import (
+    DEEP_INSTRUCTIONS,
     DEFAULT_INSTRUCTIONS,
     FIRST_BRIEF,
     fallback_text,
@@ -119,7 +120,7 @@ async def test_one_model_brief_with_digest_file_and_person_credentials(
     assert owners == ["ada"]
     assert len(fake_brain.requests) == 1
     request = fake_brain.requests[0]
-    assert request.user_message == DEFAULT_INSTRUCTIONS.replace("{name}", "Ada")
+    assert request.user_message == DEFAULT_INSTRUCTIONS.replace("{name}", "Ada") + "\n\n" + DEEP_INSTRUCTIONS
     assert request.provider_auth.kind == "chatgpt"
     assert "Ada" in request.user_message and "{name}" not in request.user_message
     from tests.tool_results import read_result
@@ -172,12 +173,12 @@ async def test_brief_queue_timeout_uses_fallback(app, slack_client, monkeypatch)
     ctx = app.state.ctx
     await only_ada(ctx)
     ctx.workspace = ctx.workspace.model_copy(deep=True)
-    ctx.workspace.config.brain.timeout_s = 0.01
+    ctx.workspace.config.brain.deep.timeout_s = 0.01
 
-    async def wait(*args):
+    async def wait(*args, **kwargs):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(ctx.gateway, "receive", wait)
+    monkeypatch.setattr(ctx.gateway.run_manager, "execute", wait)
     await send_due(ctx, NOW)
     await send_due(ctx, NOW)
     assert len(posts(slack_client)) == 1
@@ -308,7 +309,7 @@ async def test_custom_instructions_name_and_frozen_snapshot(
     from tests.tool_results import read_result
 
     assert snapshot_data(read_result(fake_brain.results[0])["result"])["needs_you"] == []
-    assert fake_brain.requests[0].user_message == "Write a brief for Ada. Call digest_snapshot."
+    assert fake_brain.requests[0].user_message == "Write a brief for Ada. Call digest_snapshot.\n\n" + DEEP_INSTRUCTIONS
     assert len(posts(slack_client)) == 1
 
 

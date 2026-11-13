@@ -255,6 +255,15 @@ Expose `/list` with `/oauth/`. See [Install](install.md#the-public-sign-in-addre
 The task list is the picture of work. Lanes supply run evidence from collectors.
 Make a task in the list for new work. A default agent holder with a wake type starts that work.
 The personal brief has Needs you, Your agents, Done since the last brief, and Due.
-The team brief has Done, Waiting on people, Stuck, and In work.
+The team brief gives each person their next actions, then Done and In work.
 A quiet ticket alone never means Stuck. Private tasks stay in their owner's brief.
 See [Workspace](workspace.md#morning-brief-and-routine-time-zones) for sections, limits, and send rules.
+
+Both briefs use deep work by default. They read each task that waits for a person.
+They check the task, its ticket, and the repository when needed.
+Each line gives the action, the place, and why the task waits.
+They check live state before they call a task stuck. A snapshot can be out of date.
+Brief runs have read tools and `shell`, with no web or write tools.
+A failed deep run uses the existing snapshot fallback.
+Set `digest.deep: false` for the earlier snapshot-only path.
+Team and personal instruction files keep their effect. See [Deep work](deep.md).

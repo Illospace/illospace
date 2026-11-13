@@ -105,7 +105,7 @@ async def resolve_public(host: str, port: int) -> list[str]:
         raise ValueError("The host has no address")
     for address in addresses:
         ip = ipaddress.ip_address(address)
-        if not ip.is_global or (
+        if not ip.is_global or ip.is_multicast or (
             isinstance(ip, ipaddress.IPv6Address)
             and (ip.ipv4_mapped or any(ip in network for network in TRANSLATED_NETWORKS))
         ):

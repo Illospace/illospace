@@ -31,6 +31,7 @@ CASES = {
     "agent_request": ("person:ben", "agent_request", None, "mcp", 0),
     "digest": ("person:ada", "person_dm", None, "digest", 3),
     "team_digest": ("team", "team_channel", "C_ACME_TEAM", "team_digest", 0),
+    "deep": ("person:ada", "person_dm", None, "deep", 0),
     "outsider": ("outsider", "tainted", None, "email", 0),
 }
 
@@ -193,14 +194,14 @@ def test_slack_fragment_and_shared_rules_appear_once(example, name):
     principal, profile, channel_id, event_channel, count = CASES[name]
     text = build(example, principal, profile, channel_id, now=NOW,
                  event_channel=event_channel, open_asks=count)
-    assert ("## Slack format" in text) == (name in {"person_dm", "team_channel", "routine"})
+    assert ("## Slack format" in text) == (name in {"person_dm", "team_channel", "routine", "deep"})
     for instruction in (
         "A draft waits for your approval.",
         "Lead with the answer or the result.",
         "A result of kind `archive` is the memory of an earlier version of Illo",
     ):
         assert text.count(instruction) == 1
-    assert text.count("## Examples") == (1 if name in {"person_dm", "team_channel", "routine"} else 0)
+    assert text.count("## Examples") == (1 if name in {"person_dm", "team_channel", "routine", "deep"} else 0)
 
 
 @pytest.mark.parametrize("key,principal,profile", [
@@ -280,7 +281,7 @@ def test_team_language_rejects_prompt_lines(example, language):
 def test_shape_rules_do_not_repeat(example, name):
     principal, profile, channel, event_channel, count = CASES[name]
     text = build(example, principal, profile, channel, now=NOW, event_channel=event_channel, open_asks=count)
-    slack = name in {"person_dm", "team_channel", "routine"}
+    slack = name in {"person_dm", "team_channel", "routine", "deep"}
     assert text.count("The first line alone must make sense on a lock screen") == int(slack)
     assert text.count("No greeting and no sign-off.") == int(slack)
     assert text.count("Lead with the answer or the result.") == 1

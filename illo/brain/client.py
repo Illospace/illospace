@@ -57,7 +57,10 @@ class RunRequest(BaseModel):
     max_turns: int
     timeout_s: float
     provider_auth: ProviderAuth = Field(default_factory=ProviderAuth, repr=False)
-    effort: Literal["low", "medium", "high"] = "low"
+    effort: Literal["low", "medium", "high", "xhigh"] = "low"
+    deep: bool = False
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    web_search: bool = False
     api_key_fallback: bool = False
     smoke: bool = False
 
@@ -70,7 +73,7 @@ class RunRequest(BaseModel):
 
 class BrainEvent(BaseModel):
     model_config = ConfigDict(extra="allow")
-    type: Literal["started", "text", "tool_call", "final", "error"]
+    type: Literal["started", "text", "tool_call", "web_search", "final", "error"]
     text: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
     category: Literal["auth", "timeout", "runtime", "limit", "internal"] = "runtime"

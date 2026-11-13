@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 from fastapi.encoders import jsonable_encoder
+from psycopg.types.json import Jsonb
 
 from illo.asks.cards import escape, section
 from illo.asks.service import post_dm
@@ -31,6 +32,9 @@ Make each title a link when it has a link. Keep task IDs.
 Use `recent_openings` to avoid the same opening line. No table or dashboard.
 If nothing needs the person, say so in one short line.
 End with one short question that offers help: ask if {name} wants Illo to coordinate something today. Change the words each day."""
+
+
+DEEP_INSTRUCTIONS = "Read each task that waits for this person before you write: the task, its ticket, and the repository when you need it. For each one, say what they must do next in one line: the action, the place, and why it waits. Check the live state first."
 
 
 FIRST_BRIEF = (
@@ -154,11 +158,15 @@ async def brief_text(ctx, person, data, due):
     if instructions is None:
         instructions = next((r.body for r in ctx.workspace.routines if r.name == "daily-digest"), None)
     prompt = (instructions or DEFAULT_INSTRUCTIONS).replace("{name}", person["name"])
+    if ctx.workspace.config.digest.deep:
+        prompt += "\n\n" + DEEP_INSTRUCTIONS
     return await write_brief(ctx, "digest", f"{person['id']}:{due.isoformat()}", prompt,
                              f"person:{person['key']}", "digest_snapshot", data, fallback_text)
 
 
 async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_name, data, fallback, *, channel_id=None):
+    if ctx.workspace.config.digest.deep:
+        return await deep_brief(ctx, channel, external_id, prompt, principal, snapshot_name, data, fallback, channel_id=channel_id)
     adapter = BriefAdapter()
     event = InboundEvent(
         channel=channel,
@@ -188,6 +196,43 @@ async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_nam
                 return mrkdwn(row["payload"]["final_answer"])
             data = row["payload"]["payload"][snapshot_name]
     return fallback(data)
+
+
+async def deep_brief(ctx, channel, external_id, prompt, principal, snapshot_name, data, fallback, *, channel_id=None):
+    from illo.deep import start
+    from illo.deep.worker import result
+    from illo.gateway.principal import Authority, person_authority
+
+    try:
+        async with ctx.pool.connection() as conn:
+            payload = {"principal": principal, snapshot_name: jsonable_encoder(data), "brief_channel": channel,
+                       "brief_destination": "Slack channel " + channel_id if channel_id else "the person's Slack DM",
+                       **({"channel_id": channel_id} if channel_id else {})}
+            event = await one(conn, """INSERT INTO events(channel,external_id,kind,principal,payload)
+                VALUES (%s,%s,'scheduled',%s,%s) ON CONFLICT DO NOTHING RETURNING id""",
+                (channel, external_id, principal, Jsonb({"text": prompt, "payload": payload})))
+            if not event:
+                stored = await one(conn, "SELECT * FROM events WHERE channel=%s AND external_id=%s", (channel, external_id))
+                if stored["payload"].get("final_answer"):
+                    return mrkdwn(stored["payload"]["final_answer"])
+                deep = await one(conn, "SELECT id FROM deep_runs WHERE origin_event_id=%s", (stored["id"],))
+                if not deep:
+                    return fallback(data)
+                deep_id = deep["id"]
+            else:
+                authority = Authority("team", "routine") if principal == "team" else await person_authority(conn, principal)
+                if authority is None:
+                    return fallback(data)
+                deep_id = await start(ctx, conn, kind="brief", job=prompt, authority=authority,
+                    deliver={"none": True}, origin_event_id=event["id"], dedupe_key=f"brief:{channel}:{external_id}")
+        row = await result(ctx, deep_id)
+        text = row["result"] if row["state"] == "done" and row["result"] and row["result"].strip() else None
+        async with ctx.pool.connection() as conn:
+            await conn.execute("UPDATE events SET status=%s,payload=payload || %s WHERE channel=%s AND external_id=%s",
+                               ("handled" if text else "failed", Jsonb({"final_answer": text}), channel, external_id))
+        return mrkdwn(text) if text else fallback(data)
+    except Exception:
+        return fallback(data)
 
 
 def is_digest(routine):

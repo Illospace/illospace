@@ -83,7 +83,9 @@ async def test_team_model_principal_credential_single_tool_and_once_per_local_da
         for name, tool in ctx.registry.tools.items()
         if in_grant({**run, "event_channel": event["channel"]}, tool)
     }
-    assert granted == {"team_snapshot"}
+    assert {"team_snapshot", "task_list", "task_get", "lists", "shell", "github_get_issue", "search_all"} <= granted
+    assert not {"web_fetch", "task_create", "deep_start", "slack_send_dm"} & granted
+    assert request.deep and not request.web_search
     assert (
         posts(slack_client)[0]["text"]
         == "Morning, team. <https://example.com/plan|Check the plan>."
@@ -113,12 +115,12 @@ async def test_team_fallback_on_failure_and_timeout(
 
         monkeypatch.setattr(run_manager, "provider_auth", auth)
     elif failure == "queue":
-        ctx.workspace.config.brain.timeout_s = 0.01
+        ctx.workspace.config.brain.deep.timeout_s = 0.01
 
-        async def wait(*args):
+        async def wait(*args, **kwargs):
             await asyncio.Event().wait()
 
-        monkeypatch.setattr(ctx.gateway, "receive", wait)
+        monkeypatch.setattr(ctx.gateway.run_manager, "execute", wait)
     else:
 
         async def fail(request):
@@ -262,7 +264,8 @@ async def test_team_tool_list_and_denials_use_actual_http(app, fake_brain, monke
 
     monkeypatch.setattr(fake_brain, "run", check_tools)
     await send_team_due(ctx, NOW + timedelta(hours=5))
-    assert listed == ["team_snapshot"]
+    assert {"team_snapshot", "task_get", "task_list", "lists", "shell"} <= set(listed)
+    assert not {"web_fetch", "deep_start", "task_create"} & set(listed)
     from illo.brain.prompts import PROFILE_TEXTS
 
     prompt = fake_brain.requests[-1].system_prompt
@@ -275,7 +278,7 @@ async def test_team_tool_list_and_denials_use_actual_http(app, fake_brain, monke
     assert [read_result(r)["decision"] for r in fake_brain.results] == [
         "allow",
         "deny",
-        "deny",
+        "allow",
         "deny",
     ]
 

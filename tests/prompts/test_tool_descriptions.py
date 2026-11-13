@@ -48,6 +48,9 @@ def test_description_check_rejects_missing_text(description):
         "digest",
         "team_digest",
         "mcp",
+        "deep_request",
+        "deep_scout",
+        "deep_brief",
     ],
 )
 def test_tool_description_snapshots(profile):
@@ -71,6 +74,12 @@ def test_tool_description_snapshots(profile):
         "tainted": profile == "tainted",
         "personal_read": False,
     }
+    if profile.startswith("deep_"):
+        kind = profile[5:]
+        personal = kind == "request"
+        run.update(principal="person:sample" if personal else "team",
+                   profile="person_dm" if personal else "routine", person_id=1 if personal else None,
+                   event_channel="deep", deep_kind=kind)
     tools = (
         [t.declaration() for t in TOOLS.values()] if profile == "mcp" else registry.list_tools(run)
     )

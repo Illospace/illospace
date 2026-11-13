@@ -81,6 +81,12 @@ class SlackAdapter:
                     conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
                 )
         parts = chunks(text)
+        def delivery_id(index):
+            if not event.payload.get("delivery_key"):
+                return {}
+            from illo.asks.service import message_id
+
+            return {"client_msg_id": message_id("deep", f"{event.payload['delivery_key']}:{index}")}
         try:
             if ts:
                 await client.chat_update(channel=channel, ts=ts, text=parts[0])
@@ -88,6 +94,7 @@ class SlackAdapter:
                 sent = await client.chat_postMessage(
                     channel=channel,
                     text=parts[0],
+                    **delivery_id(0),
                     thread_ts=event.reply_to,
                     unfurl_links=False,
                     unfurl_media=False,
@@ -98,10 +105,11 @@ class SlackAdapter:
                         await kv.set(
                             conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
                         )
-            for part in parts[1:]:
+            for index, part in enumerate(parts[1:], 1):
                 await client.chat_postMessage(
                     channel=channel,
                     text=part,
+                    **delivery_id(index),
                     thread_ts=event.reply_to or ts,
                     unfurl_links=False,
                     unfurl_media=False,

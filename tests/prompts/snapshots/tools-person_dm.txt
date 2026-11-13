@@ -15,6 +15,7 @@ connect_start: Start a connection for this person. Send fixed steps or a sign-in
 connect_status: Show the team connections and this person's sign-in state. Show no keys or another person's sign-in details.
 connectors_call: Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.
 connectors_list: List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.
+deep_start: Start deep work in the background when the request needs research across repositories or the web, a careful check, or more than a few tool calls. Give the job in full: the question, what you know already, and what a good answer contains. Then tell the person that the answer comes here in a few minutes. Do not use it for a question that your tools answer now.
 digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.
 drive_get: Read one of this person's own Drive files by `id` from `drive_search`.
 drive_search: Search this person's own Drive files. For team documents, use `drive_shared_search`.

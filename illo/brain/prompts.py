@@ -53,13 +53,24 @@ def build(
     event_channel: str | None = None,
     open_asks: int = 0,
     _fact_reserve: int = 0,
+    brief_channel: str | None = None,
+    deliver_to: str | None = None,
 ) -> str:
     """Return base text, profile text, run facts, matching rules, and the skill list."""
     key = prompt_profile(principal, profile, event_channel)
-    parts = [BASE_PROMPT, PROFILE_TEXTS.get(key, "")]
+    deep = event_channel == "deep"
+    parts = [BASE_PROMPT, PROFILE_TEXTS.get("deep" if deep else key, "")]
+    if deep and brief_channel:
+        parts.append(PROFILE_TEXTS[brief_channel])
     if key in SLACK_KEYS:
         parts.append(SLACK_FORMAT)
     parts.append(_facts(workspace, principal, key, channel_id, now, event_channel, open_asks))
+    if deep and brief_channel == "team_digest" and workspace.config.language:
+        parts[-1] += "\n• Language: " + workspace.config.language
+    if deep and deliver_to is None:
+        deliver_to = "the stored run log"
+    if deliver_to:
+        parts[-1] += "\n• Deliver to: " + deliver_to
     text = "\n\n".join(parts)
     limit = MAX_PROMPT_CHARS - max(0, _fact_reserve)
 
@@ -72,6 +83,8 @@ def build(
 
     check_size(f"{workspace.root / 'illo.yaml'} or {workspace.root / 'people.yaml'}")
     rules = workspace.matching_rules(principal, key, channel_id)
+    if deep and brief_channel:
+        rules += [r for r in workspace.matching_rules(principal, brief_channel, channel_id) if r not in rules]
     if key in {"digest", "team_digest"}:
         rules = [r for r in rules if key in r.profiles]
     if key == "outsider":
@@ -94,7 +107,7 @@ def build(
             text += f"• {skill.name}: {skill.description}"
             check_size(f"{workspace.root / skill.path} (skill {skill.name})")
     # Recall uses only the space left after required facts, rules, and skills.
-    if key in {"person_dm", "team_channel", "agent_request"}:
+    if deep or key in {"person_dm", "team_channel", "agent_request"}:
         for notes, descriptions in ((True, True), (False, True), (False, False)):
             recall = _memory_facts(workspace, principal, key, notes=notes, descriptions=descriptions)
             if len(text) + len(recall) + 2 <= limit:
@@ -171,6 +184,12 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
             context.append(data_text("channel-name", f"You are in the channel #{name}."))
         if event.payload.get("channel_class") == "members":
             context.append(MEMBERS_CONTEXT)
+    deep = event.channel == "deep"
+    deliver_to = None
+    if deep:
+        from illo.deep.delivery import place
+
+        deliver_to = event.payload.get("brief_destination") or place(event.payload["deliver"])
     suffix = "\n" + "\n".join(context) if context else ""
     return build(
         workspace,
@@ -181,6 +200,8 @@ async def build_for_run(conn, workspace, authority, event, *, now: datetime | No
         event_channel=event.channel,
         open_asks=open_asks,
         _fact_reserve=len(suffix),
+        brief_channel=event.payload.get("brief_channel") if deep else None,
+        deliver_to=deliver_to,
     ) + suffix
 
 

@@ -58,7 +58,8 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
             yield json.dumps(event("started", run_id=body.run_id)) + "\n"
             async with slots:
                 try:
-                    limit = min(body.timeout_s, float(os.getenv("ILLO_BRAIN_TIMEOUT_S", "120")))
+                    cap = ("ILLO_BRAIN_DEEP_TIMEOUT_S", "1800") if body.deep else ("ILLO_BRAIN_TIMEOUT_S", "300")
+                    limit = min(body.timeout_s, float(os.getenv(*cap)))
                     async with asyncio.timeout(limit), aclosing(runner(body)) as stream:
                         async for item in stream:
                             item["run_id"] = body.run_id
