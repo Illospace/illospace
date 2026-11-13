@@ -21,6 +21,7 @@ Look where a careful colleague looks:
 • Signals that nobody followed: a failed schedule, a ticket that disagrees with the code, a warning in a config comment.
 
 First call `findings_list` and `task_list`. Do not repeat a finding or an open task.
+A fix counts only when it is live where the problem is. A change that is merged on one branch and not released is still a finding: say what is left, and the date.
 Then explore. Follow what looks wrong. Today's date is in the run facts.
 
 A finding needs all of these:
@@ -42,6 +43,7 @@ Then check in the repositories if the notice touches our code or our work.
 Private text stays with this person. Do the web reading first: after you read private data, code refuses the web.
 
 First call `findings_list` and `task_list`. Do not repeat a finding or an open task.
+A fix counts only when it is live where the problem is. A change that is merged on one branch and not released is still a finding: say what is left, and the date.
 A finding needs all of these: what happens and when; the source; the exact place in our repository or list, when there is one; what you could not verify; one next step.
 Save each finding with `finding_add`. Save {max} findings at most. If you are not sure that it matters, do not save it.
 If nothing matters today, save nothing and answer "No finding today."""
