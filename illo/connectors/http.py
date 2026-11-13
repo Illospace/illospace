@@ -22,7 +22,15 @@ class _PrivateRequestLog(logging.Filter):
         return True
 
 
-logging.getLogger("httpx").addFilter(_PrivateRequestLog())
+for _name in (
+    "httpx",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.connection",
+    "slack_sdk.web.async_base_client",
+    "slack_sdk.web.base_client",
+):
+    logging.getLogger(_name).addFilter(_PrivateRequestLog())
 logging.getLogger("mcp.client.streamable_http").addFilter(_PrivateRequestLog())
 
 
@@ -36,18 +44,31 @@ def private_http_logs():
 
 
 class HTTPFailure(ValueError):
-    def __init__(self, error=None):
+    def __init__(self, error=None, *, status=None, headers=None):
         super().__init__("The connector request failed")
         self.error = error
+        self.status = status
+        self.headers = headers or {}
 
 
 class BoundedHTTP:
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, *, public=False):
         self.transport = transport
+        self.public = public
 
     async def request(self, method, url, *, max_bytes=262144, **kwargs):
+        from illo.connectors.addresses import PublicTransport, public_address
+
+        if self.public:
+            public_address(url)
+        transport = PublicTransport(self.transport) if self.public else self.transport
+        with private_http_logs():
+            async with asyncio.timeout(20):
+                return await self._request(method, url, transport, max_bytes=max_bytes, **kwargs)
+
+    async def _request(self, method, url, transport, *, max_bytes, **kwargs):
         async with httpx.AsyncClient(
-            transport=self.transport, timeout=20, trust_env=False, follow_redirects=False
+            transport=transport, timeout=20, trust_env=False, follow_redirects=False
         ) as client:
             for attempt in range(3):
                 async with client.stream(method, url, **kwargs) as response:
@@ -68,7 +89,14 @@ class BoundedHTTP:
                             error = json.loads(data).get("error")
                         except (ValueError, AttributeError):
                             error = None
-                        raise HTTPFailure(error if isinstance(error, str) and error in {"invalid_client", "invalid_grant"} else None)
+                        raise HTTPFailure(
+                            error
+                            if isinstance(error, str)
+                            and error in {"invalid_client", "invalid_grant"}
+                            else None,
+                            status=response.status_code,
+                            headers=dict(response.headers),
+                        )
                     if not data:
                         return {}
                     if "json" in response.headers.get("content-type", ""):

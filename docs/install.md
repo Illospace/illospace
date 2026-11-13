@@ -172,7 +172,8 @@ location = /list {
 ```
 
 Keep the sign-in query and the list key out of all proxy logs.
-The Google sign-in then completes in the same browser after one click on the DM link.
+Google and MCP OAuth sign-in then complete in the same browser after one click on the DM link.
+The MCP callback address is `https://illo.example.com/oauth/mcp/callback`.
 The task list uses the same base address.
 If the setting is absent, both use `ILLO_PUBLIC_URL`, as before.
 A local Google sign-in still needs the final address pasted into the person's DM.
@@ -180,7 +181,8 @@ The chat setup message always shows the callback address in use.
 After you change this setting, write `connect Google` and add the shown address to the Google client.
 The installer already sets `ILLO_VAULT_KEY`. Keep this key outside the checkout.
 The chat forms need Slack Socket Mode and the normal bot sign-in.
-Apply the new database migration before this app version starts. It adds `list_links`.
+Apply the database migrations before this app version starts.
+Migration `1610_mcp_browser_oauth.sql` separates the browser sign-in providers in the state table.
 
 ## Run it on your laptop to try it
 

@@ -32,15 +32,26 @@ The Google Internal audience needs a Google Workspace account.
 For a team MCP server:
 
 1. The owner writes `connect the MCP server at https://mcp.example.com/mcp as acme-crm`.
-2. Illo shows an `Add` / `Do not add` card with the address and sign-in method.
+2. Illo checks the server's sign-in method before it shows the `Add` / `Do not add` card.
+   The card shows the server address. For OAuth, it also shows the sign-in host.
+   The sign-in host can differ from the server host.
 3. If the server needs a key, `Add` opens a private form for it.
-4. Illo reads the tool list. A failed read adds no connector and saves no key.
-5. Illo saves `connectors/acme-crm.yaml` with no allowed tools and shows up to 30 tools in the DM.
-6. The owner names the tools to allow and labels each as read or write.
+   For OAuth, Illo registers a public client when the server permits it.
+   Otherwise, the owner enters a Client ID and an optional Client secret in a private form.
+4. Illo sends a `Sign in` button in the owner's DM. Open it within 10 minutes.
+   Finish sign-in in that browser. The page then says to go back to Slack.
+5. Illo reads the tool list. A failed sign-in or read saves no connector, grant, or key.
+6. Illo saves `connectors/acme-crm.yaml` with no allowed tools and shows up to 30 tools in the DM.
+7. The owner names the tools to allow and labels each as read or write.
    Illo shows an `Allow` / `Do not allow` card before it saves these permissions.
    Each write call needs its own approval card.
 
-Only an active owner can add, allow, or remove a team connector.
+Only an active owner can add, allow, remove, or sign in to a team connector.
+Write `connect acme-crm again` or `sign in to acme-crm` to replace its sign-in.
+These commands keep the allowed tools. They need no new Add or Allow card.
+If a sign-in ends, calls stop. The sensor `connector:acme-crm` shows the fault.
+Illo sends one DM with a new sign-in link to the owner who signed in.
+Personal MCP connectors are not available. Google keeps its personal sign-in flow.
 Removal needs a card. It removes the connector file and its saved key.
 The server's tool descriptions are outside data. They cannot grant a tool or change its risk.
 The file keeps all discovered names in `discovered_tools`. Only `tools` grants access.
@@ -223,6 +234,18 @@ auth:
 ```
 
 `client_secret` names a vault secret. Omit it for a public OAuth client.
+The chat flow above uses `/oauth/mcp/start` and `/oauth/mcp/callback` at the public sign-in address.
+It uses authorization code with PKCE S256 and the MCP resource identifier.
+The protected resource metadata supplies the scopes. `auth.scopes` can narrow them.
+Dynamic registration uses the name `Illo` and the public callback address.
+The private client form supplies the client when the server has no registration endpoint.
+For clients with a secret, Illo supports HTTP Basic and form authentication.
+Client secrets and tokens stay encrypted. The connector file holds only the client ID and secret name.
+The browser state belongs to one person and one connector. It expires after 10 minutes and works once.
+The callback also needs the secure browser cookie from the start route.
+
+For a host without a public HTTPS address, Illo shows `illo connector login <key>`.
+Configure the connector file first for this host flow. The command remains available for an existing connector.
 Run `illo connector login docs` on the host.
 Open the printed address. Paste the final redirect address at the hidden prompt.
 Illo checks the redirect URI and state, and uses PKCE with S256.
@@ -230,7 +253,13 @@ The local callback need not have a listener.
 Illo stores the token in an encrypted team grant and refreshes it when needed.
 A long-lived access token also works.
 
-Illo discovers the protected resource metadata and the authorization server metadata.
+The CLI and chat share the same discovery code.
+Illo first checks the MCP server's 401 challenge for a protected resource metadata address.
+It also tries the protected resource well-known paths, with and without the MCP path.
+For an issuer with a path, it tries path insertion, the appended path, then OpenID discovery.
+The issuer must match its metadata exactly.
+Each outside request uses a checked public HTTPS address, a time limit, and a byte limit.
+Illo refuses redirects and private DNS answers. It pins the checked IP for the request.
 If needed, set `authorization_url` and `token_url` in the auth block.
 Without a client ID, Illo uses dynamic registration when the server supports it.
 For client credentials, set `client_id`, `client_secret`, and `token_url`.

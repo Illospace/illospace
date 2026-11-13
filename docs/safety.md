@@ -231,6 +231,30 @@ See [workspace.md](workspace.md#voice-clips) for defaults and setup.
 
 **Tests.** `tests/safety/test_rule_06_07_voice.py` and `tests/slack/test_voice.py`.
 
+## MCP browser sign-in
+
+Only an active owner starts or completes a team MCP sign-in.
+The brain receives no connector token, client secret, code, or state.
+The DM button holds the one-time link. Events, audits, logs, and workspace files hold no sign-in state.
+Pending client values stay encrypted until the tool list succeeds.
+A failed sign-in or tool-list read saves no connector, grant, or key.
+
+The shared OAuth state table separates Google, ChatGPT, and MCP states.
+A state belongs to one person and one connector. It expires after 10 minutes and works once.
+The start route sets a secure, host-only browser cookie. The callback requires that cookie.
+Both routes return `no-store` headers. The access-log filter drops OAuth requests.
+Keep OAuth queries out of proxy access logs too.
+
+All MCP discovery, registration, token, and tool requests require public HTTPS addresses.
+The shared web address checks reject private or mixed DNS answers. The transport pins the checked IP.
+The transport refuses redirects. Time and byte limits bound each response.
+The authorization issuer must match the resource metadata.
+Outside metadata cannot grant tools, change their risks, or change the callback address.
+A permanent refresh failure ends the grant. Calls stop and the sensor shows the fault.
+One DM asks the owner who signed in to connect again. A new sign-in keeps the allowed tools.
+
+**Tests.** `tests/connectors/test_mcp_oauth.py` and `tests/safety/test_rule_06_mcp_oauth_addresses.py`.
+
 ## What a hostile text can still do
 
 The rules limit damage. They do not make hostile text harmless. These risks remain:

@@ -30,6 +30,8 @@ async def test_host_login_discovers_metadata_and_stores_encrypted_token(google_a
 
     def respond(request):
         seen.append(request)
+        if request.url.path == "/mcp":
+            return httpx.Response(401)
         if "oauth-protected-resource" in request.url.path:
             return httpx.Response(200, json={"authorization_servers": ["https://auth.example.com"]})
         if "oauth-authorization-server" in request.url.path:
@@ -70,7 +72,7 @@ async def test_host_login_discovers_metadata_and_stores_encrypted_token(google_a
         assert token["refresh_token"] == "test-refresh"
         assert b"test-refresh" not in row["secret"]
         assert token["token_url"] == "https://auth.example.com/token"
-    assert len(seen) == 3
+    assert len(seen) == 4
 
 
 @pytest.mark.parametrize(
@@ -147,6 +149,7 @@ async def test_oauth_metadata_rejects_unsafe_endpoint():
         return httpx.Response(
             200,
             json={
+                "issuer": "https://auth.example.com",
                 "authorization_endpoint": "http://unsafe.example.com/auth",
                 "token_endpoint": "https://auth.example.com/token",
             },

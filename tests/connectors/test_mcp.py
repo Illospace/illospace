@@ -141,7 +141,10 @@ def test_config_rejects_tainted_write_and_unbounded_risk():
             )
 
 
-async def test_official_streamable_http_client_with_fake_wire(mcp_app):
+async def test_official_streamable_http_client_with_fake_wire(mcp_app, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("illo.connectors.addresses.resolve_public", AsyncMock(return_value=["93.184.216.34"]))
     import json
 
     ctx, config, _ = mcp_app

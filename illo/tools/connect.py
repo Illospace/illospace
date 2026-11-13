@@ -27,7 +27,7 @@ class Key(Arguments):
 
 class MCP(Key):
     url: str = Field(max_length=2000)
-    auth: Literal["none", "bearer"]
+    auth: Literal["none", "bearer"] = "bearer"
     description: str = Field(default="", max_length=500)
 
     @field_validator("url")
@@ -83,7 +83,7 @@ async def status(tc, args):
                 connected = bool(
                     await one(
                         tc.conn,
-                        "SELECT id FROM connector_grants WHERE connector_key=%s AND person_id IS NULL AND revoked_at IS NULL",
+                        "SELECT id FROM connector_grants WHERE connector_key=%s AND person_id IS NULL AND revoked_at IS NULL AND broken_at IS NULL",
                         (config.key,),
                     )
                 )
@@ -156,7 +156,7 @@ def register(registry):
         (
             "connect_propose_mcp",
             MCP,
-            "Propose a team MCP server for the owner's approval card. Enter its HTTPS address without a key. A private form accepts the key.",
+            "Propose a team MCP server for the owner's approval card. Illo checks its sign-in method. Enter its HTTPS address without a key. OAuth uses a browser link. A private form accepts a key.",
         ),
         (
             "connect_allow_tools",

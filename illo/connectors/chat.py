@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from illo.asks import cards
 from illo.channels.slack.modals import open_form
-from illo.connectors import files, google, oauth, store
+from illo.connectors import discovery, files, google, mcp_oauth, oauth, store
 from illo.connectors.config import Connector, ConnectorTool
 from illo.connectors.http import HTTPFailure, private_http_logs
 from illo.db import one
@@ -44,21 +44,32 @@ def setup_text(ctx):
     )
 
 
-async def dm(ctx, person, text, blocks=None):
+async def dm(ctx, person, text, blocks=None, *, message_key=None):
     if not ctx.slack_client or not person.get("slack_id"):
         raise ValueError("Slack is not connected for this person")
     opened = await ctx.slack_client.conversations_open(users=person["slack_id"])
-    return await ctx.slack_client.chat_postMessage(
-        channel=opened["channel"]["id"],
-        text=text,
-        blocks=blocks,
-        unfurl_links=False,
-        unfurl_media=False,
+    options = {}
+    if message_key:
+        from illo.asks.service import message_id
+
+        options["client_msg_id"] = message_id("connector", message_key)
+    with private_http_logs():
+        return await ctx.slack_client.chat_postMessage(
+            channel=opened["channel"]["id"],
+            text=text,
+            blocks=blocks,
+            unfurl_links=False,
+            unfurl_media=False,
+            **options,
+        )
+
+
+async def active_person(conn, person_id, *, owner=False, lock=False):
+    person = await one(
+        conn,
+        "SELECT * FROM people WHERE id=%s AND active" + (" FOR SHARE" if lock else ""),
+        (person_id,),
     )
-
-
-async def active_person(conn, person_id, *, owner=False):
-    person = await one(conn, "SELECT * FROM people WHERE id=%s AND active", (person_id,))
     if not person or (owner and person["role"] != "owner"):
         raise ValueError("Only an active owner can change team connections.")
     return person
@@ -150,6 +161,8 @@ async def start(ctx, conn, person_id, kind, scope, *, send=True):
             return "The sign-in link is in the DM."
         return text
     config = next((c for c in ctx.workspace.connectors if c.key == kind and c.scope == scope), None)
+    if config and config.kind == "mcp" and config.auth and config.auth.type == "oauth":
+        return await mcp_oauth.reconnect(ctx, conn, person, config)
     text = (
         "This team connector is configured. Ask the owner to check its state."
         if config
@@ -183,6 +196,12 @@ def form_errors(kind, values):
         r"[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com", values.get("client_id", "")
     ):
         errors["client_id"] = "Use the full Client ID from the Google page."
+    if kind == "mcp_client":
+        if not values.get("client_id") or any(c.isspace() for c in values["client_id"]):
+            errors["client_id"] = "Enter the Client ID without spaces."
+        if any(c.isspace() for c in values.get("secret", "")):
+            errors["secret"] = "Enter a value without spaces."
+        return errors
     if not values.get("secret") or any(c.isspace() for c in values["secret"]):
         errors["secret"] = "Enter a value without spaces."
     return errors
@@ -234,14 +253,22 @@ async def submit_form(ctx, person, form, values):
             )
             if (
                 not draft
-                or draft["state"] != "approved"
+                or draft["state"]
+                not in ({"approved", "sent"} if form["kind"] == "mcp_client" else {"approved"})
                 or draft["kind"] != "connect_propose_mcp"
                 or draft["approver_person_id"] != person["id"]
             ):
                 return
-            text = await add_mcp(
-                ctx, conn, person, draft["content"]["arguments"], bearer=values["secret"]
-            )
+            if form["kind"] == "mcp_client":
+                if draft["content"]["arguments"]["auth"] != "oauth":
+                    return
+                text = await mcp_oauth.with_client(
+                    ctx, conn, person, draft, values["client_id"], values.get("secret")
+                )
+            else:
+                text = await add_mcp(
+                    ctx, conn, person, draft["content"]["arguments"], bearer=values["secret"]
+                )
             await drafts.mark_sent(conn, draft["id"])
     await dm(ctx, person, text)
 
@@ -301,7 +328,13 @@ async def add_mcp(ctx, conn, person, args, *, bearer=None):
 def preview(kind, args):
     key = cards.visible_escape(args["key"])
     if kind == "connect_propose_mcp":
-        auth = "none" if args["auth"] == "none" else "a key that you enter in a form"
+        auth = (
+            f"in your browser, at `{cards.visible_escape(args['auth_host'])}`"
+            if args["auth"] == "oauth"
+            else "none"
+            if args["auth"] == "none"
+            else "a key that you enter in a form"
+        )
         return (
             f"Add the connector `{key}`? Address: {cards.visible_escape(args['url'])}. Sign-in: {auth}.",
             "Add",
@@ -334,8 +367,21 @@ async def propose(tc, args, kind):
         if kind == "connect_allow_tools":
             if any(t["name"] not in config.discovered_tools for t in args["tools"]):
                 raise ValueError("The server did not list this tool.")
+    elif args["key"] in {"google", "chatgpt"}:
+        raise ValueError("This name belongs to a built-in connector. Use another name.")
     elif any(c.key == args["key"] for c in tc.app.workspace.connectors):
         raise ValueError("This connector already exists.")
+    info = None
+    if kind == "connect_propose_mcp":
+        args = dict(args)
+        try:
+            info = await discovery.metadata(tc.app.mcp_client.http, mcp_config(args), probe=True)
+        except Exception:
+            raise ValueError(
+                "Illo could not check the server sign-in. No connector was added."
+            ) from None
+        if info:
+            args.update(auth="oauth", auth_host=urlsplit(info["authorization_endpoint"]).netloc)
     row = await drafts.create(
         tc.conn,
         run_id=tc.run["id"],
@@ -344,6 +390,8 @@ async def propose(tc, args, kind):
         destination="ledger",
         content={"arguments": args},
     )
+    if info:
+        await mcp_oauth.save_proposal(tc.app, tc.conn, row["id"], info)
     from illo.asks.drafts import sync_card
 
     await sync_card(tc.app, tc.conn, row)
@@ -380,7 +428,10 @@ async def perform(ctx, draft):
         if stored["kind"] == "connect_propose_mcp":
             if args["auth"] == "bearer":
                 raise ValueError("Use the private form for the server key")
-            text = await add_mcp(ctx, conn, person, args)
+            if args["auth"] == "oauth":
+                text = await mcp_oauth.after_add(ctx, conn, person, stored)
+            else:
+                text = await add_mcp(ctx, conn, person, args)
         else:
             config = find_config(ctx, args["key"])
             if stored["kind"] == "connect_allow_tools":
@@ -396,8 +447,14 @@ async def perform(ctx, draft):
                 text = "The tool permissions are saved. Each write needs your approval card."
             else:
                 await files.remove(ctx, conn, config)
-                if config.auth and config.auth.secret:
-                    await delete(conn, config.auth.secret)
+                if config.auth:
+                    for name in (config.auth.secret, config.auth.client_secret):
+                        if name:
+                            await delete(conn, name)
+                await conn.execute(
+                    "DELETE FROM connector_oauth_states WHERE provider='mcp' AND connector_key=%s",
+                    (config.key,),
+                )
                 await conn.execute(
                     "DELETE FROM connector_grants WHERE connector_key=%s", (config.key,)
                 )
@@ -406,7 +463,36 @@ async def perform(ctx, draft):
     await dm(ctx, person, text)
 
 
+async def mcp_client_button(ctx, person, action):
+    if not (action.get("channel") or "").startswith("D"):
+        return
+    async with ctx.pool.connection() as conn:
+        await active_person(conn, person["id"], owner=True)
+        try:
+            draft_id = int(action["action_id"].split(":")[-1])
+        except (ValueError, KeyError):
+            return
+        draft = await one(conn, "SELECT * FROM drafts WHERE id=%s", (draft_id,))
+        if (
+            not draft
+            or draft["approver_person_id"] != person["id"]
+            or draft["kind"] != "connect_propose_mcp"
+            or draft["state"] not in {"approved", "sent"}
+            or draft["content"]["arguments"]["auth"] != "oauth"
+        ):
+            return
+    await open_form(
+        ctx,
+        person,
+        action["trigger_id"],
+        "mcp_client",
+        [("client_id", "Client ID"), ("secret", "Client secret (optional)")],
+        draft_id=draft_id,
+    )
+
+
 async def setup(ctx):
+    ctx.slack_actions.register("connect:mcp:client:", mcp_client_button)
     ctx.slack_actions.register("connect:google:", google_button)
     for kind in ("connect_propose_mcp", "connect_allow_tools", "connect_remove"):
         ctx.draft_performers[kind] = perform
