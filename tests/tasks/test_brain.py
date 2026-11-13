@@ -64,8 +64,14 @@ async def test_effort_reaches_person_dm_payload(app, replay, fake_brain, monkeyp
     async for _ in openai_responses.response_chunks(request, [], [], Http()):
         pass
     assert seen[-1]["reasoning"]["effort"] == "high"
+    # The run's own effort wins. The environment is only the default for a request with no effort.
     monkeypatch.setenv("ILLO_BRAIN_EFFORT", "low")
     async for _ in openai_responses.response_chunks(request, [], [], Http()):
+        pass
+    assert seen[-1]["reasoning"]["effort"] == "high"
+    bare = request.model_copy()
+    bare.model_fields_set.discard("effort")
+    async for _ in openai_responses.response_chunks(bare, [], [], Http()):
         pass
     assert seen[-1]["reasoning"]["effort"] == "low"
 

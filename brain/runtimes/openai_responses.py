@@ -103,6 +103,13 @@ def used_fields(item):
     return fields
 
 
+def run_effort(request) -> str:
+    """The request names the effort of its run. The environment is only the default."""
+    if "effort" in request.model_fields_set:
+        return request.effort
+    return os.getenv("ILLO_BRAIN_EFFORT") or request.effort
+
+
 def effort_rejected(error: dict) -> bool:
     param = error.get("param")
     # Read the message only to classify this rejection. Never emit or log it.
@@ -131,7 +138,7 @@ async def response_chunks(request, tools, items, http, *, tools_disabled=False):
     cache_key = (base, request.model)
     payload = build_request(request, tools, items, tools_disabled=tools_disabled)
     if cache_key not in _without_effort:
-        payload["reasoning"] = {"effort": os.getenv("ILLO_BRAIN_EFFORT") or request.effort}
+        payload["reasoning"] = {"effort": run_effort(request)}
     effort_retry = image_retry = True
     while True:
         async with http.stream(

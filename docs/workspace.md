@@ -48,7 +48,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs and needs `auth: chatgpt`. |
 | `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
 | `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
-| `brain.effort` | Optional profile-to-effort map: `low`, `medium`, or `high`. Person DM, team channel, and agent request default to `medium`; others default to `low`. `ILLO_BRAIN_EFFORT` overrides it in the Responses runtime. |
+| `brain.effort` | Optional profile-to-effort map: `low`, `medium`, or `high`. Person DM, team channel, and agent request default to `medium`; others default to `low`. This setting wins over `ILLO_BRAIN_EFFORT`. |
 | `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50, the limit of the brain service. |
 | `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |

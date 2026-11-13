@@ -36,7 +36,7 @@ Use `openai_responses` for current OpenAI models that require Responses for func
 Set `OPENAI_API_KEY` and select the model in the request or `ILLO_BRAIN_MODEL`.
 `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
 The request gives the reasoning effort for each run. The workspace sets it in `brain.effort`.
-Set `ILLO_BRAIN_EFFORT` only to force one effort for all runs.
+`ILLO_BRAIN_EFFORT` is the default for a request that names no effort.
 The request sends this value as `reasoning.effort`.
 If the provider rejects that parameter, the loop retries once without it.
 The worker remembers that choice for its process lifetime. A new worker starts a new cache.
@@ -298,7 +298,7 @@ Validation errors and provider exceptions do not echo the request or secrets.
 | `ILLO_BRAIN_CONCURRENCY` | `4` | Maximum active workers. Other requests wait. |
 | `ILLO_BRAIN_TIMEOUT_S` | `120` | Maximum active duration, capped further by `timeout_s`. |
 | `ILLO_BRAIN_MODEL` | `claude-opus-5-5` | Model when the request omits it. |
-| `ILLO_BRAIN_EFFORT` | Unset | Forces one effort for all runs. Unset: the request's effort applies. |
+| `ILLO_BRAIN_EFFORT` | Unset | Default effort for a request that names none. The request's effort wins. |
 | `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` | Unset | Optional Chat Completions `reasoning_effort`. |
 | `ILLO_BRAIN_TMPDIR` | System temp folder | Parent folder for each run's private files. |
 
