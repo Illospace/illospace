@@ -230,3 +230,20 @@ async def test_config_check_deletes_a_copy_with_stored_credentials(mirror_ctx):
 async def test_disabled_setup_has_no_jobs():
     ctx = SimpleNamespace(config=SimpleNamespace(repos_dir=None))
     await repos.setup(ctx)
+
+
+async def test_sync_works_when_another_user_owns_the_root(mirror_ctx, monkeypatch):
+    """A gateway with its own user cannot change the mode of the volume root."""
+    ctx, _, _ = mirror_ctx
+    root = ctx.config.repos_dir
+    root.mkdir(parents=True)
+    real = type(root).chmod
+
+    def chmod(self, mode, **kwargs):
+        if self == root.resolve():
+            raise PermissionError("Operation not permitted")
+        return real(self, mode, **kwargs)
+
+    monkeypatch.setattr(type(root), "chmod", chmod)
+    await repos.sync(ctx)
+    assert (await state(ctx))["repositories"]["Acme/app"]["ok"]

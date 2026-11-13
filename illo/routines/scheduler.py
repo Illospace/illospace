@@ -27,8 +27,9 @@ class Scheduler:
         name = f"job:{fn.__module__}.{fn.__name__}"
         try:
             await fn()
-        except Exception:
-            log.error("Scheduled job failed: %s", name)
+        except Exception as exc:
+            # The type name helps a repair. The message can hold private text, so it stays out.
+            log.error("Scheduled job failed: %s (%s)", name, type(exc).__name__)
             try:
                 async with self.ctx.pool.connection() as conn:
                     await sensors.error(conn, name, "The scheduled job failed", expected_every_s=seconds)

@@ -103,7 +103,9 @@ async def sync(ctx, *, max_age_minutes=None):
                     and time.time() - previous.get("last_success_at", 0) < max_age_minutes * 60):
                 return
             root.mkdir(parents=True, exist_ok=True)
-            root.chmod(root.stat().st_mode | 0o055)
+            # A deployment can run the gateway with its own user. That user does not own the volume root.
+            with suppress(PermissionError):
+                root.chmod(root.stat().st_mode | 0o055)
             results = {}
             old_results = previous.get("repositories", {})
             for repo in old_results.keys() - set(repositories):
