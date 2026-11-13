@@ -72,7 +72,7 @@ def options(request: RunRequest, directory: Path) -> ClaudeAgentOptions:
         skills=[],
         max_turns=request.max_turns + 1,
         model=request.model,
-        effort=os.getenv("ILLO_BRAIN_EFFORT", "low"),
+        effort=os.getenv("ILLO_BRAIN_EFFORT") or request.effort,
         include_partial_messages=True,
         enable_file_checkpointing=False,
         settings=json.dumps(
