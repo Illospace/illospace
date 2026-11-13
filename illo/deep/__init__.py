@@ -40,8 +40,9 @@ async def start(
         raise Refusal("Deep work is off for this team.")
     if (
         value(authority, "tainted", False)
-        or value(authority, "outside_read", False)
-        or value(authority, "web_read", False)
+        or (not value(authority, "customer_read", False) and (
+            value(authority, "outside_read", False) or value(authority, "web_read", False)
+        ))
         or value(authority, "profile") in {"tainted", "outsider"}
         or value(authority, "principal") == "outsider"
     ):
@@ -56,6 +57,8 @@ async def start(
         else None
     )
     context = origin["payload"].get("payload", {}).copy() if origin else {}
+    context["customer_read"] = bool(value(authority, "customer_read", False))
+    context["personal_read"] = bool(value(authority, "personal_read", False))
     if origin and (origin["tainted"] or context.get("contains_outside_text")):
         raise Refusal("Deep work needs a team request that has not read outside text.")
     if kind == "request":

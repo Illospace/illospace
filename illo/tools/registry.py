@@ -77,6 +77,7 @@ class Tool:
     on_error: Callable[[ToolContext, dict], Awaitable[None]] | None = None
     available: Callable[[ToolContext], Awaitable[bool]] | None = None
     # Patch tools need to distinguish an omitted field from an explicit null.
+    customer_data: bool = False
     exclude_unset: bool = False
     # Some team writes use an existing confirmation flow after a private read.
     draft_handler: Callable[[ToolContext, dict], Awaitable[Any]] | None = None
@@ -213,6 +214,12 @@ class Registry:
                         )
                         result = {"draft_id": row["id"], "state": "pending"}
                 elif decision == "allow":
+                    # Keep the flag even if the remote call fails after it receives data.
+                    if tool.customer_data:
+                        await ctx.conn.execute(
+                            "UPDATE runs SET customer_read=true WHERE id=%s", (ctx.run["id"],)
+                        )
+                        ctx.run["customer_read"] = True
                     if tool.personal:
                         await ctx.conn.execute(
                             "UPDATE runs SET personal_read=true WHERE id=%s", (ctx.run["id"],)
@@ -266,7 +273,7 @@ class Registry:
         envelope = {"decision": decision, "reason": reason, "result": result}
         # Personal snapshots keep complete JSON across all attention aliases.
         if (
-            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "web_fetch"}
+            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "web_fetch", "aws_read"}
             and len(json_text(envelope)) > MAX_RESULT_CHARS
         ):
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."

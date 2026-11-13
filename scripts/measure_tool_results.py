@@ -12,6 +12,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from illo.connectors.config import Connector
 from illo.connectors.mcp_client import MCPClient
 from illo.db import create_pool, migrate, one
 from illo.ledger import people, rules, runs
+from illo.tools._format import data_text
 from illo.tools.registry import ToolContext
 from tests.fakes import FakeGitHubClient, FakeGoogleClient, FakeMCPSession, FakeSlackClient
 
@@ -49,6 +51,7 @@ TYPICAL_ARGS = {
     "drive_shared_search": {"query": "mobile app"}, "drive_shared_get": {"id": "one"},
     "calendar_list": {"from": "2026-11-10T00:00:00Z", "to": "2026-11-11T00:00:00Z"},
     "chatgpt_status": {},
+    "aws_read": {"service": "logs", "operation": "GetQueryResults", "parameters": {"queryId": "acme-query"}},
     "lists": {}, "task_list": {}, "task_get": {"id": 1},
     "connectors_call": {"connector": "docs", "tool": "read"},
 }
@@ -111,6 +114,10 @@ async def seed(conn):
 
 
 async def configure_fakes(ctx):
+    async def aws_read(tc, args):
+        return data_text("aws", json.dumps({"results": [[{"field": "@message", "value": "Acme service is ready."}]], "nextToken": "acme-next"}))
+
+    ctx.registry.tools["aws_read"] = replace(ctx.registry.tools["aws_read"], handler=aws_read)
     ctx.slack_client = FakeSlackClient(messages={"1": {"text": "Check the mobile app release.", "ts": "1"}})
     client = FakeGitHubClient()
     for n in range(1,81):

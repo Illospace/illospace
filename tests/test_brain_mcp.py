@@ -29,7 +29,10 @@ async def test_sdk_result_has_one_payload_and_caps_private_text(app, rpc, rpc_to
     result = read_result(envelope)
     assert result["decision"] == "allow"
     assert "Result cut at 12000 characters" in result["result"]
-    assert parsed.structuredContent == {"decision": result["decision"], "reason": result["reason"]}
+    assert parsed.structuredContent == {
+        "decision": result["decision"], "reason": result["reason"],
+        "run_flags": {"customer_read": False, "personal_read": True},
+    }
     async with app.state.ctx.pool.connection() as conn:
         assert (await runs.get(conn, run["id"]))["personal_read"]
 

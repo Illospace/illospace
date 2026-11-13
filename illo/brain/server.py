@@ -119,6 +119,11 @@ async def endpoint(request: Request):
                     )
                     called = await ctx.registry.call(ToolContext(conn, run, ctx), name, args)
                 result = tool_result(called, is_error=called["decision"] == "deny", brain=True)
+                # This metadata comes from the locked run, never from remote tool text.
+                result["structuredContent"]["run_flags"] = {
+                    "customer_read": bool(run.get("customer_read")),
+                    "personal_read": bool(run.get("personal_read")),
+                }
             else:
                 return _error(request_id, -32601, "Method not found")
             return JSONResponse(

@@ -36,12 +36,16 @@ def find(app, args: dict) -> tuple:
 async def list_connectors(ctx, args: dict) -> list[dict]:
     results = []
     for config in ctx.app.workspace.connectors:
+        if config.kind == "aws" and config.scope == "team" and not ctx.run["tainted"] and ctx.run["principal"] != "outsider":
+            results.append({"connector": config.key, "tools": [], "region": config.region, "services": config.services})
+            continue
         if config.kind != "mcp" or config.scope != "team":
             continue
         visible = [
             tool
             for tool in config.tools
-            if not ctx.run["tainted"] or (tool.tainted and tool.risk == "read")
+            if (not ctx.run["tainted"] or (tool.tainted and tool.risk == "read"))
+            and (not ctx.run.get("deep_kind") or tool.risk == "read")
         ]
         # Do not contact a connector with no tools that this run may use.
         schemas = {}
@@ -67,24 +71,35 @@ async def list_connectors(ctx, args: dict) -> list[dict]:
             }
         )
     values = [{"connector": c["connector"], **t} for c in results for t in c["tools"]]
+    aws = "\n".join(
+        line(c["connector"], c["region"], ", ".join(c["services"]))
+        for c in results if "services" in c
+    )
     return data_text(
         "connector-catalog",
         rows(
             values,
             lambda t: line(t["connector"], t["name"], t["risk"], json_text(t["inputSchema"])),
-        ).text,
+        ).text + ("\n" + aws if aws else ""),
     )
 
 
-async def call_connector(ctx, args: dict) -> dict:
+async def call_connector(ctx, args: dict, *, approved=False) -> dict:
     if ctx.run["personal_read"]:
         raise ValueError("This run read personal data, so it cannot call a connector.")
     config, remote = find(ctx.app, args)
+    if ctx.run.get("customer_read") and not config.customer_data and not approved:
+        raise ValueError("Customer data needs approval for this connector")
+    if ctx.run.get("deep_kind") and remote.risk != "read":
+        raise ValueError("A deep run only reads")
     # Check again at the handler boundary, even when trusted code calls it directly.
     if ctx.run["principal"] == "outsider" or (
         ctx.run["tainted"] and not (remote.tainted and remote.risk == "read")
     ):
         raise ValueError("This connector tool does not allow a tainted run")
+    if config.customer_data:
+        await ctx.conn.execute("UPDATE runs SET customer_read=true WHERE id=%s", (ctx.run["id"],))
+        ctx.run["customer_read"] = True
     return outside_result(await ctx.app.mcp_client.call(ctx.app, ctx.conn, config, args["tool"], args["arguments"]))
 
 
@@ -98,6 +113,7 @@ def resolve(ctx, args: dict) -> Tool:
         destination=lambda a: f"outside:{config.key}",
         profiles=profiles,
         resolve=None,
+        customer_data=bool(config.customer_data),
     )
 
 
@@ -110,7 +126,7 @@ async def call_failed(ctx, args: dict) -> None:
 async def connector_available(ctx):
     """Show connector tools only when the run has a configured service to call."""
     return any(
-        config.kind == "mcp" and config.scope == "team"
+        config.kind in {"mcp", "aws"} and config.scope == "team"
         and (not ctx.run["tainted"] or any(t.tainted and t.risk == "read" for t in config.tools))
         for config in ctx.app.workspace.connectors
     )

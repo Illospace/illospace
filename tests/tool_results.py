@@ -5,7 +5,14 @@ import json
 
 def read_result(envelope):
     value = json.loads(envelope["content"][0]["text"])
-    assert envelope["structuredContent"] == {key: value[key] for key in ("decision", "reason")}
+    metadata = envelope["structuredContent"]
+    assert {key: metadata[key] for key in ("decision", "reason")} == {
+        key: value[key] for key in ("decision", "reason")
+    }
+    assert set(metadata) <= {"decision", "reason", "run_flags"}
+    if "run_flags" in metadata:
+        assert set(metadata["run_flags"]) == {"customer_read", "personal_read"}
+        assert all(type(v) is bool for v in metadata["run_flags"].values())
     return value
 
 

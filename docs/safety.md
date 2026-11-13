@@ -206,6 +206,41 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Tests.** `tests/safety/test_rule_10_tool_list.py`, `tests/safety/test_rule_10_brain_tools.py`, `tests/safety/test_rule_10_web_bounds.py`, `tests/safety/test_rule10_deploy.py`, `tests/safety/test_review_s20_rule_10_compose_networks.py`. The live part of `test_rule_10_brain_tools.py` runs only on request, with a real model.
 
+## 11. Customer data closes the web
+
+**Rule.** After a run reads customer data, the web stays closed for that run.
+Read the web first when a question needs both sources.
+
+**Bad case.** A log contains an outsider's instruction to send customer data through a web address.
+Without the rule, a later web request can send that data to the outsider.
+
+**Code.**
+- Migration `1600_customer_read.sql` adds `runs.customer_read`. The flag never clears during a run.
+- `Registry.call` sets the flag before an AWS call or a call to a connector with `customer_data: true`.
+  The flag stays set if the remote call fails. The result and the flag use the same transaction.
+- MCP and AWS connectors default to `customer_data: true`.
+  The owner can set it to `false` for public or team-only content. Google keeps its personal-read rules.
+  A connector with `customer_data: true` can also receive a call after a customer read.
+  Set `false` for a server that reads the open web for the run, such as a search or fetch server.
+- `scope` and the web handlers refuse `web_fetch` and `web_read_public_page` after the flag.
+  The gateway returns trusted `run_flags` metadata with each tool result.
+  The Responses loop removes provider web search before its next model request after customer or personal data.
+  Missing metadata also closes provider search. Remote text cannot change the flags or reopen the web.
+- A non-customer connector needs a draft after customer data. Only the requester can approve it.
+  A run with no person cannot make that call. Customer-data connector reads and AWS reads stay available.
+- Existing drafts stay drafts. Task writes, team Slack answers, and private-repository tickets keep their existing checks.
+- `deep_start` can pass customer data to internal deep work. The deep run inherits the flag before its first model request.
+  It also inherits an existing personal-read flag.
+- Every deep kind can list team connectors, call team MCP read tools, and call `aws_read`.
+  Deep runs cannot call connector writes. A personal deep run keeps its owner's personal read tools, under rule 2.
+  Briefs still have no web. Scouts and briefs still cannot write tasks.
+- Tainted runs get no AWS tool. Their connector reads still need `tainted: true` and `risk: read`.
+  Outsiders get no connector access. AWS and customer connector results stay outside data.
+- AWS uses only explicit vault keys, checked services, read operation names, and field removal for secret values and code.
+  The key's IAM policy remains the primary limit. The private form checks the key with STS and stores no key on failure.
+
+**Tests.** `tests/safety/test_rule_11_customer_data.py`, `tests/connectors/test_aws.py`, and `tests/connectors/test_aws_chat.py`.
+
 ## Voice privacy
 
 Illo uses only Slack's transcript by default. Audio stays in Slack.
@@ -321,16 +356,19 @@ Keep the sandbox port private. See [Sandbox](sandbox.md) for the full boundary a
 
 ## Deep work
 
-Deep work keeps the authority of the request. Outside text cannot start a deep run.
+Deep work keeps the authority of the request. A parent with customer data passes its closed-web flag to the deep run.
 Code refuses outside writes, including memory saves and Slack messages.
 Only a person-requested deep run can change tasks, and only before it reads the web.
-`runs.web_read` records that limit. `runs.personal_read` blocks web reads after private data.
+`runs.web_read` records that limit. Personal data and customer data close the web for the rest of the run.
 Scouts and briefs never change tasks. Briefs never read the web.
 Shell output and page text have outside-data markers. They do not remove the run's read tools.
 The queue lease prevents a crashed run from a second execution.
 See [Deep work](deep.md) and `tests/deep/` for the full rules and tests.
 
-A deep run reads private repositories and can then read the web. A web page can hold a hidden instruction.
-Three limits reduce what such an instruction can do: the sandbox has no network, a deep run cannot write outside the task list,
-and a web address is 400 characters at most. A risk stays: a short address can still carry a small text to an outside server.
-Read the `web_fetch` lines of the audit when you review a deep run.
+Repository code and the task list do not close the web. Customer data and personal data do.
+A web page or repository can hold an outsider's instruction. The sandbox has no network.
+Deep runs cannot write outside the task list. Web addresses have a 400-character limit.
+A risk stays before customer or personal reads: a short address can send repository or task text outside.
+Customer-data connectors remain trusted read destinations after customer reads. Their arguments can carry data to those services.
+A non-customer connector needs approval after customer reads. The requester must check that draft.
+Read the `web_fetch` and connector audit rows when you review a deep run.

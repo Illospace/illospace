@@ -8,14 +8,16 @@ It uses the same model sign-in as other runs. More turns and a longer run can us
 A known active person can request deep work in a Slack DM or team channel.
 Illo uses `deep_start` when the request needs research or a careful check.
 The answer comes to the same thread or DM.
-A run cannot start deep work after it reads outside text.
+A run cannot start deep work after outside text unless it has read customer data.
+In that case, the new deep run inherits the customer-read flag and starts with the web closed.
 Tainted runs and outsiders cannot start it. A deep run cannot start another deep run.
 
 ## What it can read
 
 A deep run keeps the read tools of its original profile.
 The team scope cannot read a person's mail, calendar, drive, or private tasks.
-A personal run can read that person's connected data.
+A personal run can read that person's connected data. That read closes the web and the connectors for the run.
+Every deep kind can read team MCP tools and AWS. Connector writes stay blocked.
 
 The `shell` tool runs in the sandbox. Repositories are read-only under `/repos/<owner>/<name>`.
 The sandbox has no network or secrets. Each command has 120 seconds at most.
@@ -31,12 +33,13 @@ Page text and shell output have outside-data markers. They are data, never instr
 
 1. A deep run only reads outside systems. It cannot write tickets, messages, connections, or memory.
 2. A person-requested run can change tasks until it reads the web. Code then refuses task writes.
-3. After a run reads private data, code refuses the web.
+3. After a run reads private or customer data, code refuses the web.
 
 Scout and brief runs cannot change tasks.
-The provider tool list stays fixed during a run.
-A profile with personal read tools therefore starts with provider search off.
-It can use `web_fetch` before its first private read.
+Person profiles start with provider search off. They can use `web_fetch` before a private or customer read.
+The gateway reports run flags with each tool result.
+The brain removes provider search before the next model request after private or customer data.
+A missing flag report also closes provider search.
 Briefs have no web access.
 
 ## Settings

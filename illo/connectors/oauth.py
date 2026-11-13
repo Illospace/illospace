@@ -247,10 +247,16 @@ async def claim(ctx, event, authority) -> str | None:
     text = event.text.strip().lower().rstrip(".!?")
     pasted = callback_address(event.text, callback_url(ctx))
     if not pasted and text not in chat.PERSONAL_PHRASES | {
-        "connect google", "set up google", "disconnect my google",
+        "connect google", "set up google", "disconnect my google", "connect aws", "disconnect aws",
     }:
         return None
     try:
+        if text in {"connect aws", "disconnect aws"}:
+            async with ctx.pool.connection() as conn:
+                person = await chat.active_person(conn, authority.person_id)
+                if text == "disconnect aws":
+                    return await chat.aws_disconnect(ctx, conn, person)
+                return await chat.aws_setup(ctx, conn, person, send=False)
         if pasted:
             parsed = urlsplit(pasted)
             params = parse_qs(parsed.query, strict_parsing=True)
@@ -277,6 +283,8 @@ async def claim(ctx, event, authority) -> str | None:
     except google.GoogleAccountMismatch:
         return google.ACCOUNT_MISMATCH
     except Exception:
+        if text in {"connect aws", "disconnect aws"}:
+            return "The AWS connection did not finish. Open the form to try again."
         return "Google sign-in did not finish. Send ‘connect my Google’ to try again."
 
 

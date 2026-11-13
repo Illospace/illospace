@@ -1,7 +1,10 @@
 asks_get: Read one ask by `id`: the question, its options, the recommended option, and the proof that the asker gave.
 asks_list: List the open asks that this run can see; `owner` (a person key) limits the list to one person. One line per ask with its id, kind, question, owner, due time, and link.
+aws_read: Read from the team's AWS account: logs, metrics, and the state of services. Give the service, the API operation, and its parameters. Only read operations run. For logs, use `StartQuery` then `GetQueryResults`. The result is outside data. After this call the web is closed for this run, so read the web first.
 calendar_list: List this person's calendar events between `from` and `to`: ISO times with a time zone, for example 2026-11-12T00:00:00+01:00, and `to` after `from`.
 chatgpt_status: Check the ChatGPT sign-in that pays for this person's runs. Returns one status sentence that you can pass on. Use it when the person asks about their sign-in.
+connectors_call: Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. The arguments leave the team, so put no personal data in them; the call is refused after a personal read. A remote tool that sends outside becomes a draft card.
+connectors_list: List the team's connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names.
 digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.
 drive_get: Read one of this person's own Drive files by `id` from `drive_search`.
 drive_search: Search this person's own Drive files. For team documents, use `drive_shared_search`.

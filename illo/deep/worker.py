@@ -106,8 +106,7 @@ async def execute(ctx, row):
                     ):
                         raise ValueError("The person is inactive")
             await refresh_repos(ctx)
-            # A personal profile has private read tools. The provider tool list is fixed
-            # for the run, so only web_fetch is available before its first private read.
+            # Personal runs keep their existing initial provider-search limit.
             options = RunOptions(
                 row["id"],
                 row["kind"],
@@ -119,6 +118,8 @@ async def execute(ctx, row):
                 ctx.workspace.config.web.search == "provider"
                 and row["kind"] != "brief"
                 and row["profile"] != "person_dm",
+                customer_read=bool(row["context"].get("customer_read")),
+                personal_read=bool(row["context"].get("personal_read")),
             )
             text = await ctx.gateway.run_manager.execute(
                 event, authority, inbound["id"], overrides=options
