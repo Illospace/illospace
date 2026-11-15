@@ -28,7 +28,9 @@ def browser_ready(ctx):
         return False
 
 
-def fallback(key):
+def fallback(key, *, personal=False):
+    if personal:
+        return "Browser sign-in needs a public HTTPS address. Ask the owner to set it up."
     return f"Browser sign-in needs a public HTTPS address. On the host, run `illo connector login {key}`."
 
 
@@ -94,9 +96,9 @@ async def issue_link(ctx, conn, person, config, info, *, client_secret=None, cre
 async def issue(ctx, conn, person, config, info, *, client_secret=None, create=False):
     from illo.connectors import chat
 
-    await chat.active_person(conn, person["id"], owner=True)
+    await chat.active_person(conn, person["id"], owner=create or config.scope == "team")
     if not browser_ready(ctx):
-        return fallback(config.key)
+        return fallback(config.key, personal=config.scope == "personal")
     link = await issue_link(
         ctx, conn, person, config, info, client_secret=client_secret, create=create
     )
@@ -110,7 +112,7 @@ async def after_add(ctx, conn, person, draft):
 
     args = draft["content"]["arguments"]
     if not browser_ready(ctx):
-        return fallback(args["key"])
+        return fallback(args["key"], personal=args.get("scope") == "personal")
     info = await load_proposal(ctx, conn, draft["id"])
     if not info.get("registration_endpoint"):
         text = f"Enter the Client ID for {args['key']}. Use only the private form."
@@ -148,12 +150,13 @@ async def with_client(ctx, conn, person, draft, client_id, client_secret, *, aut
     info = await load_proposal(ctx, conn, draft["id"])
     if auth_method is not None:
         info["token_endpoint_auth_method"] = auth_method
-    discovery.token_auth_method(info, client_secret)
+    method = discovery.token_auth_method(info, client_secret)
     config.auth = Auth(
         type="oauth",
         client_id=client_id,
         authorization_url=info["authorization_endpoint"],
         token_url=info["token_endpoint"],
+        token_endpoint_auth_method=method,
         scopes=info.get("scopes_supported", []),
         redirect_uri=callback_url(ctx),
     )
@@ -165,8 +168,8 @@ async def start(ctx, state, *, browser_nonce=None):
 
     async with ctx.pool.connection() as conn:
         row, details = await oauth.open_state(ctx, conn, state, browser_nonce, provider="mcp")
-        await active_person(conn, row["person_id"], owner=True)
-    config = Connector.model_validate(details["config"])
+        config = Connector.model_validate(details["config"])
+        await active_person(conn, row["person_id"], owner=details["create"] or config.scope == "team")
     if config.key != row["connector_key"] or config.auth.redirect_uri != callback_url(ctx):
         raise ValueError("The connector changed. Ask Illo for a new link.")
     return discovery.authorization_url(details["info"], config, state, details["verifier"])
@@ -182,8 +185,8 @@ async def complete(ctx, state, code, *, browser_nonce=None):
         row, details = await oauth.consume_state(
             ctx, conn, state, None, browser_nonce, provider="mcp"
         )
-        await chat.active_person(conn, row["person_id"], owner=True)
-    config = Connector.model_validate(details["config"])
+        config = Connector.model_validate(details["config"])
+        await chat.active_person(conn, row["person_id"], owner=details["create"] or config.scope == "team")
     if config.key != row["connector_key"] or config.auth.redirect_uri != callback_url(ctx):
         raise ValueError("The connector changed. Ask Illo for a new link.")
     info = details["info"]
@@ -208,7 +211,7 @@ async def complete(ctx, state, code, *, browser_nonce=None):
     if not set(scopes) <= set(config.auth.scopes):
         raise ValueError("The server returned a scope that Illo does not allow")
     async with ctx.pool.connection() as conn:
-        person = await chat.active_person(conn, row["person_id"], owner=True)
+        person = await chat.active_person(conn, row["person_id"], owner=details["create"] or config.scope == "team")
         existing = next((c for c in ctx.workspace.connectors if c.key == config.key), None)
         if details["create"] and existing:
             raise ValueError("This connector already exists")
@@ -230,15 +233,16 @@ async def complete(ctx, state, code, *, browser_nonce=None):
         ctx.mcp_client.check_private(
             found, [value for value in private if isinstance(value, str) and value]
         )
-        person = await chat.active_person(conn, row["person_id"], owner=True, lock=True)
+        person = await chat.active_person(conn, row["person_id"], owner=details["create"] or config.scope == "team", lock=True)
         token.update(
             token_url=info["token_endpoint"],
             client_id=config.auth.client_id,
             resource=info.get("resource", config.url),
             token_auth_method=discovery.token_auth_method(info, details.get("client_secret")),
             signed_in_by=person["id"],
+            revocation_endpoint=info.get("revocation_endpoint"),
         )
-        if details.get("client_secret"):
+        if details.get("client_secret") and (details["create"] or config.scope == "team"):
             config.auth.client_secret = "connector-" + config.key + "-client-secret"
             await store.vault(ctx).set(conn, config.auth.client_secret, details["client_secret"])
         if token.get("expires_in") is not None:
@@ -247,36 +251,41 @@ async def complete(ctx, state, code, *, browser_nonce=None):
                 or not 0 < int(token["expires_in"]) <= 315360000
             ):
                 raise ValueError("The token expiry is invalid")
-        config.discovered_tools = found
-        ctx.mcp_client.check_private(
-            config.model_dump(), [value for value in private if isinstance(value, str) and value]
-        )
-        # Re-sign-in keeps the current permissions. Only the owner can change them.
-        await files.save(
-            ctx,
-            conn,
-            config,
-            create=details["create"],
-            expected=None
-            if details["create"]
-            else Connector.model_validate(details["expected_config"]),
-        )
-        await store.save(conn, ctx, config.key, None, token, scopes)
+        if details["create"] or config.scope == "team":
+            config.discovered_tools = found
+            ctx.mcp_client.check_private(
+                config.model_dump(), [value for value in private if isinstance(value, str) and value]
+            )
+            # A member's sign-in never changes the shared file or tool permissions.
+            await files.save(
+                ctx, conn, config, create=details["create"],
+                expected=None if details["create"] else Connector.model_validate(details["expected_config"]),
+            )
+        if config.scope == "personal":
+            async with ctx.reload_lock:
+                current = next((c for c in ctx.workspace.connectors if c.key == config.key), None)
+                if current != (config if details["create"] else existing):
+                    raise ValueError("The connector changed. Ask Illo for a new link.")
+                await store.save(conn, ctx, config.key, person["id"], token, scopes)
+        else:
+            await store.save(conn, ctx, config.key, None, token, scopes)
         await sensors.ok(conn, "connector:" + config.key)
         await chat.audit_change(
             conn, person, "connect_add_mcp" if details["create"] else "connect_sign_in"
         )
-    text = f"{config.key} is connected for the team."
+    text = f"{config.key} is connected for you." if config.scope == "personal" else f"{config.key} is connected for the team."
     if details["create"]:
         text += " Name the tools to allow.\n" + chat.tools_text(found)
+        if config.scope == "team":
+            text += "\n" + chat.private_data_text(config.key)
     await chat.dm(ctx, person, text)
     return f"{config.key} is connected. Go back to Slack."
 
 
-async def reconnect_info(ctx, conn, config):
+async def reconnect_info(ctx, conn, config, person_id=None):
     info = await discovery.metadata(ctx.mcp_client.http, config)
     try:
-        _, token = await store.load(conn, ctx, config.key, None)
+        _, token = await store.load(conn, ctx, config.key, person_id if config.scope == "personal" else None)
     except ValueError:
         return info
     info["resource"] = token.get("resource", config.url)
@@ -288,11 +297,52 @@ async def reconnect_info(ctx, conn, config):
 async def reconnect(ctx, conn, person, config):
     from illo.connectors.chat import active_person
 
-    await active_person(conn, person["id"], owner=True)
+    await active_person(conn, person["id"], owner=config.scope == "team")
     if not browser_ready(ctx):
-        return fallback(config.key)
-    info = await reconnect_info(ctx, conn, config)
+        return fallback(config.key, personal=config.scope == "personal")
+    info = await reconnect_info(ctx, conn, config, person["id"])
     return await issue(ctx, conn, person, config, info)
+
+
+async def disconnect(ctx, conn, person, config):
+    try:
+        _, token = await store.load(conn, ctx, config.key, person["id"], lock=True)
+    except ValueError:
+        token = {}
+    revoked = True
+    if token:
+        try:
+            endpoint = token.get("revocation_endpoint")
+            if not endpoint:
+                # Read current metadata too. Old grants may have no saved endpoint.
+                probe = config.model_copy(update={"auth": None})
+                info = await discovery.metadata(ctx.mcp_client.http, probe)
+                endpoint = info.get("revocation_endpoint")
+            if endpoint:
+                client_secret = (
+                    await store.vault(ctx).get(conn, config.auth.client_secret)
+                    if config.auth.client_secret else None
+                )
+                await discovery.token_request(
+                    ctx.mcp_client.http,
+                    {"token_endpoint": endpoint, "token_endpoint_auth_method": token.get("token_auth_method", "none")},
+                    {"client_id": config.auth.client_id, "token": token.get("refresh_token") or token.get("access_token")},
+                    client_secret,
+                )
+        except Exception:
+            revoked = False
+    await conn.execute(
+        "DELETE FROM connector_grants WHERE connector_key=%s AND person_id=%s",
+        (config.key, person["id"]),
+    )
+    await conn.execute(
+        "DELETE FROM connector_oauth_states WHERE provider='mcp' AND connector_key=%s AND person_id=%s",
+        (config.key, person["id"]),
+    )
+    text = f"{config.key} is disconnected for you."
+    if not revoked:
+        text += " The server did not confirm revocation. Remove Illo's access in your account settings."
+    return text
 
 
 async def claim(ctx, event, authority):
@@ -302,16 +352,26 @@ async def claim(ctx, event, authority):
 
     text = event.text.strip().lower().rstrip(".!?")
     match = re.fullmatch(
-        r"(?:connect ([a-z][a-z0-9_-]*) again|sign in to ([a-z][a-z0-9_-]*))", text
+        r"(?:(connect|sign in to) (my )?([a-z][a-z0-9_-]*)( again)?|disconnect my ([a-z][a-z0-9_-]*))", text
     )
     if not match:
         return None
     from illo.connectors import chat
+    from illo.connectors.config import MCP_RESERVED
 
+    key = match[3] or match[5]
+    if key in MCP_RESERVED:
+        return None
+    config = next((c for c in ctx.workspace.connectors if c.key == key and c.kind == "mcp"), None)
+    if not config:
+        return None
+    if config.scope == "team" and (match[2] or match[5] or (match[1] == "connect" and not match[4])):
+        return None
     try:
         async with ctx.pool.connection() as conn:
-            person = await chat.active_person(conn, authority.person_id, owner=True)
-            config = chat.find_config(ctx, match[1] or match[2])
+            person = await chat.active_person(conn, authority.person_id, owner=config.scope == "team")
+            if match[5]:
+                return await disconnect(ctx, conn, person, config)
             if not config.auth or config.auth.type != "oauth":
                 return "This connector does not use browser sign-in."
             return await reconnect(ctx, conn, person, config)
@@ -324,8 +384,7 @@ async def notify_ended(ctx, conn, key=None):
 
     rows = await all_rows(
         conn,
-        """SELECT * FROM connector_grants WHERE person_id IS NULL
-        AND broken_at IS NOT NULL AND notified_at IS NULL
+        """SELECT * FROM connector_grants WHERE broken_at IS NOT NULL AND notified_at IS NULL
         AND (%s::text IS NULL OR connector_key=%s) ORDER BY id LIMIT 30 FOR UPDATE SKIP LOCKED""",
         (key, key),
     )
@@ -341,13 +400,13 @@ async def notify_ended(ctx, conn, key=None):
             ),
             None,
         )
-        if not config:
+        if not config or (config.scope == "personal") != (row["person_id"] is not None):
             continue
         token = json.loads(store.vault(ctx).decrypt(row["secret"]))
         person = await one(
             conn,
-            "SELECT * FROM people WHERE id=%s AND active AND role='owner'",
-            (token.get("signed_in_by"),),
+            "SELECT * FROM people WHERE id=%s AND active" + (" AND role='owner'" if config.scope == "team" else ""),
+            (row["person_id"] if config.scope == "personal" else token.get("signed_in_by"),),
         )
         if not person:
             continue
@@ -360,16 +419,17 @@ async def notify_ended(ctx, conn, key=None):
             # A person can read this notice hours later. A link lives for 10 minutes,
             # so the button asks for a new link when the person presses it.
             text = f"Your sign-in to {config.key} ended. Sign in again to continue."
+            action_key = config.key + (f":{person['id']}" if config.scope == "personal" else "")
             blocks = [
                 cards.section(text),
                 {
                     "type": "actions",
-                    "elements": [cards.button("Sign in", f"connect:mcp:signin:{config.key}")],
+                    "elements": [cards.button("Sign in", f"connect:mcp:signin:{action_key}")],
                 },
             ]
             await chat.dm(ctx, person, text, blocks, message_key=message_key)
         else:
-            await chat.dm(ctx, person, fallback(config.key), message_key=message_key)
+            await chat.dm(ctx, person, fallback(config.key, personal=config.scope == "personal"), message_key=message_key)
 
 
 async def signin_button(ctx, person, action):
@@ -377,11 +437,13 @@ async def signin_button(ctx, person, action):
 
     if not (action.get("channel") or "").startswith("D"):
         return
-    key = action.get("action_id", "").removeprefix("connect:mcp:signin:")
+    key, _, grant_person = action.get("action_id", "").removeprefix("connect:mcp:signin:").partition(":")
     try:
         async with ctx.pool.connection() as conn:
-            person = await chat.active_person(conn, person["id"], owner=True)
             config = chat.find_config(ctx, key)
+            if config.scope == "personal" and grant_person != str(person["id"]):
+                return
+            person = await chat.active_person(conn, person["id"], owner=config.scope == "team")
             if config.kind != "mcp" or not config.auth or config.auth.type != "oauth":
                 return
             await reconnect(ctx, conn, person, config)

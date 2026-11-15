@@ -16,7 +16,8 @@ Tainted runs and outsiders cannot start it. A deep run cannot start another deep
 
 A deep run keeps the read tools of its original profile.
 The team scope cannot read a person's mail, calendar, drive, or private tasks.
-A personal run can read that person's connected data. That read closes the web and the connectors for the run.
+A personal run can read that person's connected data. That read closes the web and team connectors for the run.
+Further reads from that person's personal MCP connectors remain available.
 Every deep kind can read team MCP tools and AWS. Connector writes stay blocked.
 
 The `shell` tool runs in the sandbox. Repositories are read-only under `/repos/<owner>/<name>`.

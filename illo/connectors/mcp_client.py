@@ -1,4 +1,4 @@
-"""Team MCP connectors. A remote server cannot add its own authority."""
+"""MCP connectors. A remote server cannot add its own authority."""
 
 import asyncio
 import json
@@ -71,7 +71,16 @@ class MCPClient:
         self.session_factory = session_factory or self.session
         self.http = http or BoundedHTTP(public=True)
 
-    async def bearer(self, ctx, conn, config) -> str | None:
+    @staticmethod
+    def grant_person(config, person_id):
+        if config.scope == "personal":
+            if person_id is None:
+                raise ValueError("A personal connector needs its person's sign-in")
+            return person_id
+        return None
+
+    async def bearer(self, ctx, conn, config, *, person_id=None) -> str | None:
+        person_id = self.grant_person(config, person_id)
         auth = config.auth
         if not auth:
             return None
@@ -83,8 +92,10 @@ class MCPClient:
         if auth.type != "oauth":
             raise ValueError("The MCP auth type is invalid")
         try:
-            row, token = await store.load(conn, ctx, config.key, None, lock=True)
+            row, token = await store.load(conn, ctx, config.key, person_id, lock=True)
         except ValueError:
+            if config.scope == "personal":
+                raise ValueError(f'Not signed in. Write "connect my {config.key}" in a DM to Illo.') from None
             if auth.secret:
                 raw = await store.vault(ctx).get(conn, auth.secret)
                 if not raw:
@@ -101,9 +112,12 @@ class MCPClient:
                 conn, "SELECT name FROM people WHERE id=%s", (token.get("signed_in_by"),)
             )
             name = person["name"] if person else "The owner"
-            failure = SignInEnded(
-                f"The sign-in to {config.key} ended. {name} must sign in again.", row
+            text = (
+                f'Your sign-in to {config.key} ended. Write "connect my {config.key}" in a DM to Illo.'
+                if config.scope == "personal"
+                else f"The sign-in to {config.key} ended. {name} must sign in again."
             )
+            failure = SignInEnded(text, row)
             await record_ended(ctx, conn, config, failure)
             raise failure
 
@@ -156,7 +170,7 @@ class MCPClient:
         if fresh.get("scope") and not set(fresh["scope"].split()) <= set(row["scopes"]):
             raise ValueError("The server returned a scope that Illo does not allow")
         token.update(fresh)
-        await store.save(conn, ctx, config.key, None, token, row["scopes"])
+        await store.save(conn, ctx, config.key, person_id, token, row["scopes"])
         return token["access_token"]
 
     @asynccontextmanager
@@ -177,11 +191,11 @@ class MCPClient:
                         await session.initialize()
                         yield session
 
-    async def private_values(self, ctx, conn, config, bearer):
+    async def private_values(self, ctx, conn, config, bearer, *, person_id=None):
         values = [bearer]
         if config.auth and config.auth.type == "oauth":
             try:
-                _, token = await store.load(conn, ctx, config.key, None)
+                _, token = await store.load(conn, ctx, config.key, self.grant_person(config, person_id))
             except ValueError:
                 token = {}
             values.extend(
@@ -207,7 +221,7 @@ class MCPClient:
 
     async def _schemas(self, session, config, private=()) -> dict:
         key = config.model_dump_json()
-        if key not in self.schemas:
+        if config.scope == "personal" or key not in self.schemas:
             allowed = {tool.name for tool in config.tools}
             schemas, cursor, seen = {}, None, set()
             for _ in range(100):
@@ -224,6 +238,8 @@ class MCPClient:
                     raise ValueError("The connector schemas are too large")
                 cursor = listing.nextCursor
                 if not cursor:
+                    if config.scope == "personal":
+                        return schemas
                     self.schemas[key] = schemas
                     break
                 if cursor in seen:
@@ -233,22 +249,22 @@ class MCPClient:
                 raise ValueError("The connector has too many tool pages")
         return self.schemas[key]
 
-    async def catalog(self, ctx, conn, config) -> dict:
+    async def catalog(self, ctx, conn, config, *, person_id=None) -> dict:
         key = config.model_dump_json()
         async with asyncio.timeout(config.timeout_s):
-            bearer = await self.bearer(ctx, conn, config)
-            private = await self.private_values(ctx, conn, config, bearer)
-            if key in self.schemas:
+            bearer = await self.bearer(ctx, conn, config, person_id=person_id)
+            private = await self.private_values(ctx, conn, config, bearer, person_id=person_id)
+            if config.scope != "personal" and key in self.schemas:
                 self.check_private(self.schemas[key], private)
                 return self.schemas[key]
             async with self.session_factory(config, bearer) as session:
                 return await self._schemas(session, config, private)
 
-    async def discover(self, ctx, conn, config, *, bearer=None) -> dict[str, str]:
+    async def discover(self, ctx, conn, config, *, bearer=None, person_id=None) -> dict[str, str]:
         """Read the bounded tool list without granting a tool."""
         async with asyncio.timeout(config.timeout_s):
             if bearer is None:
-                bearer = await self.bearer(ctx, conn, config)
+                bearer = await self.bearer(ctx, conn, config, person_id=person_id)
             async with self.session_factory(config, bearer) as session:
                 tools, cursor, seen = {}, None, set()
                 for _ in range(100):
@@ -275,14 +291,14 @@ class MCPClient:
                     seen.add(cursor)
                 raise ValueError("The connector has too many tool pages")
 
-    async def call(self, ctx, conn, config, name: str, arguments: dict) -> dict:
+    async def call(self, ctx, conn, config, name: str, arguments: dict, *, person_id=None) -> dict:
         if name not in {tool.name for tool in config.tools}:
             raise ValueError("The connector file does not list this tool")
         try:
             async with asyncio.timeout(config.timeout_s):
-                bearer = await self.bearer(ctx, conn, config)
+                bearer = await self.bearer(ctx, conn, config, person_id=person_id)
                 async with self.session_factory(config, bearer) as session:
-                    private = await self.private_values(ctx, conn, config, bearer)
+                    private = await self.private_values(ctx, conn, config, bearer, person_id=person_id)
                     schemas = await self._schemas(session, config, private)
                     self.check_private(schemas, private)
                     if name not in schemas:

@@ -32,7 +32,8 @@ The Google Internal audience needs a Google Workspace account.
 For a team MCP server:
 
 1. The owner writes `connect the MCP server at https://mcp.example.com/mcp as acme-crm`.
-2. Illo checks the server's sign-in method before it shows the `Add` / `Do not add` card.
+2. Illo checks the server's sign-in method before it shows the Add card.
+   For OAuth, choose `For the team` or `For each person`. A key server has an `Add` button.
    The card shows the server address. For OAuth, it also shows the sign-in host.
    The sign-in host can differ from the server host.
 3. If the server needs a key, `Add` opens a private form for it.
@@ -53,12 +54,50 @@ The button sends a new link. Calls to that connector are refused until the new s
 These commands keep the allowed tools. They need no new Add or Allow card.
 If a sign-in ends, calls stop. The sensor `connector:acme-crm` shows the fault.
 Illo sends one DM with a new sign-in link to the owner who signed in.
-Personal MCP connectors are not available. Google keeps its personal sign-in flow.
-Removal needs a card. It removes the connector file and its saved key.
+Removal needs a card. It removes the connector file, its saved key, and all its grants.
 The server's tool descriptions are outside data. They cannot grant a tool or change its risk.
 The file keeps all discovered names in `discovered_tools`. Only `tools` grants access.
 Connector changes make a local Git commit when the workspace is a Git repository.
 `workspace.git_push: true` also pushes that commit. A failed push leaves the file and local commit saved.
+
+## An MCP server where each person signs in
+
+1. The owner adds the server in a DM and chooses `For each person` on the Add card.
+2. Illo registers a client, or the owner enters the client in the private form.
+3. The owner opens `Sign in` and signs in with their own account.
+4. Illo saves one shared connector file with `scope: personal` and no allowed tools.
+5. The owner allows tools with the existing Allow card and labels them as read or write.
+6. Each active member writes `connect my acme-crm` in their own DM and opens `Sign in`.
+
+`sign in to my acme-crm`, `connect acme-crm`, and `connect acme-crm again` also start sign-in.
+Letter case and final punctuation do not matter. Each link works one time, for 10 minutes, in its first browser.
+Illo uses each grant only for its person. A member's sign-in never changes the file or permissions.
+The file has no `customer_data` field. Personal MCP connectors use the personal data rules.
+Each personal write needs its own approval card. Deep runs can only read.
+Personal reads work in the same runs as personal Google reads, including personal deep work and scouts.
+Team runs, normal routines, agent requests, tainted runs, and outsiders cannot use personal tools.
+A personal read closes the web and team connectors. Further personal reads keep the same person's boundary.
+After a customer read, a personal MCP call needs that person's approval, including a read call.
+A run without a person cannot approve it. Deep writes stay refused.
+
+Write `disconnect my acme-crm` to delete only your grant and pending sign-in links.
+Illo first asks the server to revoke the grant when it has a revocation endpoint.
+A failed revocation still deletes the local grant. Illo tells you to remove access in your account settings.
+An ended grant causes one DM to its person. The `Sign in` button works only for that person.
+Other people's grants keep working. Status shows only your own sign-in state.
+A personal catalog read also closes the web and team connectors. Server schemas can contain private account data.
+Personal catalogs have no schema cache. Every read uses the person's own grant and refresh lock.
+All people share one sensor, `connector:acme-crm`. Any successful call sets it to `ok`.
+A fault has no person's name. This keeps the sensor list small and does not expose a person's state.
+
+## A team server with public data
+
+The owner writes `acme-crm reads only public data` in their own DM.
+Illo shows a `Change` / `Do not change` card before it saves `customer_data: false`.
+Use this only for a server with no customer data and no private data.
+Calls then keep the web open, unless an earlier read closed it.
+Write `acme-crm holds private data` to restore `customer_data: true` and close the web after calls.
+Only team MCP connectors accept this change. AWS always closes the web.
 
 Never paste a key or password in a chat message. Use only the form that Illo opens.
 Illo encrypts the values in its vault. It keeps them out of events, cards, audit values, and workspace files.

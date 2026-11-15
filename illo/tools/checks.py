@@ -151,10 +151,14 @@ def scope(run: dict, tool) -> Decision:
 def destination(run: dict, tool, args: dict) -> Decision:
     """Check 2: personal data cannot leave its owner's destination without a draft."""
     target = tool.destination(args)
-    if run["personal_read"] and tool.family == "connectors" and target.startswith("outside:"):
+    if run["personal_read"] and tool.family == "connectors" and target.startswith("outside:") and not tool.personal:
         return Decision("deny", "This run read personal data, so it cannot call a connector.")
     if run.get("customer_read") and tool.family == "connectors" and target.startswith("outside:") and not tool.customer_data:
         return Decision("draft", "Customer data needs approval for this connector")
+    if tool.personal and tool.family == "connectors":
+        if tool.risk != "read":
+            return Decision("draft", "Each personal connector write needs your approval")
+        return Decision("allow", "The connector uses this person's own sign-in")
     if tool.risk == "read" and not target.startswith("outside:"):
         return Decision("allow", "The tool does not write")
     if not target or not (
