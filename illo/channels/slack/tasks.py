@@ -21,9 +21,22 @@ def state_label(state):
             "done": "done", "cancelled": "cancelled"}[state]
 
 
+def _visible(text):
+    """Remove hidden HTML comments in one pass. A ticket comment uses them as markers for machines."""
+    parts, at = [], 0
+    while (start := text.find("<!--", at)) != -1:
+        end = text.find("-->", start + 4)
+        if end == -1:
+            break
+        parts.append(text[at:start])
+        at = end + 3
+    parts.append(text[at:])
+    return "".join(parts).strip()
+
+
 def agent_message(event):
     # Escape source text before the helper makes Slack links.
-    text = mrkdwn(escape(event["text"]))
+    text = mrkdwn(escape(_visible(event["text"])))
     if len(text) > 600:
         cut = 600
         # Keep a converted Markdown link whole at the cut.
@@ -97,6 +110,18 @@ async def _thread_task(conn, channel, thread):
     card = await one(conn, """SELECT key FROM kv WHERE key LIKE 'task:card:%%'
         AND value->>'channel'=%s AND value->>'ts'=%s""", (channel, thread))
     return {"id": int(card["key"].rsplit(":", 1)[1])} if card else None
+
+
+async def _returned_words(conn, task_id, returned):
+    """Give the holder's last message before a return signal. It says what came back."""
+    if returned["actor"] != "code":
+        # A holder that returns the work itself writes the return text.
+        return None
+    said = await one(conn, """SELECT * FROM task_events WHERE task_id=%s AND kind='message'
+        AND actor LIKE 'agent:%%' AND id<%s AND id>coalesce((SELECT max(id) FROM task_events
+            WHERE task_id=%s AND id<%s AND kind IN ('handed','reopened','returned')),0)
+        ORDER BY id DESC LIMIT 1""", (task_id, returned["id"], task_id, returned["id"]))
+    return (agent_message(said) or None) if said else None
 
 
 async def _send(ctx, conn, task_id, reminder_counts=None):
@@ -182,16 +207,20 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
                 text=mention + "You hold this task now.", client_msg_id=message_id("handed", task_id, event["id"]))
         elif event["kind"] == "message" and event["actor"].startswith("agent:") and not returned:
-            await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
-                text=agent_message(event), client_msg_id=message_id("message", task_id, event["id"]))
+            # A comment that holds only a hidden marker has no text to send.
+            if text := agent_message(event):
+                await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
+                    text=text, client_msg_id=message_id("message", task_id, event["id"]))
+    message = returned["text"] if returned else "All pieces are done. Confirm the whole task."
+    detail = await _returned_words(conn, task_id, returned) if returned else None
     if row["state"] == "review" and (returned or not card):
         if card:
             await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
                 text="The holder returned a newer result.",
-                blocks=task_return_card(row, card["message"], [], final="The holder returned a newer result."))
-        message = returned["text"] if returned else "All pieces are done. Confirm the whole task."
+                blocks=task_return_card(row, card["message"], [], final="The holder returned a newer result.",
+                                        detail=card.get("detail")))
         proof = await ledger.proof(conn, ctx.workspace, row, ctx)
-        blocks = task_return_card(row, message, proof)
+        blocks = task_return_card(row, message, proof, detail=detail)
         delivery_channel = await _recipient_channel(ctx, conn, row, person)
         if delivery_channel != row["slack_channel"]:
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
@@ -201,15 +230,19 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
             **({"thread_ts": row["slack_ts"]} if delivery_channel == row["slack_channel"] else {}),
             text=mention + f"Task {task_id}. Returned: " + escape(row["title"]), blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": mention or " "}}, *blocks],
             client_msg_id=message_id("returned", task_id, returned["id"] if returned else events[-1]["id"]))
-        card = {"ts": sent["ts"], "message": message, "channel": delivery_channel,
+        card = {"ts": sent["ts"], "message": message, "detail": detail, "channel": delivery_channel,
                 "thread": row["slack_ts"] if delivery_channel == row["slack_channel"] else sent["ts"]}
         await kv.set(conn, f"task:card:{task_id}", card)
     elif card:
+        if returned:
+            # A newer return closed before this delivery. The card must show that return, not the old one.
+            card = {**card, "message": message, "detail": detail}
+            await kv.set(conn, f"task:card:{task_id}", card)
         proof = await ledger.proof(conn, ctx.workspace, row, ctx)
         final = None if row["state"] == "review" else ("Done." if row["state"] == "done" else "Sent back." if row["state"] in {"todo", "working"} else "Cancelled.")
         await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
             text=escape(row["title"]) + " · " + state_label(row["state"]),
-            blocks=task_return_card(row, card["message"], proof, final=final))
+            blocks=task_return_card(row, card["message"], proof, final=final, detail=card.get("detail")))
     if reminder and reminder_counts is not None:
         reminder_counts[target] += 1
     if events:

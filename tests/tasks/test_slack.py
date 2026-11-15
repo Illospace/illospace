@@ -197,6 +197,64 @@ def test_agent_comment_uses_slack_markdown_and_bounded_text():
     assert len(prefix) <= 600
     assert rest == "<https://github.com/acme/app/issues/1#issuecomment-2|Read the rest>"
     assert surface.agent_message({"text": "**Ready.** <@U_ACME_ADA>", "data": {}}) == "*Ready.* &lt;@U_ACME_ADA&gt;"
+    assert surface.agent_message({"text": "Ready.\n<!-- worker thread=1 -->", "data": {}}) == "Ready."
+    assert surface.agent_message({"text": "<!-- worker thread=1 -->", "data": {}}) == ""
+    # An open marker with no end stays as text, and many of them cost one pass.
+    assert surface.agent_message({"text": "<!--" * 20000, "data": {}}).startswith("&lt;!--")
+
+
+async def test_agent_comment_with_only_a_marker_sends_no_message(app, slack_client):
+    ctx = app.state.ctx
+    row = await returned(ctx)
+    await surface.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        await tasks.reopen(conn, row["id"], workspace=ctx.workspace, viewer=ADA, reason="More work.")
+        async with conn.transaction():
+            await tasks._event(conn, row, "agent:build", "message", "<!-- worker thread=1 -->", {})
+    before = len(slack_client.calls)
+    await surface.tick(ctx)
+    assert not any(call["method"] == "chat_postMessage" and not call.get("text") for call in slack_client.calls[before:])
+    async with ctx.pool.connection() as conn:
+        assert not await kv.get(conn, f"task:pending:{row['id']}")
+
+
+async def test_closed_card_shows_the_newer_return(app, slack_client):
+    ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    row = await returned(ctx)
+    await surface.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        await tasks.reopen(conn, row["id"], workspace=ctx.workspace, viewer=ADA, reason="More work.")
+        row = await tasks.write_result(conn, row["id"], workspace=ctx.workspace, viewer=BUILD,
+                                      append="A second result", message="The second result is ready.", returned=True)
+        # The task closes before Slack sends the second return.
+        await tasks.done(conn, row["id"], workspace=ctx.workspace, viewer=ADA)
+    await surface.tick(ctx)
+    final = [call for call in slack_client.calls if call["method"] == "chat_update" and call.get("blocks")][-1]
+    texts = [block["text"]["text"] for block in final["blocks"] if block["type"] == "section"]
+    assert "> The second result is ready." in texts and texts[-1] == "Done."
+
+
+async def test_review_card_shows_what_the_holder_returned(app, slack_client):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        row = await tasks.create(conn, workspace=ctx.workspace, viewer=ADA, list_key="launches", title="A report", holder="agent:build")
+        async with conn.transaction():
+            await tasks._event(conn, row, "agent:build", "message", "**The report is ready.** It has four results.",
+                               {"url": "https://github.com/acme/app/issues/1#issuecomment-2"})
+        await tasks.returned_by_signal(conn, row["id"], "github", "The ticket is closed as completed.", workspace=ctx.workspace)
+    await surface.tick(ctx)
+    card = [call for call in slack_client.calls if call["method"] == "chat_postMessage"][-1]
+    texts = [block["text"]["text"] for block in card["blocks"] if block["type"] == "section"]
+    assert "> The ticket is closed as completed." in texts
+    assert "*The report is ready.* It has four results." in texts
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        saved = await kv.get(conn, f"task:card:{row['id']}")
+    await surface.handle(ctx, ada, {"action_id": f"task:{row['id']}:done", "channel": saved["channel"], "message_ts": saved["ts"]})
+    final = [call for call in slack_client.calls if call["method"] == "chat_update" and call.get("blocks")][-1]
+    # The closed card keeps the holder's words.
+    assert any(block["text"]["text"].startswith("*The report is ready.*") for block in final["blocks"] if block["type"] == "section")
 
 
 async def test_task_root_uses_plain_state_words(app, slack_client):

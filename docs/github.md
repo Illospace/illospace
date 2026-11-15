@@ -157,7 +157,8 @@ The poller follows open tasks with ticket links in the connector repositories:
 - A pull request with closing keywords or `Refs #n`, `Ref #n`, or `Related to #n` supplies a `change` link.
   A reference links the work. It never closes a ticket by itself.
 
-`ticket_closed` requires every ticket link to name an issue closed as completed.
+`ticket_closed` requires every ticket link to name a closed issue, and one of them closed as completed.
+A duplicate or dropped ticket, closed as not planned, does not hold the task.
 `change_merged` requires at least one merged change link. Checks cache fresh client reads for 60 seconds.
 Outside comments stay inside data markers when a model reads them. They never become instructions.
 

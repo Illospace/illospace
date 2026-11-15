@@ -1,11 +1,14 @@
 """Restart silent holders and remind the people who must act."""
 
+import asyncio
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from illo.db import all_rows, one
 from illo.ledger import kv, tasks
+
+CHECK_TIMEOUT_S = 20
 
 
 async def _agent(ctx, conn, row, entry, now):
@@ -52,7 +55,8 @@ async def _person(ctx, conn, row, entry, now, counts, extra):
     # Find the start of the current next-move period. Later messages do not reset it.
     events = await all_rows(conn, "SELECT * FROM task_events WHERE task_id=%s ORDER BY id DESC", (row["id"],))
     since = row["created_at"]
-    needed = "review the returned work" if row["state"] == "review" else "you hold it"
+    needed = ("read the returned work on its card, then press Done or Send back"
+              if row["state"] == "review" else "you hold it")
     for event in events:
         if event["data"].get("waits_for") != target:
             break
@@ -73,8 +77,28 @@ async def _person(ctx, conn, row, entry, now, counts, extra):
                        f"This task waits for you since {hours:.0f} hours ago: {needed}", {"to": target})
 
 
+async def _recheck(ctx):
+    """Run the checks of returned work again. A signal can be lost, and a check can fail for a short time."""
+    async with ctx.pool.connection() as conn:
+        rows = await all_rows(conn, "SELECT * FROM tasks WHERE state='review' ORDER BY id")
+    for row in rows:
+        entry = next((e for e in ctx.workspace.lists if e.key == row["list_key"]), None)
+        if not entry or entry.done == "person":
+            continue
+        try:
+            # A check can wait for an outside service. Run it before the task lock, with a time limit.
+            async with ctx.pool.connection() as conn:
+                results = await asyncio.wait_for(tasks.proof(conn, ctx.workspace, row, ctx), CHECK_TIMEOUT_S)
+        except Exception:
+            continue
+        if results and all(r["ok"] for r in results):
+            async with ctx.pool.connection() as conn:
+                await tasks.settle_review(conn, row, results, workspace=ctx.workspace, ctx=ctx)
+
+
 async def tick(ctx, now=None):
     now = now or datetime.now(UTC)
+    await _recheck(ctx)
     async with ctx.pool.connection() as conn:
         lock = await one(conn, "SELECT pg_try_advisory_xact_lock(12000003) AS ok")
         if not lock["ok"]:

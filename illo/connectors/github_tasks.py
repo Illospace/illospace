@@ -212,11 +212,16 @@ async def ticket_closed(ctx, conn, task):
     links = [link for link in task["links"] if link.get("kind") == "ticket"]
     if not links:
         return False, "The task has no ticket link."
+    completed = False
     for link in links:
         item = await fresh(ctx, conn, link["url"], "ticket")
-        if not item or item.get("state") != "closed" or item.get("state_reason") != "completed":
-            return False, "A ticket is not closed as completed."
-    return True, "Every ticket is closed as completed."
+        if not item or item.get("state") != "closed":
+            return False, "A ticket is open."
+        completed = completed or item.get("state_reason") == "completed"
+    if not completed:
+        return False, "No ticket is closed as completed."
+    # A duplicate or a dropped ticket is closed as not planned. It does not hold the task.
+    return True, "Every ticket is closed, and the work is completed."
 
 
 async def change_merged(ctx, conn, task):

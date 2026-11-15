@@ -143,6 +143,7 @@ The task core names no outside tool.
 On return, code checks the rule. Passing automatic checks mark a task Done with `done_by: code`.
 A failed check leaves the task in review and shows what is missing.
 A changed proof link runs the checks again. Failed checks put active work in review.
+The task check also runs the checks of returned work again. When they pass, code closes the task.
 A person can confirm a `person` rule at once.
 Other rules need all checks to pass. `force: true` with a reason overrides a failed check.
 The record keeps the force flag, reason, and check results.
@@ -162,7 +163,7 @@ A task keeps its primary thread when the next person changes.
 If that thread is in another person's DM, Illo sends the asked person a direct notice with the task ID.
 A return card also goes to the reviewer's DM when needed. Its replies carry the same task context.
 
-A return card mentions the reviewer. It shows the first 300 message characters, checks, Done, and Send back.
+A return card mentions the reviewer. It shows the first 300 message characters, the holder's last message, checks, Done, and Send back.
 Only the reviewer or a workspace owner can use its buttons. A private task still needs visibility permission.
 Done uses the same ledger path as `task_done`.
 Send back asks for one line in the thread, then reopens the task with that reason.

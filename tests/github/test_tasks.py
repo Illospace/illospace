@@ -167,6 +167,55 @@ async def test_closed_signal_and_done_rule(ctx, github_client, reason, state):
         assert (await events(ctx, row["id"]))[-1]["text"] == "The ticket was closed as not planned."
 
 
+async def test_duplicate_ticket_closed_as_not_planned_does_not_hold_the_task(ctx, github_client):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    await github_client.create_issue(REPO, "The same repair", "A second ticket for the same work.")
+    duplicate = github_client.issues[-1]
+    async with ctx.pool.connection() as conn:
+        await tasks.add_link(conn, row["id"], workspace=ctx.workspace, viewer=ADA,
+                             links=[{"kind": "ticket", "url": duplicate["html_url"]}])
+    duplicate.update(state="closed", state_reason="not_planned")
+    github_client.issues[0].update(state="closed", state_reason="completed")
+    await poll(ctx)
+    current = await get(ctx, row["id"])
+    assert current["state"] == "done" and current["done_by"] == "code"
+
+
+async def test_tick_closes_returned_work_when_the_check_passes_later(ctx, github_client):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        # The work comes back while the ticket is open, as after a lost signal.
+        await tasks.returned_by_signal(conn, row["id"], "github", "The holder returned the work.", workspace=ctx.workspace, ctx=ctx)
+    assert (await get(ctx, row["id"]))["state"] == "review"
+    before = len(await events(ctx, row["id"]))
+    await release.tick(ctx)
+    # A check that does not pass adds no event.
+    assert (await get(ctx, row["id"]))["state"] == "review" and len(await events(ctx, row["id"])) == before
+    github_client.issues[0].update(state="closed", state_reason="completed")
+    async with ctx.pool.connection() as conn:
+        await conn.execute("DELETE FROM kv WHERE key LIKE 'tasks:github-cache:%%'")
+    await release.tick(ctx)
+    current = await get(ctx, row["id"])
+    assert current["state"] == "done" and current["done_by"] == "code"
+
+
+async def test_returned_work_that_changed_after_the_check_stays_in_review(ctx, github_client):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        await tasks.returned_by_signal(conn, row["id"], "github", "The holder returned the work.", workspace=ctx.workspace, ctx=ctx)
+    seen = await get(ctx, row["id"])
+    async with ctx.pool.connection() as conn:
+        await tasks.add_link(conn, row["id"], workspace=ctx.workspace, viewer=ADA,
+                             links=[{"kind": "ticket", "url": f"https://github.com/{REPO}/issues/77"}])
+        # The checks read the task before this link. Their result is out of date.
+        passed = [{"name": "ticket_closed", "ok": True, "text": "Every ticket is closed, and the work is completed."}]
+        await tasks.settle_review(conn, seen, passed, workspace=ctx.workspace, ctx=ctx)
+    assert (await get(ctx, row["id"]))["state"] == "review"
+
+
 async def test_checks_and_cache_and_merged_change_link(ctx, github_client):
     row = await make(ctx)
     async with ctx.pool.connection() as conn:

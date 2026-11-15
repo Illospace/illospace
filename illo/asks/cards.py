@@ -334,10 +334,15 @@ def draft_card(draft: dict) -> list[dict]:
     return blocks
 
 
-def task_return_card(task, message, checks, *, final=None):
-    """Use the same card parts for a task and its final confirmation."""
+def task_return_card(task, message, checks, *, final=None, detail=None):
+    """Use the same card parts for a task and its final confirmation.
+
+    `detail` is the holder's last message, already in Slack format. It says what came back.
+    """
     blocks = [section("Returned: " + escape(task["title"])),
               section("> " + escape(message[:300]).replace("\n", "\n> "))]
+    if detail:
+        blocks.append(section(detail))
     if checks:
         blocks.append(section("\n".join(
             ("Pass: " if check["ok"] else "Wait: ") + escape(check["name"]) + " — " + escape(check["text"])

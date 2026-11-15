@@ -235,9 +235,10 @@ async def _parent(conn, workspace, row, ctx=None):
         await _parent(conn, workspace, parent, ctx)
 
 
-async def _settle(conn, workspace, row, ctx=None, *, active=False):
+async def _settle(conn, workspace, row, ctx=None, *, active=False, results=None):
     """Apply the Done rule. `active` is a link change on work that the holder did not return."""
-    results = await proof(conn, workspace, row, ctx)
+    if results is None:
+        results = await proof(conn, workspace, row, ctx)
     children = await all_rows(conn, "SELECT state FROM tasks WHERE parent_id=%s AND state<>'cancelled'", (row["id"],))
     if active and (children or not (results and all(r["ok"] for r in results))):
         # Only passed checks close active work. A new link never sends it to review.
@@ -257,6 +258,21 @@ async def _settle(conn, workspace, row, ctx=None, *, active=False):
                            "A person must review the returned work.", {"checks": results})
     await _parent(conn, workspace, row, ctx)
     return row
+
+
+@_mutation
+async def settle_review(conn, seen, results, *, workspace, ctx=None):
+    """Close returned work with check results that the caller read before the lock.
+
+    `seen` is the task row that the checks read. A task that changed after that read stays as it is.
+    """
+    row = await one(conn, "SELECT * FROM tasks WHERE id=%s FOR UPDATE", (seen["id"],))
+    if (not row or row["state"] != "review" or row["updated_at"] != seen["updated_at"]
+            or not results or not all(r["ok"] for r in results)):
+        return row
+    if await one(conn, "SELECT id FROM tasks WHERE parent_id=%s AND state<>'cancelled' LIMIT 1", (row["id"],)):
+        return row
+    return await _settle(conn, workspace, row, ctx, results=results)
 
 
 @_mutation
