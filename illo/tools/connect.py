@@ -70,6 +70,15 @@ async def status(tc, args):
                 state = "ready" if connected else "not connected"
             description = "Illo can read your mail, calendar, and files."
             phrase = "connect my Google"
+        elif config.kind == "mcp" and config.scope == "personal":
+            connected = bool(person_id and tc.principal.startswith("person:") and await one(
+                tc.conn,
+                "SELECT id FROM connector_grants WHERE connector_key=%s AND person_id=%s AND revoked_at IS NULL AND broken_at IS NULL",
+                (config.key, person_id),
+            ))
+            state = "connected for you" if connected else f"not connected for you: write `connect my {config.key}`"
+            description = config.description or "Illo uses your sign-in only for you."
+            phrase = f"connect my {config.key}"
         else:
             connected = True
             if config.auth and config.auth.secret:
@@ -96,7 +105,8 @@ async def status(tc, args):
             ("connector:" + config.key,),
         )
         if (
-            sensor
+            not (config.kind == "mcp" and config.scope == "personal")
+            and sensor
             and sensor["last_error_at"]
             and (not sensor["last_ok_at"] or sensor["last_error_at"] > sensor["last_ok_at"])
         ):
@@ -110,8 +120,8 @@ async def status(tc, args):
                 "connected": "yes" if connected else "no",
                 "allows": data_text("connector-description", description),
                 "connect": phrase,
-                "disconnect": "disconnect my Google"
-                if config.kind == "google" and config.scope == "personal"
+                "disconnect": ("disconnect my Google" if config.kind == "google" else f"disconnect my {config.key}")
+                if config.scope == "personal"
                 else "ask the owner to remove " + config.key,
                 "tools_found": data_text("connector-tools", str(config.discovered_tools))
                 if config.discovered_tools
@@ -156,7 +166,7 @@ def register(registry):
         (
             "connect_propose_mcp",
             MCP,
-            "Propose a team MCP server for the owner's approval card. Illo checks its sign-in method. Enter its HTTPS address without a key. OAuth uses a browser link. A private form accepts a key.",
+            "Propose an MCP server for the owner's approval card. Illo checks its sign-in method. Enter its HTTPS address without a key. OAuth uses a browser link. A private form accepts a key.",
         ),
         (
             "connect_allow_tools",
@@ -166,7 +176,7 @@ def register(registry):
         (
             "connect_remove",
             Key,
-            "Propose removal of a team MCP connector and its saved key. Only the owner can approve the card in their DM.",
+            "Propose removal of an MCP connector and its saved key. Only the owner can approve the card in their DM.",
         ),
     ):
 

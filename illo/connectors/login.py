@@ -23,6 +23,8 @@ async def login(conn, ctx, config, *, http=None, prompt=None) -> None:
     auth = config.auth
     if config.kind != "mcp" or not auth or auth.type != "oauth":
         raise ValueError("This connector does not use MCP OAuth")
+    if config.scope == "personal":
+        raise ValueError(f'Write "connect my {config.key}" in a DM to Illo to sign in.')
     info = await metadata(http, config, probe=True)
     client_id = auth.client_id
     client_secret = (

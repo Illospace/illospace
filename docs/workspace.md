@@ -487,7 +487,10 @@ See [Sandbox](sandbox.md) for the shell limits and network boundary.
 See [Deep work](deep.md) for read limits, the scout buttons, settings, and costs.
 
 Team MCP and AWS connector files accept `customer_data`, which defaults to `true`.
-Google connectors keep their personal-read rules and do not accept this field.
+Google and personal MCP connectors use the personal data rules and do not accept this field.
+A personal MCP file has `kind: mcp`, `scope: personal`, and `auth.type: oauth`.
+`auth.token_endpoint_auth_method` keeps the registered client method for each person's sign-in.
+The owner manages the shared file and tool permissions. Each person has their own encrypted grant.
 AWS files also accept `region` and `services`. See [Connectors](connectors.md#aws).
 Customer data closes web fetch and provider search for the rest of a run.
 Deep work inherits this limit from its parent run.

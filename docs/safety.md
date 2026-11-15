@@ -32,7 +32,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 ## 2. A personal connector works only for its owner
 
-**Rule.** A personal connector (mail, calendar, drive) works only in the runs of its owner.
+**Rule.** A personal connector (mail, calendar, drive, or a personal MCP server) works only in the runs of its owner.
 
 **Bad case.** Ben asks "what is in Ada's mail about Globex?". Without the rule, Illo could read Ada's mailbox for Ben.
 
@@ -46,6 +46,15 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - `brief_settings` has profile `person_dm` and personal scope. It changes only the person of the run.
   The tool takes no person argument. Tainted runs and agent requests cannot use it.
 - The personal tools (`mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get`, `asks_digest`, `digest_snapshot`) have `personal = true` and the profile `person_dm` only. `scope` in `illo/tools/checks.py` also refuses a personal tool in a tainted run or a run without a person principal.
+- Personal MCP calls use `personal = true` and the same profile checks as Google.
+  `own_person` in `illo/tools/connectors.py` checks the active person against the principal and run person.
+  Personal deep runs and personal scouts can read. Team runs and agent requests cannot.
+  Personal writes need a card for each call and stay refused in every deep run.
+  `MCPClient` loads and refreshes the grant by connector and person. Personal schemas have no cache.
+  After a personal read, the run can still read that person's personal MCP connectors.
+  The arguments of such a read go to a server that the owner approved, in that person's own account.
+  A personal connector must therefore not be a server that can read any web address.
+  A read of the tool list sets no flag: the list is the server's tool schemas, not the person's data.
 - `personal_call` in `illo/connectors/google.py` loads the grant of the run's person. It never takes an owner from the arguments.
 - An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
 - `complete` in `illo/connectors/oauth.py` checks the Google account against the person's addresses in `people.yaml` (`GoogleClient.verify_account` in `illo/connectors/google.py`). It revokes a grant for another account. The web callback needs the `__Host-` browser cookie that the start link set.
@@ -78,7 +87,8 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 **Code.**
 - `Registry.call` sets `personal_read` on the run after a personal tool. It also sets it after a read result with `visibility: private`: a private lane, item, ask, rule, or private Slack thread.
 - `destination` in `illo/tools/checks.py` then makes each write to another destination a draft. After such a read, a tool with `team_visible = true` (`notes_propose`) is also a draft, although its destination is the ledger.
-- A connector call sends its arguments to `outside:<key>`. After a personal read it is refused, without a draft. The handler and the draft performer also enforce this rule.
+- A team connector call sends its arguments to `outside:<key>`. After a personal read it is refused, without a draft.
+  The same person can still use personal MCP read tools. Each personal write needs that person's approval. The handler and the draft performer also enforce this rule.
 - `read_page` in `illo/tools/web.py` refuses a public page after a personal read.
 - An ask without a lane is private to its owner and its requester (`get` and `list_open` in `illo/ledger/asks.py`). Its decision item is private too (`decision` in `illo/ledger/ask_workflow.py`).
 - Both ask creation tools refuse a private lane when the ask owner does not own that lane.
@@ -394,5 +404,5 @@ A web page or repository can hold an outsider's instruction. The sandbox has no 
 Deep runs cannot write outside the task list. Web addresses have a 400-character limit.
 A risk stays before customer or personal reads: a short address can send repository or task text outside.
 Customer-data connectors remain trusted read destinations after customer reads. Their arguments can carry data to those services.
-A non-customer connector needs approval after customer reads. The requester must check that draft.
+A non-customer connector needs approval after customer reads. This includes personal MCP read calls. The requester must check that draft.
 Read the `web_fetch` and connector audit rows when you review a deep run.

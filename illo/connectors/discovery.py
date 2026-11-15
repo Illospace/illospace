@@ -27,6 +27,7 @@ async def _metadata(http, config, *, probe):
             "token_endpoint": auth.token_url,
             "resource": config.url,
             "scopes_supported": auth.scopes,
+            **({"token_endpoint_auth_method": auth.token_endpoint_auth_method} if auth.token_endpoint_auth_method else {}),
             "token_endpoint_auth_methods_supported": ["client_secret_post"],
         }
     parts = urlsplit(config.url)

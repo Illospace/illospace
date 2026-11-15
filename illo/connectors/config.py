@@ -10,6 +10,9 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+MCP_RESERVED = frozenset({"google", "calendar", "mail", "gmail", "drive", "chatgpt", "aws"})
+
+
 AWS_SERVICES = ("logs", "cloudwatch", "autoscaling", "elbv2", "codebuild", "ecs", "lambda", "rds")
 
 
@@ -40,6 +43,7 @@ class Auth(Model):
     client_secret: str | None = None
     authorization_url: str | None = None
     token_url: str | None = None
+    token_endpoint_auth_method: Literal["none", "client_secret_post", "client_secret_basic"] | None = None
     scopes: list[str] = Field(default_factory=list)
     redirect_uri: str = "http://127.0.0.1:8765/callback"
 
@@ -95,7 +99,12 @@ class Connector(Model):
 
     @model_validator(mode="after")
     def valid_connector(self):
-        if self.kind in {"mcp", "aws"} and self.customer_data is None:
+        if self.kind == "mcp" and self.scope == "personal":
+            if self.customer_data is not None:
+                raise ValueError("A personal connector uses the personal data rules")
+            if not self.auth or self.auth.type != "oauth":
+                raise ValueError("A personal MCP connector needs browser sign-in with OAuth")
+        if self.kind in {"mcp", "aws"} and self.scope == "team" and self.customer_data is None:
             self.customer_data = True
         if self.kind == "google" and self.customer_data is not None:
             raise ValueError("Google connectors use the personal data rules")
@@ -109,8 +118,11 @@ class Connector(Model):
         names = [t.name for t in self.tools]
         if len(names) != len(set(names)):
             raise ValueError("Use unique tool names")
-        if self.kind == "mcp" and (not self.url or self.scope != "team"):
-            raise ValueError("An MCP connector needs a team scope and URL")
+        if self.kind == "mcp":
+            if not self.url:
+                raise ValueError("An MCP connector needs a URL")
+            if self.key in MCP_RESERVED:
+                raise ValueError("This name belongs to a built-in connector. Use another name.")
         if self.kind == "google":
             if not self.scopes or not set(self.scopes) <= set(GOOGLE_SCOPES):
                 raise ValueError("Use only the three Google read-only scopes")

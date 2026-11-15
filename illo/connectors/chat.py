@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 from illo.asks import cards
 from illo.channels.slack.modals import open_form
 from illo.connectors import aws, discovery, files, google, mcp_oauth, oauth, store
-from illo.connectors.config import Auth, Connector, ConnectorTool
+from illo.connectors.config import MCP_RESERVED, Auth, Connector, ConnectorTool
 from illo.connectors.http import HTTPFailure, private_http_logs
 from illo.db import one
 from illo.ledger import audit, drafts, kv, runs
@@ -74,7 +74,9 @@ async def active_person(conn, person_id, *, owner=False, lock=False):
         (person_id,),
     )
     if not person or (owner and person["role"] != "owner"):
-        raise ValueError("Only an active owner can change team connections.")
+        contact = await one(conn, "SELECT name FROM people WHERE role='owner' AND active ORDER BY key LIMIT 1")
+        name = contact["name"] if contact else "the owner"
+        raise ValueError(f"Only an active owner can change team connections. Ask {name}.")
     return person
 
 
@@ -356,8 +358,14 @@ async def audit_change(conn, person, tool, *, decision="allow"):
 
 def mcp_config(args):
     return Connector(
-        key=args["key"], kind="mcp", scope="team", url=args["url"], description=args["description"]
+        key=args["key"], kind="mcp", scope=args.get("scope", "team"),
+        url=args["url"], description=args["description"],
+        auth=Auth(type="oauth") if args.get("scope") == "personal" else None,
     )
+
+
+def private_data_text(key):
+    return f'I treat {key} as private data. If it reads only public data, write "{key} reads only public data".'
 
 
 def tools_text(found):
@@ -392,7 +400,7 @@ async def add_mcp(ctx, conn, person, args, *, bearer=None):
         await store.vault(ctx).set(conn, config.auth.secret, bearer)
     await files.save(ctx, conn, config, create=True)
     await audit_change(conn, person, "connect_add_mcp")
-    return f"The connector `{config.key}` is added. Tools found:\n{tools_text(found)}\nTell me which tools to allow."
+    return f"The connector `{config.key}` is added. Tools found:\n{tools_text(found)}\nTell me which tools to allow.\n" + private_data_text(config.key)
 
 
 def preview(kind, args):
@@ -406,10 +414,21 @@ def preview(kind, args):
             else "a key that you enter in a form"
         )
         return (
-            f"Add the connector `{key}`? Address: {cards.visible_escape(args['url'])}. Sign-in: {auth}.",
+            f"Add the connector `{key}`? Address: {cards.visible_escape(args['url'])}. Sign-in: {auth}."
+            + ("\nFor the team: you sign in one time. All team work uses your sign-in.\n"
+               "For each person: each person signs in with their own account. Illo uses it only for that person."
+               if args["auth"] == "oauth" else ""),
             "Add",
             "Do not add",
         )
+    if kind == "connect_data_policy":
+        effect = (
+            f"After a call to {key}, the web is closed for that run."
+            if args["customer_data"] else
+            f"After a call to {key}, Illo can still read the web in the same run. "
+            f"Choose this only if {key} has no customer data and no private data."
+        )
+        return effect, "Change", "Do not change"
     if kind == "connect_allow_tools":
         read = (
             ", ".join(cards.visible_escape(t["name"]) for t in args["tools"] if t["risk"] == "read")
@@ -434,12 +453,14 @@ async def propose(tc, args, kind):
     person = await active_person(tc.conn, tc.run.get("person_id"), owner=True)
     if kind != "connect_propose_mcp":
         config = find_config(tc.app, args["key"])
+        if kind == "connect_data_policy" and (config.kind != "mcp" or config.scope != "team"):
+            raise ValueError("Only a team MCP connector can change its data rule.")
         if kind == "connect_allow_tools":
             if config.kind != "mcp":
                 raise ValueError("Only an MCP connector has tool permissions.")
             if any(t["name"] not in config.discovered_tools for t in args["tools"]):
                 raise ValueError("The server did not list this tool.")
-    elif args["key"] in {"google", "chatgpt", "aws"}:
+    elif args["key"] in MCP_RESERVED:
         raise ValueError("This name belongs to a built-in connector. Use another name.")
     elif any(c.key == args["key"] for c in tc.app.workspace.connectors):
         raise ValueError("This connector already exists.")
@@ -475,12 +496,12 @@ def find_config(ctx, key):
         (
             c
             for c in ctx.workspace.connectors
-            if c.key == key and c.kind in {"mcp", "aws"} and c.scope == "team"
+            if c.key == key and c.kind in {"mcp", "aws"}
         ),
         None,
     )
     if not config:
-        raise ValueError("The team MCP connector was not found.")
+        raise ValueError("The MCP connector was not found.")
     return config
 
 
@@ -506,7 +527,13 @@ async def perform(ctx, draft):
                 text = await add_mcp(ctx, conn, person, args)
         else:
             config = find_config(ctx, args["key"])
-            if stored["kind"] == "connect_allow_tools":
+            if stored["kind"] == "connect_data_policy":
+                if config.kind != "mcp" or config.scope != "team":
+                    raise ValueError("Only a team MCP connector can change its data rule.")
+                config = config.model_copy(update={"customer_data": args["customer_data"]})
+                await files.save(ctx, conn, config)
+                text = "The connector data rule is saved."
+            elif stored["kind"] == "connect_allow_tools":
                 if any(t["name"] not in config.discovered_tools for t in args["tools"]):
                     raise ValueError("The server did not list this tool")
                 allowed = {t.name: t for t in config.tools}
@@ -517,6 +544,8 @@ async def perform(ctx, draft):
                 config = config.model_copy(update={"tools": list(allowed.values())})
                 await files.save(ctx, conn, config)
                 text = "The tool permissions are saved. Each write needs your approval card."
+                if config.scope == "personal":
+                    text += f" Each person now writes `connect my {config.key}` in a DM to me."
             else:
                 await files.remove(ctx, conn, config)
                 if config.auth:
@@ -563,11 +592,39 @@ async def mcp_client_button(ctx, person, action):
     )
 
 
+async def data_policy_claim(ctx, event, authority):
+    if not oauth.person_dm(event, authority):
+        return None
+    match = re.fullmatch(
+        r"([a-z][a-z0-9_-]*) (reads only public data|holds private data)",
+        event.text.strip().lower().rstrip(".!?"),
+    )
+    if not match:
+        return None
+    try:
+        async with ctx.pool.connection() as conn:
+            person = await active_person(conn, authority.person_id, owner=True)
+            run = await runs.create(
+                conn, principal="person:" + person["key"], person_id=person["id"],
+                profile="person_dm", runtime="direct", model="none",
+            )
+            from illo.tools.registry import ToolContext
+
+            await propose(ToolContext(conn, run, ctx), {
+                "key": match[1], "customer_data": match[2] == "holds private data",
+            }, "connect_data_policy")
+            await runs.finish(conn, run["id"], "completed")
+        return "The change card is in the DM."
+    except ValueError as exc:
+        return str(exc)
+
+
 async def setup(ctx):
+    ctx.gateway.register_claim(data_policy_claim)
     ctx.slack_actions.register("connect:mcp:client:", mcp_client_button)
     ctx.slack_actions.register("connect:google:", google_button)
     ctx.slack_actions.register("connect:aws:", aws_button)
-    for kind in ("connect_propose_mcp", "connect_allow_tools", "connect_remove"):
+    for kind in ("connect_propose_mcp", "connect_allow_tools", "connect_remove", "connect_data_policy"):
         ctx.draft_performers[kind] = perform
 
     async def expire_forms():
