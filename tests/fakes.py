@@ -97,6 +97,7 @@ class FakeGitHubClient:
     pulls: list[dict] = field(default_factory=list)
     repositories: dict[str, dict] = field(default_factory=dict)
     files: dict[tuple, dict] = field(default_factory=dict)
+    commits: dict[tuple, dict] = field(default_factory=dict)
     assignment_error: GitHubError | None = None
 
     def _items(self, repo, items):
@@ -206,6 +207,12 @@ class FakeGitHubClient:
             if issue["number"] == number:
                 issue.setdefault("comments_data", []).append({"body": body})
         return {"id": len(self.calls), "body": body}
+
+    async def get_commit(self, repo: str, ref: str):
+        self.calls.append({"method": "get_commit", "repo": repo, "ref": ref})
+        if (repo, ref) not in self.commits:
+            raise GitHubError(404)
+        return dict(self.commits[(repo, ref)])
 
     async def get_pull(self, repo: str, number: int):
         self.calls.append({"method": "get_pull", "repo": repo, "number": number})

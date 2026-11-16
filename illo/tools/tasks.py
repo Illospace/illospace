@@ -82,6 +82,11 @@ class Post(Arguments):
     to: str | None = Field(default=None, pattern=r"^person:[a-z][a-z0-9_-]*$")
 
 
+class Return(Arguments):
+    id: int = Field(ge=1)
+    message: str = Field(min_length=1, max_length=3000, pattern=r"\S")
+
+
 class Done(Arguments):
     id: int = Field(ge=1)
     force: bool = False
@@ -174,11 +179,11 @@ async def handle(ctx, name, args):
                 row = await ledger.add_link(ctx.conn, args["id"], **common, links=args["links"], ctx=ctx)
         else:
             fn = {"task_hand": ledger.hand, "task_post": ledger.post, "task_done": ledger.done,
-                  "task_reopen": ledger.reopen, "task_wake": ledger.wake, "task_cancel": ledger.cancel}[name]
+                  "task_return": ledger.return_work, "task_reopen": ledger.reopen, "task_wake": ledger.wake, "task_cancel": ledger.cancel}[name]
             values = {k: v for k, v in args.items() if k not in {"id", "events"}}
             if name == "task_hand" and not _HAND_LINKS:
                 values.pop("links", None)
-            row = await fn(ctx.conn, args["id"], **common, **values, **({"ctx": ctx} if name == "task_done" else {}))
+            row = await fn(ctx.conn, args["id"], **common, **values, **({"ctx": ctx} if name in {"task_done", "task_return"} else {}))
         return await full(ctx.conn, ctx.app.workspace, row, viewer, limit=args.get("events", 20), ctx=ctx)
     except ledger.TaskError as exc:
         raise Refusal(str(exc)) from None
@@ -193,6 +198,7 @@ def register(registry):
         ("task_update", Update, WRITE, "write_internal", "Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility."),
         ("task_hand", Hand, WRITE, "write_internal", "Hand a task to a person or named agent allowed by its list. A null holder leaves it unassigned. The state becomes todo. Give required links in the same call."),
         ("task_post", Post, CAPTURE, "write_internal", "Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder."),
+        ("task_return", Return, WRITE, "write_internal", "Return a task that the person holds for review, with the proof in `message`. Use it when the holder says the work is done and the list wants another person to confirm."),
         ("task_done", Done, WRITE, "write_internal", "Confirm a task for the person who made this request. The Done checks must pass. Use force true and a reason to override failed checks."),
         ("task_reopen", Reason, WRITE, "write_internal", "Send a task back to its holder with a reason. The state becomes todo and waits_for names the holder. The record keeps the reason."),
         ("task_wake", Get, WRITE, "write_internal", "Wake the agent holder and record the person who requests the restart."),

@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from illo.db import all_rows, one
 from illo.ledger import kv, tasks
+from illo.tasks import waits
+from illo.tools.registry import Refusal
 
 CHECK_TIMEOUT_S = 20
 
@@ -45,40 +47,55 @@ def in_window(workspace, person, now=None):
     return start <= hour < end
 
 
-async def _person(ctx, conn, row, entry, now, counts, extra):
+async def _person(ctx, conn, row, entry, now, counts, extra, pending, *, check=True):
     target = row["waits_for"]
     person = await one(conn, "SELECT * FROM people WHERE 'person:'||key=%s AND active", (target,))
     if not person:
         return
+    period = await waits.current(conn, row)
+    since = period["since"]
+    limit = timedelta(hours=entry.silence.person_hours)
+    if now - since <= limit:
+        return
+    enabled = (check and ctx.workspace.config.tasks.wait_check
+               and ctx.workspace.config.deep.enabled and row["visibility"] != "private")
+    initial = waits.request(row, period, person, now, 0)
+    deep = await one(conn, "SELECT * FROM deep_runs WHERE dedupe_key=%s", (waits.key(initial["wait"]),)) if enabled else None
+    applied = bool(deep and deep["context"].get("wait", {}).get("applied"))
+    if period["reminded"] or applied:
+        days = ctx.workspace.config.tasks.recheck_days
+        if enabled and days:
+            round = (now - since - limit) // timedelta(days=days)
+            if round >= 1:
+                # A later check speaks only for a return or a restart, even outside reminder hours.
+                pending.append(waits.request(row, period, person, now, round))
+        return
     if not in_window(ctx.workspace, person, now):
         return
-    # Find the start of the current next-move period. Later messages do not reset it.
-    events = await all_rows(conn, "SELECT * FROM task_events WHERE task_id=%s ORDER BY id DESC", (row["id"],))
-    since = row["created_at"]
-    needed = ("read the returned work on its card, then press Done or Send back"
-              if row["state"] == "review" else "you hold it")
-    reminded = False
-    for event in events:
-        if event["data"].get("waits_for") != target:
-            break
-        since = event["at"]
-        if event["kind"] == "question":
-            needed = event["text"]
-        # Use the order of the record, not the times: an event time is the start of its transaction.
-        reminded = reminded or (event["kind"] == "reminded" and event["data"].get("to") == target)
-    period = timedelta(hours=entry.silence.person_hours)
-    if now - since <= period:
-        return
-    # One reminder for each waiting period. After that, the morning brief carries the task.
-    if reminded:
-        return
+    if enabled:
+        if not deep:
+            pending.append(initial)
+            return
+        if deep["state"] in {"queued", "running"}:
+            return
+        # A failed run or a run with no result must not lose the reminder.
     if counts[target] >= 5:
         extra[target] += 1
         return
     counts[target] += 1
     hours = max(0, (now-since).total_seconds()/3600)
     await tasks._event(conn, row, "code", "reminded",
-                       f"This task waits for you since {hours:.0f} hours ago: {needed}", {"to": target})
+        f"This task waits for you since {hours:.0f} hours ago: {period['needed']}", {"to": target})
+
+
+async def _summary(conn, extra):
+    for target, count in extra.items():
+        # One summary joins the last reminder. Slack retries it with that event.
+        event = await one(conn, """SELECT * FROM task_events WHERE kind='reminded' AND data->>'to'=%s
+            ORDER BY id DESC LIMIT 1""", (target,))
+        if event:
+            await conn.execute("UPDATE task_events SET text=text || %s WHERE id=%s",
+                (f"\n{count} more tasks wait for you. Ask me: what waits for me?", event["id"]))
 
 
 async def _recheck(ctx):
@@ -103,6 +120,7 @@ async def _recheck(ctx):
 async def tick(ctx, now=None):
     now = now or datetime.now(UTC)
     await _recheck(ctx)
+    pending, refused = [], []
     async with ctx.pool.connection() as conn:
         lock = await one(conn, "SELECT pg_try_advisory_xact_lock(12000003) AS ok")
         if not lock["ok"]:
@@ -117,15 +135,30 @@ async def tick(ctx, now=None):
             if (row["holder"] or "").startswith("agent:"):
                 await _agent(ctx, conn, row, entry, now)
             if (row["waits_for"] or "").startswith("person:"):
-                await _person(ctx, conn, row, entry, now, counts, extra)
-        for target, count in extra.items():
-            # One summary joins the last reminder. Slack retries it with that event.
-            event = await one(conn, """SELECT * FROM task_events WHERE kind='reminded' AND data->>'to'=%s
-                ORDER BY id DESC LIMIT 1""", (target,))
-            if event:
-                await conn.execute("UPDATE task_events SET text=text || %s WHERE id=%s",
-                    (f"\n{count} more tasks wait for you. Ask me: what waits for me?", event["id"]))
+                await _person(ctx, conn, row, entry, now, counts, extra, pending)
+        await _summary(conn, extra)
+        extra.clear()
         await kv.set(conn, "tasks:last-check", now.isoformat())
+    # Commit every task lock before deep admission. A person run takes these locks in the other order.
+    for request in pending:
+        try:
+            async with ctx.pool.connection() as conn:
+                await waits.queue(ctx, conn, request)
+        except Refusal:
+            if request["wait"]["round"] == 0:
+                refused.append(request["wait"])
+    if refused:
+        async with ctx.pool.connection() as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
+            for wait in refused:
+                row = await one(conn, "SELECT * FROM tasks WHERE id=%s FOR UPDATE", (wait["task_id"],))
+                if not row or row["state"] in {"done", "cancelled"} or row["waits_for"] != wait["target"]:
+                    continue
+                period = await waits.current(conn, row)
+                entry = next((e for e in ctx.workspace.lists if e.key == row["list_key"]), None)
+                if entry and period["since_event_id"] == wait["since_event_id"]:
+                    await _person(ctx, conn, row, entry, now, counts, extra, [], check=False)
+            await _summary(conn, extra)
 
 
 async def setup(ctx):

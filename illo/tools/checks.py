@@ -93,6 +93,8 @@ def in_grant(run: dict, tool) -> bool:
     A tool family states `profiles` on its own tools, so two builders never edit one list.
     """
     if run.get("deep_kind"):
+        if tool.name == "wait_result":
+            return run["deep_kind"] == "check"
         if tool.name == "deep_start":
             return False
         if tool.name in {"shell", "web_fetch", "findings_list", "finding_add"}:
@@ -127,7 +129,9 @@ def scope(run: dict, tool) -> Decision:
         return Decision("deny", "Deep work needs a team request that has not read outside text.")
     if deep and (run["tainted"] or run["principal"] == "outsider"):
         return Decision("deny", "A deep run needs team authority.")
-    if deep and tool.risk != "read" and tool.name != "finding_add":
+    # These results propose a card for a person, a reminder, or one bounded restart.
+    # Like a finding, a wait result can use facts from an outside read.
+    if deep and tool.risk != "read" and tool.name not in {"finding_add", "wait_result"}:
         if not (tool.family == "tasks" and deep == "request"):
             return Decision("deny", "A deep run only reads. Put the proposal in your answer.")
         if run.get("web_read"):

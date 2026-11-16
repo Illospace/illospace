@@ -33,6 +33,7 @@ def allowed(registry, name, **changes):
 @pytest.mark.parametrize(
     "name",
     [
+        "task_return",
         "task_create",
         "task_post",
         "task_hand",
@@ -51,7 +52,7 @@ def test_task_writes_before_and_after_web(registry, name):
         decision.reason
         == "This run read the web. Code refuses task writes after that. Put the proposal in your answer."
     )
-    for kind in ("scout", "brief"):
+    for kind in ("scout", "brief", "check"):
         assert (
             allowed(registry, name, deep_kind=kind).reason
             == "A deep run only reads. Put the proposal in your answer."

@@ -10,7 +10,7 @@ from illo.channels.slack.limits import notify_unassigned
 from illo.connectors.github_client import GitHubError
 from illo.ledger import github as ledger
 from illo.ledger import kv, people
-from illo.tools._format import data_text, github, github_detail, short
+from illo.tools._format import data_text, github, github_detail, json_text, short
 from illo.tools._format import rows as format_rows
 from illo.tools._triage import auto_assign, source_event
 from illo.tools.checks import Decision, check
@@ -28,6 +28,10 @@ OUTSIDE_HEADER = (
 
 class RepoArgs(Arguments):
     repo: str = Field(pattern=REPO_PATTERN)
+
+
+class CommitArgs(RepoArgs):
+    ref: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 
 
 class NumberArgs(RepoArgs):
@@ -154,6 +158,19 @@ async def get_pull(ctx: ToolContext, args: dict) -> dict:
     )
 
 
+async def get_commit(ctx: ToolContext, args: dict):
+    repo = repository(ctx.app, args["repo"])
+    try:
+        item = await ctx.app.github_client.get_commit(repo, args["ref"])
+    except GitHubError as exc:
+        if exc.status == 404:
+            raise Refusal("The commit or ref was not found. Check the ref and repository access.") from None
+        if exc.status in {401, 403}:
+            raise Refusal("GitHub refused access to the commit or its checks. Check repository and Checks read permissions.") from None
+        raise
+    return data_text("github", json_text(item))
+
+
 def issue_body(header, text, signature, marker, original_header=None):
     text = text.strip()
     first = (original_header or header).strip()
@@ -243,6 +260,7 @@ async def comment_issue(ctx: ToolContext, args: dict) -> dict:
 
 
 DESCRIPTIONS = {
+    "github_get_commit": "Read one commit by `repo` and `ref` (a branch, a tag, or a SHA): its SHA, message, date, and check runs. Use it to see if a commit is released: a release job that passed on the production branch shows that the commit is live.",
     "github_search_issues": "Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.",
     "github_get_issue": "Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.",
     "github_get_pull": "Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.",
@@ -257,6 +275,7 @@ def register(registry) -> None:
         ("github_search_issues", search, SearchArgs, "read"),
         ("github_get_issue", get_issue, NumberArgs, "read"),
         ("github_get_pull", get_pull, NumberArgs, "read"),
+        ("github_get_commit", get_commit, CommitArgs, "read"),
         ("github_create_issue", create_issue, CreateArgs, "write_internal"),
         ("github_assign_issue", assign_issue, AssignArgs, "send_outside"),
         ("github_comment_issue", comment_issue, CommentArgs, "send_outside"),

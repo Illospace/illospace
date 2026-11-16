@@ -119,3 +119,14 @@ They keep their existing schedule, destination, delivery key, and snapshot fallb
 Team and personal instruction files still apply.
 Set `digest.deep: false` to use the earlier snapshot-only run path.
 See [Tasks](tasks.md#morning-briefs).
+
+## Wait checks
+
+Only code starts the `check` kind, with team routine authority and no direct delivery.
+The run log stays in the ledger. Its context names one task and the start of its wait.
+It has the scout's read tools, without `findings_list` or `finding_add`.
+It can read the sandbox, web, GitHub, team connectors, AWS, and team tasks.
+Its only write tool is `wait_result`. This tool works after a web read.
+Code refuses all other writes. A person cannot start this kind through `deep_start`.
+The queue starts other kinds before wait checks, then uses the run ID order.
+See [Wait checks](tasks.md#illo-checks-a-wait-before-it-reminds) for the results and limits.

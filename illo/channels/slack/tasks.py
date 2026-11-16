@@ -114,6 +114,8 @@ async def _thread_task(conn, channel, thread):
 
 async def _returned_words(conn, task_id, returned):
     """Give the holder's last message before a return signal. It says what came back."""
+    if returned["data"].get("source") == "wait_check":
+        return escape(returned["data"]["detail"])
     if returned["actor"] != "code":
         # A holder that returns the work itself writes the return text.
         return None

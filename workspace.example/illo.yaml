@@ -49,6 +49,8 @@ run_limits:
 #   max_per_hour: 6  # Automatic assignments per hour, from 1 to 100.
 
 tasks:
+  wait_check: true
+  recheck_days: 3
   release_max: 2
   check_minutes: 5
   reminder_window: [8, 20]

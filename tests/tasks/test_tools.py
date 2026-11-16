@@ -290,3 +290,27 @@ async def test_operator_mine_keeps_other_private_tasks_out(app):
             viewer=tasks.Viewer("ben", "person:ben", human=True), list_key="private", title="Private task", holder="person:ben")
         await conn.execute("UPDATE tasks SET waits_for='person:ada' WHERE id=%s", (row["id"],))
     assert (await operator(app, "task_list", mine=True))["tasks"] == []
+
+
+async def test_person_returns_with_proof_and_holder_check(app):
+    from illo.channels.slack import tasks as surface
+
+    ctx = app.state.ctx
+    row = await operator(app, "task_create", list="launches", title="Publish the report", holder="person:ben")
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        ben = await people.get(conn, "ben")
+        for person, expected in ((ada, "deny"), (ben, "allow")):
+            run = await runs.create(conn, principal="person:" + person["key"], person_id=person["id"],
+                                    profile="person_dm", runtime="fake", model="fake")
+            result = await ctx.registry.call(ToolContext(conn, run, ctx), "task_return",
+                {"id": row["id"], "message": "The report is live: https://example.com/report"})
+            assert result["decision"] == expected, result
+    await surface.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        current = await tasks.get(conn, row["id"], viewer=tasks.Viewer("ada", "person:ada"))
+    assert current["state"] == "review" and current["waits_for"] == "person:ada"
+    cards = [c for c in ctx.slack_client.calls if c["method"] == "chat_postMessage" and c.get("blocks")]
+    assert "The report is live: https://example.com/report" in str(cards[-1]["blocks"])
+    assert "<@U_ACME_ADA>" in cards[-1]["text"]
+    assert cards[-1]["blocks"][-1]["elements"][0]["text"]["text"] == "Done"

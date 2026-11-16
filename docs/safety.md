@@ -392,7 +392,8 @@ Keep the sandbox port private. See [Sandbox](sandbox.md) for the full boundary a
 
 Deep work keeps the authority of the request. A parent with customer data passes its closed-web flag to the deep run.
 Code refuses outside writes, including memory saves and Slack messages.
-Only a person-requested deep run can change tasks, and only before it reads the web.
+Only a person-requested deep run gets task write tools, and only before it reads the web.
+A wait check uses the bounded `wait_result` tool described below.
 `runs.web_read` records that limit. Personal data and customer data close the web for the rest of the run.
 Scouts and briefs never change tasks. Briefs never read the web.
 Shell output and page text have outside-data markers. They do not remove the run's read tools.
@@ -406,3 +407,8 @@ A risk stays before customer or personal reads: a short address can send reposit
 Customer-data connectors remain trusted read destinations after customer reads. Their arguments can carry data to those services.
 A non-customer connector needs approval after customer reads. This includes personal MCP read calls. The requester must check that draft.
 Read the `web_fetch` and connector audit rows when you review a deep run.
+
+`wait_result` is the only write tool of a code-started wait check. It can use facts from outside text.
+Its result supplies a review card for a person, one bounded agent restart, or the text of one reminder.
+Code binds the result to one task and waiting period. It refuses a second result from the same run.
+A stale result changes no task. Complete work still needs the list's Done rule and a person's confirmation.

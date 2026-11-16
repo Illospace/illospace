@@ -38,7 +38,7 @@ async def claim(ctx, conn, only_id=None):
         return None
     row = await one(
         conn,
-        "SELECT * FROM deep_runs WHERE state='queued' AND (%s::bigint IS NULL OR id=%s) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1",
+        "SELECT * FROM deep_runs WHERE state='queued' AND (%s::bigint IS NULL OR id=%s) ORDER BY (kind='check'),id FOR UPDATE SKIP LOCKED LIMIT 1",
         (only_id, only_id),
     )
     if not row:

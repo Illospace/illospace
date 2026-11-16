@@ -51,6 +51,7 @@ def test_description_check_rejects_missing_text(description):
         "deep_request",
         "deep_scout",
         "deep_brief",
+        "deep_check",
     ],
 )
 def test_tool_description_snapshots(profile):
