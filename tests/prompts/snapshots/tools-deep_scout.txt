@@ -5,6 +5,7 @@ connectors_call: Call one tool of a connected outside service, with `connector`,
 connectors_list: List the connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names. A connector can be personal; the person writes `connect my <name>` in a DM to sign in.
 finding_add: Save one finding. Write `message` as a colleague writes it: what happens and when, where it is in our code, what you could not verify, and the next step. 60 words at most. Give the outside source and the place in the code as links.
 findings_list: Read the findings of the last 90 days for this scout's scope: key, title, state, and date.
+github_get_commit: Read one commit by `repo` and `ref` (a branch, a tag, or a SHA): its SHA, message, date, and check runs. Use it to see if a commit is released: a release job that passed on the production branch shows that the commit is live.
 github_get_issue: Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.
 github_get_pull: Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.
 github_search_issues: Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.

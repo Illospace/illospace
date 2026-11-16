@@ -404,12 +404,18 @@ github:
   repositories: [acme/app]
   task_list: bugs
 tasks:
+  wait_check: true
+  recheck_days: 3
   release_max: 2
   check_minutes: 5
   reminder_window: [8, 20]
   github_writes_per_hour: 30
   stop_grace_minutes: 30
 ```
+
+`wait_check` enables a deep check before a reminder. It defaults to `true` and needs deep work on.
+`recheck_days` sets the days between later checks, from 0 to 30. The default is 3; 0 stops later checks.
+Private tasks keep plain reminders. See [Wait checks](tasks.md#illo-checks-a-wait-before-it-reminds).
 
 These values are the defaults. `release_max` is from 1 to 10. `check_minutes` is from 1 to 60.
 The window has two hours from 0 to 24, in time order. The end hour is exclusive.

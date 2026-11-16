@@ -310,6 +310,25 @@ class GitHubClient:
             "POST", f"/repos/{repo}/issues/{number}/comments", json={"body": body}
         )
 
+    async def get_commit(self, repo: str, ref: str) -> dict:
+        item = await self._request("GET", f"/repos/{repo}/commits/{quote(ref, safe='')}")
+        # Pin checks to the resolved SHA. A branch can move between the two reads.
+        checks = await self._request("GET", f"/repos/{repo}/commits/{item['sha']}/check-runs",
+                                     params={"per_page": 100})
+        rows = checks["check_runs"][:100]
+        result = {
+            "sha": item["sha"],
+            "message": item["commit"]["message"].split("\n", 1)[0],
+            "date": item["commit"]["author"]["date"],
+            "url": item.get("html_url"),
+            "checks": [{key: row.get(key) for key in
+                        ("name", "status", "conclusion", "completed_at", "html_url")}
+                       for row in rows],
+        }
+        if checks.get("total_count", len(rows)) > len(rows):
+            result = {"note": "More check runs exist. This result shows the first 100.", **result}
+        return result
+
     async def get_pull(self, repo: str, number: int) -> dict:
         item = await self._request("GET", f"/repos/{repo}/pulls/{number}")
         sha = item["head"]["sha"]

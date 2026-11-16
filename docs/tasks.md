@@ -281,3 +281,28 @@ Brief runs have read tools and `shell`, with no web or write tools.
 A failed deep run uses the existing snapshot fallback.
 Set `digest.deep: false` for the earlier snapshot-only path.
 Team and personal instruction files keep their effect. See [Deep work](deep.md).
+
+## Illo checks a wait before it reminds
+
+Before a reminder, Illo starts a background check of the task and the live state.
+The check gives one result:
+
+- `complete`: the work looks complete where the problem was. A person-rule list gets a review card with the proof.
+  The reviewer presses Done or Send back. Other Done rules and work already in review get a reminder.
+- `restart`: the agent can start now. Code permits one restart from a wait check during each holding period.
+  This restart counts toward `tasks.release_max`.
+- `person`: a person must act. The reminder gives one action, the verified facts, and why an agent cannot act.
+
+Each waiting period still gets one reminder. A round-0 `person` result is that reminder.
+A failed check, an empty result, or a refused start uses the plain reminder.
+Private tasks keep the plain reminder. Deep work must be on.
+At most two wait checks can wait in the queue or run at once. Other tasks wait for a later tick.
+Person requests, scouts, and briefs go before wait checks in the queue.
+
+`tasks.wait_check` defaults to `true`. Set it to `false` to keep plain reminders.
+`tasks.recheck_days` defaults to `3`, from 0 to 30. Set 0 to stop later checks.
+Later checks use the time since the reminder first became due. They do not send another plain reminder.
+A wait that got a plain reminder with no check gets one check at once. It follows the same rule.
+They speak only for complete work or a restart. A review card can arrive outside reminder hours.
+
+A holder can use `task_return` to return work with proof for another person's review.

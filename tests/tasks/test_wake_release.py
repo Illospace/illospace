@@ -23,6 +23,7 @@ BUILD = tasks.Viewer("ada", "agent:build")
 async def ctx(app):
     ctx = app.state.ctx
     ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.config.tasks.wait_check = False
     ctx.workspace.lists.append(TaskList(key="tasks", name="Tasks"))
     ctx.workspace.agents[0].wake = WakeConfig(type="poll")
     return ctx

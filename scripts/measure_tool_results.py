@@ -44,6 +44,7 @@ TYPICAL_ARGS = {
     "github_search_issues": {"query": "mobile app"},
     "github_get_issue": {"repo": "acme-example/engine", "number": 1},
     "github_get_pull": {"repo": "acme-example/engine", "number": 2},
+    "github_get_commit": {"repo": "acme-example/engine", "ref": "main"},
     "slack_read_thread": {"channel": "C_ACME_TEAM", "thread_ts": "1"},
     "web_read_public_page": {"url": "https://example.com/"},
     "mail_search": {"query": "mobile app"}, "mail_get": {"id": "one"},
@@ -120,6 +121,11 @@ async def configure_fakes(ctx):
     ctx.registry.tools["aws_read"] = replace(ctx.registry.tools["aws_read"], handler=aws_read)
     ctx.slack_client = FakeSlackClient(messages={"1": {"text": "Check the mobile app release.", "ts": "1"}})
     client = FakeGitHubClient()
+    client.commits[("acme-example/engine", "main")] = {
+        "sha": "a" * 40, "message": "Release the export", "date": "2026-11-10T00:00:00Z",
+        "checks": [{"name": "Release production", "status": "completed", "conclusion": "success",
+                    "completed_at": "2026-11-10T00:10:00Z"}],
+    }
     for n in range(1,81):
         row = {
             "number": n, "repo": "acme-example/engine", "title": f"Mobile app catalog release {n}",

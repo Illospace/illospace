@@ -192,3 +192,14 @@ A collector run can link to a task through a ticket URL or an explicit task ID.
 A title such as `engine#12` or `engine #12` also matches its ticket.
 A pull request URL matches when its GitHub lane has a closing or reference link to that ticket in the same repository.
 The connector adds that pull request as a `change` link once.
+
+## Read a commit and its checks
+
+`github_get_commit` reads a configured repository and a `ref`: a branch, tag, or SHA.
+It returns the full SHA, first message line, author date, and at most 100 check runs.
+Each check has its name, status, conclusion, and completion time. A note says when more checks exist.
+The tool reads checks for the resolved SHA, so a branch move cannot mix two commits.
+It has the same grant as `github_get_pull`, including every deep kind.
+Missing access or a missing ref gives a clear refusal. The GitHub App needs Checks read access.
+A passed production release job can supply release proof. Check that the job deploys that commit to the required place.
+A passed job records that release. Check for a later rollback or a failed health check too.

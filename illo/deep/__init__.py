@@ -47,10 +47,15 @@ async def start(
         or value(authority, "principal") == "outsider"
     ):
         raise Refusal("Deep work needs a team request that has not read outside text.")
-    if kind not in {"request", "scout", "brief"} or not job.strip():
+    if kind not in {"request", "scout", "brief", "check"} or not job.strip():
         raise Refusal("Give a job for the deep work.")
     principal, profile = value(authority, "principal"), value(authority, "profile")
     person_id = value(authority, "person_id")
+    if kind == "check" and (
+        principal != "team" or profile != "routine" or person_id is not None
+        or deliver != {"none": True} or origin_event_id is not None
+    ):
+        raise Refusal("Only code can start a wait check with no delivery.")
     origin = (
         await one(conn, "SELECT * FROM events WHERE id=%s", (origin_event_id,))
         if origin_event_id

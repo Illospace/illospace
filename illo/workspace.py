@@ -280,6 +280,8 @@ class TriageConfig(Model):
 
 
 class TasksConfig(Model):
+    wait_check: bool = True
+    recheck_days: int = Field(default=3, ge=0, le=30)
     release_max: int = Field(default=2, ge=1, le=10)
     check_minutes: int = Field(default=5, ge=1, le=60)
     reminder_window: tuple[int, int] = (8, 20)

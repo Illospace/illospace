@@ -8,6 +8,7 @@ connectors_list: List the connected outside services and the tools that this run
 digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.
 drive_get: Read one of this person's own Drive files by `id` from `drive_search`.
 drive_search: Search this person's own Drive files. For team documents, use `drive_shared_search`.
+github_get_commit: Read one commit by `repo` and `ref` (a branch, a tag, or a SHA): its SHA, message, date, and check runs. Use it to see if a commit is released: a release job that passed on the production branch shows that the commit is live.
 github_get_issue: Read one issue by `repo` (owner/name from the run facts) and `number`: its body, labels, assignees, and the last 5 comments.
 github_get_pull: Read one pull request by `repo` and `number`: its body, merge state, head commit, checks, reviews, and the last 5 comments. Use it to say whether a pull request is ready.
 github_search_issues: Search issues and pull requests in the configured repositories. Pick one with `repo` (owner/name from the run facts); a `repo:`, `org:`, or `user:` qualifier in `query` is refused. Returns one line per item with its number, state, title, labels, assignees, and link.
@@ -34,6 +35,7 @@ task_hand: Hand a task to a person or named agent allowed by its list. A null ho
 task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold.
 task_post: Add a task message. A holder can ask a blocking question with question true and an optional person in to. The answer returns the next move to the holder.
 task_reopen: Send a task back to its holder with a reason. The state becomes todo and waits_for names the holder. The record keeps the reason.
+task_return: Return a task that the person holds for review, with the proof in `message`. Use it when the holder says the work is done and the list wants another person to confirm.
 task_update: Change a task's title, brief, due time, or list. Add proof links with links. Private tasks keep their list and visibility.
 task_wake: Wake the agent holder and record the person who requests the restart.
 team_snapshot: Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.

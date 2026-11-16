@@ -381,3 +381,16 @@ async def test_private_channel_needs_the_original_mention(
         )
     await send(ctx, {**row, "origin_event_id": event["id"]}, "A result")
     assert any(c["method"] == "chat_postMessage" for c in slack_client.calls)
+
+
+async def test_request_queued_after_check_starts_first(app):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        check_id = await start(ctx, conn, kind="check", job="Check the wait.",
+                               authority=Authority("team", "routine"), deliver={"none": True})
+    request_id = await queue(ctx)
+    assert check_id < request_id
+    async with ctx.pool.connection() as conn:
+        from illo.deep.worker import claim
+        row = await claim(ctx, conn)
+    assert row["id"] == request_id
