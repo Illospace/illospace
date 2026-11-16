@@ -57,16 +57,20 @@ async def _person(ctx, conn, row, entry, now, counts, extra):
     since = row["created_at"]
     needed = ("read the returned work on its card, then press Done or Send back"
               if row["state"] == "review" else "you hold it")
+    reminded = False
     for event in events:
         if event["data"].get("waits_for") != target:
             break
         since = event["at"]
         if event["kind"] == "question":
             needed = event["text"]
+        # Use the order of the record, not the times: an event time is the start of its transaction.
+        reminded = reminded or (event["kind"] == "reminded" and event["data"].get("to") == target)
     period = timedelta(hours=entry.silence.person_hours)
     if now - since <= period:
         return
-    if any(e["kind"] == "reminded" and e["data"].get("to") == target and now-e["at"] < period for e in events):
+    # One reminder for each waiting period. After that, the morning brief carries the task.
+    if reminded:
         return
     if counts[target] >= 5:
         extra[target] += 1

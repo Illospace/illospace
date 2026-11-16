@@ -228,6 +228,10 @@ async def test_person_reminders_window_period_cap_and_summary(ctx, monkeypatch):
     await release.tick(ctx, noon+timedelta(days=2, hours=10))
     async with ctx.pool.connection() as conn:
         assert len(await all_rows(conn, "SELECT * FROM task_events WHERE kind='reminded'")) == 8
+    # A wait gets one reminder. Days later, inside the reminder hours, there is no second one.
+    await release.tick(ctx, noon+timedelta(days=3))
+    async with ctx.pool.connection() as conn:
+        assert len(await all_rows(conn, "SELECT * FROM task_events WHERE kind='reminded'")) == 8
 
 
 async def test_person_notice_on_agent_capture_and_own_person_limit(ctx):
@@ -271,6 +275,24 @@ async def test_question_reminder_keeps_wait_start_after_messages(ctx):
         await tasks.post(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, text="I still need the date.")
     await release.tick(ctx, datetime.now(UTC).replace(hour=12))
     assert any(e["kind"] == "reminded" and "Which date?" in e["text"] for e in (await record(ctx, row["id"]))[1])
+
+
+async def test_new_wait_gets_its_reminder_although_an_old_reminder_has_a_later_time(ctx, monkeypatch):
+    monkeypatch.setattr(release, "in_window", lambda *_: True)
+    row = await make(ctx, holder="person:ada")
+    await age(ctx, row["id"], 40)
+    await release.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        await tasks.hand(conn, row["id"], workspace=ctx.workspace, viewer=ADA, holder="agent:build")
+        await tasks.return_work(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, message="The result is ready.")
+        # The new wait is 40 hours old. The reminder of the first wait has a later time than its start.
+        await conn.execute("UPDATE task_events SET at=now()-interval '40 hours' WHERE task_id=%s AND kind<>'reminded'", (row["id"],))
+        await conn.execute("UPDATE tasks SET holder_since=now()-interval '10 days' WHERE id=%s", (row["id"],))
+    await release.tick(ctx)
+    reminders = [e for e in (await record(ctx, row["id"]))[1] if e["kind"] == "reminded"]
+    assert len(reminders) == 2
+    await release.tick(ctx, datetime.now(UTC) + timedelta(days=3))
+    assert len([e for e in (await record(ctx, row["id"]))[1] if e["kind"] == "reminded"]) == 2
 
 
 async def test_missing_webhook_secret_and_timeout_do_not_expose_url(ctx):

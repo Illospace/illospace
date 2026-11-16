@@ -210,7 +210,8 @@ Task result writes and messages already update `last_activity_at`.
 
 A task that waits for a person gets a `reminded` event after `silence.person_hours`.
 Illo derives the start of that wait from the record. Messages do not restart the wait.
-It sends at most one reminder per task per period, between 08:00 and 20:00 in the person's time zone.
+It sends one reminder for each wait, between 08:00 and 20:00 in the person's time zone.
+A wait that continues gets no second reminder. The morning brief carries the task after that.
 A tick sends at most five reminders per person, then one line with the count of other tasks.
 The reminder quotes the question, asks for review, or says that the person holds the task.
 

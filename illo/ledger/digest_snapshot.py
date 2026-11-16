@@ -143,7 +143,9 @@ async def task_records(conn, workspace, now, since, person=None):
             "item": {"id": row["id"], "title": row["title"], "link": thread_link(row),
                      "holder": holder, "reason": wait_reason(row, period, holder),
                      "age_hours": hours(now, since_wait), "due_at": row["due_at"],
-                     "silent_hours": hours(now, base)},
+                     "silent_hours": hours(now, base),
+                     # The wait started after the last brief. An old wait needs no second explanation.
+                     "new": since_wait > since},
         })
     return records, names
 
@@ -214,13 +216,16 @@ async def team_snapshot(conn, workspace, now):
     records, names = await task_records(conn, workspace, now, since)
     finished = [r for r in records if r["row"]["state"] == "done" and r["row"]["done_at"] > since]
     finished.sort(key=lambda r: (r["row"]["done_at"], r["row"]["id"]), reverse=True)
-    waiting, stuck, agents, people_count = {}, [], 0, 0
+    waiting, stuck, agents, people_count, new_waits = {}, [], 0, 0, []
     for r in records:
         row, item = r["row"], r["item"]
         if row["state"] in {"done", "cancelled"}:
             continue
         target = row["waits_for"] or ""
         if target.startswith("person:"):
+            if item["new"]:
+                new_waits.append({k: item[k] for k in ("id", "title", "link", "reason", "age_hours")}
+                                 | {"action_by": names.get(target, target)})
             entry = waiting.setdefault(target, {"name": names.get(target, target), "count": 0,
                                                 "oldest_hours": 0, "oldest": item})
             entry["count"] += 1
@@ -249,7 +254,7 @@ async def team_snapshot(conn, workspace, now):
     return {"team": workspace.config.team_name, "finished_total": len(finished),
             "finished": [done_item(r, names) for r in finished[:7]],
             "waiting": sorted(waiting.values(), key=lambda r: -r["oldest_hours"]),
-            "stuck": stuck, "in_work": {"agents": agents, "people": people_count},
+            "new_waits": new_waits, "stuck": stuck, "in_work": {"agents": agents, "people": people_count},
             "recent_openings": await recent_openings(conn, "team_digest")}
 
 

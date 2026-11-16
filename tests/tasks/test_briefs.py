@@ -63,6 +63,19 @@ async def test_needs_reasons_wait_order_limits_and_threads(conn, ada, workspace)
     assert data["due"] == []
 
 
+async def test_snapshots_mark_the_waits_that_started_after_the_last_brief(conn, ada, workspace):
+    old = await make(conn, workspace, "Read the old plan", holder="person:ada")
+    await stamp(conn, old, 30)
+    new = await make(conn, workspace, "Read the new plan", holder="person:ada")
+    await stamp(conn, new, 3)
+    data = await digest_snapshot.build(conn, ada, NOW, workspace)
+    assert {i["id"]: i["new"] for i in data["needs_you"]} == {old["id"]: False, new["id"]: True}
+    team = await digest_snapshot.team_snapshot(conn, workspace, NOW)
+    # The team brief names only the new wait. The old one stays in the count.
+    assert [(i["id"], i["action_by"]) for i in team["new_waits"]] == [(new["id"], "Ada")]
+    assert team["waiting"][0]["count"] == 2
+
+
 async def test_agents_silence_threshold_and_restart_window(conn, ada, workspace):
     row = await make(conn, workspace, holder="agent:build")
     await stamp(conn, row, 3)

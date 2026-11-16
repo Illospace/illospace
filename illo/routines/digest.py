@@ -34,7 +34,12 @@ If nothing needs the person, say so in one short line.
 End with one short question that offers help: ask if {name} wants Illo to coordinate something today. Change the words each day."""
 
 
-DEEP_INSTRUCTIONS = "Read each task that waits for this person before you write: the task, its ticket, and the repository when you need it. For each one, say what they must do next in one line: the action, the place, and why it waits. Check the live state first."
+DEEP_INSTRUCTIONS = """Read each task that waits for this person before you write: the task, its ticket, and the repository when you need it. Check the live state first.
+Do not ask the person to check a fact that your tools can read. Read it, and give the result.
+If the facts show that the work is complete, say that with the proof, and ask for one word to confirm.
+For a task with `new: true`, say what the person must do next in one line: the action, the place, and why it waits.
+A task with `new: false` did not change since the last brief. Give it one short line: the number and the action. Do not explain it again.
+Leave out a fact that you cannot read."""
 
 
 FIRST_BRIEF = (

@@ -19,9 +19,15 @@ class Scheduler:
     def __init__(self, ctx):
         self.ctx = ctx
         self.tasks: list[asyncio.Task] = []
+        self.names: set[str] = set()
 
     async def setup(self) -> None:
         """Keep the scheduler compatible with the module setup contract."""
+
+    async def forget_removed_jobs(self) -> None:
+        """Delete the sensors of jobs that this release no longer has. A silent old sensor is a false fault."""
+        async with self.ctx.pool.connection() as conn:
+            await conn.execute("DELETE FROM sensors WHERE key LIKE 'job:%%' AND NOT key=ANY(%s)", (sorted(self.names),))
 
     async def _call(self, fn, seconds=None):
         name = f"job:{fn.__module__}.{fn.__name__}"
@@ -46,6 +52,7 @@ class Scheduler:
         """Run after each interval. Slow jobs never overlap with themselves."""
         if seconds <= 0:
             raise ValueError("The interval must be positive")
+        self.names.add(f"job:{fn.__module__}.{fn.__name__}")
 
         async def loop():
             while True:
@@ -60,6 +67,7 @@ class Scheduler:
         """Use the team's IANA time zone for five-field cron schedules."""
         if len(expr.split()) != 5 or not croniter.is_valid(expr):
             raise ValueError("Use a five-field cron schedule")
+        self.names.add(f"job:{fn.__module__}.{fn.__name__}")
 
         async def loop():
             while True:

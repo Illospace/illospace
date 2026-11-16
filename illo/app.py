@@ -136,6 +136,7 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
                     await ctx.reload()
 
             ctx.every(config.workspace_check_seconds, check_workspace)
+            await ctx.scheduler.forget_removed_jobs()
             yield
         finally:
             if ctx:

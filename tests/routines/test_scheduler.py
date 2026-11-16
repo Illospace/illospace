@@ -252,3 +252,25 @@ async def test_timer_records_its_interval(app):
         sensor = await one(conn, "SELECT * FROM sensors WHERE key=%s",
                            (f"job:{example_job.__module__}.{example_job.__name__}",))
         assert sensor["expected_every_s"] == 7200
+
+
+async def test_start_forgets_the_sensors_of_removed_jobs(app):
+    from illo.db import all_rows
+    from illo.ledger import sensors
+
+    ctx = app.state.ctx
+
+    async def present():
+        pass
+
+    ctx.every(60, present)
+    async with ctx.pool.connection() as conn:
+        await sensors.ok(conn, f"job:{present.__module__}.present", expected_every_s=60)
+        await sensors.ok(conn, "job:illo.removed.old_job", expected_every_s=60)
+        await sensors.ok(conn, "github")
+    await ctx.scheduler.forget_removed_jobs()
+    async with ctx.pool.connection() as conn:
+        keys = {row["key"] for row in await all_rows(conn, "SELECT key FROM sensors")}
+    # A silent sensor of a removed job is a false fault in each brief.
+    assert "job:illo.removed.old_job" not in keys
+    assert {f"job:{present.__module__}.present", "github"} <= keys
