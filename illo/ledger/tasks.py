@@ -108,7 +108,9 @@ async def events(conn, task_id, *, viewer, limit=20):
 
 
 async def _event(conn, row, actor, kind, text="", data=None):
-    active = kind not in {"woken", "wake_failed", "released", "reminded"}
+    # A wait check is Illo's look at the task. It is not work on the task.
+    active = (kind not in {"woken", "wake_failed", "released", "reminded"}
+              and (data or {}).get("source") != "wait_check")
     stamps = await one(conn, """UPDATE tasks SET updated_at=now(),
         last_activity_at=CASE WHEN %s THEN now() ELSE last_activity_at END
         WHERE id=%s RETURNING updated_at,last_activity_at,waits_for""", (active, row["id"]))

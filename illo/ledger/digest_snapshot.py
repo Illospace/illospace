@@ -92,6 +92,10 @@ def wait_record(row, events):
 
 def wait_reason(row, period, name):
     for event in period:
+        # The last wait check read the live state. Its text is the best reason.
+        if event["data"].get("source") == "wait_check" and event["kind"] in {"reminded", "message"}:
+            return event["text"][:600]
+    for event in period:
         if event["kind"] == "question":
             return event["text"][:200]
         if event["kind"] == "wake_failed" and event["data"].get("final"):

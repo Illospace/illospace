@@ -268,7 +268,9 @@ async def test_later_look_outside_window(ctx, fake_brain, monkeypatch, outcome):
     await result(ctx, fake_brain, outcome)
     current, events = await record(ctx, row["id"])
     if outcome == "person":
-        assert events == before and current["state"] == "todo"
+        # The look sends nothing. The record keeps what Illo found.
+        assert events[:-1] == before and current["state"] == "todo"
+        assert events[-1]["kind"] == "message" and events[-1]["data"]["source"] == "wait_check"
     else:
         assert current["state"] == "review"
         assert any(e["kind"] == "returned" for e in events)
@@ -289,7 +291,9 @@ async def test_plain_reminder_without_check_gets_one_silent_look(ctx, fake_brain
     await result(ctx, fake_brain, outcome)
     current, events = await record(ctx, row["id"])
     if outcome == "person":
-        assert events == before and current["state"] == "todo"
+        # The look sends nothing. The record keeps what Illo found.
+        assert events[:-1] == before and current["state"] == "todo"
+        assert events[-1]["kind"] == "message" and events[-1]["data"]["source"] == "wait_check"
     else:
         assert current["state"] == "review"
     await release.tick(ctx)

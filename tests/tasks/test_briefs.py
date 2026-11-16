@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 
+from illo.db import one
 from illo.ledger import asks, digest_snapshot, lanes, sensors, tasks
 from illo.routines.digest import fallback_text as personal_text
 from illo.routines.team_digest import fallback_text as team_text
@@ -50,6 +51,15 @@ async def test_needs_reasons_wait_order_limits_and_threads(conn, ada, workspace)
     for i in range(6):
         row = await make(conn, workspace, f"Read plan {i}", holder="person:ada")
         await stamp(conn, row, 6 - i)
+    checked = await make(conn, workspace, "Read the checked plan", holder="person:ada")
+    await stamp(conn, checked, 6.5)
+    await tasks._event(conn, checked, "code", "message", "The release passed. Choose the date.", {"source": "wait_check"})
+    data = await digest_snapshot.build(conn, ada, NOW, workspace)
+    assert next(i for i in data["needs_you"] if i["id"] == checked["id"])["reason"] == "The release passed. Choose the date."
+    # A wait check is not work on the task.
+    stamps = await one(conn, "SELECT last_activity_at FROM tasks WHERE id=%s", (checked["id"],))
+    assert stamps["last_activity_at"] == NOW - timedelta(hours=6.5)
+    await conn.execute("UPDATE tasks SET state='cancelled',waits_for=NULL WHERE id=%s", (checked["id"],))
     data = await digest_snapshot.build(conn, ada, NOW, workspace)
     assert data["needs_you_total"] == 10 and len(data["needs_you"]) == 7
     assert [i["id"] for i in data["needs_you"][:4]] == [overdue["id"], question["id"], returned["id"], ticket["id"]]

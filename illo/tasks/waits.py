@@ -115,6 +115,9 @@ async def apply(conn, *, ctx, run, outcome, message):
         if outcome == "person" and wait["round"] == 0 and not period["reminded"]:
             await tasks._event(conn, row, "code", "reminded", message,
                                {"to": wait["target"], "source": "wait_check"})
+        elif outcome == "person":
+            # This look sends nothing. The record keeps what Illo found, for the briefs and for answers.
+            await tasks._event(conn, row, "code", "message", message, {"source": "wait_check"})
         text = "Illo recorded the wait check: " + outcome + "."
     await conn.execute("UPDATE deep_runs SET context=jsonb_set(context,'{wait,applied}',%s) WHERE id=%s",
                        (Jsonb(outcome), deep["id"]))
