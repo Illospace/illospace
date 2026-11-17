@@ -59,14 +59,16 @@ def _field_names(model: type[BaseModel]) -> frozenset[str]:
 def _error_message(error) -> str:
     if error["type"] in {"value_error", "assertion_error"}:
         cause = error.get("ctx", {}).get("error")
-        if isinstance(cause, ArgumentError):
-            return str(cause)
+        if isinstance(cause, ArgumentError) and [type(a) for a in cause.args] == [str]:
+            return cause.args[0]
     elif not _INPUT_CONTEXT & error.get("ctx", {}).keys():
         return error["msg"]
     return f"The value is not valid ({error['type']})"
 
 
-def validation_reason(exc: ValidationError, model: type[BaseModel]) -> str:
+def validation_reason(
+    exc: ValidationError, model: type[BaseModel], prefix: tuple[str, ...] = ()
+) -> str:
     """Show the path and the message of each schema error, never the input values."""
     errors = exc.errors(include_input=False, include_url=False)
     names = _field_names(model)
@@ -74,8 +76,13 @@ def validation_reason(exc: ValidationError, model: type[BaseModel]) -> str:
     for error in errors[:3]:
         # Keys that the caller chose stay hidden: only schema names and list indices show.
         path = ".".join(
-            str(part) if isinstance(part, int) or part in names else "<key>"
-            for part in error["loc"]
+            [
+                *prefix,
+                *(
+                    str(part) if isinstance(part, int) or part in names else "<key>"
+                    for part in error["loc"]
+                ),
+            ]
         )
         message = _error_message(error)
         details.append(f"{path}: {message}" if path else message)

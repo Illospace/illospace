@@ -11,7 +11,14 @@ from illo.channels.mcp.schemas import AskCancel, AskCreate
 from illo.db import one
 from illo.tools.checks import GRANT_PROFILES, check, destination, risk, scope
 from illo.tools.personal import Calendar
-from illo.tools.registry import Arguments, Registry, Tool, ToolContext, validation_reason
+from illo.tools.registry import (
+    ArgumentError,
+    Arguments,
+    Registry,
+    Tool,
+    ToolContext,
+    validation_reason,
+)
 
 
 def tool(name="lanes_search", risk="read", target="ledger", personal=False):
@@ -229,3 +236,17 @@ async def test_registry_validation_uses_the_shared_reason(conn, run):
     assert result == {"decision": "deny", "reason": reason, "result": None}
     row = await one(conn, "SELECT decision, reason FROM audit WHERE run_id=%s", (run["id"],))
     assert row == {"decision": "deny", "reason": reason}
+
+
+def test_validation_reason_shows_only_a_plain_argument_error_message():
+    class Odd(Arguments):
+        value: str
+
+        @field_validator("value")
+        @classmethod
+        def odd(cls, text):
+            raise ArgumentError({"value": text})
+
+    assert reason_for(Odd, {"value": "acme-private-text"}) == (
+        PREFIX + "value: The value is not valid (value_error)"
+    )

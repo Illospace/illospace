@@ -19,7 +19,11 @@ async def test_ask_validation_returns_the_reason_without_the_question(app, http)
         "ask_create", {**ASK, "question": "First question? Second question?"}, error=True
     )
     message = result["error"]["message"]
-    assert "question: The question must be one short sentence" in message
+    # The registry test in tests/test_tools.py expects the same text from the agent-run path.
+    assert message == (
+        "The tool arguments do not match its schema: "
+        "question: The question must be one short sentence"
+    )
     assert "Second question" not in message
 
 
