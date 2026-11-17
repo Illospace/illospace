@@ -158,6 +158,12 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 
 - `people`: `key` (unique), `name`, `slack_id`, `github_login`, `emails text[]`, `role` (`owner`, `member`), `timezone`, `areas text[]`, `active`. The file `people.yaml` is the truth. The table is a copy that the loader keeps equal.
 - `tokens`: MCP client tokens. `person_id`, `label` (the machine or the agent), `token_hash` (SHA-256), `scopes text[]` (exactly one of `collector`, `agent`; default `collector`), `last_used_at`, `revoked_at`. Verification reads the active owner and revocation state on every call, without a row lock. A separate transaction updates `last_used_at` at most once per minute. It skips busy rows and limits table lock waits to 100 milliseconds. Separate advisory locks preserve write limits and ask retries.
+- `agent_oauth_clients`: public client registrations, app names, exact redirect addresses, creation time, and first approval time. No client secrets.
+- `agent_oauth_requests`: pending sign-ins, PKCE challenges, resource, state, hashed pairing code, and a separate hashed browser handle. Slack identity and card IDs bind consent to the person. The row also holds the authorization code hash and its use time.
+- `agent_oauth_access`: opaque access token hashes, stable token IDs, resource, and expiry time.
+- `agent_oauth_refresh`: refresh token hashes, stable token IDs, client IDs, resource, a random seed, expiry time, and use time. Old hashes remain to detect reuse. Illo makes the next pair from the refresh token and its seed, so a retry gets the same pair and starts no second chain.
+- `agent_oauth_limits`: persistent counters for registration, pairing attempts, and token failures. The database clock sets their windows.
+
 - `events`: the gateway inbox. `channel`, `external_id`, unique (`channel`, `external_id`), `kind`, `principal`, `person_id`, `tainted`, `payload jsonb`, `status` (`received`, `ignored`, `handled`, `failed`).
 - `runs`: `event_id`, `principal`, `person_id`, `profile`, `tainted`, `personal_read`, `status` (`running`, `completed`, `failed`, `timeout`), `runtime`, `model`, `usage jsonb`, `error`, `started_at`, `ended_at`, `token_hash` (the per-run token), `token_expires_at`.
 - `audit`: `run_id` (nullable), `token_id` (nullable), `principal`, `tool`, `args_digest`, `args jsonb` (redacted), `decision`, `reason`, `at`.
@@ -182,6 +188,18 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `routine_state`: `key` (unique), `last_run_at`, `next_run_at`, `last_status`.
 - `sensors`: `key` (unique), `last_ok_at`, `last_error_at`, `detail`. One row for each thing that must stay alive: the Slack connection, each collector, the GitHub poll, the brain.
 - `kv`: `key` (unique), `value jsonb`.
+
+Agent OAuth uses Slack to prove identity. The browser shows a pairing message, and the person sends it in their own DM.
+Slack holds the consent buttons because an attacker can own the browser that starts the request.
+Code catches the whole pairing message before the gateway stores an event or starts a model run.
+Slack history and tool reads remove pairing codes too.
+Approval creates one stable `tokens` row with the `agent` scope.
+Its `token_hash` starts with `!agent-oauth:`. A SHA-256 bearer hash cannot match this value.
+Verification also looks in `agent_oauth_access` and checks the resource, expiry, stable token revocation, and active person.
+The endpoint passes its resource address. Internal gateway checks use the already admitted bearer.
+Static tokens still work on either MCP address. OAuth access tokens stay bound to the address that the client requests.
+Refresh and code reuse revoke the stable row, so all secrets for that connection stop at once.
+Each step commits before any Slack call. Discovery and token routes make no outside call and have a five-second application deadline.
 
 Migration `0406_search_items.sql` backfills these tables without a source writer lock.
 It records row versions, builds the GIN indexes, then briefly locks writers and checks changed rows.

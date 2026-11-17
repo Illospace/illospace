@@ -299,6 +299,16 @@ class TasksConfig(Model):
 
 class ConnectConfig(Model):
     public_url: str | None = None
+    agent_redirects: list[str] = Field(default_factory=list)
+
+    @field_validator("agent_redirects")
+    @classmethod
+    def valid_agent_redirects(cls, values):
+        from illo.channels.agent_urls import valid_redirect
+
+        if len(values) > 100 or not all(valid_redirect(value, https_only=True) for value in values):
+            raise ValueError("Use at most 100 exact HTTPS redirect addresses without credentials or a fragment")
+        return values
 
     @field_validator("public_url")
     @classmethod

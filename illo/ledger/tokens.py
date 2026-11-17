@@ -40,7 +40,7 @@ async def create(
     return token
 
 
-async def verify(conn: Connection, token: str) -> dict | None:
+async def verify(conn: Connection, token: str, *, resource: str | None = None) -> dict | None:
     """Reject revoked tokens and inactive owners. Record use without the token."""
     row = await one(
         conn,
@@ -48,9 +48,13 @@ async def verify(conn: Connection, token: str) -> dict | None:
         SELECT t.id,t.person_id,t.label,t.scopes,t.agent_key,p.key AS person_key,
           (t.last_used_at IS NULL OR t.last_used_at <= clock_timestamp()-interval '1 minute') AS touch
         FROM tokens t JOIN people p ON p.id=t.person_id
-        WHERE t.token_hash=%s AND t.revoked_at IS NULL AND p.active
+        WHERE t.revoked_at IS NULL AND p.active AND t.id IN (
+          SELECT id FROM tokens WHERE token_hash=%s
+          UNION ALL
+          SELECT token_id FROM agent_oauth_access WHERE token_hash=%s
+            AND expires_at>clock_timestamp() AND (%s::text IS NULL OR resource=%s))
     """,
-        (digest(token),),
+        (digest(token), digest(token), resource, resource),
     )
     if row and row.pop("touch"):
         # Commit use on another connection. The request never owns this row lock.

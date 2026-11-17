@@ -1,5 +1,77 @@
 # Connect an agent
 
+## Connect an app with its Connect button
+
+1. Add `https://illo.example.com/mcp` in the app's MCP or connector settings.
+   Replace the host with your team's Illo address. `/api/mcp` also works.
+2. Click **Connect**. Illo shows the app name and the return host.
+   The app supplies its name. Illo does not verify that name.
+3. Copy the `connect XXXX-XXXX` message. Send it to Illo in your own Slack direct message.
+4. Check the app and the return host in the Slack card. Click **Approve** only if you started this sign-in.
+5. Return to the browser. It sends you back to the app.
+
+Each team member connects with their own Slack identity. You must be active in `people.yaml`.
+The app can read and write Illo memory, tasks and lanes as you.
+Click **Deny** if you do not want the connection. A request expires after 10 minutes.
+To end a connection, ask the operator to list and revoke it:
+
+```sh
+illo token list
+illo token revoke 42
+```
+
+Use the connection ID from the list. Revocation ends all access and refresh tokens for that connection.
+
+For Codex CLI, add the address, then sign in:
+
+```sh
+codex mcp add illo --url https://illo.example.com/mcp
+codex mcp login illo
+```
+
+Claude Code also supports HTTP MCP sign-in. Add the address without a static bearer header.
+Use its MCP sign-in control to start the same Slack flow.
+
+### Operator setup for app sign-in
+
+Set `connect.public_url` or `ILLO_PUBLIC_URL` to your public HTTPS origin, such as `https://illo.example.com`.
+Agent sign-in needs an origin with no path, query, or credentials.
+With no HTTPS origin, Illo keeps static-token access. The new OAuth routes answer 404.
+
+Hosted Claude calls from Anthropic's servers. It needs these paths on the public internet through port 443:
+
+- `/mcp` and `/api/mcp`
+- `/.well-known/`
+- `/oauth/`
+
+Keep the `WWW-Authenticate` header on HTTP 401 responses through your proxy.
+Do not log OAuth query strings, cookies, request bodies, or token response bodies.
+The app filters its OAuth access logs. Your proxy needs its own log rules.
+
+Illo uses Dynamic Client Registration for public clients. It does not fetch client metadata URLs.
+It accepts the exact Claude callbacks at `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback`.
+It also accepts HTTP loopback redirects on `localhost`, `127.0.0.1`, and `[::1]`.
+Loopback ports can change. The host, path, and query must match the registration.
+Add other exact HTTPS callbacks to `connect.agent_redirects`. Its default is an empty list.
+The browser and Slack card show an extra warning for loopback redirects.
+
+Access tokens last one hour. Each refresh rotates the refresh token and starts a new 90-day idle life.
+A second use of a refresh token in the first 60 seconds gets the same new pair again. Sessions of one app can refresh at the same time.
+A later reuse of a refresh token, or a reuse of an authorization code, revokes the whole connection.
+Illo has one scope, `agent`. It grants that scope for each scope name that an app sends.
+An app can leave out the `resource` parameter. Illo then uses the `/mcp` address.
+Authorization codes last two minutes and work once. Pairing requests last 10 minutes.
+Illo stores only hashes of the secrets. Each connection keeps one stable ID in `illo token list`.
+
+The limits are 60 registrations per hour, 1,000 stored clients, and 200 pending requests.
+Each client can have 10 pending requests. Each person can try 10 pairing codes per hour.
+The token endpoint has no failure counter. Limit its request rate in your proxy if you need a limit.
+Client records with no approved connection expire after 24 hours. Cleanup runs hourly and at registration.
+
+Static tokens remain available for machines with no browser.
+
+## Create a static token
+
 An agent connects to `https://illo.example.com/mcp`. Replace the host with your team's Illo address.
 `/api/mcp` is an alias. Both addresses use stateless Streamable HTTP with JSON responses.
 
