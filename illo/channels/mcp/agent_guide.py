@@ -1,4 +1,4 @@
-"""Exact DM guides for the agent door. The gateway answers before a model run."""
+"""One live app guide for direct DM commands and brain tools."""
 
 from illo.channels.mcp.oauth import issuer
 from illo.channels.mcp.slack_signin import credentials
@@ -21,11 +21,16 @@ async def claim(ctx, event, authority):
     # A workspace connector keeps its existing command and sign-in path.
     if any(command in {f"connect {c.key}", f"connect my {c.key}"} for c in ctx.workspace.connectors):
         return None
+    async with ctx.pool.connection() as conn:
+        return await build(ctx, conn, kind)
+
+
+async def build(ctx, conn, kind):
+    """Build the steps from the public origin and the current sign-in setup."""
     base = issuer(ctx)
     if not base:
         return "App sign-in is not set up on this Illo. Ask your operator for a token."
-    async with ctx.pool.connection() as conn:
-        configured = await credentials(ctx, conn)
+    configured = await credentials(ctx, conn)
     address = base + "/mcp"
     if kind == "claude":
         text = (
@@ -36,7 +41,9 @@ async def claim(ctx, event, authority):
             'Choose "Register automatically" under OAuth client. Finish the setup and click Add.\n'
             "3. Click Connect. Then sign in with Slack and click Allow.\n"
             "One connection works on each device where you use Claude. "
-            f"For Claude Code in a terminal: `claude mcp add --transport http illo {address}`, "
+            "For Claude Code in a terminal:\n"
+            "If Illo has an old address, run `claude mcp remove illo` first.\n"
+            f"Add it with `claude mcp add --transport http illo {address}`, "
             "then type `/mcp` and sign in."
         )
     elif kind == "codex":
@@ -44,7 +51,8 @@ async def claim(ctx, event, authority):
             "To connect Codex to me:\n"
             f"1. In Codex, open the MCP settings and add a server with this address: `{address}`\n"
             "2. Start the sign-in for that server. Then sign in with Slack and click Allow.\n"
-            f"In a terminal: `codex mcp add illo --url {address}`, then `codex mcp login illo`.\n"
+            "In a terminal, if Illo has an old address, run `codex mcp remove illo` first.\n"
+            f"Add it with `codex mcp add illo --url {address}`, then `codex mcp login illo`.\n"
             "Do this one time on each machine."
         )
     else:
@@ -52,6 +60,11 @@ async def claim(ctx, event, authority):
             f"To connect an app or an agent to me, add an MCP server with this address: `{address}`\n"
             "Then start its sign-in, sign in with Slack, and click Allow.\n"
             'Say "connect my Claude" or "connect my Codex" for the exact steps.'
+        )
+    if kind in {"claude", "codex"}:
+        text += (
+            "\nRun commands in a normal terminal, not inside an agent session, "
+            "because its sandbox can block the network."
         )
     if not configured:
         for phrase in ("sign in with Slack and click Allow", "sign in with Slack, and click Allow"):

@@ -11,6 +11,9 @@
 5. Illo sends you back to the app. It also sends a DM about the connection.
 
 Ask Illo: say `connect my Claude` in a DM. Use `connect my Codex` or `connect my agent` for other guides.
+You can also ask in your own words, for yourself or another person.
+Illo calls `connect_guide` for the current address and sign-in steps.
+In a DM, you can ask Illo to send those steps to another person.
 
 To use a code, open **Use a code in Slack** on the page.
 Copy the `connect XXXX-XXXX` message. Send it to Illo in your own Slack direct message.

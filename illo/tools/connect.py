@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 
+from illo.channels.mcp import agent_guide
 from illo.connectors import chat, google
 from illo.connectors.config import validate_url
 from illo.db import one
@@ -14,6 +15,10 @@ from illo.tools.registry import Arguments, Refusal, Tool
 
 PERSON = frozenset({"person_dm"})
 STATUS = PERSON | {"team_channel", "agent_request", "routine"}
+
+
+class Guide(Arguments):
+    app: Literal["claude", "codex", "agent"] = "agent"
 
 
 class Start(Arguments):
@@ -136,7 +141,29 @@ async def start(tc, args):
     return await chat.start(tc.app, tc.conn, tc.run.get("person_id"), args["kind"], args["scope"])
 
 
+async def guide(tc, args):
+    return await agent_guide.build(tc.app, tc.conn, args["app"])
+
+
 def register(registry):
+    registry.add(
+        Tool(
+            "connect_guide",
+            "connect",
+            "read",
+            lambda _: "ledger",
+            False,
+            guide,
+            description=(
+                "Get the exact steps to connect an app or a coding agent to Illo. "
+                "Supports Claude, Codex, and other MCP clients. Gives the address and the sign-in. "
+                "Use it for each question about how to connect to Illo, for the asker or another person. "
+                "Notes and memory about this can be out of date."
+            ),
+            arguments=Guide,
+            profiles=STATUS,
+        )
+    )
     registry.add(
         Tool(
             "connect_status",

@@ -101,12 +101,17 @@ The gateway gives each run one profile. The profile decides the tool list. `illo
 
 | Profile | When | Principal | Tools |
 |---|---|---|---|
-| `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | personal and team tools, including `note_save` and `list_save`; no `notes_propose` |
-| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `asks_create`, `slack_read_thread`, `note_save`, `list_save` |
-| `routine` | a team routine | `team` | team reads, create an unassigned issue, `asks_create`, `slack_send_dm` |
-| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, create an unassigned issue, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft` |
+| `person_dm` | a person in a DM, an authenticated email, a person routine | `person:<key>` | personal and team tools, including `note_save` and `list_save`; no `notes_propose`; `connect_guide` |
+| `team_channel` | a team member in a configured channel | `team` | team reads, create an unassigned issue, `asks_create`, `slack_read_thread`, `note_save`, `list_save`; `connect_guide` |
+| `routine` | a team routine | `team` | team reads, create an unassigned issue, `asks_create`, `slack_send_dm`; `connect_guide` |
+| `agent_request` | an `illo_submit` request from an `agent` token | `person:<owner of the token>` | team reads, create an unassigned issue, `asks_create`, `asks_answer_with_rule`, `notes_propose`, `email_draft`; `connect_guide` |
 | `tainted` | a bot, webhook, or form post; a forwarded email; a signal; a Slack thread with outside text | `team`, or the person of a forwarded email | up to 8 tools (below) |
 | `outsider` | an email from an unknown or unauthenticated sender | `outsider` | `web_read_public_page` |
+
+`connect_guide` reads the current address and sign-in setup. It does not read saved notes.
+A `person_dm` run can use both `connect_guide` and `slack_send_dm`.
+`agent_request` can read the guide but cannot send a DM.
+The public MCP door does not list `connect_guide`.
 
 A run with no person does not list a tool with risk `send_outside`.
 Google tools need a configured connector and a current grant, or a team service account.
@@ -273,6 +278,7 @@ Tool names use `family_verb`. Each family is one file in `illo/tools/`. The regi
 | `notes` | `notes_search`, `notes_propose` |
 | `memory` | `note_save`, `list_save` |
 | `web` | `web_read_public_page` (a URL of the event text or the root of its host; text only; no private address) |
+| `connect` | `connect_guide` (current app steps), `connect_status`, `connect_start`, `connect_propose_mcp`, `connect_allow_tools`, `connect_remove` |
 | `connectors` | `connectors_list`, `connectors_call` (a team connector through the MCP client, with a risk level for each tool) |
 | `personal` | `mail_search`, `mail_get`, `calendar_list`, `drive_search`, `drive_get` (personal connectors, read-only), `drive_shared_search`, `drive_shared_get` (the team shared drive) |
 | `email` | `email_draft` (always a draft) |
