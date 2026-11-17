@@ -1,4 +1,4 @@
-"""OAuth for the agent door. Slack proves identity and holds the consent buttons."""
+"""OAuth for the agent door. Slack proves identity. Both consent paths use the same ledger."""
 
 import asyncio
 import html
@@ -34,7 +34,8 @@ STYLE = (
     "main{max-width:30rem;margin:10vh auto;padding:2rem;background:#fff;border:1px solid #ddd;border-radius:12px}"
     "h1{font-size:1.4rem;margin:0 0 1rem}"
     "pre{font:600 1.3rem ui-monospace,monospace;background:#f0f0ee;padding:.8rem 1rem;border-radius:8px}"
-    "button{font:inherit;padding:.5rem 1.2rem;border:0;border-radius:8px;background:#1c1c1a;color:#fff;cursor:pointer}"
+    "button,.button{display:inline-block;text-decoration:none;font:inherit;padding:.5rem 1.2rem;border:0;border-radius:8px;background:#1c1c1a;color:#fff;cursor:pointer}"
+    ".quiet{background:#f0f0ee;color:#1c1c1a}details{margin-top:1rem}"
     "#status{color:#666}"
 )
 PKCE = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -92,9 +93,10 @@ def error_page():
     return page("<h1>The sign-in request is invalid.</h1><p>Start again in the app.</p>", status=400)
 
 
-def page(body, *, script="", status=200):
+def page(body, *, script="", status=200, forms=False):
     nonce = secrets.token_urlsafe(24)
-    csp = ("default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+    form_action = "self" if forms else "none"
+    csp = (f"default-src 'none'; base-uri 'none'; form-action '{form_action}'; frame-ancestors 'none'; "
            f"script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'")
     # One small style in the page. No outside assets are needed.
     content = ('<!doctype html><html lang="en"><meta charset="utf-8">'
@@ -174,6 +176,12 @@ async def register(request):
                           "response_types": ["code"], "scope": "agent"}, 201)
 
 
+def app_details(name, uri):
+    warning = "<p>This address returns to a local app. Check that you started this sign-in.</p>" if valid_redirect(uri) else ""
+    return ('<p>App name (not verified): ' + html.escape(name)
+            + '</p><p>Return address: <strong>' + html.escape(urlsplit(uri).hostname) + '</strong></p>' + warning)
+
+
 async def authorize(request):
     ctx = request.app.state.ctx
     base, q = issuer(ctx), request.query_params
@@ -204,16 +212,18 @@ async def authorize(request):
         # An app that sends no resource gets the main door address.
         resource = resource_value(base, q["resource"]) if "resource" in q else base + "/mcp"
         value = await ledger.request(conn, client["id"], uri, resource, q.get("state"), q["code_challenge"])
+        from illo.channels.mcp.slack_signin import credentials
+
+        slack_signin = await credentials(ctx, conn)
     if "error" in value:
         return redirect(uri, {**params, **value}, base)
-    host = urlsplit(uri).hostname
-    warning = "<p>This address returns to a local app. Check that you started this sign-in.</p>" if valid_redirect(uri) else ""
-    response = page(
-        '<h1>Connect to Illo</h1><p>App name (not verified): ' + html.escape(client["name"])
-        + '</p><p>Return address: <strong>' + html.escape(host) + '</strong></p>' + warning
-        + '<p>Send this message to Illo in a Slack direct message:</p><pre id="message">connect '
-        + value["code"] + '</pre><button id="copy" type="button">Copy</button>'
-        + '<p id="status">Wait for your approval in Slack.</p>',
+    pairing = ('<p>Send this message to Illo in a Slack direct message:</p><pre id="message">connect '
+               + value["code"] + '</pre><button id="copy" type="button">Copy</button>'
+               + '<p id="status">Wait for your approval in Slack.</p>')
+    if slack_signin:
+        pairing = ('<p><a class="button" href="/oauth/agent/slack/start">Sign in with Slack</a></p>'
+                   + '<details><summary>Use a code in Slack</summary>' + pairing + '</details>')
+    response = page('<h1>Connect to Illo</h1>' + app_details(client["name"], uri) + pairing,
         script="""
 document.getElementById('copy').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(document.getElementById('message').textContent); }
@@ -292,13 +302,20 @@ def guarded(handler):
 
 
 async def setup(ctx):
+    from illo.channels.mcp import agent_guide, slack_signin
     from illo.channels.slack.agent_oauth import action
+
+    ctx.gateway.register_claim(agent_guide.claim)
 
     for path in ("", "/mcp", "/api/mcp"):
         ctx.app.add_api_route("/.well-known/oauth-protected-resource" + path, guarded(protected_resource), methods=["GET"])
     ctx.app.add_api_route("/.well-known/oauth-authorization-server", guarded(authorization_server), methods=["GET"])
     for name, handler, method in (("register", register, "POST"), ("authorize", authorize, "GET"),
                                   ("status", status, "GET"), ("continue", continue_signin, "GET"), ("token", token, "POST")):
+        ctx.app.add_api_route("/oauth/agent/" + name, guarded(handler), methods=[method])
+    for name, handler, method in (("slack/start", slack_signin.start, "GET"),
+                                  ("slack/callback", slack_signin.callback, "GET"),
+                                  ("consent", slack_signin.consent, "POST")):
         ctx.app.add_api_route("/oauth/agent/" + name, guarded(handler), methods=[method])
     ctx.slack_actions.register("agent-oauth:", action)
 

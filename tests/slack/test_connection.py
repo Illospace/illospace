@@ -81,6 +81,8 @@ async def test_connect_retry_sensor_and_shutdown(app, slack_client, monkeypatch)
         async with ctx.pool.connection() as conn:
             sensor = await one(conn, "SELECT * FROM sensors WHERE key='slack'")
             assert sensor["last_ok_at"] > sensor["last_error_at"]
+            assert (await one(conn, "SELECT value FROM kv WHERE key='slack:team'"))["value"] == "T_ACME"
+        assert connection.intake.team_id == "T_ACME"
         slack_claims = [c for c in ctx.gateway.claims if "claim_unreadable_clip" in repr(c)]
         assert len(slack_claims) == 1  # Reconnect does not add a second claim.
     finally:
@@ -224,6 +226,8 @@ async def test_dead_connection_gets_a_new_client_and_no_second_connect(app, slac
         async with ctx.pool.connection() as conn:
             sensor = await one(conn, "SELECT * FROM sensors WHERE key='slack'")
             assert sensor["last_ok_at"] > sensor["last_error_at"]
+            assert (await one(conn, "SELECT value FROM kv WHERE key='slack:team'"))["value"] == "T_ACME"
+        assert connection.intake.team_id == "T_ACME"
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

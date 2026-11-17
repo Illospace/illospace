@@ -184,6 +184,44 @@ The chat forms need Slack Socket Mode and the normal bot sign-in.
 Apply the database migrations before this app version starts.
 Migration `1610_mcp_browser_oauth.sql` separates the browser sign-in providers in the state table.
 
+## Sign in with Slack
+
+App sign-in at the agent door needs a public HTTPS origin. See [Agents](agents.md#operator-setup-for-app-sign-in).
+The code method stays available without the Slack sign-in client.
+
+1. On the Slack app page, open **Basic Information**.
+   Copy **Client ID** and **Client Secret** from **App Credentials**.
+2. Open **OAuth & Permissions → Redirect URLs**.
+   Add `https://illo.example.com/oauth/agent/slack/callback` with your own public host.
+   `deploy/slack/manifest.yaml` supplies that example under `oauth_config.redirect_urls`.
+   It also supplies `openid` under `oauth_config.scopes.user`.
+   Slack sign-in requests only `openid`. Keep it separate from the bot installation flow.
+3. Store both values in the vault. The installer already sets `ILLO_VAULT_KEY`.
+   Each command asks for its value with hidden input. Do not put the value in the command.
+
+   ```sh
+   docker compose --env-file "$ILLO_ENV_FILE" -f deploy/compose.yaml exec illo illo secret set slack-client-id
+   docker compose --env-file "$ILLO_ENV_FILE" -f deploy/compose.yaml exec illo illo secret set slack-client-secret
+   ```
+
+   With the CLI outside Docker, use:
+
+   ```sh
+   illo secret set slack-client-id
+   illo secret set slack-client-secret
+   ```
+
+4. Confirm that the Slack connection works. It records the workspace team ID for the HTTP routes.
+   Add your own Slack ID to an active entry in `people.yaml`.
+   Start Connect in your app, then click **Sign in with Slack** and **Allow**.
+
+The values take effect on the next request. No new environment variable or restart is needed.
+Without both values, the authorization page keeps only the pairing code.
+The Slack sign-in document does not state whether this manifest change needs an app reinstall.
+Each person grants the sign-in scope in the separate OpenID flow.
+See [Slack's sign-in guide](https://docs.slack.dev/authentication/sign-in-with-slack/)
+and [the manifest reference](https://docs.slack.dev/reference/app-manifest/).
+
 ## Run it on your laptop to try it
 
 Run this command from the checkout:

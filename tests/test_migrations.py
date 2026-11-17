@@ -93,3 +93,32 @@ async def test_agent_oauth_migration_retries_and_keeps_static_tokens(conn, ada):
         async with conn.transaction():
             await conn.execute("""INSERT INTO agent_oauth_access (token_hash,token_id,resource,expires_at)
                 VALUES ('hash',999,'https://illo.example.com/mcp',clock_timestamp())""")
+
+
+async def test_slack_signin_migration_retries_and_keeps_pairing(conn, ada):
+    from illo.ledger import agent_oauth as oauth
+    from illo.ledger import tokens
+
+    path = Path(__file__).parents[1] / "illo/migrations/1702_agent_slack_signin.sql"
+    text = path.read_text()
+    assert text.startswith("SET LOCAL lock_timeout = '1s';")
+    client = await oauth.register(conn, "Existing app", ["http://localhost/callback"])
+    pending = await oauth.request(conn, client["id"], "http://localhost/callback",
+                                 "https://illo.example.com/mcp", None, oauth.challenge("v" * 43))
+    await conn.commit()
+    for _ in range(2):
+        async with conn.transaction():
+            await conn.execute(text)
+    row = await oauth.browser_request(conn, pending["handle"])
+    for column in ("slack_state_hash", "slack_nonce_hash", "consent_hash", "notice_at"):
+        assert row[column] is None
+    # Build 23 writes no new column. Its pairing and card decision still work.
+    paired = await oauth.pair(conn, pending["code"].replace("-", ""), ada["slack_id"], "D_PAIR", "1")
+    await conn.execute("UPDATE agent_oauth_requests SET slack_ts='2' WHERE id=%s", (paired["id"],))
+    assert await oauth.decide(conn, paired["id"], ada["id"], "D_PAIR", "2", True)
+    row = await oauth.browser_request(conn, pending["handle"])
+    assert row["decision"] == "approved" and row["token_id"]
+    callback, params = await oauth.continue_request(conn, pending["handle"])
+    grant = await oauth.exchange(conn, {"client_id": client["id"], "code": params["code"], "code_verifier": "v" * 43})
+    assert callback == "http://localhost/callback"
+    assert (await tokens.verify(conn, grant["access_token"]))["person_id"] == ada["id"]

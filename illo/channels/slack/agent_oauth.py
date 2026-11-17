@@ -1,12 +1,15 @@
 """Catch pairing messages before the gateway. No code reaches a model or memory."""
 
+import asyncio
 import re
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
 from illo.asks.cards import button
 from illo.channels.slack.pairing import pairing_code
+from illo.db import one
 from illo.ledger import agent_oauth as ledger
+from illo.slackapi import dm_person
 
 FAILURE = "The code is invalid, used, or expired. Start again in the app."
 
@@ -60,5 +63,22 @@ async def action(ctx, person, action):
         result = await ledger.decide(conn, int(request_id), person["id"], channel,
                                      action.get("message_ts"), choice == "approve")
     if result:
+        await notify(ctx, int(request_id))
         await ctx.slack_client.chat_update(channel=channel, ts=action["message_ts"], text=result,
                                           blocks=[{"type": "section", "text": {"type": "plain_text", "text": result}}])
+
+
+async def notify(ctx, request_id):
+    # Reserve one attempt and commit before Slack. A failed DM cannot undo consent.
+    try:
+        async with ctx.pool.connection() as conn:
+            row = await one(conn, """UPDATE agent_oauth_requests r SET notice_at=clock_timestamp()
+                FROM tokens t, people p WHERE r.id=%s AND r.decision='approved'
+                AND r.notice_at IS NULL AND t.id=r.token_id AND p.id=t.person_id
+                RETURNING t.label,p.key""", (request_id,))
+        if row:
+            async with asyncio.timeout(1):
+                await dm_person(ctx, row["key"], f"You connected {row['label']} to Illo. "
+                                "If this was not you, tell your operator at once.")
+    except Exception:
+        pass
