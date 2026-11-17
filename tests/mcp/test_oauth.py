@@ -3,6 +3,7 @@
 import asyncio
 import re
 import secrets
+import time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -10,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from illo.channels.mcp import oauth
-from illo.channels.slack.agent_oauth import pairing_code
+from illo.channels.slack.agent_oauth import pairing_code, sent_by_app
 from illo.channels.slack.blocks import message_text
 from illo.channels.slack.intake import SlackIntake
 from illo.cli import execute, parser
@@ -327,9 +328,67 @@ async def test_other_dm_text_reaches_normal_gateway(flow, text, decision, fake_b
     assert len(fake_brain.requests) == (decision == "run")
 
 
-@pytest.mark.parametrize("text", ["connect ABCD-EFGH", "  `CoNnEcT abcd-efgh`  ", "```connect ABCD-EFGH```"])
+@pytest.mark.parametrize("text", [
+    "connect ABCD-EFGH", "  `CoNnEcT abcd-efgh`  ", "```connect ABCD-EFGH```", "`````connect ABCD-EFGH`````",
+    # Some apps post for the person and add this signature. The words follow the person's language.
+    "connect ABCD-EFGH *Sent using* <@U0APP123>", "connect ABCD-EFGH\n\n*Envoyé avec* <@U0APP123>",
+    "`connect ABCD-EFGH` _Sent using_ <@U0APP123>", "connect ABCD-EFGH *x* <@U0APP123>",
+    "connect ABCD-EFGH *" + "x" * 40 + "*<@U0APP123>",
+])
 def test_pairing_text(text):
     assert pairing_code(text) == "ABCDEFGH"
+    assert sent_by_app(text) == ("<@" in text)
+
+
+@pytest.mark.parametrize("text", [
+    "connect ABCD-EFGH next", "connect ABCD-EFGH <@U0APP123>", "connect ABCD-EFGH *Sent using* Claude",
+    "connect ABCD-EFGH *Sent using* <@U0APP123> and more", "Please connect ABCD-EFGH *Sent using* <@U0APP123>",
+    "connect ABCD-EFGH *" + "x" * 41 + "* <@U0APP123>", "connect ABCD-EFGH *a*\n*b* <@U0APP123>",
+    "connect ABCD-EFGH *Sent using_ <@U0APP123>", "connect ABCD-EFGH *Sent\rusing* <@U0APP123>",
+    "connect ABCD-EFGH *Sent\u2028using* <@U0APP123>", "connect ABCD-EFGH*Sent using* <@U0APP123>",
+    "connect ABCD-EFGH ** <@U0APP123>", "connect ABCD-EFGH *a* <@U1> *b* <@U2>",
+    "*Sent using* <@U0APP123>",
+])
+def test_other_text_is_not_a_pairing_message(text):
+    assert pairing_code(text) is None
+    assert not sent_by_app(text)
+
+
+def test_long_hostile_text_costs_little_work():
+    texts = ("connect ABCD-EFGH" + " " * 200_000 + "!", "connect ABCD-EFGH " + "*a" * 100_000,
+             "connect ABCD-EFGH" + " " * 300 + "*Sent using* <@U0APP123>")
+    # Processor time, so that a pause of the host does not fail the test.
+    start = time.process_time()
+    for text in texts:
+        assert pairing_code(text) is None
+    assert time.process_time() - start < 0.5
+
+
+async def test_code_that_an_app_sends_for_the_person_gets_the_card(flow, fake_brain):
+    await flow.start()
+    code = re.search(r"connect ([A-Z2-9]{4}-[A-Z2-9]{4})", flow.page.text)[0]
+    result = await flow.dm(code + "\n\n*Envoyé avec* <@U0APP123>")
+    assert result == {"decision": "agent_oauth"}
+    assert not fake_brain.requests
+    text = flow.slack.calls[-1]["text"]
+    assert "An app sent this code in your name.\nApprove only if you started this yourself" in text
+    async with flow.app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT decision, person_id FROM agent_oauth_requests")
+        assert row["decision"] == "pending" and row["person_id"]
+        assert not await all_rows(conn, "SELECT * FROM events")
+    # Only the click of the same person approves.
+    before = len(flow.slack.calls)
+    await flow.click(user="U_ACME_BEN")
+    assert len(flow.slack.calls) == before
+    assert (await flow.http.get("/oauth/agent/status")).json() == {"status": "pending"}
+    await flow.click()
+    assert (await flow.http.get("/oauth/agent/status")).json() == {"status": "approved"}
+
+
+async def test_typed_code_has_no_app_line_on_the_card(flow):
+    await flow.start()
+    await flow.dm()
+    assert "An app sent this code" not in flow.slack.calls[-1]["text"]
 
 
 @pytest.mark.parametrize("change", ["expiry", "revoke", "inactive"])
@@ -586,6 +645,7 @@ async def test_history_does_not_send_old_pairing_code_to_model(flow, fake_brain,
 def test_shared_slack_reader_removes_pairing_code_from_tools():
     assert message_text({"text": "`connect ABCD-EFGH`"}) == "[Agent sign-in code removed]"
     assert message_text({"blocks": [{"type": "section", "text": {"type": "plain_text", "text": "connect ABCD-EFGH"}}]}) == "[Agent sign-in code removed]"
+    assert message_text({"text": "connect ABCD-EFGH\n\n*Sent using* <@U0APP123>"}) == "[Agent sign-in code removed]"
     assert message_text({"text": "connect AWS"}) == "connect AWS"
 
 

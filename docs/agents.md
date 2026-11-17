@@ -17,6 +17,7 @@ In a DM, you can ask Illo to send those steps to another person.
 
 To use a code, open **Use a code in Slack** on the page.
 Copy the `connect XXXX-XXXX` message. Send it to Illo in your own Slack direct message.
+An app that posts for you in Slack can send the message. Some apps add a signature with words such as "Sent using" and the app name. Illo accepts this signature, and the card says that an app sent the code. No other text can follow the code.
 Check the app and the return host on the card. Click **Approve** only if you started this sign-in.
 Return to the browser. It sends you back to the app.
 If the operator has not set up Slack sign-in, the page shows only this code method.

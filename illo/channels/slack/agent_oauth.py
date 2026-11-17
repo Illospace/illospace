@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
 from illo.asks.cards import button
-from illo.channels.slack.pairing import pairing_code
+from illo.channels.slack.pairing import pairing_code, sent_by_app
 from illo.db import one
 from illo.ledger import agent_oauth as ledger
 from illo.slackapi import dm_person
@@ -14,11 +14,13 @@ from illo.slackapi import dm_person
 FAILURE = "The code is invalid, used, or expired. Start again in the app."
 
 
-def card(row):
+def card(row, by_app=False):
     host = urlsplit(row["redirect_uri"]).hostname
     text = (f"App name (not verified): {row['name']}\nReturn address: {host}\n"
             "It can read and write Illo memory, tasks and lanes as you.\n"
-            "Approve only if you started this yourself a moment ago.")
+            # An app can send a code that the person did not ask for. The card says who sent it.
+            + ("An app sent this code in your name.\n" if by_app else "")
+            + "Approve only if you started this yourself a moment ago.")
     if host in {"localhost", "127.0.0.1", "::1"}:
         text += "\nThis address returns to a local app. Check that you started this sign-in."
     return text, [
@@ -44,7 +46,7 @@ async def receive(ctx, raw, *, outside_workspace=False):
     if not row:
         await ctx.slack_client.chat_postMessage(channel=raw["channel"], text=FAILURE)
         return True
-    text, blocks = card(row)
+    text, blocks = card(row, sent_by_app(raw.get("text", "")))
     sent = await ctx.slack_client.chat_postMessage(channel=raw["channel"], text=text, blocks=blocks,
                                                  unfurl_links=False, unfurl_media=False,
                                                  client_msg_id=str(uuid5(NAMESPACE_URL, f"illo:agent-oauth:{row['id']}")))
