@@ -14,7 +14,7 @@ from illo.channels.signals import submit as signal_submit
 from illo.gateway import InboundEvent
 from illo.ledger import audit, tokens
 from illo.ledger import mcp as ledger
-from illo.tools.registry import Tool
+from illo.tools.registry import Tool, validation_reason
 
 from . import asks, lanes, reads, schemas, submissions
 
@@ -94,7 +94,8 @@ TOOLS = {
             schemas.AskCreate,
             asks.create,
             "write_internal",
-            "Ask a person one short question with two to five options.",
+            "Ask a person one short question with two to five options. "
+            "The question must be one sentence of 240 characters or less.",
         ),
         agent_tool(
             "ask_pull",
@@ -195,8 +196,8 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
             async with ctx.conn.transaction():
                 value = await tool.handler(ctx, clean)
             result = tool_result(value)
-        except ValidationError:
-            decision, reason = "deny", "The tool arguments do not match its schema"
+        except ValidationError as exc:
+            decision, reason = "deny", validation_reason(exc)
             ctx.events.clear()
             result = tool_result({"error": {"message": reason}}, is_error=True)
         except ValueError as exc:

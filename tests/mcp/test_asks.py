@@ -13,6 +13,16 @@ ASK = {
 }
 
 
+async def test_ask_validation_returns_the_reason_without_the_question(app, http):
+    agent = await AgentClient.create(app, http)
+    result = await agent.call(
+        "ask_create", {**ASK, "question": "First question? Second question?"}, error=True
+    )
+    message = result["error"]["message"]
+    assert "question: The question must be one short sentence" in message
+    assert "Second question" not in message
+
+
 async def test_collector_can_omit_a_recommendation(app, http):
     agent = await AgentClient.create(app, http)
     args = {key: value for key, value in ASK.items() if key != "recommended"}

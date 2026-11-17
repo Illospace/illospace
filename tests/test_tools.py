@@ -3,14 +3,22 @@
 from types import SimpleNamespace
 
 import pytest
+from pydantic import Field, ValidationError
 
+from illo.channels.mcp.schemas import AskCancel, AskCreate
+from illo.db import one
 from illo.tools.checks import GRANT_PROFILES, check, destination, risk, scope
-from illo.tools.registry import Registry, Tool
+from illo.tools.registry import Arguments, Registry, Tool, ToolContext, validation_reason
 
 
 def tool(name="lanes_search", risk="read", target="ledger", personal=False):
-    return SimpleNamespace(name=name, family=name.split("_", 1)[0], risk=risk,
-                           destination=lambda a: target, personal=personal)
+    return SimpleNamespace(
+        name=name,
+        family=name.split("_", 1)[0],
+        risk=risk,
+        destination=lambda a: target,
+        personal=personal,
+    )
 
 
 def authority(**changes):
@@ -87,3 +95,111 @@ def test_registry_rejects_duplicate_or_destructive_tool():
         registry.add(entry)
     with pytest.raises(ValueError, match="risk"):
         registry.add(Tool("delete_everything", "bad", "delete", lambda a: "ledger", False, handler))
+
+
+def test_validation_reason_strips_value_error_prefix():
+    with pytest.raises(ValidationError) as caught:
+        AskCreate.model_validate(
+            {
+                "question": "First question? Second question?",
+                "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            }
+        )
+    assert validation_reason(caught.value) == (
+        "The tool arguments do not match its schema: "
+        "question: The question must be one short sentence"
+    )
+
+
+def test_validation_reason_caps_nested_errors_at_three():
+    class Batch(Arguments):
+        values: list[int]
+
+    with pytest.raises(ValidationError) as caught:
+        Batch.model_validate({"values": ["bad"] * 5})
+    assert validation_reason(caught.value) == (
+        "The tool arguments do not match its schema: "
+        "values.0: Input should be a valid integer; "
+        "values.1: Input should be a valid integer; "
+        "values.2: Input should be a valid integer (and 2 more)"
+    )
+
+
+def test_validation_reason_handles_a_model_error_without_a_path():
+    with pytest.raises(ValidationError) as caught:
+        AskCancel.model_validate({})
+    assert validation_reason(caught.value) == (
+        "The tool arguments do not match its schema: Give ask_id or source_ref"
+    )
+
+
+def test_validation_reason_never_shows_input_values():
+    class PrivateArgs(Arguments):
+        count: int
+        label: str = Field(max_length=3)
+
+    private_text = "acme-private-token-example"
+    with pytest.raises(ValidationError) as caught:
+        PrivateArgs.model_validate({"count": private_text, "label": private_text})
+    reason = validation_reason(caught.value)
+    assert reason == (
+        "The tool arguments do not match its schema: "
+        "count: Input should be a valid integer; "
+        "label: String should have at most 3 characters"
+    )
+    assert private_text not in reason
+
+
+def test_validation_reason_caps_and_cleans_path_segments():
+    key = "extra\n\t\r\x00\u202e\u2028" + "x" * 80
+    with pytest.raises(ValidationError) as caught:
+        Arguments.model_validate({key: "acme-private-text"})
+    assert validation_reason(caught.value) == (
+        "The tool arguments do not match its schema: "
+        f"{'extra' + 'x' * 35}: Extra inputs are not permitted"
+    )
+
+
+def test_validation_reason_caps_the_message_and_keeps_the_more_suffix():
+    exc = ValidationError.from_exception_data(
+        "LongErrors",
+        [
+            {
+                "type": "value_error",
+                "loc": ("entries", i),
+                "input": "acme-private-text",
+                "ctx": {"error": ValueError("Schema requirement. " * 40)},
+            }
+            for i in range(5)
+        ],
+    )
+    reason = validation_reason(exc)
+    assert len(reason) == 400
+    assert reason.startswith("The tool arguments do not match its schema: entries.0: ")
+    assert reason.endswith("... (and 2 more)")
+    assert "acme-private-text" not in reason
+
+
+async def test_registry_validation_uses_the_shared_reason(conn, run):
+    async def handler(ctx, args):
+        pytest.fail("Invalid arguments must not reach the handler")
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "ask_cancel",
+            "asks",
+            "write_internal",
+            lambda _: "ledger",
+            False,
+            handler,
+            arguments=AskCancel,
+        )
+    )
+    with pytest.raises(ValidationError) as caught:
+        AskCancel.model_validate({})
+    reason = validation_reason(caught.value)
+    result = await registry.call(ToolContext(conn, run, None), "ask_cancel", {})
+    assert result == {"decision": "deny", "reason": reason, "result": None}
+    row = await one(conn, "SELECT decision, reason FROM audit WHERE run_id=%s", (run["id"],))
+    assert row == {"decision": "deny", "reason": reason}

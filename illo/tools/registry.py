@@ -27,6 +27,23 @@ class Arguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+def validation_reason(exc: ValidationError) -> str:
+    """Show schema errors without the input values or validation context."""
+    errors = exc.errors(include_input=False, include_context=False, include_url=False)
+    details = []
+    for error in errors[:3]:
+        path = ".".join(
+            "".join(char for char in str(part) if char.isprintable())[:40] for part in error["loc"]
+        )
+        message = error["msg"].removeprefix("Value error, ")
+        details.append(f"{path}: {message}" if path else message)
+    reason = "The tool arguments do not match its schema: " + "; ".join(details)
+    suffix = f" (and {len(errors) - 3} more)" if len(errors) > 3 else ""
+    if len(reason) + len(suffix) > 400:
+        reason = reason[: 397 - len(suffix)] + "..."
+    return reason + suffix
+
+
 @dataclass
 class ToolContext:
     """Handlers receive server authority. Arguments never supply that authority."""
@@ -146,8 +163,8 @@ class Registry:
         if tool:
             try:
                 validated = tool.arguments.model_validate(args).model_dump()
-            except ValidationError:
-                reason = "The tool arguments do not match its schema"
+            except ValidationError as exc:
+                reason = validation_reason(exc)
             else:
                 try:
                     if tool.resolve:
