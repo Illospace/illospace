@@ -60,12 +60,26 @@ The separate table keeps existing lane rows and API results unchanged.
 The migration backfills existing lanes. It permits five minutes per statement and waits one second for a lock.
 A failure rolls back the file. The runner can retry it.
 
-Item and Slack queries match the indexed expression with each query before they compute rank.
-Lane queries match the stored vector through its GIN index.
-Materialized candidate rows keep vector work on matches only.
+`0406_search_items.sql` stores item vectors in `item_search` and inbound Slack vectors in `slack_event_search`.
+Each table has a GIN index. Triggers refresh vectors after relevant text or eligibility changes.
+Foreign keys remove vector rows when their source rows disappear.
+Separate tables keep existing item and event rows and result fields unchanged.
+Item and Slack queries rank stored vectors before they read bodies or payloads.
 Search ranks all matches before the limit. It builds snippets only for the returned rows.
+The older `items.search` reader also uses `item_search`.
+No reader uses the old item indexes or the Slack expression index, so this migration drops them.
+The generated item `tsv` column stays for row compatibility.
 
-Each index build holds a `SHARE` lock until its migration commits. Reads continue. Writes wait for the build.
+The backfill and new index builds do not block source writers.
+A temporary snapshot records each source row's vector and `xmin` version.
+The migration then locks source writers and installs triggers.
+It removes deleted rows and refreshes rows with new versions before it adds foreign keys.
+This final pass catches writes that finish during the backfill.
+The backfill permits five minutes per statement. Lock waits stop after one second.
+After the writer lock, each statement also stops after one second.
+A timeout rolls back the file. The runner can retry it while the old application keeps its write paths.
+
+The earlier expression index builds hold a `SHARE` lock until commit. Reads continue; source writes wait for the build.
 The files use separate transactions so the event scan does not extend the items lock.
 The two earlier index files have a one-second lock timeout and a ten-second statement timeout.
 A timeout rolls back that file. The migration runner can retry it without a partial index or receipt.
@@ -81,5 +95,8 @@ The test checks product pricing, time words, email parts, identifiers, source fa
 Safety tests also check that a perfect recent private match stays hidden.
 
 `tests/search/test_fast_recall.py` compares the former SQL with indexed recall on a fixed synthetic corpus.
-It has 3,000 items, 500 lanes, up to 30 events per lane, and 27 fixed queries.
+It has 5,000 items, 500 lanes, up to 30 events per lane, and 33 fixed queries.
+A common word appears in 95% of items. Digit and identifier queries exercise broad fallback matches.
+The test keeps both earlier item queries as references. The wide-query speed check requires a tenfold gain.
+Migration tests check concurrent old writers, changed row versions, lock timeouts, rollback, and retry.
 It checks fields, snippets, visibility, tiers, scores, order, index plans, backfill, and relative speed.

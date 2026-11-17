@@ -71,8 +71,8 @@ async def search(
         conn,
         """
         WITH q AS MATERIALIZED (SELECT illo_search_query('simple',%s) || illo_search_query('english',%s) AS query)
-        SELECT i.id,i.kind,i.source_ref,i.title,i.summary,i.links,i.source_at,ts_rank(illo_search_vector(i.title,i.summary,i.body),q.query) AS score
-        FROM items i,q WHERE illo_search_vector(i.title,i.summary,i.body) @@ (SELECT query FROM q)
+        SELECT i.id,i.kind,i.source_ref,i.title,i.summary,i.links,i.source_at,ts_rank(s.vector,q.query) AS score
+        FROM items i JOIN item_search s ON s.item_id=i.id CROSS JOIN q WHERE s.vector @@ (SELECT query FROM q)
           AND (visibility='team' OR owner_person_id=(SELECT id FROM people WHERE 'person:' || key=%s AND active))
           AND (%s::text[] IS NULL OR kind=ANY(%s)) ORDER BY score DESC,i.id DESC LIMIT %s
     """,

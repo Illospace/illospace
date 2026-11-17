@@ -169,7 +169,9 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
   An agent that stops is not a proof. See [the T3 rules](collectors.md#reports-and-asks) for settlement evidence.
 - `asks`: `lane_id` (nullable), `kind` (`decision`, `action`, `review`, `reminder`), `requester_token_id` (nullable), `requester_person_id` (nullable), `owner_person_id`, `question`, `options jsonb` (list of `{id, label, detail}`), `recommended_option`, `proof jsonb` (text and links), `due_at`, `expires_at`, `state` (`open`, `answered`, `expired`, `cancelled`), `answer_option`, `answer_text`, `answered_by_person_id`, `answered_via` (`person`, `rule`, `approved_draft`), `rule_id`, `answered_at`, `delivery_state` (`none`, `pending`, `delivered`, `acked`, `failed`), `delivery_attempts`, `delivered_at`, `acked_at`, `slack_channel`, `slack_ts`, `reminded_at`, `source_ref` (the thing in the source system that this ask mirrors, for the stale check).
 - `rules`: `owner_person_id`, `scope` (`person`, `team`), `kind` (`always_allow`, `standing_answer`), `match jsonb` (ask kind, lane source, repository, requester, a question pattern), `answer_option_id`, `answer_option_label`, `answer_option_detail`, `text`, `origin` (`card`, `file`, `proposal`), `uses`, `removed_at`.
-- `items`: the search table. `kind` (`saved`, `decision`, `note`, `lane_summary`, `archive`, `slack`, `github`, `doc`), `source_ref` (unique), `title`, `body`, `summary`, `owner_person_id`, `visibility` (`team`, `private`), `links jsonb`, `meta jsonb`, `source_at`, `tsv tsvector` (generated from title, summary, body; GIN index).
+- `items`: the search table. `kind` (`saved`, `decision`, `note`, `lane_summary`, `archive`, `slack`, `github`, `doc`), `source_ref` (unique), `title`, `body`, `summary`, `owner_person_id`, `visibility` (`team`, `private`), `links jsonb`, `meta jsonb`, `source_at`, `tsv tsvector` (generated from title, summary, body; kept for row compatibility).
+- `item_search`: one row per item, with primary key `item_id` and an indexed `vector tsvector`. It has no `id` or `created_at` column. Triggers refresh the vector after insert or changes to title, summary, or body. A foreign key removes the vector after an item delete.
+- `slack_event_search`: one stored vector per team Slack event of kind `message` or `channel`. Its primary key is `event_id`. It has no `id` or `created_at` column. Triggers refresh text and eligibility changes. A foreign key removes the vector after an event delete. Search still checks current channel access and excludes events with an item snapshot.
 - `memory_changes`: note and list changes, with the person, run, earlier text, saved text, state, and Slack correction thread.
 - `submissions`: the receipts of `illo_submit`. `event_id text` (unique, opaque), `token_id`, `idempotency_key`, unique (`token_id`, `idempotency_key`), `desired_outcome`, `envelope jsonb`, `envelope_digest`, `status`, `result jsonb`, `completed_at`, `run_id`.
 - `drafts`: `run_id`, `approver_person_id`, `kind`, `destination`, `content jsonb`, `state` (`pending`, `approved`, `rejected`, `sent`, `expired`), `slack_channel`, `slack_ts`, `decided_at`.
@@ -180,6 +182,12 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `routine_state`: `key` (unique), `last_run_at`, `next_run_at`, `last_status`.
 - `sensors`: `key` (unique), `last_ok_at`, `last_error_at`, `detail`. One row for each thing that must stay alive: the Slack connection, each collector, the GitHub poll, the brain.
 - `kv`: `key` (unique), `value jsonb`.
+
+Migration `0406_search_items.sql` backfills these tables without a source writer lock.
+It records row versions, builds the GIN indexes, then briefly locks writers and checks changed rows.
+It installs triggers and foreign keys before commit. Existing application write paths stay valid.
+The migration drops the unused item indexes and Slack expression index. It keeps the generated item `tsv` column.
+Item and inbound Slack queries rank stored vectors before the limit, then read text for the returned rows.
 
 Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is one module of small functions that take a connection: `illo/ledger/people.py`, `lanes.py`, `asks.py`, `rules.py`, `items.py`, `audit.py`, `drafts.py`, `signals.py`, `tokens.py`, `runs.py`. No ORM.
 
@@ -295,7 +303,7 @@ One function, `search(principal, query, kinds, limit)`, in `illo/sources/search.
   Event search checks current channel privacy. It never reads DMs or email. Tainted runs cannot use search.
 - When the Google connector files exist: the shared drive, and the mail and Drive of the person (only in an untainted run of the owner).
 
-Each result has a title, a short text, a link, the source, and the time. The brain can search several times with other words. Vectors are not in the first version.
+Each result has a title, a short text, a link, the source, and the time. The brain can search several times with other words. Search uses lexical vectors. Semantic vectors remain off.
 
 The GitHub source (`illo/sources/github.py`) reads the configured repositories on a timer. An open issue or pull request becomes a lane with the source `github`. Auth: a GitHub App (id, private key, installation) or one token (`ILLO_GITHUB_TOKEN`).
 
