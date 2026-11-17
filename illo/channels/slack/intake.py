@@ -137,6 +137,11 @@ class SlackIntake:
             outside_workspace = raw["user_team"] != self.team_id
         if outside_workspace and not dm and not configured.listed:
             return
+        if dm:
+            from illo.channels.slack.agent_oauth import receive as receive_pairing
+
+            if await receive_pairing(self.ctx, raw, outside_workspace=outside_workspace):
+                return {"decision": "agent_oauth"}
         mentioned = kind == "app_mention" or f"<@{self.bot_id}>" in raw.get("text", "")
         if thread and not dm:
             async with self.ctx.pool.connection() as conn:

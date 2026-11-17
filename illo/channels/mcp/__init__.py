@@ -238,6 +238,8 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
 
 
 async def endpoint(request: Request):
+    from .oauth import challenge_header, issuer
+
     app = request.app.state.ctx
     header = request.headers.get("authorization", "")
     scheme, _, bearer = header.partition(" ")
@@ -246,12 +248,13 @@ async def endpoint(request: Request):
     elif not header:
         bearer = request.headers.get("x-illo-bridge-token", "")
     async with app.pool.connection() as conn:
-        token = await tokens.verify(conn, bearer) if bearer else None
+        resource = (issuer(app) or "") + request.url.path.rstrip("/")
+        token = await tokens.verify(conn, bearer, resource=resource) if bearer else None
         if not token:
             raise HTTPException(
                 401,
                 "The client token is missing, unknown, or revoked",
-                headers={"WWW-Authenticate": "Bearer"},
+                headers={"WWW-Authenticate": challenge_header(app, request.url.path)},
             )
         ctx = ClientContext(conn, token, app, bearer)
         try:
@@ -293,8 +296,11 @@ async def deliver_event(app, event):
 
 
 async def setup(ctx) -> None:
+    from .oauth import setup as oauth_setup
+
     async with ctx.pool.connection() as conn:
         await ledger.recover_submissions(conn)
     ctx.gateway.register("mcp", submissions.Adapter(ctx))
     ctx.app.add_api_route("/mcp", endpoint, methods=["POST"])
     ctx.app.add_api_route("/api/mcp", endpoint, methods=["POST"])
+    await oauth_setup(ctx)

@@ -70,6 +70,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |
 | `memory.list_changes` | `owners` (default) or `everyone`. Controls who creates lists and changes holders or Done rules. |
 | `connect.public_url` | Optional HTTPS browser address for `/oauth/` and `/list`. No credentials or query. Default: `ILLO_PUBLIC_URL`. |
+| `connect.agent_redirects` | Extra exact HTTPS callbacks for agent OAuth. Default: `[]`. No credentials or fragments. At most 100 entries. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |
 | `run_limits.max_message_chars` | Maximum inbound text length. Default: 20000. |
 

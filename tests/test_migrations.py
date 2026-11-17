@@ -73,3 +73,23 @@ async def test_schema_checks_states_and_foreign_keys(conn):
             await conn.execute(
                 "INSERT INTO tokens (person_id,label,token_hash) VALUES (999,'test','hash')"
             )
+
+
+async def test_agent_oauth_migration_retries_and_keeps_static_tokens(conn, ada):
+    from illo.ledger import tokens
+
+    path = Path(__file__).parents[1] / "illo/migrations/1701_agent_oauth.sql"
+    text = path.read_text()
+    assert text.startswith("SET LOCAL lock_timeout = '1s';")
+    raw = await tokens.create(conn, ada["id"], "Static machine", ["agent"])
+    await conn.commit()
+    for _ in range(2):
+        async with conn.transaction():
+            await conn.execute(text)
+    assert (await tokens.verify(conn, raw))["label"] == "Static machine"
+    names = {r["tablename"] for r in await all_rows(conn, "SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+    assert {"agent_oauth_clients", "agent_oauth_requests", "agent_oauth_access", "agent_oauth_refresh", "agent_oauth_limits"} <= names
+    with pytest.raises(ForeignKeyViolation):
+        async with conn.transaction():
+            await conn.execute("""INSERT INTO agent_oauth_access (token_hash,token_id,resource,expires_at)
+                VALUES ('hash',999,'https://illo.example.com/mcp',clock_timestamp())""")

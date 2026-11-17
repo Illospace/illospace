@@ -2,6 +2,8 @@
 
 import re
 
+from illo.channels.slack.pairing import pairing_code
+
 MAX_MESSAGE_CHARS = 8000
 MAX_ELEMENTS = 1000
 MAX_DEPTH = 12
@@ -161,6 +163,9 @@ def message_text(message: dict, *, max_chars: int = MAX_MESSAGE_CHARS) -> str:
         raise ValueError("The text limit must fit the cut marker")
     raw = message.get("text")
     raw = raw if isinstance(raw, str) else ""
+    # History and tool reads must not reveal a code that intake already claimed.
+    if pairing_code(raw):
+        return "[Agent sign-in code removed]"
     reader = _Reader(max_chars)
     blocks = reader.nodes(message.get("blocks"), 0)
     attachments = reader.attachments(message.get("attachments"))
@@ -178,4 +183,4 @@ def message_text(message: dict, *, max_chars: int = MAX_MESSAGE_CHARS) -> str:
         result = plain + "\n" + rich if plain else rich
     if len(result) > max_chars or len(raw) > max_chars or reader.cut:
         return result[:max_chars - len(CUT_MARKER)] + CUT_MARKER
-    return result
+    return "[Agent sign-in code removed]" if pairing_code(result) else result
