@@ -66,6 +66,13 @@ def fallback_text(data):
     return "\n".join(lines)
 
 
+async def sent_since(conn, due, local):
+    """Say if a team brief ran for this due time, or on the same local day."""
+    state = await one(conn, "SELECT last_run_at FROM routine_state WHERE key=%s", (TEAM_STATE_KEY,))
+    last = state["last_run_at"] if state else None
+    return bool(last and (last >= due or last.astimezone(local.tzinfo).date() >= local.date()))
+
+
 async def send_team_due(ctx, now=None):
     config = ctx.workspace.config
     team = config.digest.team
@@ -87,11 +94,7 @@ async def send_team_due(ctx, now=None):
         if await channel_private(ctx, channel.id, conn=conn):
             return
         await ask_workflow.lock_digest(conn, TEAM_STATE_KEY)
-        state = await one(
-            conn, "SELECT last_run_at FROM routine_state WHERE key=%s", (TEAM_STATE_KEY,)
-        )
-        last = state["last_run_at"] if state else None
-        if last and (last >= due or last.astimezone(zone).date() >= local.date()):
+        if await sent_since(conn, due, local):
             return
         key = f"digest-team:{due.isoformat()}"
         # A failed send must retry the event even if the current work is now empty.
@@ -111,9 +114,22 @@ async def send_team_due(ctx, now=None):
             prompt = (ctx.workspace.team_digest_instructions or (DEFAULT_INSTRUCTIONS if config.digest.deep else LEGACY_INSTRUCTIONS)).replace(
                 "{team}", config.team_name
             )
+            # The model run can take minutes, and its tools take the same locks.
+            # End the transaction first: no lock stays across the run.
+            await conn.commit()
             text = await write_brief(
                 ctx, "team_digest", key, prompt, "team", "team_snapshot", data, fallback_text, channel_id=channel.id
             )
+            # Take the locks in the same order as before the run: the channel, then the brief.
+            try:
+                channel = await resolve_channel(ctx, team.channel, conn=conn)
+            except ValueError:
+                return
+            if channel.mode == "off" or await channel_private(ctx, channel.id, conn=conn):
+                return
+            await ask_workflow.lock_digest(conn, TEAM_STATE_KEY)
+            if await sent_since(conn, due, local):
+                return
             sent = await deliver_routine(ctx, "channel:" + channel.id, text, delivery_key=key, conn=conn)
             await kv.set(
                 conn,

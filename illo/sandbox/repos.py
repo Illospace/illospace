@@ -91,6 +91,8 @@ async def sync(ctx, *, max_age_minutes=None):
     async with ctx.pool.connection() as conn:
         # A transaction lock releases on cancellation, failure, and pool return.
         async with conn.transaction():
+            # This pass does Git work with no database call. The idle limit must not end it.
+            await conn.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
             async with asyncio.timeout(300):
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (KEY,))
             previous = await kv.get(conn, KEY) or {}

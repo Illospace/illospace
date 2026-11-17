@@ -4,20 +4,24 @@ from pathlib import Path
 from typing import Any
 
 from psycopg import AsyncConnection
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 Connection = AsyncConnection[dict[str, Any]]
+IDLE_LIMIT_MS = 3600000
 
 
 def create_pool(url: str, *, min_size: int = 1, max_size: int = 10) -> AsyncConnectionPool:
     """Return a closed pool. Open it inside the app lifespan."""
+    # A transaction that stays idle for one hour is a fault. Postgres ends it and releases its locks.
+    options = f"{conninfo_to_dict(url).get('options') or ''} -c idle_in_transaction_session_timeout={IDLE_LIMIT_MS}"
     return AsyncConnectionPool(
         url,
         min_size=min_size,
         max_size=max_size,
         open=False,
-        kwargs={"row_factory": dict_row},
+        kwargs={"row_factory": dict_row, "options": options.strip()},
     )
 
 

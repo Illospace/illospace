@@ -1,6 +1,7 @@
 """Send one model-written morning brief in each person's time zone."""
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -190,12 +191,20 @@ async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_nam
         return mrkdwn(adapter.text)
     # A process can stop after the model reply and before Slack delivery.
     if result.get("duplicate"):
-        async with ctx.pool.connection() as conn:
-            row = await one(
-                conn,
-                "SELECT status,payload FROM events WHERE channel=%s AND external_id=%s",
-                (channel, event.external_id),
-            )
+        row = None
+        with suppress(TimeoutError):
+            async with asyncio.timeout(ctx.workspace.config.brain.timeout_s):
+                while True:
+                    async with ctx.pool.connection() as conn:
+                        row = await one(
+                            conn,
+                            "SELECT status,payload FROM events WHERE channel=%s AND external_id=%s",
+                            (channel, event.external_id),
+                        )
+                    # Another process can have this run in work. Wait for its answer.
+                    if not row or row["status"] != "received":
+                        break
+                    await asyncio.sleep(1)
         if row:
             if row["status"] == "handled" and row["payload"].get("final_answer"):
                 return mrkdwn(row["payload"]["final_answer"])
@@ -286,7 +295,18 @@ async def send_due(ctx, now=None):
                     (f"digest:{person['key']}",),
                 )
                 continue
+            # The model run can take minutes, and its tools take the same locks.
+            # End the transaction first: no lock stays across the run.
+            await conn.commit()
             text = await brief_text(ctx, person, data, due)
+            await ledger.lock_digest(conn, person["key"])
+            # The person can stop the briefs during the run. Read the settings again.
+            preferences = await briefs.settings(conn, person)
+            last = await ledger.digest_last_sent(conn, person["key"])
+            if not preferences["enabled"] or (
+                last and (last >= due or last.astimezone(zone).date() >= local.date())
+            ):
+                continue
             if not preferences["announced"]:
                 text += "\n\n" + FIRST_BRIEF
             sent = await post_dm(

@@ -361,6 +361,9 @@ defaults are in `docs/workspace.md`.
 
 Migration `1200_tasks.sql` adds `tasks`, `task_events`, a token's `agent_key`, and the audit target.
 `illo/ledger/tasks.py` owns all task changes and record events. Each change uses one transaction.
+No code keeps a transaction open during a model run. The tools of the run can need the same locks.
+A brief ends its transaction before its run, and takes its lock again before it sends.
+Postgres ends a transaction that stays idle for one hour. This releases its locks.
 `illo/tasks/checks.py` owns the named check registry. Connectors register checks without changes to task code.
 `illo/tasks/lists.py` loads the team's list and agent files through the workspace models.
 Task reads enforce visibility in SQL. Outsiders and tainted runs cannot call task tools.
