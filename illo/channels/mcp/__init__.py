@@ -197,7 +197,7 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
                 value = await tool.handler(ctx, clean)
             result = tool_result(value)
         except ValidationError as exc:
-            decision, reason = "deny", validation_reason(exc)
+            decision, reason = "deny", validation_reason(exc, tool.arguments)
             ctx.events.clear()
             result = tool_result({"error": {"message": reason}}, is_error=True)
         except ValueError as exc:

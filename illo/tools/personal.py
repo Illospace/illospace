@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import Field, model_validator
 
 from illo.connectors.google import personal_call, shared_call
-from illo.tools.registry import Arguments, Tool
+from illo.tools.registry import ArgumentError, Arguments, Tool
 
 
 class Query(Arguments):
@@ -26,10 +26,13 @@ class Calendar(Arguments):
 
     @model_validator(mode="after")
     def valid_range(self):
-        start = datetime.fromisoformat(self.from_.replace("Z", "+00:00"))
-        end = datetime.fromisoformat(self.to.replace("Z", "+00:00"))
-        if not start.tzinfo or not end.tzinfo or end <= start:
-            raise ValueError("Use ordered dates with time zones")
+        try:
+            start = datetime.fromisoformat(self.from_.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(self.to.replace("Z", "+00:00"))
+        except ValueError:
+            start = end = None
+        if not start or not end or not start.tzinfo or not end.tzinfo or end <= start:
+            raise ArgumentError("Use ordered dates with time zones")
         return self
 
 
