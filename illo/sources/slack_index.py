@@ -53,20 +53,21 @@ async def search(ctx, conn, query, kinds, limit, now):
     q, params = query_sql(query)
     rows = await all_rows(conn, f"""
         WITH q AS ({q}), texts AS MATERIALIZED (
-          SELECT e.*,e.created_at AS at,({VECTOR}) AS vector
-          FROM events e WHERE {VISIBLE}
+          SELECT e.id,e.created_at AS at,s.vector
+          FROM events e JOIN slack_event_search s ON s.event_id=e.id WHERE {VISIBLE}
             AND NOT EXISTS (SELECT 1 FROM items i WHERE i.source_ref='slack:'||e.external_id)
-            AND ({VECTOR} @@ (SELECT strict FROM q) OR {VECTOR} @@ (SELECT relaxed FROM q))
+            AND (s.vector @@ (SELECT strict FROM q) OR s.vector @@ (SELECT relaxed FROM q))
         ), ranked AS MATERIALIZED (
           SELECT t.*, {RANK_COLUMNS}
           FROM texts t,q
         ), page AS MATERIALIZED (
           SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
-        ) SELECT t.*,
-            ts_headline('simple',coalesce(t.payload->>'text',''),
+        ) SELECT e.*,t.vector,t.match_tier,t.lexical,t.recency,
+            ts_headline('simple',coalesce(e.payload->>'text',''),
               CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
               'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-          FROM page t,q ORDER BY {RANK_ORDER} DESC,at DESC,id DESC
+          FROM page t JOIN events e ON e.id=t.id CROSS JOIN q
+          ORDER BY {RANK_ORDER} DESC,t.at DESC,t.id DESC
     """, (*params, list(KINDS), list(allowed), now, limit))
     return [Hit(f"slack-event:{row['id']}", "slack", "slack", detail(row, allowed)["title"],
                 row["snippet"], at=row["created_at"], match_tier=row["match_tier"],
@@ -86,4 +87,4 @@ async def get(ctx, conn, source_ref):
 
 
 async def setup(ctx) -> None:
-    """Search reads events directly. No backfill or new grant is needed."""
+    """Search reads stored event vectors behind the current channel proof."""

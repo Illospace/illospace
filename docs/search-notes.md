@@ -9,6 +9,12 @@ Slack items come only from configured public channels.
 GIN indexes find matching items, lanes, and inbound Slack events before rank work starts.
 Search builds snippets after the per-source result limit.
 The `lane_search` table stores each lane vector. Database triggers keep the last 20 events current.
+The `item_search` and `slack_event_search` tables store item and inbound Slack vectors.
+Triggers cover text changes, new rows, and Slack eligibility changes. Deletes remove vectors through foreign keys.
+Search ranks those vectors before the limit. It reads bodies and payloads only for returned rows.
+Migration `0406_search_items.sql` backfills without a source writer lock.
+It briefly locks writers to check row versions, install triggers, and add foreign keys.
+The old application can keep its existing write paths during the migration.
 
 `search_all(query, kinds?, limit?)` returns compact text. The limit is 1–50; the default is 10.
 `search_get(source_ref)` returns a full item, a lane with its events, or a GitHub issue.

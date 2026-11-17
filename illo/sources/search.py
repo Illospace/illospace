@@ -109,28 +109,29 @@ RANK_ORDER = "lexical * recency * CASE match_tier WHEN 'strict' THEN 2 ELSE 1 EN
 
 async def _items(conn, principal, query, kinds, limit, now, slack_channels):
     q, params = query_sql(query)
-    # Scalar query reads let GIN find matches before vector and rank work starts.
+    # Rank stored vectors first. Read item text only after the page limit.
     rows = await all_rows(conn, f"""
         WITH q AS ({q}), texts AS MATERIALIZED (
-          SELECT i.*,p.key AS owner,coalesce(i.source_at,i.created_at) AS at,
-            illo_search_vector(i.title,i.summary,i.body) AS vector
-          FROM items i LEFT JOIN people p ON p.id=i.owner_person_id
+          SELECT i.id,coalesce(i.source_at,i.created_at) AS at,s.vector
+          FROM items i JOIN item_search s ON s.item_id=i.id
           WHERE (i.visibility='team' OR i.owner_person_id=
             (SELECT id FROM people WHERE 'person:'||key=%s AND active))
             AND (%s::text[] IS NULL OR i.kind=ANY(%s))
             AND (i.kind<>'slack' OR split_part(i.source_ref,':',2)=ANY(%s))
-            AND (illo_search_vector(i.title,i.summary,i.body) @@ (SELECT strict FROM q)
-              OR illo_search_vector(i.title,i.summary,i.body) @@ (SELECT relaxed FROM q))
+            AND (s.vector @@ (SELECT strict FROM q)
+              OR s.vector @@ (SELECT relaxed FROM q))
         ), ranked AS MATERIALIZED (
           SELECT t.*, {RANK_COLUMNS}
           FROM texts t,q
         ), page AS MATERIALIZED (
           SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
-        ) SELECT t.*,
-            ts_headline('simple',concat_ws(' ',t.summary,t.body),
+        ) SELECT i.*,t.at,t.vector,t.match_tier,t.lexical,t.recency,p.key AS owner,
+            ts_headline('simple',concat_ws(' ',i.summary,i.body),
               CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
               'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-          FROM page t,q ORDER BY {RANK_ORDER} DESC,at DESC,id DESC
+          FROM page t JOIN items i ON i.id=t.id
+          LEFT JOIN people p ON p.id=i.owner_person_id CROSS JOIN q
+          ORDER BY {RANK_ORDER} DESC,t.at DESC,t.id DESC
     """, (*params, principal, kinds, kinds, list(slack_channels), now, limit))
     return [Hit(
         r["source_ref"], r["kind"], r["source_ref"].split(":", 1)[0], r["title"],

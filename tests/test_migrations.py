@@ -34,6 +34,8 @@ async def test_migrations_apply_twice(pool):
             "asks",
             "rules",
             "items",
+            "item_search",
+            "slack_event_search",
             "submissions",
             "drafts",
             "signals",
@@ -44,8 +46,8 @@ async def test_migrations_apply_twice(pool):
             "sensors",
             "kv",
         } <= names
-        indexes = await all_rows(conn, "SELECT indexdef FROM pg_indexes WHERE tablename='items'")
-        assert any("USING gin (tsv)" in r["indexdef"] for r in indexes)
+        indexes = await all_rows(conn, "SELECT indexdef FROM pg_indexes WHERE tablename='item_search'")
+        assert any("USING gin (vector)" in r["indexdef"] for r in indexes)
 
 
 async def test_each_migration_rolls_back_as_one_file(pool, tmp_path):
