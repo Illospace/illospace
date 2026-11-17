@@ -6,13 +6,21 @@
    Replace the host with your team's Illo address. `/api/mcp` also works.
 2. Click **Connect**. Illo shows the app name and the return host.
    The app supplies its name. Illo does not verify that name.
-3. Copy the `connect XXXX-XXXX` message. Send it to Illo in your own Slack direct message.
-4. Check the app and the return host in the Slack card. Click **Approve** only if you started this sign-in.
-5. Return to the browser. It sends you back to the app.
+3. Click **Sign in with Slack**. Use your account in the team's Slack workspace.
+4. Check your name, the app, and the return host. Click **Allow** only if you started this sign-in.
+5. Illo sends you back to the app. It also sends a DM about the connection.
+
+Ask Illo: say `connect my Claude` in a DM. Use `connect my Codex` or `connect my agent` for other guides.
+
+To use a code, open **Use a code in Slack** on the page.
+Copy the `connect XXXX-XXXX` message. Send it to Illo in your own Slack direct message.
+Check the app and the return host on the card. Click **Approve** only if you started this sign-in.
+Return to the browser. It sends you back to the app.
+If the operator has not set up Slack sign-in, the page shows only this code method.
 
 Each team member connects with their own Slack identity. You must be active in `people.yaml`.
 The app can read and write Illo memory, tasks and lanes as you.
-Click **Deny** if you do not want the connection. A request expires after 10 minutes.
+Click **Cancel** on the page, or **Deny** on the Slack card, to refuse the connection. A request expires after 10 minutes.
 To end a connection, ask the operator to list and revoke it:
 
 ```sh
@@ -29,6 +37,9 @@ codex mcp add illo --url https://illo.example.com/mcp
 codex mcp login illo
 ```
 
+In Claude, choose **Register automatically** under **OAuth client** during connector setup.
+For a Team or Enterprise plan, an owner adds the connector first.
+
 Claude Code also supports HTTP MCP sign-in. Add the address without a static bearer header.
 Use its MCP sign-in control to start the same Slack flow.
 
@@ -37,6 +48,22 @@ Use its MCP sign-in control to start the same Slack flow.
 Set `connect.public_url` or `ILLO_PUBLIC_URL` to your public HTTPS origin, such as `https://illo.example.com`.
 Agent sign-in needs an origin with no path, query, or credentials.
 With no HTTPS origin, Illo keeps static-token access. The new OAuth routes answer 404.
+
+Set up the Slack app's sign-in client with the operator's vault:
+
+```sh
+illo secret set slack-client-id
+illo secret set slack-client-secret
+```
+
+Each command asks for the value with hidden input.
+Copy **Client ID** and **Client Secret** from **Basic Information** on the Slack app page.
+Add `https://illo.example.com/oauth/agent/slack/callback` under **OAuth & Permissions → Redirect URLs**.
+Replace the example host with your public origin. The app needs the `openid` user scope.
+Keep sign-in scopes separate from bot scopes in each OAuth request.
+See [Install](install.md#sign-in-with-slack) for the manifest and container commands.
+Illo reads the workspace team ID from its Slack connection. That connection must succeed first.
+Without both client values, the page keeps the code method. No new boot variable is needed.
 
 Hosted Claude calls from Anthropic's servers. It needs these paths on the public internet through port 443:
 

@@ -159,10 +159,10 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `people`: `key` (unique), `name`, `slack_id`, `github_login`, `emails text[]`, `role` (`owner`, `member`), `timezone`, `areas text[]`, `active`. The file `people.yaml` is the truth. The table is a copy that the loader keeps equal.
 - `tokens`: MCP client tokens. `person_id`, `label` (the machine or the agent), `token_hash` (SHA-256), `scopes text[]` (exactly one of `collector`, `agent`; default `collector`), `last_used_at`, `revoked_at`. Verification reads the active owner and revocation state on every call, without a row lock. A separate transaction updates `last_used_at` at most once per minute. It skips busy rows and limits table lock waits to 100 milliseconds. Separate advisory locks preserve write limits and ask retries.
 - `agent_oauth_clients`: public client registrations, app names, exact redirect addresses, creation time, and first approval time. No client secrets.
-- `agent_oauth_requests`: pending sign-ins, PKCE challenges, resource, state, hashed pairing code, and a separate hashed browser handle. Slack identity and card IDs bind consent to the person. The row also holds the authorization code hash and its use time.
+- `agent_oauth_requests`: pending sign-ins, PKCE challenges, resource, state, hashed pairing code, and a separate hashed browser handle. Slack identity and card IDs bind consent to the person. The row also holds the authorization code hash and its use time. Migration `1702_agent_slack_signin.sql` adds nullable `slack_state_hash`, `slack_nonce_hash`, `consent_hash`, and `notice_at`. The old app needs no values for these columns.
 - `agent_oauth_access`: opaque access token hashes, stable token IDs, resource, and expiry time.
 - `agent_oauth_refresh`: refresh token hashes, stable token IDs, client IDs, resource, a random seed, expiry time, and use time. Old hashes remain to detect reuse. Illo makes the next pair from the refresh token and its seed, so a retry gets the same pair and starts no second chain.
-- `agent_oauth_limits`: persistent counters for registration, pairing attempts, and token failures. The database clock sets their windows.
+- `agent_oauth_limits`: persistent counters for registration and pairing attempts. The database clock sets their windows.
 
 - `events`: the gateway inbox. `channel`, `external_id`, unique (`channel`, `external_id`), `kind`, `principal`, `person_id`, `tainted`, `payload jsonb`, `status` (`received`, `ignored`, `handled`, `failed`).
 - `runs`: `event_id`, `principal`, `person_id`, `profile`, `tainted`, `personal_read`, `status` (`running`, `completed`, `failed`, `timeout`), `runtime`, `model`, `usage jsonb`, `error`, `started_at`, `ended_at`, `token_hash` (the per-run token), `token_expires_at`.
@@ -189,10 +189,29 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `sensors`: `key` (unique), `last_ok_at`, `last_error_at`, `detail`. One row for each thing that must stay alive: the Slack connection, each collector, the GitHub poll, the brain.
 - `kv`: `key` (unique), `value jsonb`.
 
-Agent OAuth uses Slack to prove identity. The browser shows a pairing message, and the person sends it in their own DM.
-Slack holds the consent buttons because an attacker can own the browser that starts the request.
+Agent OAuth uses Slack OpenID sign-in to prove identity when the operator stores both Slack client values in the vault.
+The Slack connection records its trusted `auth.test` team ID in `kv` under `slack:team`.
+HTTP routes read that ID. They never take the team ID from the browser as proof.
+The callback validates Slack's RS256 signature with its HTTPS JWKS endpoint.
+It checks the issuer, client audience, nonce, expiry, workspace team, and active person.
+The database clock checks all times. Only state and nonce hashes reach the request row.
+Slack access tokens and ID tokens stay in the callback and never enter storage or logs.
+The two outside calls share a three-second deadline within the existing five-second route deadline.
+
+After sign-in, the browser shows consent. Allow and Cancel require a POST with a one-use CSRF value.
+The row stores its hash. The browser handle binds it to this request and browser.
+A GET never approves. This prevents silent approval in a victim's browser.
+A hosted callback can otherwise send that person's identity to an attacker's app session.
+
+The page also offers the code method in a closed details block.
+Without Slack client values, the page keeps only the code method.
+The person sends the pairing message in their own DM and decides on the Slack card.
 Code catches the whole pairing message before the gateway stores an event or starts a model run.
 Slack history and tool reads remove pairing codes too.
+Both paths lock the request and call one ledger decision function.
+They keep the active-person check, expiry check, and single stable connection.
+The card path also checks its original person, DM channel, and message.
+After commit, `notice_at` reserves one best-effort DM attempt. A Slack failure does not undo the connection.
 Approval creates one stable `tokens` row with the `agent` scope.
 Its `token_hash` starts with `!agent-oauth:`. A SHA-256 bearer hash cannot match this value.
 Verification also looks in `agent_oauth_access` and checks the resource, expiry, stable token revocation, and active person.

@@ -115,10 +115,12 @@ class SlackConnection:
                         auth = await ctx.slack_client.auth_test()
                         async with ctx.pool.connection() as conn:
                             await kv.set(conn, "slack:bot", {"name": auth.get("user"), "id": auth["user_id"]})
+                            await kv.set(conn, "slack:team", auth["team_id"])
                         if self.intake is None:
                             self.intake = SlackIntake(
                                 ctx, auth["user_id"], bot_identity=auth.get("bot_id")
                             )
+                        self.intake.team_id = auth["team_id"]
                         self.socket = SocketModeClient(
                             app_token=ctx.config.slack_app_token.get_secret_value(),
                             web_client=ctx.slack_client,

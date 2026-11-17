@@ -23,11 +23,12 @@ def challenge(verifier):
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
 
-async def record(conn, event, *, client_id=None, request_id=None, token_id=None, person_id=None):
+async def record(conn, event, *, client_id=None, request_id=None, token_id=None, person_id=None, reason=None):
     await audit.write(
         conn, principal=f"person-id:{person_id}" if person_id else "oauth:agent",
-        tool=f"agent_oauth.{event}", args={}, decision="deny" if event in {"deny", "reuse"} else "allow",
-        reason="The agent sign-in state changed", token_id=token_id,
+        tool=f"agent_oauth.{event}", args={},
+        decision="deny" if event in {"deny", "reuse", "signin_failure", "consent_cancel"} else "allow",
+        reason=f"The agent sign-in failed ({reason})" if reason else "The agent sign-in state changed", token_id=token_id,
         target=f"request:{request_id}" if request_id else f"client:{client_id}",
     )
 
@@ -107,10 +108,11 @@ async def pair(conn, code, slack_id, channel, event_ts):
         WHERE person_id=%s AND slack_channel=%s AND slack_event_ts=%s""", (person["id"], channel, event_ts))
     if prior:
         return prior if prior["slack_ts"] is None and prior["valid"] and prior["decision"] == "pending" else {"duplicate": True}
-    row = await one(conn, """UPDATE agent_oauth_requests SET person_id=%s,paired_at=clock_timestamp(),
-        slack_channel=%s,slack_event_ts=%s WHERE pairing_hash=%s AND paired_at IS NULL
+    row = await one(conn, """UPDATE agent_oauth_requests SET person_id=%s,paired_at=COALESCE(paired_at,clock_timestamp()),
+        slack_channel=%s,slack_event_ts=%s WHERE pairing_hash=%s
+        AND (paired_at IS NULL OR (person_id=%s AND slack_channel IS NULL))
         AND decision='pending' AND expires_at>clock_timestamp() RETURNING *""",
-        (person["id"], channel, event_ts, digest(code)))
+        (person["id"], channel, event_ts, digest(code), person["id"]))
     if not row or not secrets.compare_digest(row["pairing_hash"], digest(code)):
         return None
     client = await one(conn, "SELECT name FROM agent_oauth_clients WHERE id=%s", (row["client_id"],))
@@ -123,7 +125,14 @@ async def decide(conn, request_id, person_id, channel, message_ts, approve):
         WHERE r.id=%s AND r.person_id=%s AND r.slack_channel=%s AND r.slack_ts=%s
         AND EXISTS (SELECT 1 FROM people WHERE id=%s AND active) FOR UPDATE OF r""",
         (request_id, person_id, channel, message_ts, person_id))
-    if not row:
+    return await decide_paired(conn, row, approve) if row else None
+
+
+async def decide_paired(conn, row, approve):
+    """The caller locks the request. Both consent paths use this decision."""
+    person_id, request_id = row["person_id"], row["id"]
+    person = await one(conn, "SELECT id FROM people WHERE id=%s AND active FOR SHARE", (person_id,))
+    if not person or not row["paired_at"]:
         return None
     if row["decision"] != "pending":
         return "The connection is approved. Return to the app." if row["decision"] == "approved" else "The connection is denied."
@@ -144,6 +153,75 @@ async def decide(conn, request_id, person_id, channel, message_ts, approve):
     await record(conn, "approve" if approve else "deny", request_id=request_id,
                  token_id=token_id, person_id=person_id)
     return "The connection is approved. Return to the app." if approve else "The connection is denied."
+
+
+async def signin_failure(conn, reason, row=None):
+    await record(conn, "signin_failure", request_id=row["id"] if row else None, reason=reason)
+
+
+def pending(row):
+    return row and not row["expired"] and row["decision"] == "pending" and not row["continued_at"]
+
+
+async def signin_start(conn, handle):
+    row = await browser_request(conn, handle, lock=True)
+    if not pending(row):
+        await signin_failure(conn, "request", row)
+        return None
+    state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    await conn.execute("""UPDATE agent_oauth_requests SET slack_state_hash=%s,slack_nonce_hash=%s
+        WHERE id=%s""", (digest(state), digest(nonce), row["id"]))
+    await record(conn, "signin_start", request_id=row["id"])
+    return state, nonce
+
+
+async def signin_state(conn, handle, state):
+    row = await browser_request(conn, handle, lock=True)
+    if (not pending(row) or not row["slack_state_hash"]
+            or not secrets.compare_digest(row["slack_state_hash"], digest(state))):
+        await signin_failure(conn, "state", row)
+        return None
+    # Commit this consumption before the exchange. A callback works once.
+    await conn.execute("UPDATE agent_oauth_requests SET slack_state_hash=NULL WHERE id=%s", (row["id"],))
+    return row
+
+
+async def signin_person(conn, handle, attempt, slack_id):
+    row = await browser_request(conn, handle, lock=True)
+    if (not pending(row) or not row["slack_nonce_hash"]
+            or not secrets.compare_digest(row["slack_nonce_hash"], attempt["slack_nonce_hash"])
+            or row["slack_state_hash"]):
+        await signin_failure(conn, "request", row)
+        return None
+    person = await one(conn, "SELECT * FROM people WHERE slack_id=%s AND active FOR SHARE", (slack_id,))
+    if not person or row["person_id"] not in (None, person["id"]):
+        await signin_failure(conn, "member", row)
+        return None
+    csrf = secrets.token_urlsafe(32)
+    bound = await one(conn, """UPDATE agent_oauth_requests SET person_id=%s,
+        paired_at=COALESCE(paired_at,clock_timestamp()),consent_hash=%s,slack_nonce_hash=NULL
+        WHERE id=%s AND expires_at>clock_timestamp() RETURNING id""",
+        (person["id"], digest(csrf), row["id"]))
+    if not bound:
+        await signin_failure(conn, "request", row)
+        return None
+    await record(conn, "signin_success", request_id=row["id"], person_id=person["id"])
+    client = await one(conn, "SELECT name FROM agent_oauth_clients WHERE id=%s", (row["client_id"],))
+    return {**row, "name": client["name"], "person": person["name"] or person["key"], "csrf": csrf}
+
+
+async def consent(conn, handle, csrf, approve):
+    row = await browser_request(conn, handle, lock=True)
+    if (not pending(row) or not row["consent_hash"]
+            or not secrets.compare_digest(row["consent_hash"], digest(csrf))):
+        return None
+    client = await one(conn, "SELECT name FROM agent_oauth_clients WHERE id=%s", (row["client_id"],))
+    result = await decide_paired(conn, {**row, "name": client["name"]}, approve)
+    if not result or result.startswith("The sign-in request expired"):
+        return None
+    await conn.execute("UPDATE agent_oauth_requests SET consent_hash=NULL WHERE id=%s", (row["id"],))
+    await record(conn, "consent_allow" if approve else "consent_cancel", request_id=row["id"], person_id=row["person_id"])
+    return row["id"]
 
 
 async def continue_request(conn, handle):
