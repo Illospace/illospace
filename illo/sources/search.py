@@ -109,8 +109,9 @@ RANK_ORDER = "lexical * recency * CASE match_tier WHEN 'strict' THEN 2 ELSE 1 EN
 
 async def _items(conn, principal, query, kinds, limit, now, slack_channels):
     q, params = query_sql(query)
+    # Scalar query reads let GIN find matches before vector and rank work starts.
     rows = await all_rows(conn, f"""
-        WITH q AS ({q}), texts AS (
+        WITH q AS ({q}), texts AS MATERIALIZED (
           SELECT i.*,p.key AS owner,coalesce(i.source_at,i.created_at) AS at,
             illo_search_vector(i.title,i.summary,i.body) AS vector
           FROM items i LEFT JOIN people p ON p.id=i.owner_person_id
@@ -118,13 +119,18 @@ async def _items(conn, principal, query, kinds, limit, now, slack_channels):
             (SELECT id FROM people WHERE 'person:'||key=%s AND active))
             AND (%s::text[] IS NULL OR i.kind=ANY(%s))
             AND (i.kind<>'slack' OR split_part(i.source_ref,':',2)=ANY(%s))
-        ), ranked AS (
-          SELECT t.*, {RANK_COLUMNS},
+            AND (illo_search_vector(i.title,i.summary,i.body) @@ (SELECT strict FROM q)
+              OR illo_search_vector(i.title,i.summary,i.body) @@ (SELECT relaxed FROM q))
+        ), ranked AS MATERIALIZED (
+          SELECT t.*, {RANK_COLUMNS}
+          FROM texts t,q
+        ), page AS MATERIALIZED (
+          SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+        ) SELECT t.*,
             ts_headline('simple',concat_ws(' ',t.summary,t.body),
               CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
               'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-          FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
-        ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+          FROM page t,q ORDER BY {RANK_ORDER} DESC,at DESC,id DESC
     """, (*params, principal, kinds, kinds, list(slack_channels), now, limit))
     return [Hit(
         r["source_ref"], r["kind"], r["source_ref"].split(":", 1)[0], r["title"],
@@ -139,23 +145,28 @@ async def _lanes(conn, principal, query, kinds, limit, now):
         return []
     q, params = query_sql(query)
     rows = await all_rows(conn, f"""
-        WITH q AS ({q}), texts AS (
-          SELECT l.*,p.key AS owner,concat_ws(' ',l.summary,e.text) AS body,
-            l.updated_at AS at,
-            illo_search_vector(l.title,'',concat_ws(' ',l.summary,e.text)) AS vector
-          FROM lanes l LEFT JOIN people p ON p.id=l.owner_person_id
-          LEFT JOIN LATERAL (SELECT string_agg(recent.text,' ') AS text FROM
-            (SELECT text FROM lane_events WHERE lane_id=l.id ORDER BY at DESC,id DESC LIMIT 20)
-            recent) e ON true
-          WHERE l.visibility='team' OR l.owner_person_id=
-            (SELECT id FROM people WHERE 'person:'||key=%s AND active)
-        ), ranked AS (
-          SELECT t.*, {RANK_COLUMNS},
-            ts_headline('simple',t.body,
+        WITH q AS ({q}), texts AS MATERIALIZED (
+          SELECT l.*,p.key AS owner,l.updated_at AS at,s.vector
+          FROM lanes l JOIN lane_search s ON s.lane_id=l.id
+          LEFT JOIN people p ON p.id=l.owner_person_id
+          WHERE (l.visibility='team' OR l.owner_person_id=
+            (SELECT id FROM people WHERE 'person:'||key=%s AND active))
+            AND (s.vector @@ (SELECT strict FROM q)
+              OR s.vector @@ (SELECT relaxed FROM q))
+        ), ranked AS MATERIALIZED (
+          SELECT t.*, {RANK_COLUMNS}
+          FROM texts t,q
+        ), page AS MATERIALIZED (
+          SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+        ) SELECT t.*,
+            ts_headline('simple',concat_ws(' ',t.summary,e.text),
               CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
               'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-          FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
-        ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+          FROM page t CROSS JOIN q
+          LEFT JOIN LATERAL (SELECT string_agg(recent.text,' ') AS text FROM
+            (SELECT text FROM lane_events WHERE lane_id=t.id ORDER BY at DESC,id DESC LIMIT 20)
+            recent) e ON true
+          ORDER BY {RANK_ORDER} DESC,t.at DESC,t.id DESC
     """, (*params, principal, now, limit))
     return [Hit(
         f"lane:{r['id']}", "lane", r["source"], r["title"],

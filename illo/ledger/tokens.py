@@ -3,6 +3,8 @@
 import hashlib
 import secrets
 
+from psycopg import AsyncConnection, Error
+
 from illo.db import Connection, all_rows, one
 
 
@@ -40,15 +42,34 @@ async def create(
 
 async def verify(conn: Connection, token: str) -> dict | None:
     """Reject revoked tokens and inactive owners. Record use without the token."""
-    return await one(
+    row = await one(
         conn,
         """
-        UPDATE tokens t SET last_used_at = now() FROM people p
-        WHERE t.token_hash = %s AND t.revoked_at IS NULL AND p.id = t.person_id AND p.active
-        RETURNING t.id,t.person_id,t.label,t.scopes,t.agent_key,p.key AS person_key
+        SELECT t.id,t.person_id,t.label,t.scopes,t.agent_key,p.key AS person_key,
+          (t.last_used_at IS NULL OR t.last_used_at <= clock_timestamp()-interval '1 minute') AS touch
+        FROM tokens t JOIN people p ON p.id=t.person_id
+        WHERE t.token_hash=%s AND t.revoked_at IS NULL AND p.active
     """,
         (digest(token),),
     )
+    if row and row.pop("touch"):
+        # Commit use on another connection. The request never owns this row lock.
+        try:
+            async with await AsyncConnection.connect(
+                conn.info.dsn, password=conn.info.password, autocommit=True,
+                options=f"{conn.info.options} -c lock_timeout=100ms",
+            ) as usage:
+                await usage.execute("""
+                    UPDATE tokens SET last_used_at=clock_timestamp() WHERE id IN (
+                      SELECT t.id FROM tokens t JOIN people p ON p.id=t.person_id
+                      WHERE t.id=%s AND t.revoked_at IS NULL AND p.active
+                        AND (t.last_used_at IS NULL OR t.last_used_at <= clock_timestamp()-interval '1 minute')
+                      FOR NO KEY UPDATE OF t SKIP LOCKED)
+                """, (row["id"],))
+        except Error:
+            # A busy table or a refused connection must not refuse the request. The next use records the time.
+            pass
+    return row
 
 
 async def list_tokens(conn: Connection, person_id: int | None = None) -> list[dict]:

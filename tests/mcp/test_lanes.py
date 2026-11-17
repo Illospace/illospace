@@ -187,3 +187,29 @@ async def test_reopened_lane_clears_closure_and_saved_summary(app, http):
         ask = await asks.create(conn, lane_id=lane["id"], owner_person_id=lane["owner_person_id"],
                                 question="Which check comes next?", source_ref="t3:thread-a:request-a")
         assert await is_live(conn, ask)
+
+
+async def test_lane_search_vector_tracks_reports_and_last_twenty_events(app, http):
+    agent = await AgentClient.create(app, http)
+    ref = {"source": "t3", "external_id": "search-freshness"}
+    row = await agent.call("lane_report", {**ref, "title": "Widget", "event": "quartz"})
+
+    async def found(query):
+        result = await agent.call("illo_read", {
+            "capability": "knowledge.search", "arguments": {"query": query, "kinds": ["lane"]},
+        })
+        return [hit["source_ref"] for hit in result["results"]]
+
+    assert await found("quartz") == [f"lane:{row['lane_id']}"]
+    await agent.call("lane_report", {**ref, "summary": "nebula"})
+    assert await found("nebula") == [f"lane:{row['lane_id']}"]
+    await agent.call("lane_report", {**ref, "summary": "garden", "title": "Newtitle"})
+    assert await found("nebula") == []
+    assert await found("newtitle") == [f"lane:{row['lane_id']}"]
+    for n in range(20):
+        await agent.call("lane_report", {**ref, "event": f"Progress step {n}"})
+    assert await found("quartz") == []
+    async with app.state.ctx.pool.connection() as conn:
+        # Equal event times use the event ID as the final order key.
+        await conn.execute("UPDATE lane_events SET at='2026-01-01' WHERE lane_id=%s", (row["lane_id"],))
+    assert await found("quartz") == []

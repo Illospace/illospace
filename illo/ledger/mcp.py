@@ -5,8 +5,14 @@ from psycopg.types.json import Jsonb
 from illo.db import all_rows, one
 
 
+async def lock_token(conn, token_id: int, scope: str) -> None:
+    """Serialize each write family without a token row lock or a read lock."""
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                       (f"mcp-token:{scope}:{token_id}",))
+
+
 async def check_open_ask_limit(conn, token_id: int, owner_id: int) -> None:
-    """The ask ledger holds the token row lock through this check and insert."""
+    """The ask ledger holds the ask lock through this check and insert."""
     row = await one(
         conn,
         """SELECT count(*) FILTER (WHERE state='open') AS n,
@@ -22,6 +28,7 @@ async def check_open_ask_limit(conn, token_id: int, owner_id: int) -> None:
 
 async def check_hourly_limit(conn, token_id: int, *, submission: bool = False) -> None:
     """Count the new row too. A refusal rolls it back with the tool transaction."""
+    await lock_token(conn, token_id, "submissions" if submission else "signals")
     query = (
         """SELECT count(*) AS n FROM submissions WHERE token_id=%s
         AND desired_outcome <> 'preserve_knowledge' AND created_at > now()-interval '1 hour'"""

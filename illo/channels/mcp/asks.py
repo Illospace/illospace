@@ -36,6 +36,7 @@ def timestamp(value):
 
 
 async def create(ctx, args: dict) -> dict:
+    await mcp.lock_token(ctx.conn, ctx.token["id"], "asks")
     existing = await mcp.existing_ask(ctx.conn, ctx.token["id"], args["source_ref"])
     if existing:
         return answer(existing)

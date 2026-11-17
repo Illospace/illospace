@@ -52,11 +52,22 @@ Personal providers keep their existing grant checks. A tainted run has no search
 `0402_search_ranking.sql` adds immutable token and query functions and a GIN expression index for items.
 It does not rewrite the items table or replace its old generated `tsv` column.
 `0403_search_event_parts.sql` adds the matching GIN expression index for inbound Slack events.
-Lanes build their vector from their title, summary, and last 20 events during search.
+`0405_search_lanes.sql` stores lane vectors in `lane_search`, with a GIN index.
+Each vector contains the lane title, summary, and last 20 events, ordered by time and ID.
+Database triggers refresh the vector after a title, summary, or event change.
+Event writers lock the lane first. Concurrent reports cannot leave an old vector.
+The separate table keeps existing lane rows and API results unchanged.
+The migration backfills existing lanes. It permits five minutes per statement and waits one second for a lock.
+A failure rolls back the file. The runner can retry it.
+
+Item and Slack queries match the indexed expression with each query before they compute rank.
+Lane queries match the stored vector through its GIN index.
+Materialized candidate rows keep vector work on matches only.
+Search ranks all matches before the limit. It builds snippets only for the returned rows.
 
 Each index build holds a `SHARE` lock until its migration commits. Reads continue. Writes wait for the build.
 The files use separate transactions so the event scan does not extend the items lock.
-Each file has a one-second lock timeout and a ten-second statement timeout.
+The two earlier index files have a one-second lock timeout and a ten-second statement timeout.
 A timeout rolls back that file. The migration runner can retry it without a partial index or receipt.
 The runner records each completed file and skips it on later runs.
 A large event table can need a separate plan for an index build. These migrations never wait without a timeout.
@@ -68,3 +79,7 @@ It has 300 old archive items, 20 old lanes, 20 old GitHub issues, and one recent
 It also has an old named decision and a recent private match.
 The test checks product pricing, time words, email parts, identifiers, source fairness, and response scores.
 Safety tests also check that a perfect recent private match stays hidden.
+
+`tests/search/test_fast_recall.py` compares the former SQL with indexed recall on a fixed synthetic corpus.
+It has 3,000 items, 500 lanes, up to 30 events per lane, and 27 fixed queries.
+It checks fields, snippets, visibility, tiers, scores, order, index plans, backfill, and relative speed.
