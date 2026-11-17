@@ -150,6 +150,19 @@ def test_validation_reason_never_shows_input_values():
     assert private_text not in reason
 
 
+def test_validation_reason_hides_input_quoted_by_a_validator():
+    from illo.tools.personal import Calendar
+
+    private_text = "acme-private-date-example"
+    with pytest.raises(ValidationError) as caught:
+        Calendar.model_validate({"from": private_text, "to": "2026-01-01T00:00:00Z"})
+    reason = validation_reason(caught.value)
+    assert reason == (
+        "The tool arguments do not match its schema: Invalid isoformat string: '<value>'"
+    )
+    assert private_text not in reason
+
+
 def test_validation_reason_caps_and_cleans_path_segments():
     key = "extra\n\t\r\x00\u202e\u2028" + "x" * 80
     with pytest.raises(ValidationError) as caught:

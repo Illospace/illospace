@@ -27,15 +27,29 @@ class Arguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+def _text_values(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _text_values(item)]
+    return []
+
+
 def validation_reason(exc: ValidationError) -> str:
     """Show schema errors without the input values or validation context."""
-    errors = exc.errors(include_input=False, include_context=False, include_url=False)
+    errors = exc.errors(include_context=False, include_url=False)
     details = []
     for error in errors[:3]:
         path = ".".join(
             "".join(char for char in str(part) if char.isprintable())[:40] for part in error["loc"]
         )
         message = error["msg"].removeprefix("Value error, ")
+        # A validator can quote the input, for example a date parse error.
+        for text in sorted(_text_values(error.get("input")), key=len, reverse=True):
+            if len(text) >= 4:
+                message = message.replace(text, "<value>")
         details.append(f"{path}: {message}" if path else message)
     reason = "The tool arguments do not match its schema: " + "; ".join(details)
     suffix = f" (and {len(errors) - 3} more)" if len(errors) > 3 else ""
