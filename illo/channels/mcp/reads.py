@@ -3,8 +3,11 @@
 import inspect
 from dataclasses import asdict, is_dataclass
 
+from pydantic import BaseModel, ValidationError
+
 from illo.ledger import items, lanes, mcp
 from illo.sources import search as shared_search
+from illo.tools.registry import validation_reason
 
 from .schemas import GetKnowledge, Search
 
@@ -42,13 +45,21 @@ def hit(row, source: str, rank: int) -> dict:
     }
 
 
+def inner[T: BaseModel](model: type[T], value: dict) -> T:
+    """Validate the inner arguments and name their own fields in the error."""
+    try:
+        return model.model_validate(value)
+    except ValidationError as exc:
+        raise ValueError(validation_reason(exc, model, prefix=("arguments",))) from None
+
+
 async def read(ctx, args: dict) -> dict:
     capability = args["capability"]
     if capability not in CAPABILITIES:
         raise ValueError("Unknown capability. Use: " + ", ".join(CAPABILITIES))
     if capability == "knowledge.get":
-        return await get(ctx, GetKnowledge.model_validate(args["arguments"]))
-    query = Search.model_validate(args["arguments"])
+        return await get(ctx, inner(GetKnowledge, args["arguments"]))
+    query = inner(Search, args["arguments"])
     limit = max(1, min(query.limit, 50))
     if search:
         if SEARCH_USES_CONTEXT:

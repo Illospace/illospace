@@ -1,16 +1,34 @@
 """Test the grant data and each authority check independently."""
 
+from datetime import date, datetime
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from illo.channels.mcp.schemas import AskCancel, AskCreate
+from illo.db import one
 from illo.tools.checks import GRANT_PROFILES, check, destination, risk, scope
-from illo.tools.registry import Registry, Tool
+from illo.tools.personal import Calendar
+from illo.tools.registry import (
+    ArgumentError,
+    Arguments,
+    Registry,
+    Tool,
+    ToolContext,
+    validation_reason,
+)
 
 
 def tool(name="lanes_search", risk="read", target="ledger", personal=False):
-    return SimpleNamespace(name=name, family=name.split("_", 1)[0], risk=risk,
-                           destination=lambda a: target, personal=personal)
+    return SimpleNamespace(
+        name=name,
+        family=name.split("_", 1)[0],
+        risk=risk,
+        destination=lambda a: target,
+        personal=personal,
+    )
 
 
 def authority(**changes):
@@ -87,3 +105,148 @@ def test_registry_rejects_duplicate_or_destructive_tool():
         registry.add(entry)
     with pytest.raises(ValueError, match="risk"):
         registry.add(Tool("delete_everything", "bad", "delete", lambda a: "ledger", False, handler))
+
+
+PREFIX = "The tool arguments do not match its schema: "
+OPTIONS = [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+
+
+def reason_for(model, args):
+    with pytest.raises(ValidationError) as caught:
+        model.model_validate(args)
+    return validation_reason(caught.value, model)
+
+
+def test_validation_reason_shows_an_argument_error():
+    reason = reason_for(
+        AskCreate, {"question": "First question? Second question?", "options": OPTIONS}
+    )
+    assert reason == PREFIX + "question: The question must be one short sentence"
+    assert "Second question" not in reason
+
+
+def test_validation_reason_caps_nested_errors_at_three():
+    class Batch(Arguments):
+        values: list[int]
+
+    assert reason_for(Batch, {"values": ["bad"] * 5}) == PREFIX + (
+        "values.0: Input should be a valid integer; "
+        "values.1: Input should be a valid integer; "
+        "values.2: Input should be a valid integer (and 2 more)"
+    )
+
+
+def test_validation_reason_handles_a_model_error_without_a_path():
+    assert reason_for(AskCancel, {}) == PREFIX + "Give ask_id or source_ref"
+
+
+def test_validation_reason_never_shows_input_values():
+    class PrivateArgs(Arguments):
+        count: int
+        label: str = Field(max_length=3)
+
+    private_text = "acme-private-token-example"
+    reason = reason_for(PrivateArgs, {"count": private_text, "label": private_text})
+    assert reason == PREFIX + (
+        "count: Input should be a valid integer; label: String should have at most 3 characters"
+    )
+    assert private_text not in reason
+
+
+@pytest.mark.parametrize("value", ["xyz", "privateZtoken", "private\ntext", "acme\u00e9x"])
+def test_validation_reason_hides_a_plain_value_error(value):
+    class Parsed(Arguments):
+        when: str
+
+        @field_validator("when")
+        @classmethod
+        def parse(cls, text):
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+    reason = reason_for(Parsed, {"when": value})
+    assert reason == PREFIX + "when: The value is not valid (value_error)"
+
+
+def test_validation_reason_hides_input_in_a_parse_error():
+    class Day(BaseModel):
+        day: date
+
+    reason = reason_for(Day, {"day": "2026-13-45"})
+    assert reason == PREFIX + "day: The value is not valid (date_from_datetime_parsing)"
+
+
+def test_calendar_dates_fail_with_a_fixed_message():
+    reason = reason_for(Calendar, {"from": "acme-private-date", "to": "2026-01-01T00:00:00Z"})
+    assert reason == PREFIX + "Use ordered dates with time zones"
+
+
+def test_validation_reason_hides_keys_that_the_caller_chose():
+    class Tags(Arguments):
+        tags: dict[str, int]
+
+    private_key = "acme-private-key"
+    assert reason_for(Arguments, {private_key: 1}) == (
+        PREFIX + "<key>: Extra inputs are not permitted"
+    )
+    assert reason_for(Tags, {"tags": {private_key: "x"}}) == (
+        PREFIX + "tags.<key>: Input should be a valid integer"
+    )
+    nested = reason_for(AskCreate, {"question": "Q?", "options": [*OPTIONS, {private_key: 1}]})
+    assert private_key not in nested
+    assert "options.2.<key>: Extra inputs are not permitted" in nested
+
+
+def test_validation_reason_survives_deep_input():
+    deep = "acme-private-text"
+    for _ in range(5000):
+        deep = [deep]
+    reason = reason_for(Arguments, {"acme-private-key": deep})
+    assert reason == PREFIX + "<key>: Extra inputs are not permitted"
+
+
+def test_validation_reason_caps_the_message_and_keeps_the_more_suffix():
+    class Batch(Arguments):
+        values: list[Literal["x" * 200]]
+
+    reason = reason_for(Batch, {"values": ["acme-private-text"] * 5})
+    assert len(reason) == 400
+    assert reason.startswith(PREFIX + "values.0: Input should be ")
+    assert reason.endswith("... (and 2 more)")
+    assert "acme-private-text" not in reason
+
+
+async def test_registry_validation_uses_the_shared_reason(conn, run):
+    async def handler(ctx, args):
+        pytest.fail("Invalid arguments must not reach the handler")
+
+    registry = Registry()
+    registry.add(
+        Tool(
+            "ask_cancel",
+            "asks",
+            "write_internal",
+            lambda _: "ledger",
+            False,
+            handler,
+            arguments=AskCancel,
+        )
+    )
+    reason = reason_for(AskCancel, {})
+    result = await registry.call(ToolContext(conn, run, None), "ask_cancel", {})
+    assert result == {"decision": "deny", "reason": reason, "result": None}
+    row = await one(conn, "SELECT decision, reason FROM audit WHERE run_id=%s", (run["id"],))
+    assert row == {"decision": "deny", "reason": reason}
+
+
+def test_validation_reason_shows_only_a_plain_argument_error_message():
+    class Odd(Arguments):
+        value: str
+
+        @field_validator("value")
+        @classmethod
+        def odd(cls, text):
+            raise ArgumentError({"value": text})
+
+    assert reason_for(Odd, {"value": "acme-private-text"}) == (
+        PREFIX + "value: The value is not valid (value_error)"
+    )

@@ -13,6 +13,20 @@ ASK = {
 }
 
 
+async def test_ask_validation_returns_the_reason_without_the_question(app, http):
+    agent = await AgentClient.create(app, http)
+    result = await agent.call(
+        "ask_create", {**ASK, "question": "First question? Second question?"}, error=True
+    )
+    message = result["error"]["message"]
+    # The registry test in tests/test_tools.py expects the same text from the agent-run path.
+    assert message == (
+        "The tool arguments do not match its schema: "
+        "question: The question must be one short sentence"
+    )
+    assert "Second question" not in message
+
+
 async def test_collector_can_omit_a_recommendation(app, http):
     agent = await AgentClient.create(app, http)
     args = {key: value for key, value in ASK.items() if key != "recommended"}

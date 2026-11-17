@@ -1,7 +1,9 @@
 """Discover tool families and execute each call through the authority checks."""
 
+import functools
 import importlib
 import pkgutil
+import typing
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -25,6 +27,70 @@ class Arguments(BaseModel):
     """Reject fields that a tool does not declare, including principal overrides."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class ArgumentError(ValueError):
+    """A validator message that tool errors may show. It never quotes the input."""
+
+
+# These context keys carry parts of the input, such as a parse error or a tag.
+_INPUT_CONTEXT = {"error", "tag", "attribute", "encoding_error", "tz_actual"}
+
+
+@functools.cache
+def _field_names(model: type[BaseModel]) -> frozenset[str]:
+    names, models, seen = set(), [model], set()
+    while models:
+        current = models.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for name, info in current.model_fields.items():
+            names.update(n for n in (name, info.alias) if n)
+            types = [info.annotation]
+            while types:
+                kind = types.pop()
+                if isinstance(kind, type) and issubclass(kind, BaseModel):
+                    models.append(kind)
+                types.extend(typing.get_args(kind))
+    return frozenset(names)
+
+
+def _error_message(error) -> str:
+    if error["type"] in {"value_error", "assertion_error"}:
+        cause = error.get("ctx", {}).get("error")
+        if isinstance(cause, ArgumentError) and [type(a) for a in cause.args] == [str]:
+            return cause.args[0]
+    elif not _INPUT_CONTEXT & error.get("ctx", {}).keys():
+        return error["msg"]
+    return f"The value is not valid ({error['type']})"
+
+
+def validation_reason(
+    exc: ValidationError, model: type[BaseModel], prefix: tuple[str, ...] = ()
+) -> str:
+    """Show the path and the message of each schema error, never the input values."""
+    errors = exc.errors(include_input=False, include_url=False)
+    names = _field_names(model)
+    details = []
+    for error in errors[:3]:
+        # Keys that the caller chose stay hidden: only schema names and list indices show.
+        path = ".".join(
+            [
+                *prefix,
+                *(
+                    str(part) if isinstance(part, int) or part in names else "<key>"
+                    for part in error["loc"]
+                ),
+            ]
+        )
+        message = _error_message(error)
+        details.append(f"{path}: {message}" if path else message)
+    reason = "The tool arguments do not match its schema: " + "; ".join(details)
+    suffix = f" (and {len(errors) - 3} more)" if len(errors) > 3 else ""
+    if len(reason) + len(suffix) > 400:
+        reason = reason[: 397 - len(suffix)] + "..."
+    return reason + suffix
 
 
 @dataclass
@@ -146,8 +212,8 @@ class Registry:
         if tool:
             try:
                 validated = tool.arguments.model_validate(args).model_dump()
-            except ValidationError:
-                reason = "The tool arguments do not match its schema"
+            except ValidationError as exc:
+                reason = validation_reason(exc, tool.arguments)
             else:
                 try:
                     if tool.resolve:

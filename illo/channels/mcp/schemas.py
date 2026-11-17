@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from illo.tools.registry import ArgumentError
+
 Source = Literal["t3", "claude-code", "codex", "github", "manual", "email"]
 State = Literal[
     "open", "working", "waiting_person", "blocked", "review", "done", "failed", "unknown"
@@ -49,7 +51,7 @@ class GetResult(Arguments):
     def require_id(self):
         ids = {v for v in (self.event_id, self.submission_id, self.result_id) if v}
         if len(ids) != 1:
-            raise ValueError("Give one event_id, submission_id, or result_id")
+            raise ArgumentError("Give one event_id, submission_id, or result_id")
         return self
 
 
@@ -101,9 +103,9 @@ class LaneReport(Lane):
     @model_validator(mode="after")
     def require_lane(self):
         if self.lanes is None and (not self.source or not self.external_id):
-            raise ValueError("Give source and external_id, or lanes")
+            raise ArgumentError("Give source and external_id, or lanes")
         if self.lanes is not None and (self.source or self.external_id):
-            raise ValueError("Give one lane or a batch")
+            raise ArgumentError("Give one lane or a batch")
         return self
 
 
@@ -128,7 +130,7 @@ class Option(Arguments):
 def check_ask_text(value: str) -> None:
     """Refuse hidden format controls before an ask can reach a card."""
     if any(unicodedata.category(char) == "Cf" for char in value):
-        raise ValueError("Ask text cannot contain a format control")
+        raise ArgumentError("Ask text cannot contain a format control")
 
 
 class AskCreate(Arguments):
@@ -147,7 +149,7 @@ class AskCreate(Arguments):
     @classmethod
     def one_sentence(cls, value):
         if "\n" in value or len(re.findall(r"[.!?](?:\s+|$)", value)) > 1:
-            raise ValueError("The question must be one short sentence")
+            raise ArgumentError("The question must be one short sentence")
         return value
 
     @model_validator(mode="after")
@@ -157,7 +159,7 @@ class AskCreate(Arguments):
         if len(set(ids)) != len(ids) or (
             self.recommended is not None and self.recommended not in ids
         ):
-            raise ValueError("Use unique option IDs and a valid recommended option")
+            raise ArgumentError("Use unique option IDs and a valid recommended option")
         return self
 
 
@@ -176,7 +178,7 @@ class AskCancel(Arguments):
     @model_validator(mode="after")
     def require_reference(self):
         if (self.ask_id is None) == (self.source_ref is None):
-            raise ValueError("Give ask_id or source_ref")
+            raise ArgumentError("Give ask_id or source_ref")
         return self
 
 

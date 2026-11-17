@@ -50,3 +50,17 @@ async def test_shared_context_search_does_not_open_personal_connectors(app, http
         "illo_read", {"capability": "knowledge.search", "arguments": {"query": "cobalt"}}
     )
     assert seen[0][0] is app.state.ctx and seen[0][1] == "person:ada" and seen[0][3] is False
+
+
+async def test_inner_argument_errors_name_the_inner_field(app, http):
+    agent = await AgentClient.create(app, http)
+    args = {"capability": "knowledge.search", "arguments": {"query": "q", "limit": "acme-private"}}
+    result = await agent.call("illo_read", args, error=True)
+    assert result["error"]["message"] == (
+        "The tool arguments do not match its schema: "
+        "arguments.limit: Input should be a valid integer"
+    )
+    args = {"capability": "knowledge.get", "arguments": {"acme-private-key": 1}}
+    message = (await agent.call("illo_read", args, error=True))["error"]["message"]
+    assert "acme-private" not in message
+    assert "arguments.<key>: Extra inputs are not permitted" in message
