@@ -52,17 +52,21 @@ async def search(ctx, conn, query, kinds, limit, now):
         return []
     q, params = query_sql(query)
     rows = await all_rows(conn, f"""
-        WITH q AS ({q}), texts AS (
+        WITH q AS ({q}), texts AS MATERIALIZED (
           SELECT e.*,e.created_at AS at,({VECTOR}) AS vector
           FROM events e WHERE {VISIBLE}
             AND NOT EXISTS (SELECT 1 FROM items i WHERE i.source_ref='slack:'||e.external_id)
-        ), ranked AS (
-          SELECT t.*, {RANK_COLUMNS},
+            AND ({VECTOR} @@ (SELECT strict FROM q) OR {VECTOR} @@ (SELECT relaxed FROM q))
+        ), ranked AS MATERIALIZED (
+          SELECT t.*, {RANK_COLUMNS}
+          FROM texts t,q
+        ), page AS MATERIALIZED (
+          SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+        ) SELECT t.*,
             ts_headline('simple',coalesce(t.payload->>'text',''),
               CASE WHEN vector @@ q.strict THEN q.strict ELSE q.relaxed END,
               'MaxWords=45,MinWords=15,StartSel="",StopSel=""') AS snippet
-          FROM texts t,q WHERE vector @@ q.strict OR vector @@ q.relaxed
-        ) SELECT * FROM ranked ORDER BY {RANK_ORDER} DESC,at DESC,id DESC LIMIT %s
+          FROM page t,q ORDER BY {RANK_ORDER} DESC,at DESC,id DESC
     """, (*params, list(KINDS), list(allowed), now, limit))
     return [Hit(f"slack-event:{row['id']}", "slack", "slack", detail(row, allowed)["title"],
                 row["snippet"], at=row["created_at"], match_tier=row["match_tier"],

@@ -2,10 +2,13 @@
 
 Search uses Postgres full text. It reads items and the last 20 events of each lane.
 It merges each source's ordered results by reciprocal rank. It removes duplicate source refs.
-A small recency boost breaks close item scores. It uses no vectors.
+Match strength and age set the order before the source rank bonus. Search uses no semantic vectors.
 Private items and lanes appear only for their active owner. A private result sets `personal_read` on the run.
 Tainted and outsider runs cannot use these tools.
 Slack items come only from configured public channels.
+GIN indexes find matching items, lanes, and inbound Slack events before rank work starts.
+Search builds snippets after the per-source result limit.
+The `lane_search` table stores each lane vector. Database triggers keep the last 20 events current.
 
 `search_all(query, kinds?, limit?)` returns compact text. The limit is 1–50; the default is 10.
 `search_get(source_ref)` returns a full item, a lane with its events, or a GitHub issue.

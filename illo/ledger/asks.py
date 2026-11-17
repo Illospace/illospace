@@ -40,8 +40,8 @@ async def create(
     ):
         raise ValueError("Use unique option IDs and a valid recommended option")
     if requester_token_id is not None:
-        # Both direct MCP calls and model tools must hold the same token lock.
-        await conn.execute("SELECT id FROM tokens WHERE id=%s FOR UPDATE", (requester_token_id,))
+        # Direct MCP calls and model tools share the same ask limit lock.
+        await mcp.lock_token(conn, requester_token_id, "asks")
         await mcp.check_open_ask_limit(conn, requester_token_id, owner_person_id)
     return await one(
         conn,

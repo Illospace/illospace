@@ -3,6 +3,7 @@
 from pydantic import Field
 
 from illo.db import one
+from illo.ledger import mcp
 from illo.ledger import tasks as ledger
 from illo.tasks.access import token_viewer
 from illo.tasks.views import compact, full
@@ -44,8 +45,8 @@ async def handle(ctx, name, args):
                           for row in rows[:args["limit"]]]}
     common = {"workspace": workspace, "viewer": viewer}
     if name in {"task_write", "task_post", "task_create"}:
-        # The token lock makes the hourly cap exact across simultaneous calls.
-        await ctx.conn.execute("SELECT id FROM tokens WHERE id=%s FOR UPDATE", (ctx.token["id"],))
+        # The task lock makes the hourly cap exact across simultaneous calls.
+        await mcp.lock_token(ctx.conn, ctx.token["id"], "tasks")
         count = await one(ctx.conn, """SELECT count(*) AS n FROM audit WHERE token_id=%s
             AND tool = ANY(%s) AND decision='allow' AND at>now()-interval '1 hour'""",
             (ctx.token["id"], ["task_write", "task_post", "task_create"]))
