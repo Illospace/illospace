@@ -5,7 +5,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from psycopg.types.json import Jsonb
 
-from illo.asks.cards import escape, task_return_card
+from illo.asks.cards import button, escape, section, task_return_card
 from illo.channels.slack.access import channel_private
 from illo.channels.slack.channels import ChannelLookupError, resolve_channel
 from illo.channels.slack.formatting import mrkdwn
@@ -22,6 +22,18 @@ def title_link(ctx, row):
 
         return "<" + escape(url(ctx, row["id"])) + "|" + escape(row["title"]) + ">"
     return escape(row["title"])
+
+
+def notice(ctx, row, text):
+    """Give the text of a notice. With pages on, add the page link and the button that signs in the browser."""
+    if not ctx.workspace.config.pages.enabled:
+        return {"text": text}
+    text += "\n" + title_link(ctx, row)
+    if len(text) > 3000:
+        # A section holds 3,000 characters. A long question stays whole as plain text, with the link and no button.
+        return {"text": text}
+    return {"text": text, "blocks": [section(text), {"type": "actions", "elements": [
+        button("Open the page", f"web-open:{row['id']}")]}]}
 
 
 def state_label(state):
@@ -200,10 +212,10 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
             elif event["data"].get("escalated"):
                 text += f" Holder: {name}. Silence: {event['data']['hours']} hours. Illo tried {event['data']['restarts']} restarts."
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
-                text=mention + escape(text) + ("\n" + title_link(ctx, row) if ctx.workspace.config.pages.enabled else ""), client_msg_id=message_id(event["kind"], task_id, event["id"]))
+                **notice(ctx, row, mention + escape(text)), client_msg_id=message_id(event["kind"], task_id, event["id"]))
             direct = await _recipient_channel(ctx, conn, row, person)
             if direct != row["slack_channel"]:
-                await ctx.slack_client.chat_postMessage(channel=direct, text=mention + f"Task {task_id}: " + escape(text) + ("\n" + title_link(ctx, row) if ctx.workspace.config.pages.enabled else ""),
+                await ctx.slack_client.chat_postMessage(channel=direct, **notice(ctx, row, mention + f"Task {task_id}: " + escape(text)),
                     client_msg_id=message_id("notice-" + event["kind"], task_id, event["id"]))
         elif event["kind"] == "question":
             asked = await people.get(conn, event["data"].get("to", "")[7:])

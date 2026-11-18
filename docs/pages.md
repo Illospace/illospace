@@ -6,6 +6,22 @@ It uses the same visibility rules as task tools. Only the owner sees a personal 
 
 ## Sign in
 
+The fast way starts in Slack:
+
+1. Press **Open the page** on a task card from Illo.
+2. Illo shows a link in a window that only you see. Open the link.
+3. Press **Continue** in the browser.
+
+Slack proves who pressed the button, so this way needs no code.
+The link works once and expires after 10 minutes. A link preview uses nothing.
+In a browser with no session, only **Continue** uses the link.
+A link never changes the person of a browser that is signed in. If that person owns the link, the link ends.
+Illo's own logs drop each sign-in request that has a query. Set the same rule in a reverse proxy.
+If Slack does not show the window in time, Illo ends the link and asks for a new press.
+Illo gives a link only for a task that the person can see, and 20 links for each person in one hour.
+
+The other way starts in the browser:
+
 1. Open the task link from Slack.
 2. Press **Get a code**. Only this button makes a sign-in request. A link preview makes none.
 3. Send the displayed `connect XXXX-XXXX` line to Illo in a Slack direct message.
@@ -48,6 +64,10 @@ Person DMs, routines, and agent requests can write pages. Team channels can only
 Deep requests can write pages. A wait check can write only its own task page.
 Outside and tainted runs cannot read or write pages.
 A coding agent uses `task_page` through MCP. It can write only a task it holds, under the `task_write` holder rule.
+When an agent changes the content of the page of a task that a person must review, Illo tells that person in Slack.
+A write that changes no block sends nothing. A new check time alone is no change. A picture at a new commit is a change.
+A notice longer than 3,000 characters is plain text with the link and no button.
+The message has the page link and the **Open the page** button. Reminders have the same button.
 
 A reviewer can Approve or Send back. Send back requires a reason.
 Failed Done checks show a Confirm anyway form. This form requires a reason.

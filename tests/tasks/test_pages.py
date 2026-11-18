@@ -11,6 +11,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
+from illo.asks import cards
 from illo.channels.slack import tasks as slack_tasks
 from illo.db import all_rows, one
 from illo.ledger import digest_snapshot, people, runs, tasks
@@ -638,6 +639,172 @@ async def test_a_browser_that_hides_its_origin_can_use_the_forms(browser, ctx):
         refused = await browser.http.post('/web/signin', headers={'Origin': BASE, 'Sec-Fetch-Site': site})
         assert refused.status_code == 403
     assert (await browser.http.post('/web/signin', headers={'Origin': 'null'})).status_code == 403
+
+
+async def press_open(ctx, slack_client, task_id, key='ada'):
+    async with ctx.pool.connection() as conn:
+        person = await people.get(conn, key)
+    before = len(slack_client.calls)
+    await ctx.slack_actions.dispatch(ctx, person, {'action_id': f'web-open:{task_id}', 'trigger_id': 'T1'})
+    views = [c for c in slack_client.calls[before:] if c['method'] == 'views_open']
+    return views[0]['view']['blocks'][0]['text']['text'] if views else None
+
+
+def link_of(text):
+    return unescape(re.search(r'<(https://[^|>]+)\|', text)[1]).removeprefix(BASE)
+
+
+async def test_open_button_gives_a_link_that_signs_in_one_time(browser, ctx, slack_client, app):
+    row = await make(ctx, returned=True)
+    card = cards.task_return_card({**row, 'page_url': pages.url(ctx, row['id'])}, 'Returned', [])
+    assert [b['action_id'] for b in card[-1]['elements']] == [
+        f"task:{row['id']}:done", f"task:{row['id']}:back", f"web-open:{row['id']}"]
+    assert len(cards.task_return_card(row, 'Returned', [])[-1]['elements']) == 2
+    text = await press_open(ctx, slack_client, row['id'])
+    assert 'as Ana' in text and 'one time' in text
+    path = link_of(text)
+    assert path.startswith('/web/signin?key=')
+    key = path.split('=', 1)[1]
+
+    # Reading the link changes nothing. A link preview can read it many times.
+    for _ in range(2):
+        shown = await browser.http.get(path)
+        assert shown.status_code == 200 and 'Sign in as Ana' in shown.text and 'set-cookie' not in shown.headers
+        # The stylesheet request and the form request must not carry the address, which holds the key.
+        assert shown.headers['referrer-policy'] == 'strict-origin'
+    assert (await browser.http.post('/web/signin', data={'key': key}, headers={'Sec-Fetch-Site': 'cross-site'})).status_code == 403
+    done = await browser.http.post('/web/signin', data={'key': key}, headers={'Sec-Fetch-Site': 'same-origin'})
+    assert done.status_code == 303 and done.headers['location'] == f"/t/{row['id']}"
+    assert signin.SESSION_COOKIE in done.headers['set-cookie']
+    assert (await browser.http.get(done.headers['location'])).status_code == 200
+
+    # The key is used. Another browser gets nothing from it.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as other:
+        ended = await other.get(path)
+        assert ended.status_code == 410 and ended.headers['referrer-policy'] == 'strict-origin'
+        again = await other.post('/web/signin', data={'key': key})
+        assert again.status_code == 410 and 'set-cookie' not in again.headers
+        assert (await other.get('/web/signin', params={'key': 'x' * 43})).status_code == 410
+
+
+async def test_link_does_not_change_a_signed_in_browser(browser, ctx, slack_client):
+    row = await make(ctx, returned=True)
+    assert (await browser.login(next=f"/t/{row['id']}")).status_code in {302, 303}
+    cookie = browser.http.cookies.get(signin.SESSION_COOKIE)
+    own = link_of(await press_open(ctx, slack_client, row['id']))
+    other = link_of(await press_open(ctx, slack_client, row['id'], key='ben'))
+    for path in (own, other):
+        response = await browser.http.get(path)
+        assert response.status_code == 303 and response.headers['location'] == f"/t/{row['id']}"
+        assert 'set-cookie' not in response.headers and browser.http.cookies.get(signin.SESSION_COOKIE) == cookie
+    async with ctx.pool.connection() as conn:
+        rows = await all_rows(conn, """SELECT p.key,s.continued_at IS NOT NULL AS used FROM web_signins s
+            JOIN people p ON p.id=s.person_id WHERE s.pairing_hash<>'' AND s.slack_ts IS NULL ORDER BY s.id""")
+    # The key of the signed-in person ends. The key of the other person stays for that person.
+    assert [(r['key'], r['used']) for r in rows] == [('ada', True), ('ben', False)]
+
+
+async def test_open_button_refusals_and_limit(browser, ctx, slack_client, monkeypatch):
+    private = await make(ctx, list_key='private', holder='person:ada')
+    assert await press_open(ctx, slack_client, private['id'], key='ben') is None
+    assert await press_open(ctx, slack_client, 999_999) is None
+    row = await make(ctx, returned=True)
+    ctx.workspace.config.pages.enabled = False
+    assert await press_open(ctx, slack_client, row['id']) is None
+    off = await browser.http.get('/web/signin', params={'key': 'x' * 43})
+    assert off.status_code == 404 and off.headers['referrer-policy'] == 'strict-origin'
+    ctx.workspace.config.pages.enabled = True
+    monkeypatch.setattr(signin, 'LINKS_PER_HOUR', 1)
+    assert 'Open the page' in await press_open(ctx, slack_client, row['id'])
+    assert 'too many links' in await press_open(ctx, slack_client, row['id'])
+    # An ended link and an inactive person get the same answer.
+    monkeypatch.setattr(signin, 'LINKS_PER_HOUR', 9)
+    path = link_of(await press_open(ctx, slack_client, row['id']))
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET active=false WHERE key='ada'")
+    assert (await browser.http.get(path)).status_code == 410
+    refused = await browser.http.post('/web/signin', data={'key': path.split('=', 1)[1]})
+    assert refused.status_code == 410 and 'set-cookie' not in refused.headers
+
+
+async def test_agent_page_on_returned_work_tells_the_reviewer_one_time(ctx, slack_client):
+    row = await make(ctx, returned=True)
+    await slack_tasks.tick(ctx)
+    start = len(slack_client.calls)
+
+    async def notices():
+        await slack_tasks.tick(ctx)
+        return [c for c in slack_client.calls[start:] if c['method'] == 'chat_postMessage'
+                and 'ready for your review' in c['text']]
+
+    # A person who writes the page knows it. An agent that writes it must tell the reviewer.
+    await write(ctx, row)
+    assert not await notices()
+    async with ctx.pool.connection() as conn:
+        await pages.write(conn, ctx, BUILD, {'task': row['id'], 'blocks': TEXT + TEXT})
+    sent = await notices()
+    assert sent and all(f"/t/{row['id']}|" in c['text'] for c in sent)
+    assert all(c['blocks'][-1]['elements'][0]['action_id'] == f"web-open:{row['id']}" for c in sent)
+    # The same blocks again are no news. A check with no time gets the present time on each write.
+    checks = [*TEXT, {'kind': 'checks', 'title': 'Checks', 'items': [{'claim': 'The release passed', 'state': 'yes'}]}]
+    async with ctx.pool.connection() as conn:
+        await pages.write(conn, ctx, BUILD, {'task': row['id'], 'blocks': TEXT + TEXT})
+        await pages.write(conn, ctx, BUILD, {'task': row['id'], 'blocks': checks})
+    assert len(await notices()) == 2 * len(sent)
+    async with ctx.pool.connection() as conn:
+        await pages.write(conn, ctx, BUILD, {'task': row['id'], 'blocks': checks})
+    assert len(await notices()) == 2 * len(sent)
+    # A page on a task in work has no reviewer yet.
+    working = await make(ctx)
+    async with ctx.pool.connection() as conn:
+        await pages.write(conn, ctx, BUILD, {'task': working['id'], 'blocks': TEXT})
+    assert len(await notices()) == 2 * len(sent)
+
+
+async def test_logs_drop_the_address_of_a_link(app):
+    import logging
+
+    from illo.tasks.pages.web import LinkLogFilter
+
+    def record(text):
+        return logging.LogRecord('uvicorn.access', logging.INFO, '', 0, text, (), None)
+
+    for query in ('key=abc', 'next=%2Ft%2F1&key=abc', '%6bey=abc'):
+        assert not LinkLogFilter().filter(record(f'1.2.3.4 - "GET /web/signin?{query} HTTP/1.1" 200'))
+    assert LinkLogFilter().filter(record('1.2.3.4 - "POST /web/signin HTTP/1.1" 303'))
+    assert LinkLogFilter().filter(record('1.2.3.4 - "GET /t/1 HTTP/1.1" 200'))
+    assert all(any(isinstance(f, LinkLogFilter) for f in logging.getLogger(name).filters)
+               for name in ('uvicorn.access', 'httpx', 'httpcore'))
+
+
+def test_long_notice_stays_whole_as_plain_text(ctx):
+    row = {'id': 7, 'title': 'Review the work'}
+    short = slack_tasks.notice(ctx, row, 'Read it.')
+    assert [b['type'] for b in short['blocks']] == ['section', 'actions']
+    assert short['blocks'][0]['text']['text'] == short['text'] == f'Read it.\n<{BASE}/t/7|Review the work>'
+    assert short['blocks'][-1]['elements'][0]['action_id'] == 'web-open:7'
+    # A section cuts its text at 3,000 characters. A long notice has no blocks, so Slack shows all of it.
+    assert slack_tasks.notice(ctx, row, '&amp;' * 1200) == {'text': '&amp;' * 1200 + f'\n<{BASE}/t/7|Review the work>'}
+    ctx.workspace.config.pages.enabled = False
+    assert slack_tasks.notice(ctx, row, 'Read it.') == {'text': 'Read it.'}
+
+
+async def test_slow_slack_ends_the_link_and_asks_for_a_new_press(ctx, slack_client, monkeypatch):
+    row = await make(ctx, returned=True)
+
+    async def expired(**kwargs):
+        raise RuntimeError('expired_trigger_id')
+
+    monkeypatch.setattr(slack_client, 'views_open', expired)
+    async with ctx.pool.connection() as conn:
+        person = await people.get(conn, 'ada')
+    await ctx.slack_actions.dispatch(ctx, person, {'action_id': f"web-open:{row['id']}", 'trigger_id': 'T1',
+                                                   'channel': 'D_ACME_ADA', 'thread_ts': '1.2'})
+    said = slack_client.calls[-1]
+    assert said['method'] == 'chat_postEphemeral' and said['user'] == 'U_ACME_ADA' and said['thread_ts'] == '1.2'
+    assert 'Press Open the page again' in said['text'] and 'key=' not in said['text']
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT id FROM web_signins')
 
 
 async def test_ended_signin_offers_a_new_code_for_the_same_task(browser, ctx):

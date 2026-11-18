@@ -4,20 +4,24 @@ import hashlib
 import hmac
 import re
 import secrets
+from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
-from illo.asks.cards import button
+from illo.asks.cards import button, escape, section
 from illo.channels.slack.pairing import sent_by_app
+from illo.connectors.http import private_http_logs
 from illo.db import one
+from illo.ledger import tasks
 from illo.ledger.agent_oauth import PAIR_ALPHABET, limit
 from illo.ledger.tokens import digest
-from illo.tasks.pages import enabled
+from illo.tasks.pages import base_url, enabled
 
 REQUEST_COOKIE = "illo_web_request"
 SESSION_COOKIE = "illo_web_session"
 MAX_PENDING = 200
 STARTS_PER_HOUR = 60
 STARTS_PER_HOST = 30
+LINKS_PER_HOUR = 20
 
 
 def next_path(value):
@@ -142,6 +146,52 @@ async def action(ctx, person, action):
         text = "The browser sign-in is approved. Return to the browser." if choice == "approve" else "The browser sign-in is denied."
         await ctx.slack_client.chat_update(channel=channel, ts=action["message_ts"], text=text,
             blocks=[{"type": "section", "text": {"type": "plain_text", "text": text}}])
+
+
+async def link(conn, ctx, person, task_id):
+    """Make a key that signs in one browser as this person. The person asked for it in Slack."""
+    if not await limit(conn, "web_link", str(person["id"]), LINKS_PER_HOUR):
+        return None
+    # The click in Slack is the approval, so the row starts as approved. The key works one time,
+    # in the same exchange as the handle of a browser that got an approval. No pairing code matches it.
+    key = secrets.token_urlsafe(32)
+    await conn.execute("""INSERT INTO web_signins(pairing_hash,browser_hash,next_path,person_id,paired_at,decision)
+        VALUES (%s,%s,%s,%s,clock_timestamp(),'approved')""",
+        (digest("link:" + key), digest(key), f"/t/{task_id}", person["id"]))
+    return key
+
+
+async def open_action(ctx, person, action):
+    """Answer the button "Open the page" with a private link. Slack proved who pressed the button."""
+    match = re.fullmatch(r"web-open:([1-9][0-9]*)", action.get("action_id", ""))
+    if not enabled(ctx) or not match or not action.get("trigger_id"):
+        return
+    task_id = int(match[1])
+    async with ctx.pool.connection() as conn:
+        viewer = tasks.Viewer(person["key"], "person:" + person["key"], human=True)
+        if not await tasks.get(conn, task_id, viewer=viewer):
+            return
+        key = await link(conn, ctx, person, task_id)
+    address = base_url(ctx) + "/web/signin?" + urlencode({"key": key or ""})
+    text = ("You asked for too many links. Try again in one hour." if not key else
+            f"*<{escape(address)}|Open the page of task {task_id}>*\n"
+            f"This link signs in one browser as {escape(person['name'])}. It works one time, for 10 minutes. "
+            "Do not give it to another person.")
+    try:
+        # A modal is private to the person who pressed the button, and it leaves no message with a key.
+        with private_http_logs():
+            await ctx.slack_client.views_open(trigger_id=action["trigger_id"], view={
+                "type": "modal", "title": {"type": "plain_text", "text": "Task page"},
+                "close": {"type": "plain_text", "text": "Close"}, "blocks": [section(text)]})
+    except Exception:
+        # Slack accepts a modal for only 3 seconds after the click. End the link that no person got.
+        if key:
+            async with ctx.pool.connection() as conn:
+                await conn.execute("DELETE FROM web_signins WHERE browser_hash=%s", (digest(key),))
+        if action.get("channel"):
+            await ctx.slack_client.chat_postEphemeral(channel=action["channel"], user=person["slack_id"],
+                text="Slack did not show the link in time. Press Open the page again.",
+                **({"thread_ts": action["thread_ts"]} if action.get("thread_ts") else {}))
 
 
 async def cleanup(ctx):

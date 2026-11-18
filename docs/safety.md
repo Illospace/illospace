@@ -422,7 +422,10 @@ The CSP permits only the local stylesheet, local images, and local forms. HTML r
 Images come only from configured repository mirrors at a fixed commit. Magic bytes determine the image type.
 No file can exceed 8 MB. The file route checks the session and task visibility.
 A decision needs an active session, a CSRF token, and the current version digest.
-When present, Origin must match the page origin. Stale forms change nothing.
+A form must come from the page origin. The server reads `Sec-Fetch-Site` first, and `Origin` when that header is absent.
+Stale forms change nothing.
 The browser uses HttpOnly cookies with SameSite=Lax. Cookies use Secure except in explicit local HTTP tests.
-Sign-in uses the existing Slack pairing recognizer before any model sees the code.
+Sign-in with a code uses the existing Slack pairing recognizer before any model sees the code.
+A sign-in link comes only from a button press that Slack proved, and only in a window that the person sees.
+The link works once, for 10 minutes, and its page sends no address to another request. No model sees a link.
 Separate request tables keep the agent OAuth behaviour unchanged.

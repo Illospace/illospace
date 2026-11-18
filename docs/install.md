@@ -170,9 +170,13 @@ location = /list {
     proxy_pass http://127.0.0.1:8484;
     access_log off;
 }
+location = /web/signin {
+    proxy_pass http://127.0.0.1:8484;
+    access_log off;
+}
 ```
 
-Keep the sign-in query and the list key out of all proxy logs.
+Keep the sign-in query, the list key, and the key of a page sign-in link out of all proxy logs.
 Google and MCP OAuth sign-in then complete in the same browser after one click on the DM link.
 The MCP callback address is `https://illo.example.com/oauth/mcp/callback`.
 The task list uses the same base address.

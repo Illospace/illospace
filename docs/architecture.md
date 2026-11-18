@@ -459,14 +459,16 @@ A whole-page write replaces one JSON list in one transaction. The task lock seri
 The page keeps no block history. The task keeps its existing event history.
 The browser uses a random request cookie to exchange one Slack approval for a session.
 Only the person who sent the code can approve the card. The browser session lasts 30 days.
+The Slack button **Open the page** makes a request that is approved from the start, for the person who pressed it.
+Its key is in the link, not in a cookie. The same one-time exchange gives the session. Each person has 20 links in one hour.
 The scheduler removes expired requests and sessions every five minutes.
-Global and per-host start limits and a pending-request cap bound the sign-in table.
+Global and per-host start limits and a pending-request cap bound the code requests. The limit of 20 links for each person in one hour bounds the link requests.
 The existing agent OAuth flow keeps its own state and behaviour.
 
 | Route | Purpose |
 |---|---|
-| `GET /web/signin` | Show the start button, the code, or the result. It makes no request. A local task path is the only accepted destination. |
-| `POST /web/signin` | Make one sign-in request for this browser, then show the code. |
+| `GET /web/signin` | Show the start button, the code, or the result. It makes no request. A local task path is the only accepted destination. With the `key` of a link, show whose link it is and a Continue form. |
+| `POST /web/signin` | Make one sign-in request for this browser, then show the code. With the `key` of a link, exchange the key for a session. |
 | `POST /web/signout` | Delete the session after a CSRF check. |
 | `GET /web/app.css` | Serve the page stylesheet with no cache. |
 | `GET /t/{id}` | Show a task visible to the signed-in person. |

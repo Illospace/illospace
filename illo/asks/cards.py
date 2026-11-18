@@ -359,5 +359,7 @@ def task_return_card(task, message, checks, *, final=None, detail=None):
     else:
         blocks.append({"type": "actions", "elements": [
             button("Done", f"task:{task['id']}:done", True),
-            button("Send back", f"task:{task['id']}:back")]})
+            button("Send back", f"task:{task['id']}:back"),
+            # The button gives a link that signs in the browser. The title link needs a signed-in browser.
+            *([button("Open the page", f"web-open:{task['id']}")] if task.get("page_url") else [])]})
     return blocks

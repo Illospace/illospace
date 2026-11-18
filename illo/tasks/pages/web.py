@@ -1,6 +1,7 @@
 """Private HTML routes. No model text becomes executable markup."""
 
 import hmac
+import logging
 from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -16,8 +17,13 @@ from illo.tasks import pages
 from illo.tasks.pages import images, render, signin
 
 
-def html(body, status=200):
-    return HTMLResponse(body, status_code=status, headers=render.HEADERS)
+def html(body, status=200, headers=render.HEADERS):
+    return HTMLResponse(body, status_code=status, headers=headers)
+
+
+# The address of a sign-in link holds its key. A page at that address must not send the address
+# to the stylesheet request or to the form request, so these pages send only the origin.
+LINK_HEADERS = {**render.HEADERS, 'Referrer-Policy': 'strict-origin'}
 
 
 def missing():
@@ -70,10 +76,46 @@ def start_form(destination, label):
     return f'<form method="post" action="{escape(action)}"><button class="btn go">{escape(label)}</button></form>'
 
 
+async def link_sign_in(ctx, conn, request, person, key):
+    """Exchange the one-time key of a link from Slack. The click in Slack was the approval."""
+    row = await signin.request(conn, key)
+    usable = bool(row and not row['expired'] and row['decision'] == 'approved' and not row['continued_at'])
+    if person:
+        # A link never changes the person of a browser that is signed in. The key of that person ends here.
+        if usable and row['person_id'] == person['id']:
+            await conn.execute('UPDATE web_signins SET continued_at=clock_timestamp() WHERE id=%s', (row['id'],))
+        return redirect((row['next_path'] if row else '') or '/web/signin')
+    owner = usable and await one(conn, 'SELECT name FROM people WHERE id=%s AND active', (row['person_id'],))
+    if not owner:
+        return html(render.document(
+            '<main class="signin"><h1>The link ended.</h1><p>A link works one time, for 10 minutes. '
+            'In Slack, press <b>Open the page</b> again.</p></main>'), 410, LINK_HEADERS)
+    if request.method != 'POST':
+        # Only a POST uses the key. A link preview reads this page and changes nothing.
+        name = escape(owner['name'])
+        return html(render.document(
+            f'<main class="signin"><h1>Sign in as {name}</h1>'
+            f'<p>Illo made this link for {name} in Slack. Continue only if you are {name}.</p>'
+            f'<form method="post" action="/web/signin"><input type="hidden" name="key" value="{escape(key)}">'
+            '<button class="btn go">Continue</button></form></main>', title='Sign in to Illo'), headers=LINK_HEADERS)
+    if not origin_ok(ctx, request):
+        return html(render.document('<main><p>The form is invalid.</p></main>'), 403)
+    approved = await signin.continue_session(conn, key)
+    if not approved:
+        return html(render.document('<main class="signin"><h1>The link ended.</h1></main>'), 410)
+    token, destination = approved
+    response = redirect(destination or '/web/signin')
+    cookie(ctx, response, signin.SESSION_COOKIE, token, 30 * 86400)
+    return response
+
+
 async def sign_in(ctx, request):
     async with ctx.pool.connection() as conn:
         person = await signin.session(conn, request.cookies.get(signin.SESSION_COOKIE))
         destination = signin.next_path(request.query_params.get('next', ''))
+        key = request.query_params.get('key', '') if request.method == 'GET' else (await form_data(request)).get('key', '')
+        if key:
+            return await link_sign_in(ctx, conn, request, person, key)
         if person:
             return redirect(destination) if destination else html(render.document('<main class="signin"><h1>You are signed in</h1></main>'))
         if request.method == 'POST':
@@ -93,7 +135,8 @@ async def sign_in(ctx, request):
         if not pending:
             return html(render.document(
                 '<main class="signin"><h1>Sign in to Illo</h1>'
-                '<p>Illo gives you a code. You send the code to Illo in Slack.</p>'
+                '<p>The fast way: in Slack, press <b>Open the page</b> on a task card from Illo.</p>'
+                '<p>The other way: Illo gives you a code here. You send the code to Illo in Slack.</p>'
                 + start_form(destination, 'Get a code') + '</main>', title='Sign in to Illo'))
         approved = await signin.continue_session(conn, handle)
         if approved:
@@ -191,14 +234,26 @@ async def decide(ctx, request, task_id):
     return redirect(f'/t/{task_id}')
 
 
+class LinkLogFilter(logging.Filter):
+    def filter(self, record):
+        # A log line shows the query string, and the query of a sign-in link holds its one-time key.
+        # Drop each sign-in line that has a query. The order and the encoding of its fields do not matter then.
+        return '/web/signin?' not in record.getMessage()
+
+
 async def setup(ctx):
+    for name in ('uvicorn.access', 'httpx', 'httpcore'):
+        logging.getLogger(name).addFilter(LinkLogFilter())
     ctx.slack_actions.register('web-signin:', signin.action)
+    ctx.slack_actions.register('web-open:', signin.open_action)
     ctx.every(300, lambda: signin.cleanup(ctx))
 
     async def route(request: Request):
-        if not pages.enabled(ctx):
-            return missing()
         path = request.url.path
+        if not pages.enabled(ctx):
+            # The address of a sign-in link holds its key, also when pages are off.
+            return html(render.document('<main><h1>The task was not found.</h1></main>'), 404,
+                        LINK_HEADERS if path == '/web/signin' else render.HEADERS)
         if path == '/web/app.css':
             return Response(Path(__file__).with_name('app.css').read_text(), media_type='text/css', headers=render.HEADERS)
         if path == '/web/signin':
