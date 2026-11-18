@@ -39,6 +39,10 @@ async def receive(ctx, raw, *, outside_workspace=False):
     if (outside_workspace or raw.get("bot_id") or raw.get("bot_profile") or raw.get("workflow_id")
             or raw.get("subtype") == "bot_message"):
         return True
+    from illo.tasks.pages.signin import receive as browser_receive
+
+    if await browser_receive(ctx, raw, code):
+        return True
     async with ctx.pool.connection() as conn:
         row = await ledger.pair(conn, code, raw.get("user", ""), raw["channel"], raw["ts"])
     if row and row.get("duplicate"):

@@ -412,3 +412,17 @@ Read the `web_fetch` and connector audit rows when you review a deep run.
 Its result supplies a review card for a person, one bounded agent restart, or the text of one reminder.
 Code binds the result to one task and waiting period. It refuses a second result from the same run.
 A stale result changes no task. Complete work still needs the list's Done rule and a person's confirmation.
+
+
+## Task pages
+
+Agent text is data. The server escapes it before it adds the supported text markup.
+It removes hidden comment markers from agent messages. Models supply a fixed block list, never HTML or script.
+The CSP permits only the local stylesheet, local images, and local forms. HTML responses use no-store.
+Images come only from configured repository mirrors at a fixed commit. Magic bytes determine the image type.
+No file can exceed 8 MB. The file route checks the session and task visibility.
+A decision needs an active session, a CSRF token, and the current version digest.
+When present, Origin must match the page origin. Stale forms change nothing.
+The browser uses HttpOnly cookies with SameSite=Lax. Cookies use Secure except in explicit local HTTP tests.
+Sign-in uses the existing Slack pairing recognizer before any model sees the code.
+Separate request tables keep the agent OAuth behaviour unchanged.

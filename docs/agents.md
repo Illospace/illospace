@@ -360,3 +360,27 @@ It also includes an issue URL when the first user message contains exactly one G
 It never copies that user message into the lane. Use fixture databases to test this read path.
 A pull request link can match a task ticket through its GitHub closing or reference link in the same repository.
 A reference supplies a `change` link. It never closes an issue by itself.
+
+
+## Write a task page
+
+When `pages.enabled` is on, the agent tool list includes `task_page`.
+It takes `task` (the task ID) and `blocks` (up to 12 typed blocks).
+It replaces the page of a task you hold, under the same holder rule as `task_write`.
+It returns the page URL, blocks, and result versions. It does not start a model run.
+The tool shares the limit of 60 task changes per token per hour.
+A page shows work as its reader sees it, then the checks and their sources. Do not repeat the brief.
+See [Task pages](pages.md) for the five block kinds and image rules.
+
+```json
+{
+  "name": "task_page",
+  "arguments": {
+    "task": 12,
+    "blocks": [
+      {"kind": "preview", "as": "Example Co", "label": "Draft message", "text": "The new release is ready."},
+      {"kind": "checks", "items": [{"claim": "The release passed", "state": "yes", "source_url": "https://example.com/checks"}]}
+    ]
+  }
+}
+```

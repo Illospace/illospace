@@ -306,3 +306,6 @@ A wait that got a plain reminder with no check gets one check at once. It follow
 They speak only for complete work or a restart. A review card can arrive outside reminder hours.
 
 A holder can use `task_return` to return work with proof for another person's review.
+
+A task also has a [page](pages.md) when `pages.enabled` is on.
+The page shows the work, the proof, and the same review actions as Slack.

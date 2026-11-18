@@ -147,6 +147,7 @@ class Registry:
             tool.declaration()
             for _, tool in sorted(self.tools.items())
             if tool.name not in {"asks_digest"}
+            and not (tool.name in {"page_read", "page_write"} and not run.get("pages_enabled"))
             and not (tool.risk == "send_outside" and run.get("person_id") is None)
             and scope(run, tool).outcome == "allow"
         ]
@@ -154,6 +155,7 @@ class Registry:
     async def list_tools_for(self, ctx: ToolContext) -> list[dict]:
         """Hide tools whose connector or grant is absent. Call checks still apply."""
         result = []
+        ctx.run["pages_enabled"] = ctx.app.workspace.config.pages.enabled
         for declaration in self.list_tools(ctx.run):
             tool = self.tools[declaration["name"]]
             if tool.available is None or await tool.available(ctx):
@@ -175,7 +177,7 @@ class Registry:
                 reason = f"The run has reached the {name} call limit of {RUN_LIMITS[name]}"
         if tool:
             try:
-                validated = tool.arguments.model_validate(args).model_dump(exclude_unset=tool.exclude_unset)
+                validated = tool.arguments.model_validate(args).model_dump(by_alias=True, exclude_unset=tool.exclude_unset)
             except ValidationError:
                 reason = "The tool arguments do not match its schema"
             else:
@@ -273,7 +275,7 @@ class Registry:
         envelope = {"decision": decision, "reason": reason, "result": result}
         # Personal snapshots keep complete JSON across all attention aliases.
         if (
-            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "web_fetch", "aws_read"}
+            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "web_fetch", "aws_read", "page_read"}
             and len(json_text(envelope)) > MAX_RESULT_CHARS
         ):
             note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."

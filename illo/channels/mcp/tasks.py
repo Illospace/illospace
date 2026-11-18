@@ -10,7 +10,7 @@ from illo.tasks.views import compact, full
 from illo.tools import tasks as shared
 from illo.tools.registry import Arguments
 
-NAMES = frozenset({"task_mine", "task_get", "task_write", "task_post", "task_create", "task_lists"})
+NAMES = frozenset({"task_mine", "task_get", "task_write", "task_post", "task_create", "task_lists", "task_page"})
 
 
 class Mine(Arguments):
@@ -44,14 +44,18 @@ async def handle(ctx, name, args):
         return {"tasks": [{**compact(row), "new_for_you": row["last_actor"] != viewer.actor}
                           for row in rows[:args["limit"]]]}
     common = {"workspace": workspace, "viewer": viewer}
-    if name in {"task_write", "task_post", "task_create"}:
+    if name in {"task_write", "task_post", "task_create", "task_page"}:
         # The task lock makes the hourly cap exact across simultaneous calls.
         await mcp.lock_token(ctx.conn, ctx.token["id"], "tasks")
         count = await one(ctx.conn, """SELECT count(*) AS n FROM audit WHERE token_id=%s
             AND tool = ANY(%s) AND decision='allow' AND at>now()-interval '1 hour'""",
-            (ctx.token["id"], ["task_write", "task_post", "task_create"]))
+            (ctx.token["id"], ["task_write", "task_post", "task_create", "task_page"]))
         if count["n"] >= 60:
             raise ledger.TaskError("The token has reached its limit of 60 task changes per hour.")
+    if name == "task_page":
+        from illo.tasks.pages import write
+
+        return await write(ctx.conn, ctx.app, viewer, args, holder_only=True)
     if name == "task_get":
         row = await ledger.get(ctx.conn, args["id"], viewer=viewer)
         if not row:
@@ -67,7 +71,10 @@ async def handle(ctx, name, args):
 
 
 def tools(factory):
+    from illo.tasks.pages.schema import Write as PageWrite
+
     entries = [
+        ("task_page", PageWrite, "write_internal", "Show a person the work they must review as its reader will see it, then the checks you made, each with its source. Do not repeat the brief. Replace the page of a task you hold and return its URL."),
         ("task_mine", Mine, "read", "Read your tasks with state, waits_for, and new_for_you. Read task_get before you work. An unnamed token reads the tasks of its person and their agents."),
         ("task_get", shared.Get, "read", "Read the brief, result version, links, pieces, checks, messages, silent_hours, and last wake result before you act."),
         ("task_write", shared.Write, "write_internal", "Write your result below the brief. Give either result with the version you read, or append. A message must say what changed and what you need. Set returned true on the last write. Never say done."),

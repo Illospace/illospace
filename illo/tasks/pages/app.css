@@ -1,0 +1,75 @@
+:root{
+  color-scheme:light dark;
+  --bg:#fbfbfa; --card:#ffffff; --ink:#17202a; --soft:#5b6875; --line:#dfe3e7;
+  --accent:#145db5; --accent-ink:#ffffff; --ok:#1a7f4b; --bad:#b3261e; --wait:#8a5a00; --wait-bg:#fff4d6;
+  --radius:10px;
+  font:1rem/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+  background:var(--bg); color:var(--ink);
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#11161c; --card:#171d25; --ink:#edf1f5; --soft:#9aa7b4; --line:#2b3440;
+  --accent:#8fc0ff; --accent-ink:#0b1622; --ok:#5fd39a; --bad:#ff8a80; --wait:#ffd27a; --wait-bg:#3a2e12;
+}}
+*{box-sizing:border-box}
+body{margin:0; overflow-wrap:anywhere}
+a{color:var(--accent)}
+.top{display:flex; gap:.5rem; align-items:center; padding:.6rem 1rem; border-bottom:1px solid var(--line); font-size:.85rem; color:var(--soft)}
+.top .mark{width:1.25rem; height:1.25rem; border-radius:.35rem; background:var(--ink); color:var(--bg); display:grid; place-items:center; font-weight:700; font-size:.7rem}
+.top .grow{flex:1}
+.top form{margin:0} .top button{all:unset; cursor:pointer; color:var(--accent)}
+main{max-width:44rem; margin:auto; padding:1rem 1rem 7rem}
+.chips{display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 .5rem; padding:0; list-style:none; font-size:.8rem}
+.chips li{border:1px solid var(--line); border-radius:99px; padding:.05rem .6rem; color:var(--soft)}
+.chips .wait{background:var(--wait-bg); color:var(--wait); border-color:transparent}
+h1{font-size:1.45rem; line-height:1.25; letter-spacing:-.01em; margin:.2rem 0 .3rem}
+.ask{font-size:1.05rem; margin:0 0 1.1rem}
+.notice{border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:var(--radius); padding:.6rem .8rem; margin:0 0 1rem; background:var(--card)}
+.notice.bad{border-left-color:var(--bad)}
+.block{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); margin:0 0 .9rem; overflow:hidden}
+.block>h2{font-size:.75rem; text-transform:uppercase; letter-spacing:.06em; color:var(--soft); font-weight:600; margin:0; padding:.7rem .9rem 0}
+.block .body{padding:.6rem .9rem .8rem}
+.block .body>:first-child{margin-top:0} .block .body>:last-child{margin-bottom:0}
+.prose p,.prose ul,.prose ol,.prose blockquote,.prose pre{margin:.5rem 0}
+.prose code{font:.9em ui-monospace,monospace; background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:0 .25em}
+.prose pre{overflow:auto; padding:.6rem; background:var(--bg); border:1px solid var(--line); border-radius:6px}
+.prose pre code{border:0; padding:0; background:none}
+.prose blockquote{border-left:3px solid var(--line); padding-left:.7rem; color:var(--soft)}
+/* preview: a thing as its reader will see it (a post, a mail, a message) */
+.preview .as{display:flex; gap:.6rem; align-items:center; padding:.75rem .9rem .2rem}
+.preview .badge{width:2.1rem; height:2.1rem; border-radius:.45rem; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-weight:700}
+.preview .as b{display:block; line-height:1.2} .preview .as small{color:var(--soft)}
+.preview .text{padding:.3rem .9rem .8rem; white-space:pre-line}
+.preview img,.image img{display:block; width:100%; height:auto; background:var(--bg)}
+.image figcaption{padding:.5rem .9rem; font-size:.85rem; color:var(--soft)}
+.image{margin:0 0 .9rem}
+.missing{padding:1.2rem .9rem; color:var(--soft); font-size:.9rem; border-top:1px dashed var(--line)}
+/* checks */
+.checks{list-style:none; margin:0; padding:.3rem .9rem .6rem}
+.checks li{display:grid; grid-template-columns:1.3rem 1fr; gap:.45rem; padding:.35rem 0; border-top:1px solid var(--line)}
+.checks li:first-child{border-top:0}
+.checks .dot{width:1.1rem; height:1.1rem; border-radius:50%; margin-top:.2rem; display:grid; place-items:center; font-size:.7rem; font-weight:700; color:var(--card)}
+.checks .yes .dot{background:var(--ok)} .checks .no .dot{background:var(--bad)} .checks .open .dot{background:var(--soft)}
+.checks small{display:block; color:var(--soft)}
+/* bars: inline SVG, one row for each value; widths are SVG attributes, not styles */
+.bars svg{display:block; width:100%; height:auto} .bars text{fill:currentColor; font-size:12px} .bars rect{fill:var(--accent)}
+.by{font-size:.8rem; color:var(--soft); margin:-.3rem 0 1.2rem}
+details{border-top:1px solid var(--line); padding:.6rem 0}
+details>summary{cursor:pointer; font-weight:600}
+.links{list-style:none; padding:0; margin:.5rem 0; display:flex; flex-wrap:wrap; gap:.4rem 1rem}
+.trail{list-style:none; padding:0; margin:.6rem 0 0}
+.trail li{border-left:2px solid var(--line); padding:0 0 .7rem .7rem; font-size:.9rem}
+.trail time,.trail .actor{color:var(--soft); font-size:.8rem}
+/* the decision bar stays at the bottom of the window */
+.decide{position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:.6rem 1rem calc(.6rem + env(safe-area-inset-bottom))}
+.decide .in{max-width:44rem; margin:auto; display:flex; flex-wrap:wrap; gap:.5rem; align-items:flex-start}
+.decide form{margin:0}
+.btn{font:inherit; border-radius:8px; padding:.5rem 1rem; border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer}
+.btn.go{background:var(--accent); color:var(--accent-ink); border-color:transparent; font-weight:600}
+.decide details{border:0; padding:0; flex:1 1 16rem}
+.decide details>summary{list-style:none; display:inline-block}
+.decide details>summary::-webkit-details-marker{display:none}
+.decide textarea{display:block; width:100%; min-height:4.5rem; margin:.5rem 0; font:inherit; padding:.5rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink)}
+.decide .said{flex:1 1 100%; margin:0; color:var(--soft); font-size:.9rem}
+/* sign-in */
+.signin{max-width:26rem; margin:12vh auto; padding:1rem; text-align:center}
+.signin .code{font:600 1.6rem ui-monospace,monospace; letter-spacing:.04em; padding:.7rem; border:1px dashed var(--line); border-radius:var(--radius); margin:1rem 0; user-select:all}

@@ -19,6 +19,8 @@ Then read the live state where the work is. The task text can be old: do not tru
 • A public page or an outside service: the web tools.
 • Logs and business data: the connectors, if they are connected.
 
+When the task waits for a person to review it, use `page_read`. If its blocks are absent or for an older result version, write the page with `page_write`.
+
 Then call `wait_result` one time:
 • `complete`: the wanted result of the task is live where the problem was. A merge alone is not complete. Give the proof: each fact with its web address.
 • `restart`: an agent holds the task, its start failed or it stopped, and the cause is gone now.

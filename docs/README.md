@@ -22,3 +22,5 @@ Read the pages in this order.
 Read [tasks.md](tasks.md) for lists, tasks, agent work, proof, and task threads.
 
 - [Sandbox](sandbox.md): shell commands, repository copies, and resource limits.
+
+- [Task pages](pages.md): browser sign-in, typed blocks, images, and review actions.

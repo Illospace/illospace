@@ -55,3 +55,8 @@ tasks:
   check_minutes: 5
   reminder_window: [8, 20]
   github_writes_per_hour: 30
+
+# Task pages are off by default. Expose /t/ and /web/ to use them.
+# pages:
+#   enabled: false
+#   url: https://illo.example.com

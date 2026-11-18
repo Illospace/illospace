@@ -41,6 +41,7 @@ SETUP_MODULES = (
     "illo.connectors.oauth",
     "illo.connectors.chat",
     "illo.tasks.list_page",
+    "illo.tasks.pages.web",
     "illo.connectors.chatgpt_oauth",
     "illo.routines.scheduler",
     "illo.routines.digest",

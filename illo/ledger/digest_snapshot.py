@@ -76,6 +76,14 @@ def thread_link(row):
     return ""
 
 
+def task_link(workspace, row):
+    if workspace.config.pages.enabled:
+        from illo.tasks.pages import workspace_url
+
+        return workspace_url(workspace, row["id"])
+    return thread_link(row)
+
+
 def hours(now, at):
     return round(max(0, (now - at).total_seconds() / 3600), 1)
 
@@ -144,7 +152,7 @@ async def task_records(conn, workspace, now, since, person=None):
         records.append({
             "row": row, "events": history, "period": period, "wait_since": since_wait, "restarts": restarts,
             "reviewer": await tasks.reviewer(conn, workspace, row),
-            "item": {"id": row["id"], "title": row["title"], "link": thread_link(row),
+            "item": {"id": row["id"], "title": row["title"], "link": task_link(workspace, row),
                      "holder": holder, "reason": wait_reason(row, period, holder),
                      "age_hours": hours(now, since_wait), "due_at": row["due_at"],
                      "silent_hours": hours(now, base),

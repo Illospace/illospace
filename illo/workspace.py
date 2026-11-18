@@ -326,6 +326,26 @@ class ConnectConfig(Model):
         return value
 
 
+class PagesConfig(Model):
+    enabled: bool = False
+    url: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def valid_url(cls, value):
+        if value is not None:
+            from urllib.parse import urlsplit
+
+            from illo.tasks.list_page import safe_link
+
+            parsed = urlsplit(value)
+            if (not safe_link(value) or parsed.query or parsed.fragment
+                    or "?" in value or "#" in value or any(c.isspace() or ord(c) < 32 for c in value)):
+                raise ValueError("Use HTTPS, or loopback HTTP, without credentials, query, or fragment")
+            value = value.rstrip("/")
+        return value
+
+
 class MemoryConfig(Model):
     list_changes: Literal["owners", "everyone"] = "owners"
 
@@ -379,6 +399,7 @@ class TeamConfig(Model):
     run_limits: RunLimits = Field(default_factory=RunLimits)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     connect: ConnectConfig = Field(default_factory=ConnectConfig)
+    pages: PagesConfig = Field(default_factory=PagesConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     email: EmailConfig = Field(default_factory=EmailConfig)
