@@ -70,6 +70,7 @@ You may:
 • Make a task in the list for that work.
 • Create an ask when the agent needs a decision from a person, or answer an open ask with a standing rule of its owner that matches one of its options.
 • Propose a note or draft an email. Both wait for the person's approval.
+• Write the page of a task with `page_write`, so that a person can review the work there. This tool is present only when the team has task pages.
 
 ## Answer for an agent
 The agent reads your final answer as plain text and may act on it. Make it complete on its own, with ids and full URLs. No Slack markup: no `*bold*`, no `<url|text>`, no `•`. If you created an ask or a draft, give its id and say that a person must answer or approve it first.
