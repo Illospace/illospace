@@ -33,6 +33,9 @@ from collectors.common import (
     read_token,
 )
 
+# Illo accepts 1,000 lanes in one report. A machine can have more threads than that.
+LANE_BATCH = 500
+
 
 @dataclass
 class Config:
@@ -565,18 +568,20 @@ class Collector:
             if refresh
             or self.state["lanes"].get(lane["external_id"]) != hashes[lane["external_id"]]
         ]
-        self.mcp.call(
-            "lane_report",
-            {
-                "lanes": changed,
-                "collector": {
-                    "label": self.config.machine,
-                    "version": VERSION,
-                    "threads_seen": len(threads),
-                    "expected_every_s": self.config.poll_seconds,
+        # An empty report still goes out, because it is the heartbeat.
+        for start in range(0, max(len(changed), 1), LANE_BATCH):
+            self.mcp.call(
+                "lane_report",
+                {
+                    "lanes": changed[start : start + LANE_BATCH],
+                    "collector": {
+                        "label": self.config.machine,
+                        "version": VERSION,
+                        "threads_seen": len(threads),
+                        "expected_every_s": self.config.poll_seconds,
+                    },
                 },
-            },
-        )
+            )
         self.state["lanes"] = hashes
         if refresh:
             self.state["refreshed_at"] = now

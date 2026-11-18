@@ -340,6 +340,71 @@ def test_changed_lanes_heartbeat_refresh_and_restart(setup):
     assert collector.config.state_file.stat().st_mode & 0o777 == 0o600
 
 
+def test_many_lanes_go_out_in_batches_that_illo_accepts(setup, monkeypatch):
+    from dataclasses import replace
+
+    from collectors.t3 import collector as module
+    from illo.channels.mcp.schemas import LaneReport
+
+    collector, api, now = setup
+    thread = collector.source.list_threads()[0]
+    threads = [replace(thread, id=f"thread-{n}", pending=[]) for n in range(1201)]
+    monkeypatch.setattr(collector.source, "list_threads", lambda: threads)
+    collector.poll()
+    reports = [args for name, args in api.calls if name == "lane_report"]
+    assert [len(r["lanes"]) for r in reports] == [500, 500, 201]
+    limit = next(m.max_length for m in LaneReport.model_fields["lanes"].metadata if hasattr(m, "max_length"))
+    assert module.LANE_BATCH <= limit
+    for report in reports:
+        LaneReport.model_validate(report)
+        assert report["collector"]["threads_seen"] == 1201
+    assert {lane["external_id"] for r in reports for lane in r["lanes"]} == {t.id for t in threads}
+    assert len(collector.state["lanes"]) == 1201
+    api.calls.clear()
+    now[0] += 30
+    collector.poll()
+    assert [args["lanes"] for name, args in api.calls if name == "lane_report"] == [[]]
+
+
+@pytest.mark.parametrize("count,sizes", [(500, [500]), (1000, [500, 500]), (501, [500, 1])])
+def test_lane_batches_have_no_extra_empty_report(setup, monkeypatch, count, sizes):
+    from dataclasses import replace
+
+    collector, api, _ = setup
+    thread = collector.source.list_threads()[0]
+    threads = [replace(thread, id=f"thread-{n}", pending=[]) for n in range(count)]
+    monkeypatch.setattr(collector.source, "list_threads", lambda: threads)
+    collector.poll()
+    assert [len(args["lanes"]) for name, args in api.calls if name == "lane_report"] == sizes
+
+
+def test_failed_lane_batch_keeps_the_old_state_and_the_next_poll_sends_all(setup, monkeypatch):
+    from dataclasses import replace
+
+    collector, api, _ = setup
+    thread = collector.source.list_threads()[0]
+    threads = [replace(thread, id=f"thread-{n}", pending=[]) for n in range(600)]
+    monkeypatch.setattr(collector.source, "list_threads", lambda: threads)
+    real, calls = collector.mcp.call, []
+
+    def second_fails(name, args):
+        calls.append(name)
+        if calls.count("lane_report") == 2:
+            raise CollectorError("Illo did not answer.")
+        return real(name, args)
+
+    monkeypatch.setattr(collector.mcp, "call", second_fails)
+    with pytest.raises(CollectorError):
+        collector.poll()
+    assert collector.state["lanes"] == {} and "refreshed_at" not in collector.state
+    assert calls == ["lane_report", "lane_report"]
+    monkeypatch.setattr(collector.mcp, "call", real)
+    api.calls.clear()
+    collector.poll()
+    assert [len(args["lanes"]) for name, args in api.calls if name == "lane_report"] == [500, 100]
+    assert len(collector.state["lanes"]) == 600
+
+
 def test_structured_ask_and_cancel(setup):
     collector, api, _ = setup
     api.wait()
