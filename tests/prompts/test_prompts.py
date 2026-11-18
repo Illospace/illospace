@@ -70,7 +70,8 @@ def test_base_prompt_stays_short():
 def test_every_profile_has_a_short_text():
     assert PROFILE_NAMES <= PROFILE_TEXTS.keys()
     for name, text in PROFILE_TEXTS.items():
-        limit = 340 if name in {"person_dm", "team_channel"} else 280 if name == "agent_request" else 250
+        # 295 for an agent request: its list of allowed work names the task page (11 words).
+        limit = 340 if name in {"person_dm", "team_channel"} else 295 if name == "agent_request" else 250
         assert words(text) <= limit, name
 
 
