@@ -62,8 +62,9 @@ If the mirror loses the commit, the page shows that the picture is unavailable.
 `page_write` replaces the blocks of a visible task.
 Person DMs, routines, and agent requests can write pages. Team channels can only read pages.
 Deep requests can write pages. A wait check can write only its own task page.
-When work comes back for a person to review, Illo starts one look at the work that fills the page. The look is a wait check, so it needs `tasks.wait_check`, deep work, and a team task. It sends no message.
+When work comes back for a person to review, Illo starts one look at the work that fills the page. The look is a wait check, so it needs `tasks.wait_check`, deep work, and a team task. It sends no message of its own.
 At most two wait checks run at once, so a look can wait for a later tick.
+The review card in Slack waits for this look, for 6 minutes at most. When the look ends with a message, the card has Illo's words on what to review. Its first button opens the page. When the look fails, has no message, or is late, the card has the holder's words. A late look changes the card and sends one message that the page is ready.
 `page_read` returns `stale: true` when the work came back or the result changed after the page was written. The page says so too.
 Outside and tainted runs cannot read or write pages.
 A coding agent uses `task_page` through MCP. It can write only a task it holds, under the `task_write` holder rule.

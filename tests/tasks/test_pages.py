@@ -30,8 +30,10 @@ TEXT = [{'kind': 'text', 'title': 'Note', 'text': 'The work is ready.'}]
 
 
 @pytest.fixture
-async def ctx(app):
+async def ctx(app, monkeypatch):
     ctx = app.state.ctx
+    # Most tests want the review card at once. The tests of the wait for the page set the time again.
+    monkeypatch.setattr(slack_tasks, 'HOLD_FOR_PAGE', 0)
     ctx.workspace = ctx.workspace.model_copy(deep=True)
     ctx.workspace.config.pages = PagesConfig(enabled=True, url=BASE)
     ctx.workspace.lists += [TaskList(key='private', name='Private', owner='ada')]
@@ -658,7 +660,8 @@ async def test_open_button_gives_a_link_that_signs_in_one_time(browser, ctx, sla
     row = await make(ctx, returned=True)
     card = cards.task_return_card({**row, 'page_url': pages.url(ctx, row['id'])}, 'Returned', [])
     assert [b['action_id'] for b in card[-1]['elements']] == [
-        f"task:{row['id']}:done", f"task:{row['id']}:back", f"web-open:{row['id']}"]
+        f"web-open:{row['id']}", f"task:{row['id']}:done", f"task:{row['id']}:back"]
+    assert [b.get('style') for b in card[-1]['elements']] == ['primary', None, None]
     assert len(cards.task_return_card(row, 'Returned', [])[-1]['elements']) == 2
     text = await press_open(ctx, slack_client, row['id'])
     assert 'as Ana' in text and 'one time' in text
@@ -761,10 +764,11 @@ async def test_agent_page_on_returned_work_tells_the_reviewer_one_time(ctx, slac
     assert len(await notices()) == 2 * len(sent)
 
 
-async def test_returned_work_gets_one_look_that_fills_the_page(ctx, fake_brain):
+async def test_returned_work_gets_one_look_that_fills_the_page(ctx, fake_brain, monkeypatch):
     from illo.deep import worker
     from illo.tasks import release, waits
 
+    monkeypatch.setattr(slack_tasks, 'HOLD_FOR_PAGE', 360)
     row = await make(ctx, returned=True)
     await write(ctx, row)
     async with ctx.pool.connection() as conn:
@@ -779,8 +783,12 @@ async def test_returned_work_gets_one_look_that_fills_the_page(ctx, fake_brain):
     # One look for this wait, at once: no silence limit. The job names the page tools.
     assert len(deep) == 1 and deep[0]['context']['wait']['round'] == waits.AT_RETURN
     assert deep[0]['context']['wait']['task_id'] == row['id'] and '`stale` is true' in deep[0]['job']
+    def cards():
+        return [c for c in ctx.slack_client.calls if c['method'] == 'chat_postMessage' and c.get('blocks')]
+
+    # The review card waits for the look, so that one message opens the page with the work on it.
     await slack_tasks.tick(ctx)
-    before = len(ctx.slack_client.calls)
+    assert not cards()
     fake_brain.script = [{'name': 'page_write', 'arguments': {'task': row['id'], 'blocks': TEXT + TEXT}},
                          {'name': 'wait_result', 'arguments': {'outcome': 'person', 'message': 'Review the new draft. An agent cannot approve it.'}}]
     assert (await worker.tick(ctx))['state'] == 'done'
@@ -789,16 +797,60 @@ async def test_returned_work_gets_one_look_that_fills_the_page(ctx, fake_brain):
         page = await pages.read(conn, ctx, ANA, row['id'])
         events = await all_rows(conn, 'SELECT * FROM task_events WHERE task_id=%s ORDER BY id', (row['id'],))
     assert page['stale'] is False and len(page['blocks']) == 2
-    # This look sends no reminder and no message. The silence limit still decides the first reminder.
+    # This look sends no reminder. The silence limit still decides the first reminder.
     assert not [e for e in events if e['kind'] == 'reminded']
     assert events[-1]['kind'] == 'message' and events[-1]['data']['source'] == 'wait_check'
-    assert not [c for c in ctx.slack_client.calls[before:] if c['method'] == 'chat_postMessage']
+    # One card: Illo's words say what to review, and the first button opens the page.
+    await slack_tasks.tick(ctx)
+    assert len(cards()) == 1
+    card = cards()[0]['blocks']
+    assert 'Review the new draft. An agent cannot approve it.' in str(card) and 'The ticket is closed' not in str(card)
+    assert card[-1]['elements'][0]['action_id'] == f"web-open:{row['id']}"
     # With pages off, a returned task gets no look before the silence limit.
     ctx.workspace.config.pages.enabled = False
     other = await make(ctx, returned=True)
     await release.tick(ctx)
     async with ctx.pool.connection() as conn:
         assert not await one(conn, "SELECT id FROM deep_runs WHERE context->'wait'->>'task_id'=%s", (str(other['id']),))
+
+
+async def test_review_card_does_not_wait_long_for_the_page(ctx, monkeypatch):
+    monkeypatch.setattr(slack_tasks, 'HOLD_FOR_PAGE', 360)
+    row = await make(ctx, returned=True)
+
+    def cards():
+        return [c for c in ctx.slack_client.calls if c['method'] == 'chat_postMessage' and c.get('blocks')]
+
+    await slack_tasks.tick(ctx)
+    assert not cards()
+    # No look came in time. The card goes out with the holder's words.
+    monkeypatch.setattr(slack_tasks, 'HOLD_FOR_PAGE', 0)
+    await slack_tasks.tick(ctx)
+    assert len(cards()) == 1 and 'Please review the result.' in str(cards()[0]['blocks'])
+    # The look ends late. The card gets Illo's words, and one message says that the page is ready.
+    async with ctx.pool.connection() as conn:
+        await tasks._event(conn, row, 'code', 'message', 'Review the new draft.', {'source': 'wait_check'})
+    for _ in range(2):
+        await slack_tasks.tick(ctx)
+    update = [c for c in ctx.slack_client.calls if c['method'] == 'chat_update' and c.get('blocks')][-1]
+    assert 'Review the new draft.' in str(update['blocks']) and 'Please review the result.' not in str(update['blocks'])
+    ready = [c for c in ctx.slack_client.calls if c['method'] == 'chat_postMessage' and 'now shows the returned work' in c['text']]
+    assert len(ready) == 1 and ready[0]['blocks'][-1]['elements'][0]['action_id'] == f"web-open:{row['id']}"
+
+
+async def test_cancelled_look_ends_the_wait_of_the_card(ctx, monkeypatch):
+    from illo.tasks import release
+
+    monkeypatch.setattr(slack_tasks, 'HOLD_FOR_PAGE', 360)
+    await make(ctx, returned=True)
+    await release.tick(ctx)
+    await slack_tasks.tick(ctx)
+    cards = lambda: [c for c in ctx.slack_client.calls if c['method'] == 'chat_postMessage' and c.get('blocks')]  # noqa: E731
+    assert not cards()
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE deep_runs SET state='cancelled' WHERE kind='check'")
+    await slack_tasks.tick(ctx)
+    assert len(cards()) == 1
 
 
 async def test_logs_drop_the_address_of_a_link(app):

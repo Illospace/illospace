@@ -132,6 +132,34 @@ async def _thread_task(conn, channel, thread):
     return {"id": int(card["key"].rsplit(":", 1)[1])} if card else None
 
 
+HOLD_FOR_PAGE = 360
+PAGE_SHOWS = "The work came back. The task page shows it."
+
+
+async def _look(conn, task_id, returned):
+    """Give what Illo's look at the returned work said, if that look has ended with a message."""
+    return await one(conn, """SELECT * FROM task_events WHERE task_id=%s AND id>%s AND kind IN ('message','reminded')
+        AND data->>'source'='wait_check' ORDER BY id DESC LIMIT 1""", (task_id, returned["id"]))
+
+
+async def _page_comes(ctx, conn, row, returned):
+    """Say if the review card must wait: Illo's look at the returned work fills the task page first.
+
+    The wait ends when the look has a result, when its run ends, or after `HOLD_FOR_PAGE` seconds.
+    """
+    config = ctx.workspace.config
+    if not (config.pages.enabled and config.tasks.wait_check and config.deep.enabled
+            and row["visibility"] != "private" and row["state"] == "review"):
+        return False
+    waited = await one(conn, """SELECT clock_timestamp()-%s > make_interval(secs=>%s) AS long,
+        (SELECT state FROM deep_runs WHERE kind='check' AND context->'wait'->>'task_id'=%s
+           AND context->'wait'->>'round'='-1' AND created_at>=%s ORDER BY id DESC LIMIT 1) AS run""",
+        (returned["at"], HOLD_FOR_PAGE, str(row["id"]), returned["at"]))
+    if waited["long"] or waited["run"] in {"done", "failed", "cancelled"}:
+        return False
+    return not await _look(conn, row["id"], returned)
+
+
 async def _returned_words(conn, task_id, returned):
     """Give the holder's last message before a return signal. It says what came back."""
     if returned["data"].get("source") == "wait_check":
@@ -166,6 +194,10 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
     else:
         ref = target or await ledger.reviewer(conn, ctx.workspace, row)
         person = await people.get(conn, ref[7:]) if ref else None
+    came_back = next((e for e in reversed(events) if e["kind"] == "returned"), None)
+    if came_back and await _page_comes(ctx, conn, row, came_back):
+        # Not an error: the pending marker stays. One message then opens the page with the work on it.
+        return True
     reminder = next((e for e in reversed(events) if e["kind"] == "reminded"
                      and e["data"].get("to") == target), None)
     if reminder and (not in_window(ctx.workspace, person) or
@@ -239,6 +271,11 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
                     text=text, client_msg_id=message_id("message", task_id, event["id"]))
     message = returned["text"] if returned else "All pieces are done. Confirm the whole task."
     detail = await _returned_words(conn, task_id, returned) if returned else None
+    look = await _look(conn, task_id, returned) if returned and row.get("page_url") else None
+    if look:
+        # Illo read the work and put it on the page. Its words say what to review. The holder's own
+        # message, with its file links, is on the page.
+        message, detail = PAGE_SHOWS, escape(look["text"])
     if row["state"] == "review" and (returned or not card):
         if card:
             await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
@@ -257,9 +294,21 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
             text=mention + f"Task {task_id}. Returned: " + title_link(ctx, row), blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": mention or " "}}, *blocks],
             client_msg_id=message_id("returned", task_id, returned["id"] if returned else events[-1]["id"]))
         card = {"ts": sent["ts"], "message": message, "detail": detail, "channel": delivery_channel,
-                "thread": row["slack_ts"] if delivery_channel == row["slack_channel"] else sent["ts"]}
+                "thread": row["slack_ts"] if delivery_channel == row["slack_channel"] else sent["ts"],
+                "return": returned["id"] if returned else None, "looked": bool(look)}
         await kv.set(conn, f"task:card:{task_id}", card)
     elif card:
+        late = (await _look(conn, task_id, {"id": card["return"]})
+                if row["state"] == "review" and row.get("page_url") and card.get("return") and not card.get("looked")
+                else None)
+        if late:
+            # The look ended after the card went out. Put its words on the card, and say that the page is ready.
+            card = {**card, "message": PAGE_SHOWS, "detail": escape(late["text"]), "looked": True}
+            await kv.set(conn, f"task:card:{task_id}", card)
+            await ctx.slack_client.chat_postMessage(channel=card.get("channel", row["slack_channel"]),
+                thread_ts=card.get("thread", row["slack_ts"]),
+                **notice(ctx, row, mention + "The task page now shows the returned work."),
+                client_msg_id=message_id("page-ready", task_id, late["id"]))
         if returned:
             # A newer return closed before this delivery. The card must show that return, not the old one.
             card = {**card, "message": message, "detail": detail}
@@ -281,13 +330,17 @@ async def tick(ctx):
     if not ctx.slack_client:
         return
     async with ctx.pool.connection() as conn:
-        pending = await all_rows(conn, "SELECT key FROM kv WHERE key LIKE 'task:pending:%%' ORDER BY key LIMIT 50")
+        pending = await all_rows(conn, "SELECT key FROM kv WHERE key LIKE 'task:pending:%%' ORDER BY key LIMIT 200")
     reminder_counts = Counter()
+    sent = 0
     for value in pending:
+        if sent >= 50:
+            break
         task_id = int(value["key"].rsplit(":", 1)[1])
         try:
             async with ctx.pool.connection() as conn:
-                await _send(ctx, conn, task_id, reminder_counts)
+                # A card that waits for its page costs one read. It must not take a place from another task.
+                sent += not await _send(ctx, conn, task_id, reminder_counts)
                 await sensors.ok(conn, "tasks:slack")
         except ChannelLookupError as exc:
             async with ctx.pool.connection() as conn:
