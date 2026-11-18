@@ -55,11 +55,17 @@ async def _person(ctx, conn, row, entry, now, counts, extra, pending, *, check=T
     period = await waits.current(conn, row)
     since = period["since"]
     limit = timedelta(hours=entry.silence.person_hours)
-    if now - since <= limit:
-        return
     enabled = (check and ctx.workspace.config.tasks.wait_check
                and ctx.workspace.config.deep.enabled and row["visibility"] != "private")
     pages = ctx.workspace.config.pages.enabled
+    if enabled and pages and row["state"] == "review":
+        # The reviewer opens the task page to decide. Look at the returned work at once and fill the page.
+        # This look sends nothing, so the silence limit still decides the first reminder.
+        first = waits.request(row, period, person, now, waits.AT_RETURN, pages=True)
+        if not await one(conn, "SELECT id FROM deep_runs WHERE dedupe_key=%s", (waits.key(first["wait"]),)):
+            pending.append(first)
+    if now - since <= limit:
+        return
     initial = waits.request(row, period, person, now, 0, pages=pages)
     deep = await one(conn, "SELECT * FROM deep_runs WHERE dedupe_key=%s", (waits.key(initial["wait"]),)) if enabled else None
     applied = bool(deep and deep["context"].get("wait", {}).get("applied"))

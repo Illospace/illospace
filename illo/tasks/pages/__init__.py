@@ -36,6 +36,25 @@ def workspace_url(workspace, task_id):
     return base.rstrip("/") + f"/t/{task_id}"
 
 
+async def stale(conn, row, page):
+    """Say if the page can show older work: the work came back, or the result changed, after the page was written.
+
+    A return through a ticket adds no result version, so the page keeps the id of the last event that its
+    writer could see. Event times are not safe for this: an event gets the start time of its transaction.
+    """
+    if not page:
+        return False
+    if page["result_version"] < row["result_version"]:
+        return True
+    if page.get("last_event_id") is None:
+        # A page from before this column. Its write time is the best mark.
+        newer = "at>%s", page["written_at"]
+    else:
+        newer = "id>%s", page["last_event_id"]
+    return bool(await one(conn, "SELECT 1 FROM task_events WHERE task_id=%s AND kind='returned' AND "
+                          + newer[0] + " LIMIT 1", (row["id"], newer[1])))
+
+
 async def read(conn, ctx, viewer, task_id):
     if not enabled(ctx):
         raise tasks.TaskError("Task pages are off.")
@@ -45,7 +64,8 @@ async def read(conn, ctx, viewer, task_id):
     page = await one(conn, "SELECT * FROM task_pages WHERE task_id=%s", (task_id,))
     return {"task": task_id, "blocks": page["blocks"] if page else [],
             "result_version": page["result_version"] if page else None,
-            "current_result_version": row["result_version"], "url": url(ctx, task_id),
+            "current_result_version": row["result_version"], "stale": await stale(conn, row, page),
+            "url": url(ctx, task_id),
             "author": page["author"] if page else None,
             "written_at": page["written_at"] if page else None,
             "visibility": row["visibility"]}
@@ -70,10 +90,13 @@ async def write(conn, ctx, viewer, args, *, holder_only=False):
             if item["state"] != "open" and item["checked_at"] is None:
                 item["checked_at"] = datetime.now(UTC).isoformat()
     before = await one(conn, "SELECT blocks FROM task_pages WHERE task_id=%s", (row["id"],))
-    await conn.execute("""INSERT INTO task_pages(task_id,blocks,author,result_version)
-        VALUES (%s,%s,%s,%s) ON CONFLICT(task_id) DO UPDATE SET blocks=EXCLUDED.blocks,
-        author=EXCLUDED.author,result_version=EXCLUDED.result_version,written_at=clock_timestamp()""",
-        (row["id"], Jsonb(blocks), viewer.actor, row["result_version"]))
+    # The task lock is held, so no event of this task can come between this read and the write.
+    last = await one(conn, "SELECT max(id) AS id FROM task_events WHERE task_id=%s", (row["id"],))
+    await conn.execute("""INSERT INTO task_pages(task_id,blocks,author,result_version,last_event_id)
+        VALUES (%s,%s,%s,%s,%s) ON CONFLICT(task_id) DO UPDATE SET blocks=EXCLUDED.blocks,
+        author=EXCLUDED.author,result_version=EXCLUDED.result_version,
+        last_event_id=EXCLUDED.last_event_id,written_at=clock_timestamp()""",
+        (row["id"], Jsonb(blocks), viewer.actor, row["result_version"], last["id"]))
     if (row["state"] == "review" and (row["waits_for"] or "").startswith("person:")
             and viewer.actor.startswith("agent:") and (not before or _content(before["blocks"]) != _content(blocks))):
         # An agent changed the page after the work came back. No other message tells the reviewer.

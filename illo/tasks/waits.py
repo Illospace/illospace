@@ -9,8 +9,10 @@ from illo.ledger import tasks
 from illo.tools.registry import Refusal
 
 # The page tools exist only when task pages are on. The prompt names them only then.
-PAGE = ("When the task waits for a person to review it, use `page_read`. If its blocks are absent "
-        "or for an older result version, write the page with `page_write`.\n\n")
+PAGE = ("When the task waits for a person to review it, use `page_read`. If the page has no blocks "
+        "or `stale` is true, write the page with `page_write`.\n\n")
+# The look at return time. It fills the page, and it sends no reminder.
+AT_RETURN = -1
 JOB = """Task {id} waits for {person} since {hours} hours. The record says: {needed}
 Before Illo reminds a person, find out if a person is needed. A wait ends in one of three ways. Find which one is true.
 

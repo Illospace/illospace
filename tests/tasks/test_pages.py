@@ -293,7 +293,7 @@ async def test_render_all_blocks_escape_fields_headers_and_version(browser, ctx,
     assert 'href="javascript:' not in response.text and '" onclick=' not in response.text
     for name, value in render.HEADERS.items():
         assert response.headers[name] == value
-    for expected in ['class="block preview"', 'class="checks"', '<progress', 'class="missing"', 'The result changed after this page was written.', 'The brief', 'Returned work', 'History (']:
+    for expected in ['class="block preview"', 'class="checks"', '<progress', 'class="missing"', 'This page can show older work.', 'The brief', 'Returned work', 'History (']:
         assert expected in response.text
     css = await browser.http.get('/web/app.css')
     assert css.headers['cache-control'] == 'no-store' and '--radius:10px' in css.text
@@ -759,6 +759,46 @@ async def test_agent_page_on_returned_work_tells_the_reviewer_one_time(ctx, slac
     async with ctx.pool.connection() as conn:
         await pages.write(conn, ctx, BUILD, {'task': working['id'], 'blocks': TEXT})
     assert len(await notices()) == 2 * len(sent)
+
+
+async def test_returned_work_gets_one_look_that_fills_the_page(ctx, fake_brain):
+    from illo.deep import worker
+    from illo.tasks import release, waits
+
+    row = await make(ctx, returned=True)
+    await write(ctx, row)
+    async with ctx.pool.connection() as conn:
+        assert (await pages.read(conn, ctx, ANA, row['id']))['stale'] is False
+        # A return through a ticket adds no result version. The page is still older than the work.
+        await tasks._event(conn, row, 'agent:build', 'returned', 'The ticket is closed as completed.')
+        assert (await pages.read(conn, ctx, ANA, row['id']))['stale'] is True
+    for _ in range(2):
+        await release.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        deep = await all_rows(conn, "SELECT * FROM deep_runs WHERE kind='check'")
+    # One look for this wait, at once: no silence limit. The job names the page tools.
+    assert len(deep) == 1 and deep[0]['context']['wait']['round'] == waits.AT_RETURN
+    assert deep[0]['context']['wait']['task_id'] == row['id'] and '`stale` is true' in deep[0]['job']
+    await slack_tasks.tick(ctx)
+    before = len(ctx.slack_client.calls)
+    fake_brain.script = [{'name': 'page_write', 'arguments': {'task': row['id'], 'blocks': TEXT + TEXT}},
+                         {'name': 'wait_result', 'arguments': {'outcome': 'person', 'message': 'Review the new draft. An agent cannot approve it.'}}]
+    assert (await worker.tick(ctx))['state'] == 'done'
+    await slack_tasks.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        page = await pages.read(conn, ctx, ANA, row['id'])
+        events = await all_rows(conn, 'SELECT * FROM task_events WHERE task_id=%s ORDER BY id', (row['id'],))
+    assert page['stale'] is False and len(page['blocks']) == 2
+    # This look sends no reminder and no message. The silence limit still decides the first reminder.
+    assert not [e for e in events if e['kind'] == 'reminded']
+    assert events[-1]['kind'] == 'message' and events[-1]['data']['source'] == 'wait_check'
+    assert not [c for c in ctx.slack_client.calls[before:] if c['method'] == 'chat_postMessage']
+    # With pages off, a returned task gets no look before the silence limit.
+    ctx.workspace.config.pages.enabled = False
+    other = await make(ctx, returned=True)
+    await release.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, "SELECT id FROM deep_runs WHERE context->'wait'->>'task_id'=%s", (str(other['id']),))
 
 
 async def test_logs_drop_the_address_of_a_link(app):

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from illo.channels.slack.tasks import _can_review, _visible, holder_name
 from illo.db import all_rows, one
 from illo.ledger import digest_snapshot, tasks
-from illo.tasks import list_page
+from illo.tasks import list_page, pages
 from illo.tasks.pages import images, markdown, signin
 
 HEADERS = {
@@ -154,8 +154,8 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
             body += await block_html(ctx, task_id, position, block, person)
         author = await holder_name(ctx, conn, stored['author']) if stored['author'] not in {'code', 'illo'} else 'Illo'
         body += '<p class="by">' + e(f"{author} wrote this page on {time(stored['written_at'], person)} for version {stored['result_version']} of the result.") + '</p>'
-        if stored['result_version'] < row['result_version']:
-            body += notice('The result changed after this page was written.')
+        if await pages.stale(conn, row, stored):
+            body += notice('This page can show older work. The work changed after the page was written.')
     body += '<details><summary>The brief</summary><div class="prose">' + markdown.render(row['brief']) + '</div></details>'
     body += '<details open><summary>Returned work</summary><div class="prose">' + markdown.render(row['result'])
     returned = next((x for x in reversed(events) if x['kind'] == 'returned'), None)

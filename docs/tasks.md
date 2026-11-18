@@ -299,6 +299,7 @@ Private tasks keep the plain reminder. Deep work must be on.
 At most two wait checks can wait in the queue or run at once. Other tasks wait for a later tick.
 Person requests, scouts, and briefs go before wait checks in the queue.
 
+With task pages on, a team task that comes back for review gets one more look, with no silence limit. It fills the task page and sends nothing. It waits in the same queue as the other wait checks. The silence limit still decides the first reminder.
 `tasks.wait_check` defaults to `true`. Set it to `false` to keep plain reminders.
 `tasks.recheck_days` defaults to `3`, from 0 to 30. Set 0 to stop later checks.
 Later checks use the time since the reminder first became due. They do not send another plain reminder.

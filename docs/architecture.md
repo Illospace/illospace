@@ -453,7 +453,7 @@ Migration `1800_task_pages.sql` adds three tables:
 |---|---|
 | `web_signins` | Browser request and pairing hashes, expiry, person, consent, and Slack card identity. |
 | `web_sessions` | Session token hash, person, creation, expiry, and last access. |
-| `task_pages` | One current block list per task, author, result version, and write time. |
+| `task_pages` | One current block list per task, author, result version, and write time. Migration `1801_task_page_event.sql` adds `last_event_id`, the last task event that the writer could see. |
 
 A whole-page write replaces one JSON list in one transaction. The task lock serializes writes and decisions.
 The page keeps no block history. The task keeps its existing event history.
