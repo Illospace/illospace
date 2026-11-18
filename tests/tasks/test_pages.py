@@ -629,6 +629,17 @@ async def test_signin_start_from_another_origin_is_refused(browser, ctx):
         assert not await one(conn, 'SELECT id FROM web_signins')
 
 
+async def test_a_browser_that_hides_its_origin_can_use_the_forms(browser, ctx):
+    # Real browsers sent "Origin: null" with each form while the policy was "no-referrer", and each form failed.
+    assert render.HEADERS['Referrer-Policy'] == 'same-origin'
+    hidden = {'Origin': 'null', 'Sec-Fetch-Site': 'same-origin'}
+    assert (await browser.http.post('/web/signin', headers=hidden)).status_code == 303
+    for site in ('cross-site', 'same-site'):
+        refused = await browser.http.post('/web/signin', headers={'Origin': BASE, 'Sec-Fetch-Site': site})
+        assert refused.status_code == 403
+    assert (await browser.http.post('/web/signin', headers={'Origin': 'null'})).status_code == 403
+
+
 async def test_ended_signin_offers_a_new_code_for_the_same_task(browser, ctx):
     await browser.start(next='/t/7')
     async with ctx.pool.connection() as conn:

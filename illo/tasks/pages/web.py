@@ -34,6 +34,11 @@ def cookie(ctx, response, name, value, seconds):
 
 
 def origin_ok(ctx, request):
+    # A browser sets Sec-Fetch-Site by itself, and a page cannot change it. It is correct also when the
+    # browser hides the origin ("Origin: null"), which a strict referrer policy or a privacy setting causes.
+    site = request.headers.get('sec-fetch-site')
+    if site:
+        return site == 'same-origin'
     if 'origin' not in request.headers:
         return True
     base = urlsplit(pages.base_url(ctx))

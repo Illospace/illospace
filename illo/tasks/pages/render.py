@@ -13,7 +13,8 @@ from illo.tasks.pages import images, markdown, signin
 
 HEADERS = {
     "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
+    # Not "no-referrer": with that policy a browser sends "Origin: null" with each form of the page.
+    "Referrer-Policy": "same-origin",
     "X-Robots-Tag": "noindex",
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
