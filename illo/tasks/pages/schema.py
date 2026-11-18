@@ -30,17 +30,19 @@ class Text(Arguments):
 
 class Preview(Arguments):
     kind: Literal["preview"]
+    title: str = Field(default="", max_length=80)
     name: str = Field(max_length=80)
-    label: str = Field(max_length=80)
+    label: str = Field(default="", max_length=80)
     text: str = Field(max_length=6000)
     image: ImageRef | None = None
 
 
 class Image(Arguments):
     kind: Literal["image"]
+    title: str = Field(default="", max_length=80)
     image: ImageRef
-    caption: str = Field(max_length=200)
-    alt: str = Field(max_length=200)
+    caption: str = Field(default="", max_length=200)
+    alt: str = Field(default="", max_length=200)
 
 
 class Check(Arguments):
@@ -73,7 +75,7 @@ class Bar(Arguments):
 
 class Bars(Arguments):
     kind: Literal["bars"]
-    title: str = Field(max_length=80)
+    title: str = Field(default="", max_length=80)
     rows: list[Bar] = Field(min_length=1, max_length=12)
 
 

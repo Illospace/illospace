@@ -1,5 +1,6 @@
 """Discover tool families and execute each call through the authority checks."""
 
+import functools
 import importlib
 import logging
 import pkgutil
@@ -30,6 +31,62 @@ RUN_LIMITS = {
     "github_create_issue": 3,
     "github_comment_issue": 5,
 }
+
+
+SCHEMA_REASON = "The tool arguments do not match its schema"
+MAX_REASON_CHARS = 600
+# The messages of these error types come from the schema only. Other types can repeat the caller's value.
+SAFE_ERRORS = frozenset({
+    "missing", "extra_forbidden", "string_type", "int_type", "float_type", "bool_type", "list_type",
+    "dict_type", "model_type", "literal_error", "enum", "is_instance_of", "none_required", "finite_number",
+    "string_too_long", "string_too_short", "string_pattern_mismatch", "too_long", "too_short",
+    "greater_than", "greater_than_equal", "less_than", "less_than_equal", "union_tag_not_found",
+})
+
+
+@functools.cache
+def _schema_words(model) -> frozenset[str]:
+    """The field names and the union tags that the schema of a tool declares."""
+    words = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            words.update(node.get("properties", {}))
+            words.update(node.get("discriminator", {}).get("mapping", {}))
+            if isinstance(node.get("const"), str):
+                words.add(node["const"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(model.model_json_schema())
+    return frozenset(words)
+
+
+def schema_reason(exc: ValidationError, model, limit: int = 5) -> str:
+    """Name the fields that failed, so that a model can correct its call.
+
+    The audit record keeps this reason, and it keeps no argument values. So the text holds only
+    list positions, words from the schema of the tool, and messages that come from the schema.
+    A key that the caller invented shows as `?`.
+    """
+    words = _schema_words(model)
+    parts = []
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    for error in errors[:limit]:
+        where = ".".join(str(part) if isinstance(part, int) or part in words else "?"
+                         for part in error["loc"]) or "arguments"
+        if error["type"] == "union_tag_invalid":
+            message = "Use one of the kinds in the schema"
+        elif error["type"] in SAFE_ERRORS:
+            message = error["msg"]
+        else:
+            message = "The value is not valid"
+        parts.append(f"{where}: {message}")
+    more = f" (and {len(errors) - limit} more)" if len(errors) > limit else ""
+    return (SCHEMA_REASON + ": " + "; ".join(parts) + more)[:MAX_REASON_CHARS]
 
 
 class Arguments(BaseModel):
@@ -178,8 +235,8 @@ class Registry:
         if tool:
             try:
                 validated = tool.arguments.model_validate(args).model_dump(exclude_unset=tool.exclude_unset)
-            except ValidationError:
-                reason = "The tool arguments do not match its schema"
+            except ValidationError as exc:
+                reason = schema_reason(exc, tool.arguments)
             else:
                 try:
                     if tool.resolve:

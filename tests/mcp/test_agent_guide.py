@@ -196,7 +196,7 @@ async def test_guide_rejects_invalid_arguments(guide, args):
                                 profile="person_dm", runtime="fake", model="fake")
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_guide", args)
         assert result["decision"] == "deny"
-        assert result["reason"] == "The tool arguments do not match its schema"
+        assert result["reason"].startswith("The tool arguments do not match its schema: ")
 
 
 @pytest.mark.parametrize("principal,tainted", [("outsider", False), ("person:ada", True)])

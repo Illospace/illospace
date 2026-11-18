@@ -718,3 +718,65 @@ async def test_page_words_for_the_wait(browser, ctx):
         await conn.execute("UPDATE task_events SET at=at-interval '25 hours' WHERE task_id=%s", (row['id'],))
         await conn.execute("UPDATE tasks SET created_at=created_at-interval '25 hours' WHERE id=%s", (row['id'],))
     assert 'Waits for you · 1 day<' in (await browser.http.get(f'/t/{row["id"]}')).text
+
+
+async def test_schema_refusal_names_the_fields_and_no_values(ctx):
+    row = await make(ctx)
+    secret = 'VALUE-THAT-MUST-NOT-APPEAR'
+    blocks = [{'kind': 'preview', 'label': 'x', 'text': secret, 'extra': secret},
+              {'kind': secret, 'text': 'x'},
+              {'kind': 'checks', 'items': [{'claim': 'c', 'state': secret}]}]
+    async with ctx.pool.connection() as conn:
+        person = await people.get(conn, 'ada')
+        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', runtime='fake', model='fake')
+        result = await ctx.registry.call(ToolContext(conn, run, ctx), 'page_write', {'task': row['id'], 'blocks': blocks})
+        stored = await one(conn, "SELECT reason FROM audit WHERE run_id=%s AND tool='page_write'", (run['id'],))
+    reason = result['reason']
+    assert result['decision'] == 'deny' and reason.startswith('The tool arguments do not match its schema: ')
+    assert 'blocks.0.preview.name: Field required' in reason and 'blocks.0.preview.?: Extra inputs are not permitted' in reason
+    assert 'blocks.1: Use one of the kinds in the schema' in reason and 'blocks.2.checks.items.0.state' in reason
+    assert secret not in reason and stored['reason'] == reason
+
+
+def test_small_block_fields_are_optional():
+    page = Write.model_validate({'task': 1, 'blocks': [
+        {'kind': 'preview', 'name': 'Example Co', 'text': 'Hello', 'title': 'Post'},
+        {'kind': 'image', 'image': {'repo': 'r', 'ref': 'main', 'path': 'a.png'}},
+        {'kind': 'bars', 'rows': [{'label': 'a', 'value': 1}]}]}).model_dump()
+    assert page['blocks'][0]['label'] == '' and page['blocks'][1]['caption'] == '' and page['blocks'][2]['title'] == ''
+
+
+async def test_optional_titles_render(ctx, monkeypatch):
+    async def ok(ctx, image, data=True):
+        return image, None, None
+    monkeypatch.setattr(images, 'read', ok)
+    ref = {'repo': 'r', 'ref': 'a' * 40, 'path': 'x.png'}
+    html = await render.block_html(ctx, 1, 0, {'kind': 'image', 'title': 'Picture', 'image': ref, 'caption': '', 'alt': ''}, {'timezone': 'UTC'})
+    assert '<h2>Picture</h2>' in html and 'figcaption' not in html
+    html = await render.block_html(ctx, 1, 0, {'kind': 'preview', 'title': 'Post', 'name': 'Ex', 'text': 't'}, {'timezone': 'UTC'})
+    assert '<h2>Post</h2>' in html and '<small></small>' in html
+
+
+@pytest.mark.parametrize('blocks,expected', [
+    ([{'kind': 'checks', 'items': [{'claim': 'c', 'state': 'yes', 'checked_at': 'SECRET_TOKEN_123'}]}],
+     'blocks.0.checks.items.0.checked_at: The value is not valid'),
+    ([{'kind': 'text', 'text': 'ok', 'SECRET_TOKEN_123': 'hidden'}], 'blocks.0.text.?: Extra inputs are not permitted'),
+    ([{'kind': 'image', 'image': {'repo': 'r', 'ref': 'main', 'path': '../SECRET_TOKEN_123'}}],
+     'blocks.0.image.image.path: The value is not valid'),
+])
+def test_schema_reason_never_repeats_caller_text(blocks, expected):
+    from illo.tools.registry import schema_reason
+
+    with pytest.raises(ValidationError) as caught:
+        Write.model_validate({'task': 1, 'blocks': blocks})
+    reason = schema_reason(caught.value, Write)
+    assert expected in reason and 'SECRET_TOKEN_123' not in reason
+
+
+def test_schema_reason_has_a_length_limit():
+    from illo.tools.registry import MAX_REASON_CHARS, schema_reason
+
+    with pytest.raises(ValidationError) as caught:
+        Write.model_validate({'task': 1, 'blocks': [], **{'A' * 13000 + str(n): 0 for n in range(9)}})
+    reason = schema_reason(caught.value, Write)
+    assert len(reason) <= MAX_REASON_CHARS and 'AAAA' not in reason and '(and 4 more)' in reason

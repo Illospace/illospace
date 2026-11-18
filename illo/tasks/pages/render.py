@@ -63,12 +63,13 @@ async def block_html(ctx, task_id, position, block, person):
         except ValueError:
             image = '<div class="missing">The picture is not available.</div>'
     if kind == 'image':
-        return '<figure class="block image">' + image + '<figcaption>' + e(block['caption']) + '</figcaption></figure>'
+        caption = '<figcaption>' + e(block['caption']) + '</figcaption>' if block.get('caption') else ''
+        return '<figure class="block image">' + heading + image + caption + '</figure>'
     if kind == 'preview':
         name = _visible(block['name'])
-        return ('<section class="block preview"><div class="as"><span class="badge">'
+        return ('<section class="block preview">' + heading + '<div class="as"><span class="badge">'
                 + e(name[:1]) + '</span><div><b>' + e(name) + '</b><small>'
-                + e(block['label']) + '</small></div></div><div class="text">'
+                + e(block.get('label', '')) + '</small></div></div><div class="text">'
                 + e(_visible(block['text'])) + '</div>' + image + '</section>')
     if kind == 'text':
         body = '<div class="body prose">' + markdown.render(block['text']) + '</div>'
