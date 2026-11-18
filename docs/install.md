@@ -155,7 +155,8 @@ connect:
 ```
 
 Use HTTPS. Do not include credentials, a query, or a fragment.
-Only `/oauth/` and `/list` paths must be exposed.
+Expose `/oauth/` and `/list` when those features are used.
+For task pages, also expose `/t/` and `/web/`. Prefer the team’s private network.
 Keep the brain, `/brain/mcp`, Postgres, and the admin routes private.
 A reverse proxy can forward these paths to the local Illo service.
 For example, use these Nginx locations inside your HTTPS server block:
@@ -384,3 +385,5 @@ A Slack error blocks the message and its index write. Illo records the missed ev
 
 Compose builds the sandbox with the gateway and brain. The sandbox uses no credentials.
 The gateway keeps repository copies on a shared volume. See [Sandbox](sandbox.md) for settings, limits, and disable steps.
+
+See [Task pages](pages.md) to enable browser sign-in and the task routes.

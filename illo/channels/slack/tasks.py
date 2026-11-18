@@ -16,6 +16,14 @@ from illo.tasks.release import in_window
 from illo.tools._format import data_text, json_text
 
 
+def title_link(ctx, row):
+    if ctx.workspace.config.pages.enabled:
+        from illo.tasks.pages import url
+
+        return "<" + escape(url(ctx, row["id"])) + "|" + escape(row["title"]) + ">"
+    return escape(row["title"])
+
+
 def state_label(state):
     return {"todo": "to do", "working": "in work", "review": "in review",
             "done": "done", "cancelled": "cancelled"}[state]
@@ -82,7 +90,7 @@ async def _thread(ctx, conn, row, entry, person):
             raise ValueError("The task channel is now private.")
         return row
     channel = await _channel(ctx, conn, row, entry, person)
-    text = ("Task: " + escape(row["title"]) + " · " + escape(entry.name) + " · "
+    text = ("Task: " + title_link(ctx, row) + " · " + escape(entry.name) + " · "
             + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(state_label(row["state"])))
     sent = await ctx.slack_client.chat_postMessage(channel=channel, text=text,
         unfurl_links=False, client_msg_id=message_id("root", row["id"]))
@@ -167,7 +175,11 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
                            (f"task:pending:{task_id}", Jsonb(pending_version)))
         return
     row = await _thread(ctx, conn, row, entry, person)
-    root_text = ("Task: " + escape(row["title"]) + " · " + escape(entry.name) + " · "
+    if ctx.workspace.config.pages.enabled:
+        from illo.tasks.pages import url
+
+        row["page_url"] = url(ctx, row["id"])
+    root_text = ("Task: " + title_link(ctx, row) + " · " + escape(entry.name) + " · "
                  + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(state_label(row["state"])))
     if await kv.get(conn, f"task:root:{task_id}") != root_text:
         await ctx.slack_client.chat_update(channel=row["slack_channel"], ts=row["slack_ts"], text=root_text)
@@ -188,10 +200,10 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
             elif event["data"].get("escalated"):
                 text += f" Holder: {name}. Silence: {event['data']['hours']} hours. Illo tried {event['data']['restarts']} restarts."
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
-                text=mention + escape(text), client_msg_id=message_id(event["kind"], task_id, event["id"]))
+                text=mention + escape(text) + ("\n" + title_link(ctx, row) if ctx.workspace.config.pages.enabled else ""), client_msg_id=message_id(event["kind"], task_id, event["id"]))
             direct = await _recipient_channel(ctx, conn, row, person)
             if direct != row["slack_channel"]:
-                await ctx.slack_client.chat_postMessage(channel=direct, text=mention + f"Task {task_id}: " + escape(text),
+                await ctx.slack_client.chat_postMessage(channel=direct, text=mention + f"Task {task_id}: " + escape(text) + ("\n" + title_link(ctx, row) if ctx.workspace.config.pages.enabled else ""),
                     client_msg_id=message_id("notice-" + event["kind"], task_id, event["id"]))
         elif event["kind"] == "question":
             asked = await people.get(conn, event["data"].get("to", "")[7:])
@@ -226,11 +238,11 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
         delivery_channel = await _recipient_channel(ctx, conn, row, person)
         if delivery_channel != row["slack_channel"]:
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],
-                text="Returned: " + escape(row["title"]) + ". The review card waits in the reviewer's DM.",
+                text="Returned: " + title_link(ctx, row) + ". The review card waits in the reviewer's DM.",
                 client_msg_id=message_id("review-notice", task_id, returned["id"] if returned else events[-1]["id"]))
         sent = await ctx.slack_client.chat_postMessage(channel=delivery_channel,
             **({"thread_ts": row["slack_ts"]} if delivery_channel == row["slack_channel"] else {}),
-            text=mention + f"Task {task_id}. Returned: " + escape(row["title"]), blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": mention or " "}}, *blocks],
+            text=mention + f"Task {task_id}. Returned: " + title_link(ctx, row), blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": mention or " "}}, *blocks],
             client_msg_id=message_id("returned", task_id, returned["id"] if returned else events[-1]["id"]))
         card = {"ts": sent["ts"], "message": message, "detail": detail, "channel": delivery_channel,
                 "thread": row["slack_ts"] if delivery_channel == row["slack_channel"] else sent["ts"]}
@@ -243,7 +255,7 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
         proof = await ledger.proof(conn, ctx.workspace, row, ctx)
         final = None if row["state"] == "review" else ("Done." if row["state"] == "done" else "Sent back." if row["state"] in {"todo", "working"} else "Cancelled.")
         await ctx.slack_client.chat_update(channel=card.get("channel", row["slack_channel"]), ts=card["ts"],
-            text=escape(row["title"]) + " · " + state_label(row["state"]),
+            text=title_link(ctx, row) + " · " + state_label(row["state"]),
             blocks=task_return_card(row, card["message"], proof, final=final, detail=card.get("detail")))
     if reminder and reminder_counts is not None:
         reminder_counts[target] += 1

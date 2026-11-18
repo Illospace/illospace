@@ -53,7 +53,7 @@ TYPICAL_ARGS = {
     "calendar_list": {"from": "2026-11-10T00:00:00Z", "to": "2026-11-11T00:00:00Z"},
     "chatgpt_status": {},
     "aws_read": {"service": "logs", "operation": "GetQueryResults", "parameters": {"queryId": "acme-query"}},
-    "lists": {}, "task_list": {}, "task_get": {"id": 1},
+    "lists": {}, "task_list": {}, "task_get": {"id": 1}, "page_read": {"task": 1},
     "connectors_call": {"connector": "docs", "tool": "read"},
 }
 LIST_TOOLS = {
@@ -118,7 +118,7 @@ async def configure_fakes(ctx):
     async def aws_read(tc, args):
         return data_text("aws", json.dumps({"results": [[{"field": "@message", "value": "Acme service is ready."}]], "nextToken": "acme-next"}))
 
-    ctx.registry.tools["aws_read"] = replace(ctx.registry.tools["aws_read"], handler=aws_read)
+    ctx.registry.tools["aws_read"] = replace(ctx.registry.tools["aws_read"], handler=aws_read, available=None)
     ctx.slack_client = FakeSlackClient(messages={"1": {"text": "Check the mobile app release.", "ts": "1"}})
     client = FakeGitHubClient()
     client.commits[("acme-example/engine", "main")] = {
@@ -198,7 +198,10 @@ async def measure(ctx):
                 continue
             run = await runs.create(conn, principal="person:ada", person_id=person["id"],
                                     profile="person_dm", runtime="fake", model="fake", event_id=event["id"])
-            result = await ctx.registry.call(ToolContext(conn, run, ctx), name, TYPICAL_ARGS.get(name, {}))
+            tc = ToolContext(conn, run, ctx)
+            if tool.available is not None and not await tool.available(tc):
+                continue
+            result = await ctx.registry.call(tc, name, TYPICAL_ARGS.get(name, {}))
             envelope = tool_result(result, **({"brain": True} if "brain" in inspect.signature(tool_result).parameters else {}))
             # The two OpenAI adapters formerly forwarded this whole envelope.
             if "result" not in envelope.get("structuredContent", {}):

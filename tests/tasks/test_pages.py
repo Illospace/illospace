@@ -1,0 +1,720 @@
+"""Task pages use real Postgres, fake Slack, and local image repositories."""
+
+import os
+import re
+import subprocess
+from datetime import UTC, datetime, timedelta
+from html import unescape
+
+import httpx
+import pytest
+from psycopg.types.json import Jsonb
+from pydantic import ValidationError
+
+from illo.channels.slack import tasks as slack_tasks
+from illo.db import all_rows, one
+from illo.ledger import digest_snapshot, people, runs, tasks
+from illo.tasks import pages
+from illo.tasks.pages import images, markdown, render, signin
+from illo.tasks.pages.schema import Write
+from illo.tools.registry import ToolContext
+from illo.workspace import PagesConfig, TaskList
+from tests.mcp.test_oauth import Flow
+from tests.tasks.test_tools import agent
+
+BASE = 'https://illo.example.com'
+ANA = tasks.Viewer('ada', 'person:ada', human=True)
+BUILD = tasks.Viewer('ada', 'agent:build')
+TEXT = [{'kind': 'text', 'title': 'Note', 'text': 'The work is ready.'}]
+
+
+@pytest.fixture
+async def ctx(app):
+    ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.config.pages = PagesConfig(enabled=True, url=BASE)
+    ctx.workspace.lists += [TaskList(key='private', name='Private', owner='ada')]
+    # The shared example uses a historical fixture key. The page displays the simple example name.
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET name='Ana' WHERE key='ada'")
+    return ctx
+
+
+class Browser(Flow):
+    async def start(self, next='/t/1'):
+        # Only a POST makes a sign-in request. The page with the code follows.
+        self.page = await self.http.post('/web/signin', params={'next': next})
+        if self.page.status_code == 303:
+            self.page = await self.http.get(self.page.headers['location'])
+        return self.page
+
+    async def login(self, *, next='/t/1', user='U_ACME_ADA', choice='approve'):
+        await self.start(next=next)
+        await self.dm(user=user)
+        await self.click(choice=choice, user=user)
+        return await self.http.get('/web/signin')
+
+
+@pytest.fixture
+async def browser(ctx, app, slack_client):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+        yield Browser(app, client, slack_client)
+
+
+async def make(ctx, *, returned=False, **extra):
+    async with ctx.pool.connection() as conn:
+        row = await tasks.create(conn, workspace=ctx.workspace, viewer=ANA, list_key=extra.pop('list_key', 'launches'),
+                                 title=extra.pop('title', 'Review the work'), holder=extra.pop('holder', 'agent:build'), **extra)
+        if returned:
+            row = await tasks.write_result(conn, row['id'], workspace=ctx.workspace, viewer=BUILD,
+                append='The result', message='Please review the result.', returned=True)
+    return row
+
+
+async def write(ctx, row, blocks=TEXT):
+    async with ctx.pool.connection() as conn:
+        return await pages.write(conn, ctx, ANA, {'task': row['id'], 'blocks': blocks})
+
+
+def fields(response):
+    return {k: unescape(v) for k, v in re.findall(r'name="(csrf|seen)" value="([^"]*)"', response.text)}
+
+
+@pytest.mark.parametrize('value', ['https://key@illo.example.com', 'https://illo.example.com/?x=1',
+                                  'https://illo.example.com/#x', 'http://illo.example.com', '//illo.example.com',
+                                  'https://illo.example.com/?', 'https://illo.example.com/#'])
+def test_setting_rejects_bad_base(value):
+    with pytest.raises(ValidationError):
+        PagesConfig(url=value)
+
+
+def test_setting_base_and_next():
+    for value in ['https://illo.example.com/', 'http://127.0.0.1:8000/', 'http://localhost:8000', 'http://[::1]']:
+        assert PagesConfig(url=value).url == value.rstrip('/')
+    assert PagesConfig().enabled is False
+    for value in ['//evil.example/t/1', 'https://evil.example', '/list', '/t/../bad', '/t/%2f%2fevil.example', '/t/1\r\nLocation: bad']:
+        assert signin.next_path(value) == ''
+    assert signin.next_path('/t/3') == '/t/3'
+
+
+async def test_disabled_routes_tools_and_links(ctx, browser, app, http):
+    row = await make(ctx)
+    ctx.workspace.config.pages.enabled = False
+    for path, method in [('/web/signin', 'get'), ('/web/app.css', 'get'), ('/web/signout', 'post'),
+                         (f'/t/{row["id"]}', 'get'), (f'/t/{row["id"]}/file/0', 'get'), (f'/t/{row["id"]}/decide', 'post')]:
+        response = await getattr(http, method)(path)
+        assert response.status_code == 404
+        assert response.headers['content-security-policy'] == render.HEADERS['Content-Security-Policy']
+    build = await agent(app, http, 'build')
+    assert 'task_page' not in str((await build.rpc('tools/list')).json())
+    await build.call('task_page', {'task': row['id'], 'blocks': TEXT}, error=True)
+    async with ctx.pool.connection() as conn:
+        person = await people.get(conn, 'ada')
+        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', runtime='fake', model='fake')
+        tc = ToolContext(conn, run, ctx)
+        assert not {'page_read', 'page_write'} & {t['name'] for t in await ctx.registry.list_tools_for(tc)}
+        assert (await ctx.registry.call(tc, 'page_write', {'task': row['id'], 'blocks': TEXT}))['decision'] == 'deny'
+    assert digest_snapshot.task_link(ctx.workspace, row) == digest_snapshot.thread_link(row)
+    assert slack_tasks.title_link(ctx, row) == row['title']
+
+
+async def test_signin_full_flow_same_browser_only_and_signout(browser, ctx, fake_brain, app):
+    row = await make(ctx)
+    response = await browser.start(next=f'/t/{row["id"]}')
+    assert response.status_code == 200 and 'http-equiv="refresh"' in response.text
+    cookie = response.headers['set-cookie']
+    assert 'HttpOnly' in cookie and 'SameSite=lax' in cookie and 'Secure' in cookie and 'Path=/' in cookie
+    code = re.search(r'connect [A-Z2-9]{4}-[A-Z2-9]{4}', response.text)[0]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as other:
+        other_page = await other.get('/web/signin', params={'next': f'/t/{row["id"]}'})
+        assert code not in other_page.text
+        await browser.dm()
+        assert 'browser wants to sign in' in browser.last_card()['text']
+        await browser.click(user='U_ACME_BEN')
+        assert (await browser.http.get('/web/signin')).status_code == 200
+        await browser.click()
+        assert (await other.get('/web/signin')).status_code == 200
+        assert (await other.get(f'/t/{row["id"]}')).status_code == 302
+        response = await browser.http.get('/web/signin')
+        assert response.status_code == 303 and response.headers['location'] == f'/t/{row["id"]}'
+        page = await browser.http.get(response.headers['location'])
+        assert page.status_code == 200 and 'Ana' in page.text
+    assert not fake_brain.requests
+    async with ctx.pool.connection() as conn:
+        stored = await one(conn, 'SELECT * FROM web_sessions')
+        token = browser.http.cookies.get(signin.SESSION_COOKIE)
+        assert token not in str(stored) and stored['token_hash'] == signin.digest(token)
+        assert timedelta(days=29) < stored['expires_at'] - datetime.now(UTC) <= timedelta(days=30)
+        events = await all_rows(conn, 'SELECT * FROM events')
+        assert code not in str(events)
+    bad = await browser.http.post('/web/signout', data={})
+    assert bad.status_code == 403
+    response = await browser.http.post('/web/signout', data={'csrf': fields(page)['csrf']})
+    assert response.status_code == 303
+    assert (await browser.http.get(f'/t/{row["id"]}')).status_code == 302
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT * FROM web_sessions')
+
+
+@pytest.mark.parametrize('failure', ['deny', 'expired', 'bot', 'inactive', 'used', 'unknown', 'channel'])
+async def test_signin_refusals(browser, ctx, failure, fake_brain):
+    await browser.start()
+    changes = {}
+    if failure in {'expired', 'inactive'}:
+        async with ctx.pool.connection() as conn:
+            if failure == 'expired':
+                await conn.execute("UPDATE web_signins SET expires_at=now()-interval '1 second'")
+            else:
+                await conn.execute("UPDATE people SET active=false WHERE key='ada'")
+    if failure == 'bot':
+        changes['bot_id'] = 'B_APP'
+    if failure == 'channel':
+        changes.update(channel='C_ACME_TEAM', channel_type='channel')
+    if failure == 'unknown':
+        changes['text'] = 'connect ZZZZ-ZZZZ'
+    await browser.dm(**changes)
+    if failure in {'deny', 'used'}:
+        await browser.click(choice='deny' if failure == 'deny' else 'approve')
+        await browser.dm()
+        assert 'invalid, used, or expired' in browser.slack.calls[-1]['text']
+    response = await browser.http.get('/web/signin')
+    assert response.status_code == (303 if failure == 'used' else 200)
+    if failure != 'used':
+        assert not browser.http.cookies.get(signin.SESSION_COOKIE)
+    assert not fake_brain.requests
+
+
+async def test_app_signature_repeated_delivery_and_expired_click(browser, ctx):
+    await browser.start()
+    code = re.search(r'connect [A-Z2-9]{4}-[A-Z2-9]{4}', browser.page.text)[0]
+    await browser.dm(text=code + '\n*Sent using* <@U123>')
+    assert 'An app sent this code in your name.' in browser.last_card()['text']
+    count = len(browser.slack.calls)
+    browser.seq -= 1
+    await browser.dm(text=code + '\n*Sent using* <@U123>')
+    assert len(browser.slack.calls) == count
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE web_signins SET expires_at=now()-interval '1 second'")
+    await browser.click()
+    async with ctx.pool.connection() as conn:
+        assert (await one(conn, 'SELECT decision FROM web_signins'))['decision'] == 'pending'
+
+
+async def test_signin_limits_and_cleanup(ctx, browser, monkeypatch):
+    monkeypatch.setattr(signin, 'STARTS_PER_HOST', 1)
+    assert (await browser.start()).status_code == 200
+    assert (await browser.start()).status_code == 429
+    async with ctx.pool.connection() as conn:
+        await conn.execute("DELETE FROM agent_oauth_limits WHERE kind LIKE 'web_%%'")
+    monkeypatch.setattr(signin, 'MAX_PENDING', 1)
+    assert (await browser.start()).status_code == 429
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE web_signins SET expires_at=now()-interval '1 second'")
+        await conn.execute("INSERT INTO web_sessions(token_hash,person_id,expires_at) SELECT 'expired',id,now()-interval '1 second' FROM people LIMIT 1")
+    await signin.cleanup(ctx)
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT * FROM web_signins')
+        assert not await one(conn, 'SELECT * FROM web_sessions')
+
+
+@pytest.mark.parametrize('next', ['//evil.example', 'https://evil.example/t/1', '/list', '/t/%2f%2fevil.example'])
+async def test_next_does_not_redirect_outside(browser, next):
+    result = await browser.login(next=next)
+    assert result.headers['location'] == '/web/signin'
+    assert 'You are signed in' in (await browser.http.get('/web/signin')).text
+
+
+async def test_visibility_and_inactive_session(browser, ctx):
+    private = await make(ctx, list_key='private')
+    result = await browser.http.get(f'/t/{private["id"]}')
+    assert result.status_code == 302 and result.headers['location'] == '/web/signin?next=%2Ft%2F' + str(private['id'])
+    await browser.login(user='U_ACME_BEN')
+    unseen = await browser.http.get(f'/t/{private["id"]}')
+    missing = await browser.http.get('/t/999999')
+    assert unseen.status_code == missing.status_code == 404 and unseen.text == missing.text
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET active=false WHERE key='ben'")
+    assert (await browser.http.get(f'/t/{private["id"]}')).status_code == 302
+
+
+def test_markdown_subset_and_hidden_text():
+    html = markdown.render('**bold** *italic* `code`\nnext\n\n- one\n- two\n\n1. first\n\n> quote\n\n```html\n<script>x</script>\n```\n\n[x](https://example.com) https://example.com/a\n<!-- hidden --> <img src=x>')
+    for expected in ['<strong>bold</strong>', '<em>italic</em>', '<code>code</code>', '<br>next', '<ul>', '<ol>', '<blockquote>', '<pre><code>', '&lt;script&gt;', 'rel="noopener noreferrer"']:
+        assert expected in html
+    assert '<script' not in html and '<img' not in html and 'hidden' not in html
+    assert 'href="javascript:' not in markdown.render('[bad](javascript:alert(1))')
+
+
+@pytest.mark.parametrize('block', [
+    {'kind': 'text', 'text': 'x'*6001}, {'kind': 'text', 'title': 'x'*81, 'text': ''},
+    {'kind': 'preview', 'name': 'a', 'label': 'x'*81, 'text': ''},
+    {'kind': 'checks', 'items': []}, {'kind': 'checks', 'items': [{'claim': 'x', 'state': 'bad'}]},
+    {'kind': 'checks', 'items': [{'claim': 'x', 'state': 'yes', 'source_url': 'javascript:bad'}]},
+    {'kind': 'checks', 'items': [{'claim': 'x', 'state': 'yes', 'checked_at': '2026-11-18'}]},
+    {'kind': 'bars', 'title': '', 'rows': [{'label': '', 'value': float('nan')}]},
+    {'kind': 'bars', 'title': '', 'rows': [{'label': '', 'value': -1}]},
+    {'kind': 'html', 'text': '<script>'},
+])
+def test_block_schema_limits(block):
+    with pytest.raises(ValidationError):
+        Write.model_validate({'task': 1, 'blocks': [block]})
+    with pytest.raises(ValidationError):
+        Write.model_validate({'task': 1, 'blocks': TEXT * 13})
+
+
+async def test_render_all_blocks_escape_fields_headers_and_version(browser, ctx, monkeypatch):
+    attack = '<script>alert("x")</script>'
+    row = await make(ctx, title=attack, brief=attack, returned=True)
+    async def missing(*args, **kwargs):
+        raise ValueError('missing')
+    monkeypatch.setattr(images, 'read', missing)
+    blocks = [
+        {'kind': 'text', 'title': attack, 'text': attack + '\n<!-- marker -->'},
+        {'kind': 'preview', 'name': attack, 'label': attack, 'text': attack},
+        {'kind': 'checks', 'title': attack, 'items': [{'claim': attack, 'state': 'yes', 'source_url': 'https://example.com/"bad'}]},
+        {'kind': 'bars', 'title': attack, 'rows': [{'label': attack[:40], 'value': 4, 'unit': '<bad>'}]},
+    ]
+    await write(ctx, row, blocks)
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE tasks SET result=%s,result_version=result_version+1,links=%s WHERE id=%s", (attack, Jsonb([
+            {'url': 'javascript:alert(1)', 'title': attack, 'kind': 'evidence'},
+            {'url': 'https://example.com/" onclick="bad', 'title': attack, 'kind': 'evidence'}]), row['id']))
+        await tasks._event(conn, row, 'agent:build', 'message', attack + '<!-- secret marker -->')
+        page = await one(conn, 'SELECT * FROM task_pages WHERE task_id=%s', (row['id'],))
+        assert page['blocks'][2]['items'][0]['checked_at']
+        # Insert a formerly valid image reference. A missing mirror is a normal read state.
+        await conn.execute("UPDATE task_pages SET blocks=blocks || %s WHERE task_id=%s", (Jsonb([{'kind': 'image', 'image': {'repo': 'acme-example/engine', 'ref': 'f'*40, 'path': 'x.png'}, 'caption': attack, 'alt': attack}]), row['id']))
+    await browser.login()
+    response = await browser.http.get(f'/t/{row["id"]}')
+    assert response.status_code == 200
+    assert '<script' not in response.text and ' style=' not in response.text and '<style' not in response.text
+    assert '&lt;script&gt;' in response.text and 'marker' not in response.text
+    assert 'href="javascript:' not in response.text and '" onclick=' not in response.text
+    for name, value in render.HEADERS.items():
+        assert response.headers[name] == value
+    for expected in ['class="block preview"', 'class="checks"', '<progress', 'class="missing"', 'The result changed after this page was written.', 'The brief', 'Returned work', 'History (']:
+        assert expected in response.text
+    css = await browser.http.get('/web/app.css')
+    assert css.headers['cache-control'] == 'no-store' and '--radius:10px' in css.text
+    assert (await browser.http.get(f'/t/{row["id"]}/file/4')).status_code == 404
+
+
+async def test_replace_and_tool_profiles(ctx, app, http):
+    row = await make(ctx)
+    first = await write(ctx, row)
+    second = await write(ctx, row, [])
+    assert second['blocks'] == [] and second['result_version'] == row['result_version']
+    assert second['written_at'] > first['written_at']
+    for profile, writes, reads in [('person_dm', True, True), ('routine', True, True), ('team_channel', False, True), ('tainted', False, False), ('outsider', False, False)]:
+        async with ctx.pool.connection() as conn:
+            person = await people.get(conn, 'ada')
+            run = await runs.create(conn, principal='outsider' if profile == 'outsider' else 'person:ada', person_id=person['id'] if profile != 'outsider' else None, profile='person_dm' if profile == 'outsider' else profile, runtime='fake', model='fake')
+            tc = ToolContext(conn, run, ctx)
+            names = {t['name'] for t in await ctx.registry.list_tools_for(tc)}
+            assert ('page_write' in names) is writes
+            assert ('page_read' in names) is reads
+    build = await agent(app, http, 'build')
+    studio = await agent(app, http, 'studio', 'ben')
+    assert 'task_page' in str((await build.rpc('tools/list')).json())
+    await studio.call('task_page', {'task': row['id'], 'blocks': TEXT}, error=True)
+    value = await build.call('task_page', {'task': row['id'], 'blocks': TEXT})
+    assert value['url'] == BASE + f'/t/{row["id"]}'
+    assert value['blocks'] == TEXT
+    private = await make(ctx, list_key='private')
+    async with ctx.pool.connection() as conn:
+        with pytest.raises(tasks.TaskError):
+            await pages.write(conn, ctx, tasks.Viewer('ben', 'person:ben', human=True), {'task': private['id'], 'blocks': TEXT})
+
+
+@pytest.fixture
+def mirror(ctx, tmp_path):
+    root = tmp_path / 'mirrors'
+    path = root / 'acme-example/engine'
+    path.mkdir(parents=True)
+    ctx.config.repos_dir = root
+    ctx.workspace.config.sandbox.repositories = ['acme-example/engine']
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(path), *args], env=env, stderr=subprocess.DEVNULL).decode().strip()
+    git('init', '-b', 'main')
+    git('config', 'user.email', 'ana@example.com')
+    git('config', 'user.name', 'Ana')
+    data = b'\x89PNG\r\n\x1a\n' + b'fake image bytes'
+    (path / 'picture.png').write_bytes(data)
+    (path / 'plain.txt').write_text('Not an image')
+    (path / 'large.png').write_bytes(b'\x89PNG\r\n\x1a\n' + b'x' * images.MAX_BYTES)
+    git('add', '.')
+    git('commit', '-m', 'Add test images')
+    sha = git('rev-parse', 'HEAD')
+    return path, git, sha, data
+
+
+async def test_images_pin_commit_and_require_visibility(ctx, browser, app, mirror):
+    path, git, sha, data = mirror
+    image = {'repo': 'acme-example/engine', 'ref': 'main', 'path': 'picture.png'}
+    row = await make(ctx, list_key='private')
+    page = await write(ctx, row, [{'kind': 'image', 'image': image, 'caption': 'Picture', 'alt': 'The picture'}])
+    assert page['blocks'][0]['image']['ref'] == sha
+    (path / 'picture.png').write_bytes(b'GIF89aChanged')
+    git('add', '.')
+    git('commit', '-m', 'Change the picture')
+    route = f'/t/{row["id"]}/file/0'
+    assert (await browser.http.get(route)).status_code == 404
+    await browser.login()
+    result = await browser.http.get(route)
+    assert result.content == data and result.headers['content-type'] == 'image/png'
+    assert result.headers['content-security-policy'] == "default-src 'none'"
+    assert result.headers['cache-control'] == 'private, no-store'
+    assert result.headers['content-disposition'] == 'inline'
+    assert result.headers['x-content-type-options'] == 'nosniff'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as http:
+        other = Browser(app, http, browser.slack)
+        await other.login(user='U_ACME_BEN')
+        assert (await other.http.get(route)).status_code == 404
+    # A pinned object can disappear after a mirror refresh. Reads must fail closed.
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE task_pages SET blocks=jsonb_set(blocks,'{0,image,ref}',%s) WHERE task_id=%s", (Jsonb('f'*40), row['id']))
+    assert 'class="missing"' in (await browser.http.get(f'/t/{row["id"]}')).text
+    assert (await browser.http.get(route)).status_code == 404
+
+
+@pytest.mark.parametrize('change', [{'path': '../picture.png'}, {'path': '/picture.png'}, {'path': '-picture.png'},
+                                     {'path': 'bad\x00.png'}, {'repo': 'other/project'}, {'path': 'plain.txt'},
+                                     {'path': 'large.png'}, {'path': 'missing.png'}, {'ref': '--help'}])
+async def test_image_refusals(ctx, mirror, change):
+    row = await make(ctx)
+    image = {'repo': 'acme-example/engine', 'ref': 'main', 'path': 'picture.png', **change}
+    with pytest.raises((ValidationError, tasks.TaskError)):
+        await write(ctx, row, [{'kind': 'image', 'image': image, 'caption': '', 'alt': ''}])
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT * FROM task_pages')
+
+
+@pytest.mark.parametrize('data,expected', [(b'GIF87aabc', 'image/gif'), (b'\xff\xd8\xffx', 'image/jpeg'),
+                                          (b'RIFFabcdWEBPx', 'image/webp')])
+def test_image_magic(data, expected):
+    assert images.media_type(data) == expected
+
+
+async def test_decision_guards_stale_result_and_send_back(browser, ctx):
+    row = await make(ctx, returned=True)
+    await write(ctx, row)
+    await browser.login()
+    route = f'/t/{row["id"]}'
+    form = fields(await browser.http.get(route))
+    for extra in [{'csrf': ''}, {'csrf': 'wrong'}, {'csrf': 'é'}]:
+        response = await browser.http.post(route + '/decide', data={**form, 'action': 'done', **extra})
+        assert response.status_code == 403
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'done'}, headers={'Origin': 'https://evil.example'})
+    assert response.status_code == 403
+    await write(ctx, row, [{'kind': 'text', 'text': 'A new page'}])
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'done'})
+    assert 'The work changed after you opened the page. Read it again.' in response.text
+    form = fields(response)
+    for reason in ['', ' ' , 'x'*4001]:
+        response = await browser.http.post(route + '/decide', data={**form, 'action': 'reopen', 'reason': reason})
+        assert response.status_code == 200
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'reopen', 'reason': 'Use the shorter text.'}, headers={'Origin': BASE})
+    assert response.status_code == 303
+    page = await browser.http.get(route)
+    assert 'You sent this back on' in page.text and 'Use the shorter text.' in page.text
+    async with ctx.pool.connection() as conn:
+        current = await tasks.get(conn, row['id'], viewer=ANA)
+        assert current['state'] == 'todo' and current['waits_for'] == 'agent:build'
+        event = await one(conn, "SELECT * FROM task_events WHERE task_id=%s AND kind='reopened'", (row['id'],))
+        wake = await one(conn, 'SELECT * FROM task_wakes WHERE event_id=%s', (event['id'],))
+        assert event['actor'] == 'person:ada' and event['text'] == 'Use the shorter text.'
+        assert wake['holder'] == 'agent:build' and wake['reason'] == 'task.reopened'
+    # A stale result or state cannot reuse an old form.
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'done'})
+    assert 'The work changed' in response.text
+
+
+async def test_approve_has_same_event_parent_and_card_updates(browser, ctx):
+    parent = await make(ctx, title='The whole')
+    row = await make(ctx, parent_id=parent['id'], returned=True)
+    await slack_tasks.tick(ctx)
+    await browser.login()
+    route = f'/t/{row["id"]}'
+    response = await browser.http.post(route + '/decide', data={**fields(await browser.http.get(route)), 'action': 'done'})
+    assert response.status_code == 303
+    async with ctx.pool.connection() as conn:
+        current = await tasks.get(conn, row['id'], viewer=ANA)
+        assert current['state'] == 'done' and current['done_by'] == 'person:ada'
+        event = await one(conn, "SELECT * FROM task_events WHERE task_id=%s AND kind='done'", (row['id'],))
+        assert event['actor'] == 'person:ada' and event['data']['force'] is False
+        assert (await tasks.get(conn, parent['id'], viewer=ANA))['state'] == 'review'
+    assert any(call['method'] == 'chat_update' and call.get('blocks') and call['blocks'][-1].get('text', {}).get('text') == 'Done.' for call in ctx.slack_client.calls)
+    assert 'You approved this on' in (await browser.http.get(route)).text
+
+
+async def test_failed_checks_require_reason(browser, ctx, monkeypatch):
+    row = await make(ctx, returned=True)
+    async def proof(*args, **kwargs):
+        return [{'name': 'test', 'ok': False, 'text': 'The proof is absent.'}]
+    monkeypatch.setattr(tasks, 'proof', proof)
+    await browser.login()
+    route = f'/t/{row["id"]}'
+    form = fields(await browser.http.get(route))
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'done'})
+    assert 'The proof is absent.' in response.text and 'Confirm anyway…' in response.text
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'force', 'reason': ''})
+    assert response.status_code == 200
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'force', 'reason': 'I checked the work myself.'})
+    assert response.status_code == 303
+    async with ctx.pool.connection() as conn:
+        event = await one(conn, "SELECT * FROM task_events WHERE task_id=%s AND kind='done'", (row['id'],))
+        assert event['data']['force'] is True and event['text'] == 'I checked the work myself.'
+
+
+async def test_unallowed_reviewer_has_no_buttons(browser, ctx):
+    row = await make(ctx, returned=True)
+    await browser.login(user='U_ACME_BEN')
+    route = f'/t/{row["id"]}'
+    response = await browser.http.get(route)
+    assert '>Approve<' not in response.text and 'Send back…' not in response.text
+    assert (await browser.http.post(route + '/decide', data={**fields(response), 'action': 'done'})).status_code == 403
+
+
+async def test_message_uses_existing_wake_path(browser, ctx):
+    row = await make(ctx)
+    await browser.login()
+    route = f'/t/{row["id"]}'
+    response = await browser.http.get(route)
+    assert 'Message the holder…' in response.text
+    response = await browser.http.post(route + '/decide', data={**fields(response), 'action': 'message', 'reason': 'Please check the proof.'})
+    assert response.status_code == 303
+    async with ctx.pool.connection() as conn:
+        event = await one(conn, "SELECT * FROM task_events WHERE task_id=%s AND kind='message'", (row['id'],))
+        assert event['text'] == 'Please check the proof.' and event['data']['wake'] is True
+        assert await one(conn, 'SELECT * FROM task_wakes WHERE event_id=%s', (event['id'],))
+
+
+async def test_links_briefs_cards_and_reminders(ctx):
+    row = await make(ctx, returned=True)
+    assert digest_snapshot.task_link(ctx.workspace, row) == BASE + f'/t/{row["id"]}'
+    await slack_tasks.tick(ctx)
+    cards = [call for call in ctx.slack_client.calls if call['method'] == 'chat_postMessage' and call.get('blocks')]
+    assert BASE + f'/t/{row["id"]}' in str(cards[-1]['blocks'])
+    async with ctx.pool.connection() as conn:
+        await tasks._event(conn, row, 'code', 'reminded', 'Please review.', {'to': 'person:ada', 'source': 'wait_check'})
+    ctx.workspace.config.tasks.reminder_window = (0, 24)
+    await slack_tasks.tick(ctx)
+    assert any('Please review.' in c.get('text', '') and BASE + f'/t/{row["id"]}' in c['text'] for c in ctx.slack_client.calls)
+    ctx.workspace.config.pages.enabled = False
+    assert digest_snapshot.task_link(ctx.workspace, row) == digest_snapshot.thread_link(row)
+
+
+async def test_browser_send_back_reaches_the_agent_ticket(browser, ctx, github_client):
+    from illo.tasks import wake
+
+    row = await make(ctx, list_key='bugs')
+    await wake.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        await tasks.return_work(conn, row['id'], workspace=ctx.workspace, viewer=BUILD, message='Please check the work.', ctx=ctx)
+    await browser.login()
+    route = f'/t/{row["id"]}'
+    form = fields(await browser.http.get(route))
+    assert (await browser.http.post(route + '/decide', data={**form, 'action': 'reopen', 'reason': 'Use CSV.\nKeep the date.'})).status_code == 303
+    await wake.tick(ctx)
+    comments = [call['body'] for call in github_client.calls if call['method'] == 'comment_issue']
+    assert any(f"Task {row['id']}: Use CSV.\nKeep the date." in body and '<!-- illo:wake:' in body for body in comments)
+    assert 'Illo' in (await browser.http.get(route)).text
+
+
+async def test_wait_check_can_write_only_its_bound_page(ctx, fake_brain):
+    from illo.deep import worker
+    from illo.tasks import release
+    from tests.tasks.test_wake_release import age
+    from tests.tool_results import read_result
+
+    row = await make(ctx, returned=True)
+    other = await make(ctx)
+    await age(ctx, row['id'], 40)
+    ctx.workspace.config.tasks.reminder_window = (0, 24)
+    await release.tick(ctx)
+    fake_brain.script = [
+        {'name': 'page_read', 'arguments': {'task': row['id']}},
+        {'name': 'page_write', 'arguments': {'task': row['id'], 'blocks': TEXT}},
+        {'name': 'page_write', 'arguments': {'task': other['id'], 'blocks': TEXT}},
+        {'name': 'wait_result', 'arguments': {'outcome': 'person', 'message': 'Review the returned work on its page.'}},
+    ]
+    deep = await worker.tick(ctx)
+    assert deep['state'] == 'done'
+    results = [read_result(value) for value in fake_brain.results]
+    assert [result['decision'] for result in results] == ['allow', 'allow', 'deny', 'allow']
+    assert results[1]['result']['url'] == BASE + f'/t/{row["id"]}'
+    async with ctx.pool.connection() as conn:
+        assert await one(conn, 'SELECT * FROM task_pages WHERE task_id=%s', (row['id'],))
+        assert not await one(conn, 'SELECT * FROM task_pages WHERE task_id=%s', (other['id'],))
+
+
+async def test_session_expiry_local_http_and_every_html_header(ctx, browser):
+    ctx.config.web_allow_http = True
+    response = await browser.start(next='//evil.example')
+    assert 'Secure' not in response.headers['set-cookie']
+    for name, value in render.HEADERS.items():
+        assert response.headers[name] == value
+    await browser.dm()
+    await browser.click()
+    response = await browser.http.get('/web/signin')
+    assert response.status_code == 303
+    for name, value in render.HEADERS.items():
+        assert response.headers[name] == value
+    response = await browser.http.get('/web/signin')
+    assert 'You are signed in' in response.text
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE web_sessions SET expires_at=clock_timestamp()-interval '1 second'")
+    assert (await browser.http.get('/t/1')).status_code == 302
+
+
+async def test_page_read_keeps_the_whole_block_list(ctx):
+    row = await make(ctx)
+    blocks = [{'kind': 'text', 'text': 'x' * 6000} for _ in range(12)]
+    await write(ctx, row, blocks)
+    async with ctx.pool.connection() as conn:
+        person = await people.get(conn, 'ada')
+        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', runtime='fake', model='fake')
+        result = await ctx.registry.call(ToolContext(conn, run, ctx), 'page_read', {'task': row['id']})
+        assert result['decision'] == 'allow' and len(result['result']['blocks']) == 12
+        assert result['result']['blocks'][-1]['text'] == 'x' * 6000
+
+
+@pytest.mark.parametrize('kind,write', [('request', True), ('check', True), ('scout', False), ('brief', False)])
+async def test_page_tool_deep_grants(ctx, kind, write):
+    from illo.tools.checks import scope
+
+    run = {'principal': 'person:ada' if kind == 'request' else 'team', 'person_id': 1 if kind == 'request' else None,
+           'profile': 'person_dm' if kind == 'request' else 'routine', 'deep_kind': kind,
+           'tainted': False, 'personal_read': False, 'pages_enabled': True}
+    names = {t['name'] for t in ctx.registry.list_tools(run)}
+    assert 'page_read' in names and ('page_write' in names) is write
+    assert scope({**run, 'web_read': True}, ctx.registry.tools['page_write']).outcome == ('allow' if kind == 'check' else 'deny')
+    assert 'page_write' not in {t['name'] for t in ctx.registry.list_tools({**run, 'tainted': True})}
+
+
+async def test_changed_result_and_history_collapse(ctx, browser):
+    row = await make(ctx, returned=True)
+    await browser.login()
+    route = f'/t/{row["id"]}'
+    form = fields(await browser.http.get(route))
+    async with ctx.pool.connection() as conn:
+        await conn.execute('UPDATE tasks SET result_version=result_version+1 WHERE id=%s', (row['id'],))
+        for _ in range(3):
+            await tasks._event(conn, row, 'code', 'reminded', 'Please review.', {'to': 'person:ada'})
+            await tasks._event(conn, row, 'code', 'message', 'The check ran.')
+    response = await browser.http.post(route + '/decide', data={**form, 'action': 'done'})
+    assert 'The work changed after you opened the page. Read it again.' in response.text
+    assert response.text.count('Please review.') == 1 and 'Reminders: 3' in response.text
+    async with ctx.pool.connection() as conn:
+        assert (await tasks.get(conn, row['id'], viewer=ANA))['state'] == 'review'
+
+
+async def test_reading_the_signin_page_makes_no_request(browser, ctx):
+    # A link preview or a crawler only reads. It must not use the start limit or make a row.
+    for _ in range(3):
+        response = await browser.http.get('/web/signin', params={'next': '/t/1'})
+        assert response.status_code == 200 and 'Get a code' in response.text
+        assert 'connect ' not in response.text and 'set-cookie' not in response.headers
+    assert (await browser.http.get('/t/1', follow_redirects=True)).status_code == 200
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT id FROM web_signins')
+        assert not await one(conn, "SELECT 1 FROM agent_oauth_limits WHERE kind LIKE 'web_%%'")
+
+
+async def test_signin_start_from_another_origin_is_refused(browser, ctx):
+    response = await browser.http.post('/web/signin', headers={'Origin': 'https://evil.example'})
+    assert response.status_code == 403
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT id FROM web_signins')
+
+
+async def test_ended_signin_offers_a_new_code_for_the_same_task(browser, ctx):
+    await browser.start(next='/t/7')
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE web_signins SET expires_at=now()-interval '1 second'")
+    ended = await browser.http.get('/web/signin')
+    assert 'The sign-in ended' in ended.text and 'action="/web/signin?next=%2Ft%2F7"' in ended.text
+    assert 'connect ' in (await browser.start(next='/t/7')).text
+
+
+def test_wait_check_names_the_page_tools_only_when_pages_are_on():
+    from illo.tasks import waits
+
+    row, person = {'id': 3, 'waits_for': 'person:ada'}, {'name': 'Ana'}
+    period = {'since_event_id': 1, 'since': datetime.now(UTC), 'needed': 'you hold it'}
+    off = waits.request(row, period, person, datetime.now(UTC), 0)['job']
+    on = waits.request(row, period, person, datetime.now(UTC), 0, pages=True)['job']
+    assert 'page_' not in off and '{page}' not in off
+    assert 'connected.\n\nThen call `wait_result`' in off
+    assert on == off.replace('Then call `wait_result`', waits.PAGE + 'Then call `wait_result`', 1)
+
+
+async def test_destination_survives_a_lost_request(browser, ctx):
+    posted = await browser.http.post('/web/signin', params={'next': '/t/7'})
+    assert posted.status_code == 303 and posted.headers['location'] == '/web/signin?next=%2Ft%2F7'
+    await signin.cleanup(ctx)
+    async with ctx.pool.connection() as conn:
+        await conn.execute('DELETE FROM web_signins')
+    again = await browser.http.get(posted.headers['location'])
+    assert 'Get a code' in again.text and 'action="/web/signin?next=%2Ft%2F7"' in again.text
+    browser.http.cookies.clear()
+    again = await browser.http.get(posted.headers['location'])
+    assert 'action="/web/signin?next=%2Ft%2F7"' in again.text
+
+
+async def test_signed_in_person_makes_no_new_request(browser, ctx):
+    await browser.login()
+    token = browser.http.cookies.get(signin.SESSION_COOKIE)
+    async with ctx.pool.connection() as conn:
+        before = await one(conn, "SELECT count(*) AS n FROM agent_oauth_limits WHERE kind LIKE 'web_start%%'")
+    posted = await browser.http.post('/web/signin', params={'next': '/t/1'})
+    assert posted.status_code == 303 and posted.headers['location'] == '/t/1'
+    assert (await browser.http.post('/web/signin')).status_code == 200
+    assert (await browser.http.get('/web/signin', params={'restart': '1'})).status_code == 200
+    assert browser.http.cookies.get(signin.SESSION_COOKIE) == token
+    async with ctx.pool.connection() as conn:
+        after = await one(conn, "SELECT count(*) AS n FROM agent_oauth_limits WHERE kind LIKE 'web_start%%'")
+        assert after == before and (await one(conn, 'SELECT count(*) AS n FROM web_signins'))['n'] == 1
+
+
+async def test_restart_parameter_on_a_read_makes_nothing(browser, ctx):
+    response = await browser.http.get('/web/signin', params={'restart': '1'})
+    assert response.status_code == 200 and 'Get a code' in response.text
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, 'SELECT id FROM web_signins')
+
+
+async def test_page_render_does_not_read_the_picture_data(ctx, monkeypatch):
+    calls = []
+
+    def fake(ctx, image, data=True):
+        calls.append(data)
+        return image, b'' if data else None, 'image/png' if data else None
+
+    monkeypatch.setattr(images, '_read', fake)
+    block = {'kind': 'image', 'image': {'repo': 'r', 'ref': 'a' * 40, 'path': 'x.png'}, 'caption': 'c', 'alt': 'a'}
+    html = await render.block_html(ctx, 1, 0, block, {'timezone': 'UTC'})
+    assert calls == [False] and '/t/1/file/0' in html
+    await images.read(ctx, block['image'])
+    assert calls == [False, True]
+
+
+async def test_bars_use_progress_elements(ctx):
+    block = {'kind': 'bars', 'title': 'T', 'rows': [{'label': 'x' * 40, 'value': 2, 'unit': ''}, {'label': 'short', 'value': 0.5, 'unit': 'ms'}]}
+    html = await render.block_html(ctx, 1, 0, block, {'timezone': 'UTC'})
+    assert '<progress max="2" value="2"></progress><span>2</span>' in html
+    assert '<span>short</span><progress max="2" value="0.5"></progress><span>0.5 ms</span>' in html
+    assert 'x' * 40 in html and '<svg' not in html and 'style' not in html
+
+
+async def test_page_words_for_the_wait(browser, ctx):
+    row = await make(ctx, returned=True)
+    await browser.login()
+    text = (await browser.http.get(f'/t/{row["id"]}')).text
+    assert 'Waits for you · today' in text and '<li>In review</li>' in text
+    assert '<p class="ask">Returned by ' in text
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE task_events SET at=at-interval '25 hours' WHERE task_id=%s", (row['id'],))
+        await conn.execute("UPDATE tasks SET created_at=created_at-interval '25 hours' WHERE id=%s", (row['id'],))
+    assert 'Waits for you · 1 day<' in (await browser.http.get(f'/t/{row["id"]}')).text

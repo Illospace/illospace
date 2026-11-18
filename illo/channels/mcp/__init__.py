@@ -33,9 +33,9 @@ COLLECTOR_TOOLS = frozenset(
 AGENT_TOOLS = COLLECTOR_TOOLS | {"illo_submit", "illo_read", "illo_get_result"} | tasks.NAMES
 
 
-def allowed_tools(token: dict) -> frozenset[str]:
+def allowed_tools(token: dict, *, pages_enabled=False) -> frozenset[str]:
     if token["scopes"] == ["agent"]:
-        return AGENT_TOOLS
+        return AGENT_TOOLS if pages_enabled else AGENT_TOOLS - {"task_page"}
     if token["scopes"] == ["collector"]:
         return COLLECTOR_TOOLS
     return frozenset()
@@ -186,7 +186,7 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
             "tools": [
                 tool.declaration()
                 for tool in TOOLS.values()
-                if tool.name in allowed_tools(ctx.token)
+                if tool.name in allowed_tools(ctx.token, pages_enabled=ctx.app.workspace.config.pages.enabled)
             ]
         }
     elif method == "tools/call":
@@ -203,7 +203,9 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
         if not tool:
             return _error(request_id, -32602, "Unknown tool"), name, args, "deny", "Unknown tool"
         try:
-            if name not in allowed_tools(ctx.token):
+            if name == "task_page" and not ctx.app.workspace.config.pages.enabled:
+                raise ValueError("Task pages are off.")
+            if name not in allowed_tools(ctx.token, pages_enabled=ctx.app.workspace.config.pages.enabled):
                 raise ValueError("The token scope does not allow this tool")
             validated = tool.arguments.model_validate(args)
             # Reports are snapshots: omitted fields must not reset a stored lane.

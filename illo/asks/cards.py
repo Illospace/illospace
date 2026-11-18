@@ -344,7 +344,9 @@ def task_return_card(task, message, checks, *, final=None, detail=None):
 
     `detail` is the holder's last message, already in Slack format. It says what came back.
     """
-    blocks = [section("Returned: " + escape(task["title"])),
+    title = ("<" + escape(task["page_url"]) + "|" + escape(task["title"]) + ">"
+             if task.get("page_url") else escape(task["title"]))
+    blocks = [section("Returned: " + title),
               section("> " + escape(message[:300]).replace("\n", "\n> "))]
     if detail:
         blocks.append(section(detail))

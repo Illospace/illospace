@@ -12,5 +12,6 @@ task_create: Capture work the person stated. Hold it yourself or use the list de
 task_get: Read the brief, result version, links, pieces, checks, messages, silent_hours, and last wake result before you act.
 task_lists: Read the visible lists, their instructions, holders, and Done rules. Read these instructions before you split work into pieces.
 task_mine: Read your tasks with state, waits_for, and new_for_you. Read task_get before you work. An unnamed token reads the tasks of its person and their agents.
+task_page: Show a person the work they must review as its reader will see it, then the checks you made, each with its source. Do not repeat the brief. Replace the page of a task you hold and return its URL.
 task_post: Ask one blocking question on your task. Optionally name a person in to. If the task has another holder, change nothing and end the run.
 task_write: Write your result below the brief. Give either result with the version you read, or append. A message must say what changed and what you need. Set returned true on the last write. Never say done.

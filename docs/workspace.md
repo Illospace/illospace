@@ -69,6 +69,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |
 | `memory.list_changes` | `owners` (default) or `everyone`. Controls who creates lists and changes holders or Done rules. |
+| `pages.enabled` | Off by default. Enable signed-in task pages and page tools. |
+| `pages.url` | Optional HTTPS base address for task links. Loopback HTTP is allowed. No credentials, query, or fragment. Falls back to `connect.public_url`, then `ILLO_PUBLIC_URL`. |
 | `connect.public_url` | Optional HTTPS browser address for `/oauth/` and `/list`. No credentials or query. Default: `ILLO_PUBLIC_URL`. |
 | `connect.agent_redirects` | Extra exact HTTPS callbacks for agent OAuth. Default: `[]`. No credentials or fragments. At most 100 entries. |
 | `run_limits.max_concurrent` | Maximum active runs. Default: 4. Range: 1–100. |
@@ -501,3 +503,5 @@ The owner manages the shared file and tool permissions. Each person has their ow
 AWS files also accept `region` and `services`. See [Connectors](connectors.md#aws).
 Customer data closes web fetch and provider search for the rest of a run.
 Deep work inherits this limit from its parent run.
+
+See [Task pages](pages.md) for browser sign-in, blocks, and decisions.

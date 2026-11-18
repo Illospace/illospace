@@ -266,6 +266,7 @@ Tool names use `family_verb`. Each family is one file in `illo/tools/`. The regi
 
 | Family | Tools (first set) |
 |---|---|
+| `tasks` | `page_read`, `page_write` when pages are on; see Task pages below. |
 | `lanes` | `lanes_search`, `lanes_get`, `lanes_mine` |
 | `asks` | `asks_list`, `asks_get`, `asks_create` (Illo asks a person), `asks_answer` (a draft for the ask owner), `asks_answer_with_rule`, `asks_cancel_mine`, `asks_digest`, `digest_snapshot` |
 | `search` | `search_all` (items, lanes, GitHub, Slack, Drive and mail of the person; filters by principal), `search_get` |
@@ -426,7 +427,7 @@ A team-channel run keeps its team principal. Its verified sender supplies the ta
 This does not change the authority of other tool families.
 
 `illo/tools/tasks.py` registers the Operator tools. Task actions use the ledger destination and need no approval card.
-Person DM and team-channel profiles have the write tools. Routines have read tools only.
+Person DM and team-channel profiles have the write tools. Routines read tasks and can write page blocks when pages are on.
 Agent requests add capture and chat. Direct agent task tools need the `agent` token scope.
 Each task tool call has an audit row. Only ledger code writes record events.
 
@@ -442,3 +443,47 @@ The Slack sender enforces the reminder window again when it retries a send.
 `illo/tasks/connectors.py` holds the wake, signal, link, and lane registries.
 Installed connectors register before workspace validation. The core calls their functions without an outside-tool import.
 The GitHub connector owns issue wake actions, task signals, proof checks, alert capture, and collector matching.
+
+
+## Task pages
+
+Migration `1800_task_pages.sql` adds three tables:
+
+| Table | State |
+|---|---|
+| `web_signins` | Browser request and pairing hashes, expiry, person, consent, and Slack card identity. |
+| `web_sessions` | Session token hash, person, creation, expiry, and last access. |
+| `task_pages` | One current block list per task, author, result version, and write time. |
+
+A whole-page write replaces one JSON list in one transaction. The task lock serializes writes and decisions.
+The page keeps no block history. The task keeps its existing event history.
+The browser uses a random request cookie to exchange one Slack approval for a session.
+Only the person who sent the code can approve the card. The browser session lasts 30 days.
+The scheduler removes expired requests and sessions every five minutes.
+Global and per-host start limits and a pending-request cap bound the sign-in table.
+The existing agent OAuth flow keeps its own state and behaviour.
+
+| Route | Purpose |
+|---|---|
+| `GET /web/signin` | Show the start button, the code, or the result. It makes no request. A local task path is the only accepted destination. |
+| `POST /web/signin` | Make one sign-in request for this browser, then show the code. |
+| `POST /web/signout` | Delete the session after a CSRF check. |
+| `GET /web/app.css` | Serve the page stylesheet with no cache. |
+| `GET /t/{id}` | Show a task visible to the signed-in person. |
+| `GET /t/{id}/file/{position}` | Read one pinned image through the same visibility check. Positions start at zero. |
+| `POST /t/{id}/decide` | Call the existing Done, reopen, or message function. |
+
+These routes return 404 when `pages.enabled` is false. All HTML uses no-store and a strict CSP.
+The page contains no script or inline style. Agent text is escaped data.
+
+| Tool | Risk | Profiles when pages are on |
+|---|---|---|
+| `page_read` | `read` | `person_dm`, `team_channel`, `routine`, `agent_request`; deep runs with task reads. |
+| `page_write` | `write_internal` | `person_dm`, `routine`, `agent_request`; deep requests and the current task of a wait check. |
+| MCP `task_page` | `write_internal` | The `agent` token scope, for a task held by that token's agent. |
+
+`page_read` takes `task`. The two writes take `task` and `blocks`.
+The shared block schema is in `illo/tasks/pages/schema.py`.
+Page tools are absent when pages are off. Direct calls also fail.
+Wait checks can write only their bound task page, even after a web read.
+This exception changes no task state and grants no other task write.

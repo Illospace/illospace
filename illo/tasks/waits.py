@@ -8,6 +8,9 @@ from illo.gateway.principal import Authority
 from illo.ledger import tasks
 from illo.tools.registry import Refusal
 
+# The page tools exist only when task pages are on. The prompt names them only then.
+PAGE = ("When the task waits for a person to review it, use `page_read`. If its blocks are absent "
+        "or for an older result version, write the page with `page_write`.\n\n")
 JOB = """Task {id} waits for {person} since {hours} hours. The record says: {needed}
 Before Illo reminds a person, find out if a person is needed. A wait ends in one of three ways. Find which one is true.
 
@@ -19,7 +22,7 @@ Then read the live state where the work is. The task text can be old: do not tru
 • A public page or an outside service: the web tools.
 • Logs and business data: the connectors, if they are connected.
 
-Then call `wait_result` one time:
+{page}Then call `wait_result` one time:
 • `complete`: the wanted result of the task is live where the problem was. A merge alone is not complete. Give the proof: each fact with its web address.
 • `restart`: an agent holds the task, its start failed or it stopped, and the cause is gone now.
 • `person`: a person must act. Write the one action. The person must be able to do it from your message alone. Say why an agent cannot do it. Give the facts that you verified, so the person does not check them again.
@@ -55,11 +58,12 @@ def key(wait):
     return f"wait:{wait['task_id']}:{wait['since_event_id'] or 0}:{wait['round']}"
 
 
-def request(row, period, person, now, round):
+def request(row, period, person, now, round, *, pages=False):
     wait = {"task_id": row["id"], "target": row["waits_for"],
             "since_event_id": period["since_event_id"], "round": round}
     return {"wait": wait, "job": JOB.format(id=row["id"], person=person["name"],
-        hours=f"{max(0, (now-period['since']).total_seconds()/3600):.0f}", needed=period["needed"])}
+        hours=f"{max(0, (now-period['since']).total_seconds()/3600):.0f}", needed=period["needed"],
+        page=PAGE if pages else "")}
 
 
 async def queue(ctx, conn, pending):

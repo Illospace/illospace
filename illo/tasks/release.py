@@ -59,7 +59,8 @@ async def _person(ctx, conn, row, entry, now, counts, extra, pending, *, check=T
         return
     enabled = (check and ctx.workspace.config.tasks.wait_check
                and ctx.workspace.config.deep.enabled and row["visibility"] != "private")
-    initial = waits.request(row, period, person, now, 0)
+    pages = ctx.workspace.config.pages.enabled
+    initial = waits.request(row, period, person, now, 0, pages=pages)
     deep = await one(conn, "SELECT * FROM deep_runs WHERE dedupe_key=%s", (waits.key(initial["wait"]),)) if enabled else None
     applied = bool(deep and deep["context"].get("wait", {}).get("applied"))
     if period["reminded"] or applied:
@@ -72,7 +73,7 @@ async def _person(ctx, conn, row, entry, now, counts, extra, pending, *, check=T
             round = (now - since - limit) // timedelta(days=days)
             if round >= 1:
                 # A later check speaks only for a return or a restart, even outside reminder hours.
-                pending.append(waits.request(row, period, person, now, round))
+                pending.append(waits.request(row, period, person, now, round, pages=pages))
         return
     if not in_window(ctx.workspace, person, now):
         return
