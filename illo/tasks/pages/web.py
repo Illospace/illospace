@@ -14,7 +14,7 @@ from illo.db import one
 from illo.ledger import audit, tasks
 from illo.ledger.tokens import digest
 from illo.tasks import pages
-from illo.tasks.pages import images, render, signin
+from illo.tasks.pages import ask_page, images, render, signin
 
 
 def html(body, status=200, headers=render.HEADERS):
@@ -26,8 +26,8 @@ def html(body, status=200, headers=render.HEADERS):
 LINK_HEADERS = {**render.HEADERS, 'Referrer-Policy': 'strict-origin'}
 
 
-def missing():
-    return html(render.document('<main><h1>The task was not found.</h1></main>'), 404)
+def missing(message="The task was not found."):
+    return html(render.document("<main><h1>" + escape(message) + "</h1></main>"), 404)
 
 
 def redirect(path, status=303):
@@ -246,11 +246,14 @@ async def setup(ctx):
         logging.getLogger(name).addFilter(LinkLogFilter())
     ctx.slack_actions.register('web-signin:', signin.action)
     ctx.slack_actions.register('web-open:', signin.open_action)
+    ctx.slack_actions.register('web-open-ask:', signin.open_action)
     ctx.every(300, lambda: signin.cleanup(ctx))
 
     async def route(request: Request):
         path = request.url.path
         if not pages.enabled(ctx):
+            if path.startswith('/a/'):
+                return missing('The request was not found.')
             # The address of a sign-in link holds its key, also when pages are off.
             return html(render.document('<main><h1>The task was not found.</h1></main>'), 404,
                         LINK_HEADERS if path == '/web/signin' else render.HEADERS)
@@ -268,6 +271,14 @@ async def setup(ctx):
             response = redirect('/web/signin')
             response.delete_cookie(signin.SESSION_COOKIE, path='/', httponly=True, samesite='lax', secure=not ctx.config.web_allow_http)
             return response
+        if 'ask_id' in request.path_params:
+            try:
+                ask_id = int(request.path_params['ask_id'])
+                if ask_id <= 0 or ask_id > 2**63-1:
+                    raise ValueError
+            except ValueError:
+                return missing('The request was not found.')
+            return await ask_page.route(ctx, request, ask_id)
         try:
             task_id = int(request.path_params['task_id'])
             position = int(request.path_params['position']) if 'position' in request.path_params else None
@@ -280,6 +291,7 @@ async def setup(ctx):
         return await task_page(ctx, request, task_id, file_position=position)
 
     for path, methods in [('/web/signin', ['GET', 'POST']), ('/web/signout', ['POST']),
-                          ('/web/app.css', ['GET']), ('/t/{task_id}', ['GET']),
+                          ('/web/app.css', ['GET']), ('/a/{ask_id}', ['GET']),
+                          ('/a/{ask_id}/answer', ['POST']), ('/t/{task_id}', ['GET']),
                           ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
         ctx.app.add_api_route(path, route, methods=methods)

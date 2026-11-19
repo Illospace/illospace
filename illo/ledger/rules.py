@@ -59,6 +59,8 @@ def matches(rule: dict, ask: dict, lane: dict | None = None) -> bool:
     """A rule can answer only its owner's ask. Unknown match fields fail closed."""
     if rule["removed_at"] or rule["owner_person_id"] != ask["owner_person_id"]:
         return False
+    if rule['kind'] == 'standing_answer' and not (ask['kind'] == 'decision' or ask.get('permission')):
+        return False
     lane = lane or {}
     fields = {
         "ask_kind": ask["kind"],

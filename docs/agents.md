@@ -274,7 +274,20 @@ Collectors can report a batch and their health:
 {"lane":{"source":"t3","external_id":"acme-thread-1"},"question":"Which test target should I use?","options":[{"id":"preview","label":"Preview"},{"id":"local","label":"Local"}],"recommended":"preview","proof":{"text":"The preview has the new schema."},"source_ref":"acme-thread-1:test-target"}
 ```
 
-Use one short sentence and two to five options. If you give a recommendation, it must name an option id.
+Use one short sentence of 240 characters at most, and two to five options.
+If you give a recommendation, it must name an option id.
+Put the rest in `proof.text` or `proof.body`. Other named entries also appear on the request page.
+The page shows nested lists and named values. Picture addresses appear as links. `proof.links` shows all links.
+The `area` entry selects an owner and stays hidden.
+The proof has at most 40 values, 20,000 bytes as compact JSON, and three levels. The proof object is level one.
+A string value `saved:<number>` anywhere in the proof shows that saved item's title and text.
+Both the requester and the person who must answer must have access to that item.
+The page checks access each time. It shows no item text after access ends.
+`ask_create` returns `page_url` and `card_text`, the card's first line and question.
+When pages are on, `page_url` points to `/a/{id}`. Only the two participants can open it.
+The owner answers on the page or in Slack. Both paths save one answer.
+When pages are off, `page_url` is null and the agent's Slack card shows the complete proof.
+A card can have at most 45 blocks and 30,000 characters. A larger request is refused before the ask is written.
 The asks service sends the card. This call only writes the ledger.
 The same token and `source_ref` return the same ask.
 A token can have 20 open asks for each owner.
@@ -309,6 +322,10 @@ A token of the same person can acknowledge a delivered answer.
 
 You can also pass `ask_id`. Only an open ask becomes cancelled.
 Source references belong to the calling token. Ask ids also permit a new token of the same person.
+Illo records when an ask is cancelled. An answered ask cannot be cancelled.
+One message serves one request: a new ask can reuse the card of a recently cancelled ask.
+The token and owner must match, and the cancel must be less than 10 minutes old.
+Illo updates that card. Old buttons stop working, and thread answers go to the new ask.
 
 ### `signal_submit`
 

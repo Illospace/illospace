@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
+from illo.asks import proof
 from illo.asks.service import is_live
 from illo.channels.mcp.schemas import check_ask_text
 from illo.ledger import ask_workflow as ledger
@@ -48,6 +49,7 @@ class CreateArgs(Arguments):
 
     @model_validator(mode="after")
     def visible_text(self):
+        proof.check(self.proof)
         check_ask_text(self.model_dump_json())
         return self
 

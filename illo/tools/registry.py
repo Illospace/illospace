@@ -74,12 +74,14 @@ def schema_reason(exc: ValidationError, model, limit: int = 5) -> str:
     """
     words = _schema_words(model)
     parts = []
-    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    errors = exc.errors(include_url=False, include_context=True, include_input=False)
     for error in errors[:limit]:
         where = ".".join(str(part) if isinstance(part, int) or part in words else "?"
                          for part in error["loc"]) or "arguments"
         if error["type"] == "union_tag_invalid":
             message = "Use one of the kinds in the schema"
+        elif isinstance(error.get("ctx", {}).get("error"), Refusal):
+            message = str(error["ctx"]["error"])
         elif error["type"] in SAFE_ERRORS:
             message = error["msg"]
         else:

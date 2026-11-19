@@ -7,6 +7,8 @@ import unicodedata
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
+from illo.asks import proof as material
+
 EMOJI = {"decision": "🔷", "action": "🔧", "review": "👀", "reminder": "⏰"}
 
 
@@ -43,31 +45,89 @@ def relative(time: datetime, now: datetime) -> str:
 
 def links_text(links: list) -> str:
     result = []
-    for link in links[:3]:
-        url = link.get("url", "") if isinstance(link, dict) else str(link)
-        try:
-            parsed = urlsplit(url)
-        except ValueError:
-            continue
-        if parsed.scheme in {"https", "http"} and parsed.hostname:
-            result.append(f"<{escape(url).replace('|', '%7C')}|{escape(parsed.hostname)}>")
+    for url, _ in list(material.links(links))[:3]:
+        result.append(f"<{escape(url).replace('|', '%7C')}|{escape(urlsplit(url).hostname)}>")
     return " · ".join(result)
+
+
+def who(ask):
+    requester = ask.get("requester") or {}
+    if not requester:
+        return "Illo", "Illo"
+    owner = ask.get("owner") or {}
+    if requester.get("person_id") == owner.get("id") and requester.get("person_id") is not None:
+        text = f"Your agent {requester['label']}"
+        return text, text
+    text = f"{requester.get('person_name', '')}, through {requester['label']}"
+    return text + ",", text
+
+
+def first_line(ask):
+    wording = {"decision": "needs a decision from you.", "action": "asks you to do something.",
+               "review": "asks you for a review.", "reminder": "reminds you."}
+    return who(ask)[0] + " " + wording[ask["kind"]]
+
+
+def fallback(ask):
+    return EMOJI[ask["kind"]] + " " + first_line(ask) + "\n" + ask["question"]
+
+
+def can_always(ask):
+    return (ask.get("allow_rule", True) and ask.get("recommended_option") is not None
+            and (ask["kind"] == "decision" or ask.get("permission", False)))
+
+
+def proof_value(value, saved, depth=0):
+    if material.saved_ref(value):
+        item = saved.get(value)
+        return (escape(item['title']) + "\n" + escape(item['body']) if item
+                else "You cannot see this saved item.")
+    if isinstance(value, str):
+        if found := material.address(value):
+            url, title = found
+            return f"<{escape(url).replace('|', '%7C')}|{escape(title)}>"
+        return escape(value)
+    if isinstance(value, (dict, list)) and depth < 2:
+        pairs = value.items() if isinstance(value, dict) else [(None, child) for child in value]
+        return "\n".join((escape(key) + ": " if key is not None else "")
+                         + proof_value(child, saved, depth + 1) for key, child in pairs)
+    return escape(material.scalar(value))
+
+
+def proof_sections(proof, saved):
+    blocks = []
+    if text := material.body(proof):
+        blocks.extend(preview_sections(proof_value(text, saved)))
+    for key, value in material.entries(proof):
+        if key == "links":
+            text = "\n".join(f"<{escape(url).replace('|', '%7C')}|{escape(title)}>"
+                             for url, title in material.links(value))
+            for ref in material.references(value):
+                text += "\n" + proof_value(ref, saved)
+        else:
+            text = proof_value(value, saved)
+        blocks.extend(preview_sections("*" + escape(material.label(key)) + "*\n" + text))
+    return blocks
 
 
 def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(UTC)
     lane = ask.get("lane") or {}
     blocks = [
-        section(f"{EMOJI[ask['kind']]} {escape(lane.get('title') or 'Ask')}"),
+        section(f"{EMOJI[ask['kind']]} {escape(first_line(ask))}"
+                + ("\nAbout: " + escape(lane["title"]) if lane.get("title") else "")),
         section(f"*{escape(ask['question'])}*"),
     ]
     proof = ask.get("proof") or {}
-    text = proof.get("text") or proof.get("body") or ""
-    if text:
-        blocks.append(section(f"Why: {escape(str(text).splitlines()[0])}"))
-    links = links_text(proof.get("links", []))
-    if links:
-        blocks.append(section(links))
+    if ask.get("full_proof"):
+        blocks.extend(proof_sections(proof, ask.get("saved_items", {})))
+    else:
+        text = material.body(proof)
+        if text:
+            blocks.append(section(f"Why: {escape(str(text).splitlines()[0])}"))
+        links = links_text(proof.get("links", []))
+        if links:
+            blocks.append(section(links))
     if ask["state"] == "open":
         details = [
             f"• {escape(o['label'])}: {escape(o.get('detail', ''))}"
@@ -77,26 +137,19 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
         if details:
             blocks.append(section("\n".join(details)))
         options = sorted(ask["options"], key=lambda o: o["id"] != ask["recommended_option"])
-        for offset in range(0, len(options), 5):
-            blocks.append(
-                {
-                    "type": "actions",
-                    "elements": [
-                        button(
-                            o["label"],
-                            f"ask:{ask['id']}:opt:{o['id']}",
-                            o["id"] == ask["recommended_option"],
-                        )
-                        for o in options[offset : offset + 5]
-                    ],
-                }
-            )
+        option_buttons = [button(o["label"], f"ask:{ask['id']}:opt:{o['id']}",
+                                 o["id"] == ask["recommended_option"] and not ask.get("page_url"))
+                          for o in options]
+        if ask.get("page_url"):
+            option_buttons.insert(0, button("Open the page", f"web-open-ask:{ask['id']}", True))
+        for offset in range(0, len(option_buttons), 5):
+            blocks.append({"type": "actions", "elements": option_buttons[offset:offset + 5]})
         elements = []
         recommended = next((o for o in options if o["id"] == ask["recommended_option"]), None)
-        if recommended and ask.get("allow_rule", True):
+        if recommended and can_always(ask):
             elements.append(
                 button(
-                    f"Always: {recommended['label']}", f"ask:{ask['id']}:always:{recommended['id']}"
+                    (f"Always: {recommended['label']}" if len(recommended["label"]) + 8 <= 30 else "Always this answer"), f"ask:{ask['id']}:always:{recommended['id']}"
                 )
             )
         elements.append(button("Other…", f"ask:{ask['id']}:other"))
@@ -118,13 +171,8 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
     else:
         blocks.append(section("This question is closed. No answer is needed."))
     context = []
-    requester = ask.get("requester") or {}
-    if requester.get("label"):
-        context.append(
-            f"From {escape(requester['label'])}"
-            + (f" of {escape(requester['person_name'])}" if requester.get("person_name") else "")
-            + (f" on {escape(lane['machine'])}" if lane.get("machine") else "")
-        )
+    if lane.get("machine"):
+        context.append(f"on {escape(lane['machine'])}")
     if ask.get("due_at"):
         context.append(f"due {relative(ask['due_at'], now)}")
     if context:

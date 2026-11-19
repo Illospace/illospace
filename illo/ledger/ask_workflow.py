@@ -62,7 +62,7 @@ async def card_data(conn: Connection, ask):
     row["requester"] = (
         await one(
             conn,
-            "SELECT t.label,p.name AS person_name,p.key AS person_key "
+            "SELECT t.label,t.scopes,p.id AS person_id,p.name AS person_name,p.key AS person_key "
             "FROM tokens t JOIN people p ON p.id=t.person_id WHERE t.id=%s",
             (ask["requester_token_id"],),
         )
@@ -80,7 +80,7 @@ async def card_data(conn: Connection, ask):
 async def close_stale(conn: Connection):
     """A source reference follows the lane's terminal state."""
     await conn.execute("""
-        UPDATE asks a SET state='cancelled' FROM lanes l WHERE a.lane_id=l.id
+        UPDATE asks a SET state='cancelled',cancelled_at=clock_timestamp() FROM lanes l WHERE a.lane_id=l.id
         AND a.source_ref IS NOT NULL AND a.state='open'
         AND (l.state IN ('done','failed') OR l.closed_at IS NOT NULL)
     """)
@@ -291,3 +291,10 @@ async def expire_ask(conn: Connection, ask_id: int) -> None:
         "UPDATE asks SET state='expired' WHERE id=%s AND state='open' AND expires_at<=now()",
         (ask_id,),
     )
+
+
+async def page_read(conn, ask_id, person_id, *, lock=False):
+    """A page belongs only to the ask's active participants, regardless of lane rights."""
+    return await one(conn, """SELECT a.* FROM asks a JOIN people p ON p.id=%s AND p.active
+        WHERE a.id=%s AND p.id IN (a.owner_person_id,a.requester_person_id)"""
+        + (" FOR UPDATE OF a" if lock else ""), (person_id, ask_id))

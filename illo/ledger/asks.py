@@ -188,7 +188,7 @@ async def cancel(conn: Connection, ask_id: int) -> bool:
     return bool(
         await one(
             conn,
-            "UPDATE asks SET state='cancelled' WHERE id=%s AND state='open' RETURNING id",
+            "UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s AND state='open' RETURNING id",
             (ask_id,),
         )
     )

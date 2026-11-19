@@ -98,7 +98,7 @@ TOOLS = {
             schemas.AskCreate,
             asks.create,
             "write_internal",
-            "Ask a person one short question with two to five `options` (each an `id` and a `label`); `recommended` must be one of the ids. `owner` is a person key, email, GitHub login, or Slack id, and defaults to the token's person. The person gets a card, or a standing rule of theirs answers; poll `ask_pull` for the answer. A repeated `source_ref` returns the first ask.",
+            "Ask a person one short question with two to five `options` (each an `id` and a `label`); `recommended` must be one of the ids. The person sees the question, the proof, and the options, and nothing else: name no ID that a person cannot open. Put the material in `proof`: `text` (your words), `links`, and other named entries. A value `saved:<number>` shows that saved item to the person. `owner` is a person key, email, GitHub login, or Slack id, and defaults to the token's person. The person gets a card, or a standing rule of theirs answers; poll `ask_pull` for the answer. A repeated `source_ref` returns the first ask.",
         ),
         agent_tool(
             "ask_pull",

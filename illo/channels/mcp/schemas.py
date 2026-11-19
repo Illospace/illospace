@@ -6,6 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from illo.asks import proof
+from illo.tools.registry import Refusal
+
 Source = Literal["t3", "claude-code", "codex", "github", "manual", "email"]
 State = Literal[
     "open", "working", "waiting_person", "blocked", "review", "done", "failed", "unknown"
@@ -132,7 +135,7 @@ class Option(Arguments):
 def check_ask_text(value: str) -> None:
     """Refuse hidden format controls before an ask can reach a card."""
     if any(unicodedata.category(char) == "Cf" for char in value):
-        raise ValueError("Ask text cannot contain a format control")
+        raise Refusal("Ask text cannot contain a format control")
 
 
 class AskCreate(Arguments):
@@ -147,12 +150,19 @@ class AskCreate(Arguments):
     expires_at: str | None = None
     source_ref: str | None = Field(default=None, min_length=1)
 
-    @field_validator("question")
+    @field_validator("question", mode="before")
     @classmethod
     def one_sentence(cls, value):
-        if "\n" in value or len(re.findall(r"[.!?](?:\s+|$)", value)) > 1:
-            raise ValueError("The question must be one short sentence")
+        if not isinstance(value, str):
+            return value
+        if not value.strip() or len(value.strip()) > 240 or "\n" in value.strip() or len(re.findall(r"[.!?](?:\s+|$)", value.strip())) > 1:
+            raise Refusal("The question is one short sentence, 240 characters at most. Put the rest in proof.text.")
         return value
+
+    @field_validator("proof")
+    @classmethod
+    def proof_limits(cls, value):
+        return proof.check(value)
 
     @model_validator(mode="after")
     def check_options(self):
@@ -161,7 +171,7 @@ class AskCreate(Arguments):
         if len(set(ids)) != len(ids) or (
             self.recommended is not None and self.recommended not in ids
         ):
-            raise ValueError("Use unique option IDs and a valid recommended option")
+            raise Refusal("Use unique option IDs and a valid recommended option")
         return self
 
 

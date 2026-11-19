@@ -8,7 +8,7 @@ It uses the same visibility rules as task tools. Only the owner sees a personal 
 
 The fast way starts in Slack:
 
-1. Press **Open the page** on a task card from Illo.
+1. Press **Open the page** on a task or request card from Illo.
 2. Illo shows a link in a window that only you see. Open the link.
 3. Press **Continue** in the browser.
 
@@ -18,7 +18,7 @@ In a browser with no session, only **Continue** uses the link.
 A link never changes the person of a browser that is signed in. If that person owns the link, the link ends.
 Illo's own logs drop each sign-in request that has a query. Set the same rule in a reverse proxy.
 If Slack does not show the window in time, Illo ends the link and asks for a new press.
-Illo gives a link only for a task that the person can see, and 20 links for each person in one hour.
+Illo gives a link only for a task or request that the person can see. Each person gets 20 links per hour.
 
 The other way starts in the browser:
 
@@ -79,6 +79,36 @@ An open task also accepts a message to its holder.
 These actions use the same ledger functions and delivery paths as Slack.
 If the work changes after you open the page, read it again before you act.
 
+## Request pages
+
+An agent's ask has a request page at `/a/{id}` when pages are on.
+`ask_create` returns this address in `page_url`. It returns null when pages are off.
+`card_text` contains the card's first line and question as plain text.
+The page shows who asks, the question, the proof, every link, and the options.
+Only the active owner and requester can open it. A workspace owner has no extra access.
+The owner can choose an option or give another answer of 1 to 4,000 characters.
+The requester can read the page but cannot answer. Slack and the page use the same answer service.
+A changed request requires a fresh form. A closed request needs no answer.
+
+Put a long brief in `proof.text` or `proof.body`. Other named entries get their own sections.
+The page shows strings, numbers, booleans, nested lists, and named values. Picture addresses remain links.
+All entries in `proof.links` appear. The routing entry `area` stays hidden.
+The proof has at most 40 values, 20,000 bytes as compact JSON, and three levels. The proof object is level one.
+A string `saved:<number>` anywhere in the proof names a saved item.
+Both participants must have access when the agent creates the ask.
+Each page read checks the reader's access again. An unavailable item shows no title or text.
+The ask stores the reference, never a copy of the saved text.
+
+When pages are off, the agent's Slack card shows the complete proof and saved text.
+A request with more than 45 card blocks or 30,000 characters is refused before an ask is written.
+Illo's own asks and collector asks keep their short cards.
+Only a decision or permission ask can offer a standing answer.
+
+One message serves one request. A new ask can reuse the card of a recently cancelled ask.
+The token and owner must match. The cancel must be less than 10 minutes old.
+The new card replaces the old card. Old buttons stop working, and thread answers go to the new ask.
+An answered ask keeps its message and its answer.
+
 ## Setting and access
 
 Pages are off by default. Add this block to `illo.yaml`:
@@ -94,7 +124,7 @@ Use HTTPS. HTTP is allowed only on a loopback host.
 For local HTTP tests, set `ILLO_WEB_ALLOW_HTTP=true` so the browser can send the cookie.
 Do not set this option on a shared host.
 
-Expose `/t/` and `/web/` through the gateway. Use the team's private network first.
+Expose `/t/`, `/a/`, and `/web/` through the gateway. Use the team's private network first.
 Keep the brain, Postgres, and admin routes private.
 When pages are off, these routes return 404 and the page tools disappear.
 Slack task links keep their previous destinations.

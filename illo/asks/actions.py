@@ -1,8 +1,9 @@
 """Handle owner answers without a model run."""
 
-from illo.asks.service import is_live, refresh_ask
+from illo.asks.cards import can_always
+from illo.asks.service import answer, is_live, refresh_ask
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import asks, rules
+from illo.ledger import rules
 
 
 def in_card_dm(person, action, row):
@@ -47,9 +48,9 @@ async def handle(ctx, person, action):
             notice = "Reply in this thread with your answer."
         elif operation in {"opt", "always"} and len(parts) == 4:
             option = next((o for o in ask["options"] if o["id"] == parts[3]), None)
-            if option is None or (operation == "always" and not ask["allow_rule"]):
+            if option is None or (operation == "always" and not can_always(ask)):
                 return
-            answered = await asks.answer(conn, ask_id, person_id=person["id"], option=option["id"])
+            answered = await answer(conn, ask_id, person["id"], option=option["id"])
             if not answered:
                 return
             if operation == "always":
@@ -80,7 +81,6 @@ async def handle(ctx, person, action):
                     f"requester: {requester}. "
                     'Say "show my rules" to see or remove it.'
                 )
-            await ledger.decision(conn, answered)
         else:
             return
     if notice:
@@ -106,11 +106,7 @@ async def claim_thread(ctx, event, authority):
         elif not event.text.strip():
             text = "Reply in this thread with your answer."
         else:
-            answered = await asks.answer(
-                conn, ask["id"], person_id=authority.person_id, text=event.text
-            )
-            if answered:
-                await ledger.decision(conn, answered)
+            answered = await answer(conn, ask["id"], authority.person_id, text=event.text)
             text = "Answer saved." if answered else "This question is closed. No answer is needed."
     await refresh_ask(ctx, ask["id"])
     return text

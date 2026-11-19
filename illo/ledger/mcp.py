@@ -264,6 +264,29 @@ async def cancel_ask(conn, token, ask_id, source_ref) -> dict | None:
         (token["person_id"], ask_id, ask_id, source_ref, source_ref, token["id"]),
     )
     if row and row["state"] == "open":
-        await conn.execute("UPDATE asks SET state='cancelled' WHERE id=%s", (row["id"],))
+        await conn.execute("UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s", (row["id"],))
         row["state"] = "cancelled"
     return row
+
+
+async def take_ask_card(conn, ask):
+    """Reuse one recently cancelled card. Locks follow id order, as card workers do."""
+    old = await one(conn, """SELECT id FROM asks WHERE requester_token_id=%s
+        AND owner_person_id=%s AND state='cancelled' AND slack_ts IS NOT NULL
+        AND cancelled_at>clock_timestamp()-interval '10 minutes'
+        ORDER BY cancelled_at DESC,id DESC LIMIT 1""",
+        (ask['requester_token_id'], ask['owner_person_id']))
+    if not old:
+        return
+    locked = await all_rows(conn, 'SELECT * FROM asks WHERE id=ANY(%s) ORDER BY id FOR UPDATE',
+                            ([old['id'], ask['id']],))
+    previous = next(row for row in locked if row['id'] == old['id'])
+    current = next(row for row in locked if row['id'] == ask['id'])
+    eligible = await one(conn, """SELECT id FROM asks WHERE id=%s AND state='cancelled'
+        AND cancelled_at>clock_timestamp()-interval '10 minutes' AND slack_ts IS NOT NULL""", (previous['id'],))
+    if not eligible or current['slack_ts']:
+        return
+    await conn.execute('UPDATE asks SET slack_channel=NULL,slack_ts=NULL WHERE id=%s', (previous['id'],))
+    await conn.execute("""UPDATE asks SET slack_channel=%s,slack_ts=%s,card_digest=NULL,
+        awaiting_text=%s WHERE id=%s""", (previous['slack_channel'], previous['slack_ts'],
+                                         previous['awaiting_text'], current['id']))
