@@ -26,7 +26,7 @@ LINKS_PER_HOUR = 20
 
 def next_path(value):
     # Limit the destination to task and request pages. Encoded separators and controls cannot change its host.
-    return value if re.fullmatch(r"/(?:t|a)/[1-9][0-9]*(?:/)?", value or "") else ""
+    return value if re.fullmatch(r"/(?:t|web/a)/[1-9][0-9]*(?:/)?", value or "") else ""
 
 
 def pairing_line(handle):
@@ -157,7 +157,7 @@ async def link(conn, ctx, person, task_id, *, ask=False):
     key = secrets.token_urlsafe(32)
     await conn.execute("""INSERT INTO web_signins(pairing_hash,browser_hash,next_path,person_id,paired_at,decision)
         VALUES (%s,%s,%s,%s,clock_timestamp(),'approved')""",
-        (digest("link:" + key), digest(key), f"/{'a' if ask else 't'}/{task_id}", person["id"]))
+        (digest("link:" + key), digest(key), f"/{'web/a' if ask else 't'}/{task_id}", person["id"]))
     return key
 
 

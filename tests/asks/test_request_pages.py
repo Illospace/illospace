@@ -88,7 +88,7 @@ async def test_agent_repair_cancel_reuse_and_complete_page(ctx, app, http, brows
                 'picture': 'https://example.com/plan.png', 'brief': 'saved:77',
                 'links': [f'https://example.com/{n}' for n in range(6)]}
     first = await agent.call('ask_create', {**ASK, 'proof': material, 'source_ref': 'request-1'})
-    assert first['page_url'] == BASE + f"/a/{first['ask_id']}"
+    assert first['page_url'] == BASE + f"/web/a/{first['ask_id']}"
     assert first['card_text'] == '🔧 Ada, through Example agent, asks you to do something.\n' + ASK['question']
     await service.tick(ctx)
     original = await read(ctx, first['ask_id'])
@@ -105,7 +105,7 @@ async def test_agent_repair_cancel_reuse_and_complete_page(ctx, app, http, brows
     assert len(posts(slack_client)) == 1
     assert len([c for c in slack_client.calls if c['method'] == 'chat_update']) >= 2
     await login(ctx, browser.http)
-    page = await browser.http.get(f"/a/{original['id']}")
+    page = await browser.http.get(f"/web/a/{original['id']}")
     assert page.status_code == 200
     for text in ('The final condition matters.', '<h2>Suggested reply</h2>', 'I can review the plan tomorrow.',
                  'Picture: plan.png', 'The saved plan includes every step.', 'Saved item 77', 'https://example.com/5'):
@@ -125,14 +125,14 @@ async def test_reader_matrix(ctx, app, http, browser, viewer, status, bar):
     ask = await agent.call('ask_create', ASK)
     if viewer:
         await login(ctx, browser.http, viewer)
-    page = await browser.http.get(f"/a/{ask['ask_id']}")
+    page = await browser.http.get(f"/web/a/{ask['ask_id']}")
     assert page.status_code == status
     assert ('class="decide"' in page.text) is bar
     if status == 404:
-        missing = await browser.http.get('/a/999999')
+        missing = await browser.http.get('/web/a/999999')
         assert page.text == missing.text and 'The request was not found.' in page.text
     if status == 302:
-        assert page.headers['location'] == '/web/signin?next=%2Fa%2F' + str(ask['ask_id'])
+        assert page.headers['location'] == '/web/signin?next=%2Fweb%2Fa%2F' + str(ask['ask_id'])
     if viewer == 'ada':
         assert 'Waits for Ben · today' in page.text
     if viewer == 'ben':
@@ -149,7 +149,7 @@ async def test_saved_item_visibility_changes_and_aliases(ctx, app, http, browser
     agent = await AgentClient.create(app, http)
     ask = await agent.call('ask_create', {**ASK, 'proof': {'brief': ['saved:88']}})
     await login(ctx, browser.http)
-    path = f"/a/{ask['ask_id']}"
+    path = f"/web/a/{ask['ask_id']}"
     assert 'The saved plan includes every step.' in (await browser.http.get(path)).text
     async with ctx.pool.connection() as conn:
         await conn.execute("UPDATE items SET visibility='private' WHERE id=%s", (item['id'],))
@@ -180,7 +180,7 @@ async def test_answer_form_guards_and_audit(ctx, app, http, browser, slack_clien
     agent = await AgentClient.create(app, http)
     ask = await agent.call('ask_create', ASK)
     await service.tick(ctx)
-    path = f"/a/{ask['ask_id']}"
+    path = f"/web/a/{ask['ask_id']}"
     assert (await browser.http.post(path + '/answer')).status_code == 302
     await login(ctx, browser.http)
     form = fields(await browser.http.get(path))
@@ -211,7 +211,7 @@ async def test_answer_form_guards_and_audit(ctx, app, http, browser, slack_clien
 async def test_requester_cannot_answer_and_cancel_closes_page(ctx, app, http, browser):
     agent = await AgentClient.create(app, http)
     ask = await agent.call('ask_create', ASK)
-    path = f"/a/{ask['ask_id']}"
+    path = f"/web/a/{ask['ask_id']}"
     await login(ctx, browser.http, 'ada')
     token = browser.http.cookies.get(signin.SESSION_COOKIE)
     row = await read(ctx, ask['ask_id'])
@@ -233,7 +233,7 @@ async def test_simultaneous_slack_and_page_answer_commit_once(ctx, app, http, br
     await service.tick(ctx)
     row = await read(ctx, ask['ask_id'])
     await login(ctx, browser.http)
-    path = f"/a/{row['id']}"
+    path = f"/web/a/{row['id']}"
     form = fields(await browser.http.get(path))
     await asyncio.gather(actions.handle(ctx, await member(ctx), click(row)),
                          browser.http.post(path + '/answer', data={**form, 'option': 'no'}))
@@ -264,7 +264,7 @@ async def test_pages_off_complete_card_and_size_refusal(ctx, app, http, slack_cl
         assert expected in text
     assert text.count('x') >= 6000 and 'hidden' not in text and 'web-open' not in str(card)
     assert all(len(b['text']['text']) <= 2800 for b in card['blocks'] if b['type'] == 'section')
-    assert (await http.get(f"/a/{created['ask_id']}")).status_code == 404
+    assert (await http.get(f"/web/a/{created['ask_id']}")).status_code == 404
     async with ctx.pool.connection() as conn:
         await conn.execute("UPDATE items SET body=%s WHERE source_ref='saved:77'", ('x' * 130000,))
     result = await agent.call('ask_create', {**ASK, 'proof': {'brief': 'saved:77'}, 'source_ref': 'too-long'}, error=True)
@@ -330,10 +330,10 @@ async def test_open_ask_action_signin_and_participant_checks(ctx, browser, app, 
             text = views[0]['view']['blocks'][0]['text']['text']
             assert 'Open the page of request' in text
             path = link_of(text)
-    assert signin.next_path('/a/17') == '/a/17'
+    assert signin.next_path('/web/a/17') == '/web/a/17'
     key = path.split('=', 1)[1]
     response = await browser.http.post('/web/signin', data={'key': key})
-    assert response.status_code == 303 and response.headers['location'] == f"/a/{ask['ask_id']}"
+    assert response.status_code == 303 and response.headers['location'] == f"/web/a/{ask['ask_id']}"
     assert 'Waits for you' in (await browser.http.get(response.headers['location'])).text
 
 
@@ -417,7 +417,7 @@ async def test_saved_ref_inside_links_and_body(ctx, app, http, browser, slack_cl
     ask = await agent.call('ask_create', {**ASK, 'proof': {'body': 'saved:77', 'links': ['saved:77']}})
     if pages_on:
         await login(ctx, browser.http)
-        page = await browser.http.get(f"/a/{ask['ask_id']}")
+        page = await browser.http.get(f"/web/a/{ask['ask_id']}")
         assert page.text.count('The saved plan includes every step.') == 2
     else:
         await service.tick(ctx)
@@ -429,18 +429,18 @@ async def test_inactive_person_and_team_lane_do_not_widen_request_page(ctx, app,
     await agent.call('lane_report', {'source': 'manual', 'external_id': 'team-plan', 'visibility': 'team'})
     ask = await agent.call('ask_create', {**ASK, 'lane': {'source': 'manual', 'external_id': 'team-plan'}})
     await login(ctx, browser.http, 'david')
-    assert (await browser.http.get(f"/a/{ask['ask_id']}")).status_code == 404
+    assert (await browser.http.get(f"/web/a/{ask['ask_id']}")).status_code == 404
     await login(ctx, browser.http, 'ben')
-    assert (await browser.http.get(f"/a/{ask['ask_id']}")).status_code == 200
+    assert (await browser.http.get(f"/web/a/{ask['ask_id']}")).status_code == 200
     async with ctx.pool.connection() as conn:
         await conn.execute("UPDATE people SET active=false WHERE key='ben'")
-    assert (await browser.http.get(f"/a/{ask['ask_id']}")).status_code == 302
+    assert (await browser.http.get(f"/web/a/{ask['ask_id']}")).status_code == 302
 
 
 async def test_page_answer_with_option_rule_notice_and_closed_state(ctx, app, http, browser):
     agent = await AgentClient.create(app, http)
     ask = await agent.call('ask_create', {**ASK, 'kind': 'decision'})
-    path = f"/a/{ask['ask_id']}"
+    path = f"/web/a/{ask['ask_id']}"
     await login(ctx, browser.http)
     row = await read(ctx, ask['ask_id'])
     for key in ('question', 'state', 'options', 'answered_at'):
@@ -454,7 +454,7 @@ async def test_page_answer_with_option_rule_notice_and_closed_state(ctx, app, ht
     assert 'A rule of yours answered: Use the reviewed plan.' in shown.text
     assert 'class="decide"' not in shown.text
     another = await agent.call('ask_create', ASK)
-    path = f"/a/{another['ask_id']}"
+    path = f"/web/a/{another['ask_id']}"
     form = fields(await browser.http.get(path))
     result = await browser.http.post(path + '/answer', data={**form, 'option': 'yes'})
     assert result.status_code == 303

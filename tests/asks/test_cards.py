@@ -108,7 +108,7 @@ def test_requester_forms_page_button_and_long_always_label():
         brain = ask(kind=kind, requester=None)
         assert first_line(brain) == 'Illo ' + text
         assert fallback(brain).endswith(text + '\nContinue?')
-    row = ask(page_url='https://illo.example.com/a/1')
+    row = ask(page_url='https://illo.example.com/web/a/1')
     row['options'][1]['label'] = 'Use the complete reviewed option label'
     actions = [b for b in ask_card(row, NOW) if b['type'] == 'actions']
     assert actions[0]['elements'][0]['action_id'] == 'web-open-ask:1'

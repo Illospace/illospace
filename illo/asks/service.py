@@ -134,7 +134,7 @@ async def is_live(conn, ask):
 
 
 async def prepare_card(ctx, conn, data):
-    data['page_url'] = pages.base_url(ctx) + f"/a/{data['id']}" if pages.enabled(ctx) else None
+    data['page_url'] = pages.base_url(ctx) + f"/web/a/{data['id']}" if pages.enabled(ctx) else None
     requester = data.get('requester') or {}
     data['full_proof'] = not pages.enabled(ctx) and requester.get('scopes') == ['agent']
     if data['full_proof'] and data.get('owner'):

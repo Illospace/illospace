@@ -81,7 +81,7 @@ If the work changes after you open the page, read it again before you act.
 
 ## Request pages
 
-An agent's ask has a request page at `/a/{id}` when pages are on.
+An agent's ask has a request page at `/web/a/{id}` when pages are on.
 `ask_create` returns this address in `page_url`. It returns null when pages are off.
 `card_text` contains the card's first line and question as plain text.
 The page shows who asks, the question, the proof, every link, and the options.
@@ -124,7 +124,7 @@ Use HTTPS. HTTP is allowed only on a loopback host.
 For local HTTP tests, set `ILLO_WEB_ALLOW_HTTP=true` so the browser can send the cookie.
 Do not set this option on a shared host.
 
-Expose `/t/`, `/a/`, and `/web/` through the gateway. Use the team's private network first.
+Expose `/t/` and `/web/` through the gateway. Request pages are under `/web/`. Use the team's private network first.
 Keep the brain, Postgres, and admin routes private.
 When pages are off, these routes return 404 and the page tools disappear.
 Slack task links keep their previous destinations.

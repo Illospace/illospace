@@ -100,7 +100,7 @@ async def create(ctx, args: dict) -> dict:
 
 async def created_result(ctx, row):
     data = await workflow.card_data(ctx.conn, row)
-    page_url = pages.base_url(ctx.app) + f"/a/{row['id']}" if pages.enabled(ctx.app) else None
+    page_url = pages.base_url(ctx.app) + f"/web/a/{row['id']}" if pages.enabled(ctx.app) else None
     return {**answer(row), 'page_url': page_url, 'card_text': cards.fallback(data)}
 
 

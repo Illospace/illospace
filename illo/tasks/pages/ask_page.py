@@ -20,7 +20,7 @@ def seen(row):
 
 
 def form(ask_id, csrf, stamp, *, option=None, label='', primary=False):
-    return (f'<form method="post" action="/a/{ask_id}/answer">'
+    return (f'<form method="post" action="/web/a/{ask_id}/answer">'
             f'<input type="hidden" name="csrf" value="{e(csrf)}">'
             f'<input type="hidden" name="seen" value="{e(stamp)}">'
             + (f'<input type="hidden" name="option" value="{e(option)}">' if option is not None else
@@ -125,7 +125,7 @@ async def route(ctx, request, ask_id):
     async with ctx.pool.connection() as conn:
         person = await signin.session(conn, token)
         if not person:
-            return redirect('/web/signin?' + urlencode({'next': f'/a/{ask_id}'}), 302)
+            return redirect('/web/signin?' + urlencode({'next': f'/web/a/{ask_id}'}), 302)
         values = await form_data(request) if request.method == 'POST' else {}
         if request.method == 'POST' and (not origin_ok(ctx, request) or not signin.valid_csrf(token, values.get('csrf', ''))):
             return html(render.document('<main><p>The form is invalid. Read the page again.</p></main>'), 403)
@@ -154,4 +154,4 @@ async def route(ctx, request, ask_id):
         await audit.write(conn, principal='person:' + person['key'], tool='ask_answer', args={'id': ask_id},
                           decision='allow', reason='The person answers on the request page.', target=f'ask {ask_id}')
     await service.refresh_ask(ctx, ask_id)
-    return redirect(f'/a/{ask_id}')
+    return redirect(f'/web/a/{ask_id}')

@@ -284,7 +284,7 @@ A string value `saved:<number>` anywhere in the proof shows that saved item's ti
 Both the requester and the person who must answer must have access to that item.
 The page checks access each time. It shows no item text after access ends.
 `ask_create` returns `page_url` and `card_text`, the card's first line and question.
-When pages are on, `page_url` points to `/a/{id}`. Only the two participants can open it.
+When pages are on, `page_url` points to `/web/a/{id}`. Only the two participants can open it.
 The owner answers on the page or in Slack. Both paths save one answer.
 When pages are off, `page_url` is null and the agent's Slack card shows the complete proof.
 A card can have at most 45 blocks and 30,000 characters. A larger request is refused before the ask is written.

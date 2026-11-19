@@ -252,7 +252,7 @@ async def setup(ctx):
     async def route(request: Request):
         path = request.url.path
         if not pages.enabled(ctx):
-            if path.startswith('/a/'):
+            if path.startswith('/web/a/'):
                 return missing('The request was not found.')
             # The address of a sign-in link holds its key, also when pages are off.
             return html(render.document('<main><h1>The task was not found.</h1></main>'), 404,
@@ -291,7 +291,7 @@ async def setup(ctx):
         return await task_page(ctx, request, task_id, file_position=position)
 
     for path, methods in [('/web/signin', ['GET', 'POST']), ('/web/signout', ['POST']),
-                          ('/web/app.css', ['GET']), ('/a/{ask_id}', ['GET']),
-                          ('/a/{ask_id}/answer', ['POST']), ('/t/{task_id}', ['GET']),
+                          ('/web/app.css', ['GET']), ('/web/a/{ask_id}', ['GET']),
+                          ('/web/a/{ask_id}/answer', ['POST']), ('/t/{task_id}', ['GET']),
                           ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
         ctx.app.add_api_route(path, route, methods=methods)
