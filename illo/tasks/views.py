@@ -4,6 +4,7 @@ import json
 
 from illo.db import all_rows, one
 from illo.ledger import tasks
+from illo.tasks import pages, progress
 from illo.tools._format import data_text
 
 WAKE_PENDING = ("Illo starts this agent in the next minute. If the agent needs a ticket, Illo files it "
@@ -19,6 +20,9 @@ async def full(conn, workspace, row, viewer, *, limit=20, ctx=None):
     result = {key: value for key, value in row.items() if key != "tsv"}
     latest = await one(conn, """SELECT text FROM task_events WHERE task_id=%s
         AND kind IN ('woken','wake_failed') ORDER BY id DESC LIMIT 1""", (row["id"],))
+    result["progress"] = await progress.read(conn, row, viewer)
+    if workspace.config.pages.enabled:
+        result["page_url"] = pages.url(getattr(ctx, "app", ctx), row["id"]) if ctx else pages.workspace_url(workspace, row["id"])
     result["wake"] = data_text("task-wake", latest["text"]) if latest else None
     agent = next((a for a in workspace.agents if "agent:" + a.key == row["holder"]), None)
     if agent and await one(conn, "SELECT 1 FROM task_wakes WHERE task_id=%s AND finished_at IS NULL", (row["id"],)):

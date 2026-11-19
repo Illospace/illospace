@@ -409,6 +409,7 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
         linked = any(link.get("kind") in {"ticket", "change"} and link.get("url") in urls for link in row["links"])
         if not (row["id"] == task_id or linked or names_ticket(title, row)):
             continue
+        await kv.set(conn, f"task:lane:{row['id']}:{lane['id']}", True)
         live = f"task:lane-live:{row['id']}:{lane['id']}"
         if lane["state"] == "working":
             await kv.set(conn, live, True)

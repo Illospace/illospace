@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from illo.channels.slack.tasks import _can_review, _visible, holder_name
 from illo.db import all_rows, one
 from illo.ledger import digest_snapshot, tasks
-from illo.tasks import list_page, pages
+from illo.tasks import list_page, pages, progress
 from illo.tasks.pages import images, markdown, outside, signin
 from illo.tools.web import normalize_url
 
@@ -19,16 +19,20 @@ HEADERS = {
     "Referrer-Policy": "same-origin",
     "X-Robots-Tag": "noindex",
     "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-src 'self'; frame-ancestors 'none'",
 }
 
 
-def document(body, *, title="Illo", refresh=False):
+PROGRESS_HEADERS = {**HEADERS, 'Content-Security-Policy': HEADERS['Content-Security-Policy'].replace(
+    "frame-ancestors 'none'", "frame-ancestors 'self'")}
+
+
+def document(body, *, title="Illo", refresh=False, body_class=''):
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            + ('<meta http-equiv="refresh" content="3">' if refresh else '')
+            + (f'<meta http-equiv="refresh" content="{3 if refresh is True else refresh}">' if refresh else '')
             + '<title>' + e(title) + '</title><link rel="stylesheet" href="/web/app.css">'
-            '</head><body>' + body + '</body></html>')
+            '</head><body' + (f' class="{e(body_class)}"' if body_class else '') + '>' + body + '</body></html>')
 
 
 # The Illo mark. It takes the colour of the text, so it needs no style and no picture request.
@@ -179,6 +183,10 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
             if wake:
                 body += notice(_visible(wake['text']))
             break
+    if row['state'] in {'todo', 'working'} and (row['holder'] or '').startswith('agent:'):
+        value = await progress.read(conn, row, viewer)
+        n = len(value.get('steps') or [])
+        body += f'<iframe class="progress s{n}" src="/t/{task_id}/progress" title="Progress" loading="lazy"></iframe>'
     if stored:
         files = await outside.positions(conn, task_id=task_id)
         for position, block in enumerate(stored['blocks']):
@@ -220,3 +228,46 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
     if actions:
         body += '<div class="decide"><div class="in">' + actions + '</div></div>'
     return document(body, title=f'Task {task_id} · Illo')
+
+
+async def progress_document(conn, row, person):
+    viewer = tasks.Viewer(person['key'], 'person:' + person['key'], human=True)
+    value = await progress.facts(conn, row, viewer)
+    stages = [(key, 'Your review' if key == 'review' and row['waits_for'] == viewer.actor else label)
+              for key, label in progress.STAGES if key != 'pull' or value['has_repo'] or value['has_pull']]
+    current = next((i for i, (key, _) in enumerate(stages) if key == value['stage']), -1)
+    body = '<section class="block"><h2>Progress</h2><div class="body"><ol class="stages">'
+    for i, (_, label) in enumerate(stages):
+        state = 'done' if i < current else 'here' if i == current else ''
+        body += (f'<li class="{state}">' if state else '<li>') + e(label) + '</li>'
+    body += '</ol>'
+    lane = value['lane']
+    # A collector sends a lane with no change each 10 minutes. A shorter limit calls a long command silent.
+    if lane and not lane['closed_at'] and progress.minutes(lane['last_signal_at']) > 15:
+        body += '<p>No signal for ' + str(progress.minutes(lane['last_signal_at'])) + ' minutes.</p>'
+    elif lane and lane['live'] and value.get('now'):
+        body += '<p class="now-line"><span>Now: ' + progress.NOW[value['now']] + '</span><span>' + progress.age(value['at']) + ' ago</span></p>'
+    elif not lane and value['stage'] == 'waits':
+        body += '<p>The agent did not start yet.</p>'
+    body += '</div></section>'
+    steps = value.get('steps') or []
+    if steps:
+        done = value.get('steps_done', sum(step['state'] == 'done' for step in steps))
+        total = value.get('steps_total', len(steps))
+        body += f'<section class="block"><h2>The agent\'s own steps · {done} of {total}</h2><ul class="steps">'
+        for step in steps:
+            state = step['state']
+            body += f'<li class="{state}"><span class="dot">' + ('✓' if state == 'done' else '') + '</span><div>' + e(_visible(step['text'])) + '</div></li>'
+        body += '</ul></section>'
+    chips = []
+    if value.get('files_changed') is not None:
+        n = value['files_changed']
+        chips.append(f'{n} file changed' if n == 1 else f'{n} files changed')
+    if value['branch']:
+        chips.append(_visible(value['branch']))
+    if chips:
+        body += '<ul class="chips">' + ''.join('<li>' + e(chip) + '</li>' for chip in chips) + '</ul>'
+    active = row['state'] in {'todo', 'working'}
+    if not active:
+        body += f'<p>The state of the task changed. <a href="/t/{row["id"]}" target="_top">Read the page again</a></p>'
+    return document(body, title='Progress', refresh=15 if active else False, body_class='frame')

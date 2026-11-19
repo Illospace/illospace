@@ -103,7 +103,7 @@ It contains hashes, request references, and delivery notes. It contains no messa
 Each poll sends changed lanes to `lane_report`, plus a collector liveness record.
 An empty batch still reports liveness. Every 10 minutes, the collector refreshes every selected lane.
 The collector sends the title, state, last assistant text, links, repository, and machine.
-It cuts the summary to 500 characters. It sends no attachment, tool result, file change, or command output field.
+It cuts the summary to 500 characters. It sends no attachment, tool result, file content, or command output field.
 It removes code blocks and common credentials from text. This filter cannot detect all private prose.
 Reports use private visibility by default. Set `share = "team"` only for sessions that the team may read.
 The next report also changes an existing lane to the configured visibility.
@@ -271,3 +271,15 @@ ruff check collectors tests/collectors
 
 The tests cover state mapping, changed lanes, refresh, asks, stale answers, retry, credentials, hooks, and settings merge.
 They call no real Slack, GitHub, model, or T3 agent.
+
+
+### Task progress
+
+For a thread with a task link, the collector sends `progress` from the latest run in progress.
+It reads the newest items, the latest step list, and the count of distinct changed paths.
+All SQLite reads use the same read-only snapshot. No model call runs.
+No command text leaves the machine. The collector sends a fixed `now` key for the activity.
+It sends at most 12 steps, each cut to 120 characters, with the full step counts.
+For a long list, it shows the last done step, the present step, and the next steps.
+It sends `null` after the run ends. A progress change makes the lane report change.
+Threads without a task link send no progress field.

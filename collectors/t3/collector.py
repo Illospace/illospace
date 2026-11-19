@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import socket
 import sqlite3
 import sys
@@ -114,6 +115,112 @@ class Thread:
     is_step: bool = False
     parent_ref: str | None = None
     links: list[str] = field(default_factory=list)
+    progress: dict | None = None
+
+
+def step_list(item):
+    if item.get("type") == "todo_list":
+        return item["steps"] if isinstance(item.get("steps"), list) else None
+    if item.get("type") != "dynamic_tool" or not re.search(
+        r"todo|update_plan", item.get("toolName", ""), re.I
+    ):
+        return None
+    value = item.get("input") or {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if isinstance(value, dict):
+        steps = value.get("todos", value.get("plan", value.get("steps")))
+        return steps if isinstance(steps, list) else None
+    return None
+
+
+def activity(item):
+    kind = item.get("type")
+    if kind in {"user_input_request", "approval_request", "secret_request"}:
+        return "waits" if item.get("status") in {"pending", "running", "in_progress"} else None
+    if kind == "dynamic_tool":
+        if step_list(item) is not None:
+            return None
+        name = re.split(r"[./:]|__", item.get("toolName", ""))[-1].lower()
+        if name in {"read", "read_file", "readfile", "view_image"}:
+            return "reads"
+        if name in {"write", "edit", "write_file", "edit_file", "apply_patch", "multiedit"}:
+            return "changes"
+        return "tool"
+    if kind == "command_execution":
+        command = item.get("input", "")
+        if isinstance(command, dict):
+            command = command.get("command", command.get("cmd", ""))
+        if not isinstance(command, str):
+            return "command"
+        if re.match(r"^\s*git (?:commit|push)\b", command):
+            return "saves"
+        if re.match(r"^\s*gh pr create\b", command):
+            return "pull"
+        if re.match(r"^\s*(?:(?:rg|grep|cat|ls|find|head|tail)\b|sed -n\b|"
+                    r"git (?:diff|log|show|status)\b|gh (?:issue|pr) view\b)", command):
+            return "reads"
+        try:
+            lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+            lexer.whitespace_split = True
+            parts = [[]]
+            for token in lexer:
+                if token in {";", "&&", "||", "|", "&"}:
+                    parts.append([])
+                else:
+                    parts[-1].append(token)
+            for part in parts:
+                while part and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", part[0]) or part[0] in {"env", "npx"}):
+                    part = part[1:]
+                if not part:
+                    continue
+                tool = part[0].rsplit("/", 1)[-1]
+                if tool in {"pytest", "vitest", "jest", "playwright"}:
+                    return "tests"
+                if tool in {"npm", "go", "cargo"} and (part[1:2] == ["test"] or (tool == "npm" and part[1:3] == ["run", "test"])):
+                    return "tests"
+                if re.fullmatch(r"python[0-9.]*", tool) and part[1:3] == ["-m", "pytest"]:
+                    return "tests"
+        except ValueError:
+            pass
+        return "command"
+    return {"file_change": "changes", "reasoning": "thinks", "compaction": "thinks",
+            "assistant_message": "writes", "web_search": "searches", "subagent": "helper"}.get(kind)
+
+
+def run_progress(items):
+    """Reduce local items to the bounded data that may leave this machine."""
+    result = {}
+    ordered = sorted(items, key=lambda item: item.get("ordinal", 0), reverse=True)
+    steps = next((steps for item in ordered if (steps := step_list(item)) is not None), None)
+    if steps is not None:
+        steps = [{"text": str(step.get("text", step.get("content", step.get("step", ""))))[:120],
+                  "state": {"completed": "done", "done": "done", "in_progress": "now",
+                            "running": "now", "now": "now"}.get(step.get("status", step.get("state")), "todo")}
+                 for step in steps if isinstance(step, dict)]
+        result.update(steps_total=min(len(steps), 100000),
+                      steps_done=min(sum(step["state"] == "done" for step in steps), 100000))
+        if len(steps) > 12:
+            current = next((i for i, step in enumerate(steps) if step["state"] == "now"),
+                           next((i for i, step in enumerate(steps) if step["state"] == "todo"), len(steps)))
+            last_done = next((step for step in reversed(steps[:current]) if step["state"] == "done"), None)
+            shown = ([last_done] if last_done else []) + steps[current:current + (11 if last_done else 12)]
+            # A nearly complete list still shows twelve steps when twelve exist.
+            if len(shown) < 12:
+                shown = steps[max(0, current - (12 - len(steps[current:]))):][:12]
+            steps = shown
+        result["steps"] = steps
+    now = next((key for item in ordered if (key := activity(item))), None)
+    if now:
+        result["now"] = now
+    paths = {change["path"] for item in items if item.get("type") == "file_change"
+             for change in item.get("changes", []) if isinstance(change, dict) and isinstance(change.get("path"), str)}
+    if paths:
+        result["files_changed"] = min(len(paths), 100000)
+    return result
 
 
 def task_links(row, projection):
@@ -347,6 +454,13 @@ class T3Source:
             # A stable message ID keeps this fallback ask separate from the next question.
             if text:
                 pending.append(Pending("message-" + latest["id"], text))
+        latest_run = row.get("latestRunId")
+        progress = None
+        if status in {"running", "waiting", "waiting_input", "waiting_approval"} and latest_run:
+            progress = run_progress([item for item in projection.get("turnItems", [])
+                                     if item.get("runId") == latest_run])
+        if "progress" in projection:
+            progress = projection["progress"]
         return Thread(
             thread_id,
             row["title"],
@@ -359,6 +473,7 @@ class T3Source:
             is_step,
             lineage.get("parentThreadId") if is_step else None,
             task_links(row, projection),
+            progress,
         )
 
     def _sqlite_threads(self) -> list[Thread]:
@@ -444,6 +559,37 @@ class T3Source:
                                 ("event_type", "command_type", "command_id", "status"),
                                 evidence,
                             ))
+                    links = task_links(row, projection)
+                    if links:
+                        run = connection.execute(
+                            "SELECT run_id,status FROM orchestration_v2_projection_runs "
+                            "WHERE thread_id=? ORDER BY ordinal DESC LIMIT 1", (thread_id,),
+                        ).fetchone()
+                        projection["progress"] = None
+                        if run and run[1] in {"running", "waiting", "waiting_input", "waiting_approval"}:
+                            recent = [json.loads(item[0]) for item in connection.execute(
+                                "SELECT payload_json FROM orchestration_v2_projection_turn_items "
+                                "WHERE thread_id=? AND run_id=? ORDER BY ordinal DESC LIMIT 12",
+                                (thread_id, run[0]),
+                            )]
+                            plan = connection.execute(
+                                "SELECT payload_json FROM orchestration_v2_projection_turn_items "
+                                "WHERE thread_id=? AND run_id=? AND (type='todo_list' OR "
+                                "(type='dynamic_tool' AND (lower(json_extract(payload_json,'$.toolName')) "
+                                "LIKE '%todo%' OR lower(json_extract(payload_json,'$.toolName')) LIKE '%update_plan%'))) "
+                                "ORDER BY ordinal DESC LIMIT 1", (thread_id, run[0]),
+                            ).fetchone()
+                            value = run_progress([*recent, *([json.loads(plan[0])] if plan else [])])
+                            count = connection.execute(
+                                "SELECT count(DISTINCT json_extract(c.value,'$.path')) "
+                                "FROM orchestration_v2_projection_turn_items i, "
+                                "json_each(i.payload_json,'$.changes') c "
+                                "WHERE i.thread_id=? AND i.run_id=? AND i.type='file_change' "
+                                "AND json_type(c.value,'$.path')='text'", (thread_id, run[0]),
+                            ).fetchone()[0]
+                            if count:
+                                value["files_changed"] = min(count, 100000)
+                            projection["progress"] = value
                     result.append(self._thread(row, projection))
                 return result
         except (sqlite3.Error, ValueError, KeyError) as error:
@@ -506,6 +652,13 @@ class Collector:
             "is_step": thread.is_step,
             "parent_ref": thread.parent_ref,
         }
+        if thread.links:
+            lane["progress"] = thread.progress
+            if thread.progress:
+                lane["progress"] = dict(thread.progress)
+                if "steps" in thread.progress:
+                    lane["progress"]["steps"] = [{**step, "text": clean(step["text"], 120, self.secrets)}
+                                                 for step in thread.progress["steps"]]
         if self.config.owner:
             lane["owner"] = self.config.owner
         return lane

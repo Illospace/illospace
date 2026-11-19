@@ -153,3 +153,30 @@ Expose `/t/` and `/web/` through the gateway. Request pages are under `/web/`. U
 Keep the brain, Postgres, and admin routes private.
 When pages are off, these routes return 404 and the page tools disappear.
 Slack task links keep their previous destinations.
+
+## Task progress
+
+An open task with an agent as holder shows a progress frame above its blocks.
+The frame reads `/t/{id}/progress` each 15 seconds while the task is `todo` or `working`.
+The main page does not refresh. A person can keep a message open.
+The frame uses the same session and task access checks as the task page.
+Without access, the frame returns a plain 404.
+
+Code computes the stages from current facts, with no model call:
+
+- `Waits for the agent`: the task is open, its holder is an agent, and no task lane is live.
+- `Works`: a task lane is live. The existing `task:lane-live:` key defines live.
+- `Pull request`: the task or a task lane has a pull request link. The task has not returned.
+- `Your review` or `Review`: the task state is `review`. The first label names the person who must act.
+- `Done`: the task state is `done`.
+
+Later stages take priority. A task without a repository or pull request link omits the pull request stage.
+Lane reports supply the activity, the agent's own steps, and the count of changed files.
+A branch link supplies the branch. Step text stays escaped data, with hidden comments removed.
+Illo never sends this step text to GitHub or Slack.
+A lane without a signal for more than 10 minutes shows the time without a signal.
+When the task leaves work, the frame stops its refresh and links back to the task page.
+
+Illo keeps a task-to-lane key when the existing lane handler finds a match.
+This key preserves the link after a lane stops. It does not change the rule for a live lane.
+Task readers cannot read progress text from another person's private lane.

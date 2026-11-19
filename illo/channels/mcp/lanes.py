@@ -62,6 +62,7 @@ async def report_one(ctx, args: dict) -> dict:
                 "end_summary",
                 "is_step",
                 "parent_ref",
+                "progress",
                 "owner_person_id",
             )
         }

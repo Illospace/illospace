@@ -12,7 +12,9 @@ from collectors.t3.collector import (
     Collector,
     Config,
     T3Source,
+    activity,
     lane_state,
+    run_progress,
     start_question,
 )
 
@@ -24,6 +26,7 @@ class APIs:
             "projectId": "project-a",
             "title": "Acme task",
             "status": "running",
+            "latestRunId": "run-a",
             "updatedAt": "2026-01-01T00:00:00Z",
             "createdBy": "user",
         }
@@ -695,10 +698,10 @@ def t3_database(database, api):
     with sqlite3.connect(database) as connection:
         connection.executescript("""
         CREATE TABLE orchestration_v2_projection_threads (thread_id, payload_json, deleted_at);
-        CREATE TABLE orchestration_v2_projection_runs (thread_id, ordinal, status);
+        CREATE TABLE orchestration_v2_projection_runs (thread_id, ordinal, status, run_id DEFAULT 'run-a');
         CREATE TABLE orchestration_v2_projection_runtime_requests (thread_id, status, payload_json);
         CREATE TABLE orchestration_v2_projection_messages (thread_id, role, updated_at, payload_json);
-        CREATE TABLE orchestration_v2_projection_turn_items (thread_id, type, payload_json);
+        CREATE TABLE orchestration_v2_projection_turn_items (thread_id, type, payload_json, run_id DEFAULT 'run-a', ordinal DEFAULT 0);
         CREATE TABLE orchestration_command_receipts (
           command_id TEXT PRIMARY KEY, command_type, status);
         CREATE TABLE orchestration_events (
@@ -710,7 +713,7 @@ def t3_database(database, api):
             ("thread-a", json.dumps(api.shell)),
         )
         connection.execute(
-            "INSERT INTO orchestration_v2_projection_runs VALUES ('thread-a', 1, ?)",
+            "INSERT INTO orchestration_v2_projection_runs (thread_id,ordinal,status) VALUES ('thread-a', 1, ?)",
             (api.shell["status"],),
         )
         for request in api.projection["runtimeRequests"]:
@@ -720,7 +723,7 @@ def t3_database(database, api):
             )
         for item in api.projection["turnItems"]:
             connection.execute(
-                "INSERT INTO orchestration_v2_projection_turn_items VALUES (?, ?, ?)",
+                "INSERT INTO orchestration_v2_projection_turn_items (thread_id,type,payload_json) VALUES (?, ?, ?)",
                 ("thread-a", item["type"], json.dumps(item)),
             )
 
@@ -744,7 +747,7 @@ def test_sqlite_running_run_precedes_a_later_terminal_run(setup, tmp_path):
     t3_database(database, api)
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "INSERT INTO orchestration_v2_projection_runs VALUES ('thread-a',2,'completed')"
+            "INSERT INTO orchestration_v2_projection_runs (thread_id,ordinal,status) VALUES ('thread-a',2,'completed')"
         )
     collector.config.data_path = database
     assert collector.source.list_threads()[0].state == "working"
@@ -821,3 +824,130 @@ def test_http_thread_links_keep_user_text_out_of_lane(setup):
     assert "https://github.com/acme/app/issues/12" in lane["links"]
     assert "https://github.com/acme/app/pull/20" in lane["links"]
     assert "Private words" not in json.dumps(api.calls)
+
+
+@pytest.mark.parametrize('item,key', [
+    *[({'type': 'command_execution', 'input': command}, 'reads') for command in (
+        'rg pattern', 'grep pattern file', 'cat file', 'sed -n 1p file', 'ls', 'find .',
+        'head file', 'tail file', 'git diff', 'git log', 'git show', 'git status',
+        'gh issue view 1', 'gh pr view 1')],
+    *[({'type': 'command_execution', 'input': command}, 'tests') for command in (
+        'pytest tests', '.venv/bin/python -m pytest tests', 'npm test', 'npm run test',
+        'vitest', 'jest', 'go test ./...', 'cargo test', 'playwright test')],
+    ({'type': 'command_execution', 'input': 'git commit -m example'}, 'saves'),
+    ({'type': 'command_execution', 'input': 'git push'}, 'saves'),
+    ({'type': 'command_execution', 'input': 'gh pr create'}, 'pull'),
+    ({'type': 'command_execution', 'input': 'python build.py'}, 'command'),
+    ({'type': 'file_change'}, 'changes'), ({'type': 'reasoning'}, 'thinks'),
+    ({'type': 'compaction'}, 'thinks'), ({'type': 'assistant_message'}, 'writes'),
+    ({'type': 'web_search'}, 'searches'), ({'type': 'dynamic_tool', 'toolName': 'lookup'}, 'tool'),
+    ({'type': 'dynamic_tool', 'toolName': 'Read'}, 'reads'),
+    ({'type': 'dynamic_tool', 'toolName': 'Edit'}, 'changes'),
+    ({'type': 'subagent'}, 'helper'),
+    *[({'type': kind, 'status': 'pending'}, 'waits') for kind in (
+        'user_input_request', 'approval_request', 'secret_request')],
+    ({'type': 'approval_request', 'status': 'completed'}, None),
+])
+def test_activity_keys(item, key):
+    assert activity(item) == key
+
+
+@pytest.mark.parametrize('kind', ['codex', 'claude-tool'])
+def test_step_forms_limits_and_counts(kind):
+    steps = [{'text': 'x' * 130, 'status': 'completed' if n < 14 else 'in_progress' if n == 14 else 'pending'}
+             for n in range(30)]
+    item = {'type': 'todo_list', 'steps': steps}
+    if kind == 'claude-tool':
+        # This compatibility fixture uses the standard TodoWrite input.
+        item = {'type': 'dynamic_tool', 'toolName': 'TodoWrite',
+                'input': {'todos': [{'content': step['text'], 'status': step['status']} for step in steps]}}
+    result = run_progress([item])
+    assert result['steps_total'] == 30 and result['steps_done'] == 14
+    assert len(result['steps']) == 12
+    assert [step['state'] for step in result['steps'][:3]] == ['done', 'now', 'todo']
+    assert all(len(step['text']) == 120 for step in result['steps'])
+    assert 'now' not in result
+
+
+def test_latest_list_and_distinct_files():
+    result = run_progress([
+        {'type': 'todo_list', 'ordinal': 1, 'steps': [{'text': 'Old', 'status': 'pending'}]},
+        {'type': 'todo_list', 'ordinal': 3, 'steps': [{'text': 'New', 'status': 'completed'}]},
+        {'type': 'file_change', 'ordinal': 2, 'changes': [{'path': 'a.py'}, {'path': 'b.py'}]},
+        {'type': 'file_change', 'ordinal': 4, 'changes': [{'path': 'a.py'}]},
+    ])
+    assert result == {'steps': [{'text': 'New', 'state': 'done'}], 'steps_done': 1, 'steps_total': 1,
+                      'files_changed': 2, 'now': 'changes'}
+    assert 'files_changed' not in run_progress([{'type': 'file_change'}])
+    assert 'steps' not in run_progress([{'type': 'reasoning'}])
+
+
+def test_sqlite_progress_current_run_change_and_clear(setup, tmp_path):
+    collector, api, _ = setup
+    api.projection['turnItems'] = [
+        {'type': 'todo_list', 'ordinal': 1, 'steps': [{'text': 'Read the code', 'status': 'in_progress'}]},
+        {'type': 'command_execution', 'ordinal': 2, 'input': 'pytest private-command-marker'},
+        {'type': 'file_change', 'ordinal': 0, 'changes': [{'path': 'a.py'}, {'path': 'a.py'}]},
+    ]
+    api.projection['messages'] += [{'role': 'user', 'text': 'https://github.com/acme-example/engine/issues/1'}]
+    database = tmp_path / 'progress.sqlite'
+    t3_database(database, api)
+    with sqlite3.connect(database) as connection:
+        for item in api.projection['turnItems']:
+            connection.execute('UPDATE orchestration_v2_projection_turn_items SET ordinal=? WHERE type=?',
+                               (item['ordinal'], item['type']))
+        connection.execute('INSERT INTO orchestration_v2_projection_messages VALUES (?,?,?,?)',
+                           ('thread-a', 'user', '', json.dumps(api.projection['messages'][-1])))
+        connection.execute('INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?,?)',
+                           ('thread-a', 'todo_list', json.dumps({'type': 'todo_list', 'steps': [
+                               {'text': 'Old private plan', 'status': 'completed'}]}), 'old-run', 99))
+    collector.config.data_path = database
+    collector.poll()
+    value = api.calls[0][1]['lanes'][0]['progress']
+    assert value == {'steps': [{'text': 'Read the code', 'state': 'now'}], 'steps_total': 1,
+                     'steps_done': 0, 'now': 'tests', 'files_changed': 1}
+    assert 'private-command-marker' not in json.dumps(api.calls)
+    assert 'Old private plan' not in json.dumps(api.calls)
+    collector.poll()
+    assert [args['lanes'] for name, args in api.calls if name == 'lane_report'][-1] == []
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE orchestration_v2_projection_turn_items SET payload_json=? WHERE type='command_execution'",
+                           (json.dumps({'type': 'command_execution', 'ordinal': 2, 'input': 'git status'}),))
+    collector.poll()
+    assert [args['lanes'] for name, args in api.calls if name == 'lane_report'][-1][0]['progress']['now'] == 'reads'
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE orchestration_v2_projection_runs SET status='completed'")
+    collector.poll()
+    assert [args['lanes'] for name, args in api.calls if name == 'lane_report'][-1][0]['progress'] is None
+
+
+def test_no_progress_for_unlinked_thread(setup):
+    collector, api, _ = setup
+    api.projection['turnItems'] = [{'type': 'reasoning', 'runId': 'run-a'}]
+    collector.poll()
+    assert 'progress' not in api.calls[0][1]['lanes'][0]
+
+
+@pytest.mark.parametrize('command,key', [
+    ('cat pytest', 'reads'), ('echo pytest', 'command'),
+    ("git commit -m 'pytest repair'", 'saves'),
+    ('PYTHONPATH=. .venv/bin/python -m pytest tests', 'tests'),
+    ('cd example && npm run test', 'tests'),
+])
+def test_activity_command_arguments(command, key):
+    assert activity({'type': 'command_execution', 'input': command}) == key
+
+
+def test_sqlite_newest_ended_run_clears_progress(setup, tmp_path):
+    collector, api, _ = setup
+    api.shell['linkedPullRequest'] = {'url': 'https://github.com/acme-example/engine/pull/1'}
+    database = tmp_path / 'ended.sqlite'
+    t3_database(database, api)
+    with sqlite3.connect(database) as connection:
+        connection.execute('INSERT INTO orchestration_v2_projection_runs VALUES (?,?,?,?)',
+                           ('thread-a', 2, 'completed', 'run-ended'))
+    collector.config.data_path = database
+    collector.poll()
+    lane = api.calls[0][1]['lanes'][0]
+    assert lane['state'] == 'working'  # The existing lane rule still sees the earlier live run.
+    assert lane['progress'] is None

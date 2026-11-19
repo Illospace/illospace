@@ -158,16 +158,18 @@ async def sign_in(ctx, request):
     return response
 
 
-async def task_page(ctx, request, task_id, *, file_position=None):
+async def task_page(ctx, request, task_id, *, file_position=None, progress=False):
     token = request.cookies.get(signin.SESSION_COOKIE, '')
     async with ctx.pool.connection() as conn:
         person = await signin.session(conn, token)
         if not person:
-            return missing() if file_position is not None else redirect('/web/signin?' + urlencode({'next': f'/t/{task_id}'}), 302)
+            return missing() if file_position is not None or progress else redirect('/web/signin?' + urlencode({'next': f'/t/{task_id}'}), 302)
         viewer = tasks.Viewer(person['key'], 'person:' + person['key'], human=True)
         row = await tasks.get(conn, task_id, viewer=viewer)
         if not row:
             return missing()
+        if progress:
+            return html(await render.progress_document(conn, row, person), headers=render.PROGRESS_HEADERS)
         if file_position is None:
             return html(await render.page(ctx, conn, row, person, token))
         page = await one(conn, 'SELECT * FROM task_pages WHERE task_id=%s', (task_id,))
@@ -297,10 +299,10 @@ async def setup(ctx):
             return missing()
         if request.method == 'POST':
             return await decide(ctx, request, task_id)
-        return await task_page(ctx, request, task_id, file_position=position)
+        return await task_page(ctx, request, task_id, file_position=position, progress=path.endswith('/progress'))
 
     for path, methods in [('/web/signin', ['GET', 'POST']), ('/web/signout', ['POST']),
                           ('/web/app.css', ['GET']), ('/web/a/{ask_id}', ['GET']),
                           ('/web/a/{ask_id}/answer', ['POST']), ('/web/a/{ask_id}/file/{position}', ['GET']), ('/t/{task_id}', ['GET']),
-                          ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
+                          ('/t/{task_id}/progress', ['GET']), ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
         ctx.app.add_api_route(path, route, methods=methods)

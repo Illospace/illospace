@@ -5,6 +5,7 @@ from pydantic import Field
 from illo.db import one
 from illo.ledger import mcp
 from illo.ledger import tasks as ledger
+from illo.tasks import progress
 from illo.tasks.access import token_viewer
 from illo.tasks.views import compact, full
 from illo.tools import tasks as shared
@@ -41,7 +42,8 @@ async def handle(ctx, name, args):
         for holder in holders:
             rows.extend(await ledger.search(ctx.conn, viewer=viewer, holder=holder, **args))
         rows.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
-        return {"tasks": [{**compact(row), "new_for_you": row["last_actor"] != viewer.actor}
+        return {"tasks": [{**compact(row), "progress": await progress.read(ctx.conn, row, viewer),
+                           "new_for_you": row["last_actor"] != viewer.actor}
                           for row in rows[:args["limit"]]]}
     common = {"workspace": workspace, "viewer": viewer}
     if name == "task_page":

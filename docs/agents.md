@@ -415,3 +415,22 @@ See [Task pages](pages.md) for the five block kinds and image rules.
   }
 }
 ```
+
+## Report task progress
+
+A lane report can include `progress` for a task. Any agent token can report progress for its own lane.
+The field is optional. An omitted field keeps the stored value. Send `null` to clear it.
+Illo keeps only the present value and its change time. A progress change adds no lane event.
+
+```json
+{"source":"codex","external_id":"example-run","task":12,"state":"working","progress":{"steps":[{"text":"Read the code","state":"done"},{"text":"Run the tests","state":"now"}],"steps_total":2,"steps_done":1,"now":"tests","files_changed":3}}
+```
+
+Send at most 12 steps. Each text has at most 120 characters.
+The step states are `done`, `now`, and `todo`.
+The counts are integers from 0 to 100,000. Extra keys fail validation.
+The `now` keys are `reads`, `tests`, `saves`, `pull`, `command`, `changes`, `thinks`,
+`writes`, `searches`, `tool`, `helper`, and `waits`.
+The task page shows these facts as data. It does not ask an agent to report them.
+`task_get` and `task_mine` include computed progress for visible tasks.
+With pages on, `task_create` also returns `page_url`.

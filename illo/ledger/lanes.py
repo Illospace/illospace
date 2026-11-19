@@ -30,6 +30,7 @@ async def upsert(
     end_summary: str | None = None,
     is_step: bool = False,
     parent_ref: str | None = None,
+    progress: dict | None = None,
 ) -> dict:
     """Refresh the source snapshot and its last signal time."""
     lane = await one(
@@ -67,6 +68,10 @@ async def upsert(
             state,
         ),
     )
+    value = Jsonb(progress) if progress is not None else None
+    lane = await one(conn, """UPDATE lanes SET progress=%s,
+        progress_at=CASE WHEN progress IS DISTINCT FROM %s::jsonb THEN now() ELSE progress_at END
+        WHERE id=%s RETURNING *""", (value, value, lane["id"]))
     if lane["state"] not in {"done", "failed"}:
         await conn.execute("DELETE FROM items WHERE source_ref=%s", (f"lane:{lane['id']}:end",))
     return lane

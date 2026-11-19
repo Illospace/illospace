@@ -75,7 +75,22 @@ class GetKnowledge(Arguments):
     id: str | int | None = None
 
 
+class ProgressStep(Arguments):
+    text: str = Field(max_length=120)
+    state: Literal["done", "now", "todo"]
+
+
+class Progress(Arguments):
+    steps: list[ProgressStep] | None = Field(default=None, max_length=12)
+    steps_total: int | None = Field(default=None, ge=0, le=100000)
+    steps_done: int | None = Field(default=None, ge=0, le=100000)
+    now: Literal["reads", "tests", "saves", "pull", "command", "changes", "thinks",
+                 "writes", "searches", "tool", "helper", "waits"] | None = None
+    files_changed: int | None = Field(default=None, ge=0, le=100000)
+
+
 class Lane(Arguments):
+    progress: Progress | None = None
     task: int | None = Field(default=None, ge=1)
     source: Source
     external_id: str = Field(min_length=1)
