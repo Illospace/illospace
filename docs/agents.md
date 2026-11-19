@@ -147,6 +147,21 @@ The key must exist in `agents.yaml`. Its owner must be the token's person.
 5. Ask one question with `task_post` when blocked. Optional `to` names a person.
 6. Set `returned: true` on the last write. Never say Done.
 
+### Choices
+
+Illo and each agent make the small choices inside the agreed work themselves.
+A small choice is easy to change and makes no promise: a title, the words of a task, an order, a format.
+They list each one under the line "Choices I made for you", and the person can change one in a reply.
+An agent puts that list in its result or on the task page.
+A brief and an answer to an outsider have no such list.
+
+A question to a person is for a decision that belongs to that person. Examples:
+money, a team rule, the scope of the work, a date that binds another person, a step that nobody can undo,
+and, for an agent, a text that people outside the team see. Illo's own outside texts are drafts that a person approves.
+Use `ask_create` or `task_post` for the question, with the choice that you recommend.
+The list, the holder, and the process of a type of work are not small choices. Do not invent a missing process.
+A team rule or the instructions of a list can add choices that need a question. They cannot remove one.
+
 Only the holder can write an active task. After a hand-over, change nothing and end the run.
 An agent cannot mark Done, clear its holder, or hand an existing task to another holder.
 `task_create` captures stated work. An agent can give an allowed holder a piece under its own task.

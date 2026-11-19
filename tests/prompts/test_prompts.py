@@ -64,7 +64,8 @@ def test_assembled_prompt_matches_snapshot(example, name):
 
 
 def test_base_prompt_stays_short():
-    assert words(BASE_PROMPT) <= 1100
+    # 1290: the section "Choices" (small choices with no question, and the list of them) has about 185 words.
+    assert words(BASE_PROMPT) <= 1290
 
 
 def test_every_profile_has_a_short_text():

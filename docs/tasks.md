@@ -119,6 +119,7 @@ Collector tokens cannot call these tools.
 2. Read `task_get`. The task is the brief.
 3. Write the result with `task_write`. Give `result` and `result_version`, or give `append`.
 4. Include `message`: say what changed and what you need. The call writes one result event and one message event.
+   List each small choice that you made with no question under "Choices I made for you". See [Choices](agents.md#choices).
 5. Ask one blocking question with `task_post` when needed. Use `to` to name a person.
 6. Set `returned: true` on the last write. Never say Done.
 
