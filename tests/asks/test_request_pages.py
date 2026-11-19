@@ -107,7 +107,7 @@ async def test_agent_repair_cancel_reuse_and_complete_page(ctx, app, http, brows
     await login(ctx, browser.http)
     page = await browser.http.get(f"/web/a/{original['id']}")
     assert page.status_code == 200
-    for text in ('The final condition matters.', '<h2>Suggested reply</h2>', 'I can review the plan tomorrow.',
+    for text in ('The final condition matters.', '<dt>Suggested reply</dt>', 'I can review the plan tomorrow.',
                  'Picture: plan.png', 'The saved plan includes every step.', 'Saved item 77', 'https://example.com/5'):
         assert text in page.text
     assert '<img' not in page.text and '<script' not in page.text and 'style=' not in page.text
@@ -116,6 +116,25 @@ async def test_agent_repair_cancel_reuse_and_complete_page(ctx, app, http, brows
     assert posts(slack_client)[0]['text'] == first['card_text']
     assert posts(slack_client)[0]['blocks'][2]['text']['text'].startswith('Why:')
     assert 'suggested_reply' not in str(posts(slack_client)[0]['blocks'])
+
+
+async def test_page_keeps_requester_order_and_folds_a_long_item(ctx, app, http, browser):
+    agent = await AgentClient.create(app, http, label='Example agent')
+    await saved(ctx, body='# The saved plan\n\n## Part 1\n' + 'A sentence of the plan.\n\n' * 200 + 'The last line.')
+    material = {'zz_summary': 'The first entry is a text of more than 80 characters, so it gets a block of its own on the page.',
+                'report': 'saved:77', 'ticket': 'https://example.com/issues/3331', 'a_number': 1225889,
+                'note': 'OK <!-- hidden words -->'}
+    made = await agent.call('ask_create', {**ASK, 'proof': material})
+    assert (await read(ctx, made['ask_id']))['proof_order'] == list(material)
+    await login(ctx, browser.http)
+    text = (await browser.http.get(f"/web/a/{made['ask_id']}")).text
+    places = [text.index(part) for part in ('<h2>Zz summary</h2>', '<h2>The saved plan</h2>', '<dt>Ticket</dt>', '<dt>A number</dt>')]
+    assert places == sorted(places)
+    assert '<h3>Part 1</h3>' in text and '# The saved plan' not in text
+    assert '>example.com/issues/3331</a>' in text and '<dd>1225889</dd>' in text
+    assert text.index('<details class="more"><summary>The rest of the text</summary>') < text.index('The last line.')
+    assert '<dt>Note</dt><dd>OK' in text and 'hidden words' not in text
+    assert '<svg class="mark"' in text and 'style=' not in text
 
 
 @pytest.mark.parametrize('viewer,status,bar', [('ben', 200, True), ('ada', 200, False),

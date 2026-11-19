@@ -240,6 +240,22 @@ async def test_visibility_and_inactive_session(browser, ctx):
     assert (await browser.http.get(f'/t/{private["id"]}')).status_code == 302
 
 
+def test_markdown_headings_lists_tables_and_cut():
+    html = markdown.render('# Title #\ntext\n### Part\n- a\n  - a1\n    more\n  1. n1\n- b\n\n|h|i|\n|-|-|\n|<b>|2|\n\n---\n```\n# code\n- code\n```')
+    assert html == ('<h3>Title</h3><p>text</p><h4>Part</h4><ul><li>a<ul><li>a1<br>more</li></ul><ol><li>n1</li></ol></li><li>b</li></ul>'
+                    '<div class="table"><table><tr><th>h</th><th>i</th></tr><tr><td>&lt;b&gt;</td><td>2</td></tr></table></div>'
+                    '<hr><pre><code># code\n- code</code></pre>')
+    assert markdown.render('#no heading\n- a\n\n      - deep') == '<p>#no heading</p><ul><li>a</li></ul><ul><li>deep</li></ul>'
+    assert markdown.render('# C#\n## Part ##\n# ') == '<h3>C#</h3><h3>Part</h3><p>#</p>'
+    assert markdown.render('|a||\n|-|-|\n||2|') == ('<div class="table"><table><tr><th>a</th><th></th></tr>'
+                                                  '<tr><td></td><td>2</td></tr></table></div>')
+    assert markdown.cut('short') == ('short', '')
+    long = 'first\n\n```\n' + 'x\n\n' * 800 + '```\n\nlast part'
+    head, rest = markdown.cut(long)
+    assert head.endswith('```') and rest == 'last part'
+    assert markdown.cut('x' * 5000) == ('x' * 5000, '')
+
+
 def test_markdown_subset_and_hidden_text():
     html = markdown.render('**bold** *italic* `code`\nnext\n\n- one\n- two\n\n1. first\n\n> quote\n\n```html\n<script>x</script>\n```\n\n[x](https://example.com) https://example.com/a\n<!-- hidden --> <img src=x>')
     for expected in ['<strong>bold</strong>', '<em>italic</em>', '<code>code</code>', '<br>next', '<ul>', '<ol>', '<blockquote>', '<pre><code>', '&lt;script&gt;', 'rel="noopener noreferrer"']:
@@ -298,7 +314,7 @@ async def test_render_all_blocks_escape_fields_headers_and_version(browser, ctx,
     for expected in ['class="block preview"', 'class="checks"', '<progress', 'class="missing"', 'This page can show older work.', 'The brief', 'Returned work', 'History (']:
         assert expected in response.text
     css = await browser.http.get('/web/app.css')
-    assert css.headers['cache-control'] == 'no-store' and '--radius:10px' in css.text
+    assert css.headers['cache-control'] == 'no-store' and '--radius:20px' in css.text
     assert (await browser.http.get(f'/t/{row["id"]}/file/4')).status_code == 404
 
 

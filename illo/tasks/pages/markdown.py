@@ -45,19 +45,48 @@ def link(url, label):
     return '<a rel="noopener noreferrer" href="' + escape(url, quote=True) + '">' + escape(label) + '</a>'
 
 
+def cut(text, limit=1200):
+    """Cut a long text at a blank line outside a code block. The reader opens the rest."""
+    text = _visible(text or '')
+    if len(text) <= limit + 800:
+        return text, ''
+    size, fence, lines = 0, False, text.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith('```'):
+            fence = not fence
+        if size >= limit and not fence and not line.strip():
+            return '\n'.join(lines[:index]), '\n'.join(lines[index + 1:])
+        size += len(line) + 1
+    return text, ''
+
+
+def cells(line):
+    # Remove one pipe at each end only. An empty cell at the edge is a cell.
+    line = line.strip()
+    return [cell.strip() for cell in line[1:-1 if line.endswith('|') and len(line) > 1 else None].split('|')]
+
+
 def render(text):
     lines = _visible(text or '').splitlines()
-    result, paragraph, code = [], [], None
-    list_kind = None
+    result, paragraph, code, table = [], [], None, []
+    lists = []
 
-    def flush():
-        nonlocal list_kind
+    def flush(depth=0):
         if paragraph:
             result.append('<p>' + '<br>'.join(inline(line) for line in paragraph) + '</p>')
             paragraph.clear()
-        if list_kind:
-            result.append(f'</{list_kind}>')
-            list_kind = None
+        if table:
+            head = len(table) > 1 and re.fullmatch(r'[\s|:-]+', table[1]) is not None
+            result.append('<div class="table"><table>')
+            for index, row in enumerate(table):
+                if head and index == 1:
+                    continue
+                tag = 'th' if head and index == 0 else 'td'
+                result.append('<tr>' + ''.join(f'<{tag}>' + inline(cell) + f'</{tag}>' for cell in cells(row)) + '</tr>')
+            result.append('</table></div>')
+            table.clear()
+        while len(lists) > depth:
+            result.append('</li></' + lists.pop() + '>')
 
     for line in lines:
         if line.startswith('```'):
@@ -73,18 +102,42 @@ def render(text):
             continue
         if not line.strip():
             flush()
-        elif match := re.match(r'^(?:- |\d+\. )(.*)', line):
-            kind = 'ul' if line.startswith('- ') else 'ol'
-            if list_kind != kind:
-                flush()
+        elif match := re.match(r'^( *)(?:[-*+] |(\d+)\. )(.*)', line):
+            # Each list level stays open, so an item with more indent goes inside the item before it.
+            kind = 'ol' if match[2] else 'ul'
+            level = min(len(match[1]) // 2, len(lists), 3)
+            flush(level + 1)
+            if len(lists) == level + 1 and lists[-1] != kind:
+                flush(level)
+            if len(lists) == level + 1:
+                result.append('</li>')
+            else:
                 result.append(f'<{kind}>')
-                list_kind = kind
-            result.append('<li>' + inline(match[1]) + '</li>')
+                lists.append(kind)
+            result.append('<li>' + inline(match[3]))
+        elif lists and line.startswith('  ') and not paragraph:
+            result.append('<br>' + inline(line.strip()))
+        elif match := re.match(r'^(#{1,6}) +(.*)', line):
+            flush()
+            tag = 'h3' if len(match[1]) < 3 else 'h4'
+            # Closing marks count only after a space, so "C#" keeps its mark.
+            title = match[2].rstrip()
+            bare = title.rstrip('#')
+            if not bare or bare.endswith(' '):
+                title = bare.rstrip()
+            result.append(f'<{tag}>' + inline(title) + f'</{tag}>')
+        elif re.fullmatch(r' {0,3}(?:-{3,}|\*{3,}|_{3,}) *', line):
+            flush()
+            result.append('<hr>')
+        elif line.startswith('|') and line.rstrip().endswith('|') and not paragraph:
+            if not table:
+                flush()
+            table.append(line)
         elif line.startswith('>'):
             flush()
             result.append('<blockquote>' + inline(line[1:].lstrip()) + '</blockquote>')
         else:
-            if list_kind:
+            if lists or table:
                 flush()
             paragraph.append(line)
     if code is not None:

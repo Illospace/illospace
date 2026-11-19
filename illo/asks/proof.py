@@ -62,8 +62,11 @@ def label(key):
     return text[:1].upper() + text[1:]
 
 
-def entries(value):
-    return ((key, child) for key, child in value.items() if key not in ROUTING_KEYS and key not in {'text', 'body'})
+def entries(value, order=None):
+    """Give the entries in the order of the requester. The stored value does not keep that order."""
+    keys = [key for key in order or [] if key in value] if isinstance(order, list) else []
+    keys += [key for key in value if key not in keys]
+    return ((key, value[key]) for key in keys if key not in ROUTING_KEYS and key not in {'text', 'body'})
 
 
 def body(value):

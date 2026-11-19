@@ -2,11 +2,13 @@
 
 import hashlib
 import hmac
+import re
 from datetime import UTC, datetime
 from html import escape as e
 from urllib.parse import urlencode
 
 from illo.asks import cards, proof, service
+from illo.channels.slack.tasks import _visible
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import audit
 from illo.tasks.list_page import safe_link
@@ -28,22 +30,43 @@ def form(ask_id, csrf, stamp, *, option=None, label='', primary=False):
             + f'<button class="{"btn go" if primary else "btn"}">{e(label)}</button></form>')
 
 
+def prose(text, end=''):
+    """A long text shows its first part. The reader opens the rest."""
+    head, rest = markdown.cut(text)
+    return ('<div class="body prose">' + markdown.render(head)
+            + ('<details class="more"><summary>The rest of the text</summary>' + markdown.render(rest) + '</details>'
+               if rest else '') + end + '</div>')
+
+
+def address_html(value):
+    url, title = proof.address(value)
+    if title == url:
+        title = re.sub(r'^https?://(?:www\.)?', '', url)
+    # The task link rule is stricter for HTTP. Markdown also accepts external HTTP links.
+    return markdown.link(url, title) if safe_link(url) or markdown.safe_url(url) else e(title)
+
+
+def short(value):
+    """A link, a number, or a few words: one line of the facts list, not a block of its own."""
+    if proof.saved_ref(value) or isinstance(value, (dict, list)):
+        return False
+    return not isinstance(value, str) or bool(proof.address(value)) or (len(value) <= 80 and '\n' not in value)
+
+
 async def value_html(conn, value, label, person, depth=0):
     if proof.saved_ref(value):
         item = (await proof.saved_items(conn, value, 'person:' + person['key']))[value]
         if not item:
             return '<section class="block"><h2>' + e(label) + '</h2><div class="missing">You cannot see this saved item.</div></section>'
-        return ('<section class="block"><h2>' + e(item['title']) + '</h2><div class="body prose">'
-                + markdown.render(item['body']) + '<p class="by">'
+        # The block has the title of the item. A first heading in the text says the same thing again.
+        text = re.sub(r'\A\s*# [^\n]*\n?', '', item['body'])
+        return ('<section class="block"><h2>' + e(item['title']) + '</h2>' + prose(text, '<p class="by">'
                 + e(f"Saved item {value[6:]} · {render.time(item['source_at'] or item['created_at'], person)}")
-                + '</p></div></section>')
+                + '</p>') + '</section>')
     if isinstance(value, str):
-        if found := proof.address(value):
-            url, title = found
-            # The task link rule is stricter for HTTP. Markdown also accepts external HTTP links.
-            link = markdown.link(url, title) if safe_link(url) or markdown.safe_url(url) else e(title)
-            return '<div class="body prose"><p>' + link + '</p></div>'
-        return '<div class="body prose">' + markdown.render(value) + '</div>'
+        if proof.address(value):
+            return '<div class="body prose"><p>' + address_html(value) + '</p></div>'
+        return prose(value)
     if isinstance(value, (dict, list)) and depth < 2:
         pairs = value.items() if isinstance(value, dict) else [(None, child) for child in value]
         body = '<ul class="links">'
@@ -60,11 +83,7 @@ async def page(ctx, conn, row, person, token, *, message=''):
     owner = data['owner'] or {}
     mine = person['id'] == row['owner_person_id']
     csrf, stamp = signin.csrf(token), seen(row)
-    body = ('<header class="top"><span class="mark">i</span><span>' + e(f"Request {row['id']}")
-            + '</span><span class="grow"></span><span>' + e(person['name']) + '</span>'
-            '<form method="post" action="/web/signout">'
-            f'<input type="hidden" name="csrf" value="{csrf}"><button>Sign out</button></form></header>'
-            '<main><ul class="chips">')
+    body = render.top(f"Request {row['id']}", person, csrf) + '<main><ul class="chips">'
     if row['state'] == 'open':
         days = max(0, (datetime.now(UTC) - row['created_at']).days)
         since = 'today' if days == 0 else '1 day' if days == 1 else f'{days} days'
@@ -89,8 +108,20 @@ async def page(ctx, conn, row, person, token, *, message=''):
     if text := proof.body(material):
         content = await value_html(conn, text, proof.label('text' if material.get('text') else 'body'), person)
         body += content if proof.saved_ref(text) else '<section class="block">' + content + '</section>'
-    for key, value in proof.entries(material):
+    facts = []
+
+    def facts_html():
+        text = ('<section class="block"><dl class="facts">' + ''.join(facts) + '</dl></section>') if facts else ''
+        facts.clear()
+        return text
+
+    for key, value in proof.entries(material, row.get('proof_order')):
         label = proof.label(key)
+        if short(value):
+            facts.append('<dt>' + e(label) + '</dt><dd>'
+                         + (address_html(value) if proof.address(value) else e(_visible(proof.scalar(value)))) + '</dd>')
+            continue
+        body += facts_html()
         if proof.saved_ref(value):
             body += await value_html(conn, value, label, person)
             continue
@@ -103,6 +134,7 @@ async def page(ctx, conn, row, person, token, *, message=''):
         else:
             content = await value_html(conn, value, label, person)
         body += '<section class="block"><h2>' + e(label) + '</h2>' + content + '</section>'
+    body += facts_html()
     details = [o for o in row['options'] if o.get('detail')]
     if details and row['state'] == 'open' and mine:
         body += '<h2>The options</h2><ul class="links">' + ''.join(

@@ -29,6 +29,20 @@ def document(body, *, title="Illo", refresh=False):
             '</head><body>' + body + '</body></html>')
 
 
+# The Illo mark. It takes the colour of the text, so it needs no style and no picture request.
+MARK = ('<svg class="mark" viewBox="0 37 176 176" aria-hidden="true"><g transform="translate(-184 0)" fill="currentColor">'
+        '<path fill-rule="evenodd" d="M 298.6 62.4 A 72 72 0 1 0 333.5 180.2 L 317.2 165.5 A 50 50 0 1 1 292.9 83.7 Z"/>'
+        '<circle cx="295.8" cy="73.1" r="11"/><circle cx="325.3" cy="172.8" r="11"/>'
+        '<path fill-rule="evenodd" d="M 341.1 93.8 A 72 72 0 0 1 332.7 181.1 L 316.6 166.1 A 50 50 0 0 0 322.4 105.5 Z"/>'
+        '<circle cx="331.7" cy="99.7" r="11"/><circle cx="324.6" cy="173.6" r="11"/><circle cx="336" cy="64" r="17"/></g></svg>')
+
+
+def top(label, person, csrf):
+    return ('<header class="top">' + MARK + '<b>' + e(label) + '</b><span class="grow"></span><span>'
+            + e(person['name']) + '</span><form method="post" action="/web/signout">'
+            f'<input type="hidden" name="csrf" value="{e(csrf)}"><button>Sign out</button></form></header>')
+
+
 def notice(text):
     return '<p class="notice">' + e(text) + '</p>' if text else ''
 
@@ -123,12 +137,7 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
     days = max(0, (datetime.now(UTC) - since).days)
     entry = next((entry for entry in ctx.workspace.lists if entry.key == row['list_key']), None)
     csrf, stamp = signin.csrf(token), seen(row, stored)
-    body = ('<header class="top"><span class="mark">i</span><span>'
-            + e(f"Task {task_id} · {entry.name if entry else row['list_key']}")
-            + '</span><span class="grow"></span><span>' + e(person['name']) + '</span>'
-            '<form method="post" action="/web/signout">'
-            f'<input type="hidden" name="csrf" value="{csrf}"><button>Sign out</button></form></header>'
-            '<main><ul class="chips">')
+    body = top(f"Task {task_id} · {entry.name if entry else row['list_key']}", person, csrf) + '<main><ul class="chips">'
     if row['waits_for']:
         since_words = 'today' if days == 0 else '1 day' if days == 1 else f'{days} days'
         body += '<li class="wait">' + e(f'Waits for {wait} · {since_words}') + '</li>'

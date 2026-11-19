@@ -40,7 +40,7 @@ A new write replaces the old blocks. The brief stays separate.
 
 | Kind | Content |
 |---|---|
-| `text` | An optional title and text with basic Markdown. |
+| `text` | An optional title and text with basic Markdown: headings, lists with one more level, tables, code, quotes, links. |
 | `preview` | The author name, label, plain text, and an optional image. It shows work as its reader sees it. |
 | `image` | An image, caption, and alternative text. |
 | `checks` | Up to 12 claims with `yes`, `no`, or `open`, a source URL, and a check time. |

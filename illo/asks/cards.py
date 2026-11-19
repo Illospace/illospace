@@ -94,11 +94,11 @@ def proof_value(value, saved, depth=0):
     return escape(material.scalar(value))
 
 
-def proof_sections(proof, saved):
+def proof_sections(proof, saved, order=None):
     blocks = []
     if text := material.body(proof):
         blocks.extend(preview_sections(proof_value(text, saved)))
-    for key, value in material.entries(proof):
+    for key, value in material.entries(proof, order):
         if key == "links":
             text = "\n".join(f"<{escape(url).replace('|', '%7C')}|{escape(title)}>"
                              for url, title in material.links(value))
@@ -120,7 +120,7 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
     ]
     proof = ask.get("proof") or {}
     if ask.get("full_proof"):
-        blocks.extend(proof_sections(proof, ask.get("saved_items", {})))
+        blocks.extend(proof_sections(proof, ask.get("saved_items", {}), ask.get("proof_order")))
     else:
         text = material.body(proof)
         if text:
