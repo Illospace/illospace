@@ -12,7 +12,7 @@ from illo.channels.slack.tasks import _visible
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import audit
 from illo.tasks.list_page import safe_link
-from illo.tasks.pages import markdown, render, signin
+from illo.tasks.pages import markdown, outside, render, signin
 
 
 def seen(row):
@@ -104,6 +104,9 @@ async def page(ctx, conn, row, person, token, *, message=''):
             body += render.notice(f"{name} answered on {render.time(row['answered_at'], person)}: {answer}")
     elif row['state'] != 'open':
         body += render.notice('This question is closed. No answer is needed.')
+    files = await outside.positions(conn, ask_id=row['id'])
+    for position, block in enumerate(row.get('blocks', [])):
+        body += await render.block_html(ctx, f"/web/a/{row['id']}/file", position, block, person, files=files, repo_images=False)
     material = row['proof']
     if text := proof.body(material):
         content = await value_html(conn, text, proof.label('text' if material.get('text') else 'body'), person)
@@ -150,13 +153,15 @@ async def page(ctx, conn, row, person, token, *, message=''):
     return render.document(body, title=f"Request {row['id']} · Illo")
 
 
-async def route(ctx, request, ask_id):
-    from illo.tasks.pages.web import form_data, html, missing, origin_ok, redirect
+async def route(ctx, request, ask_id, *, file_position=None):
+    from illo.tasks.pages.web import file_response, form_data, html, missing, origin_ok, redirect
 
     token = request.cookies.get(signin.SESSION_COOKIE, '')
     async with ctx.pool.connection() as conn:
         person = await signin.session(conn, token)
         if not person:
+            if file_position is not None:
+                return missing('The request was not found.')
             return redirect('/web/signin?' + urlencode({'next': f'/web/a/{ask_id}'}), 302)
         values = await form_data(request) if request.method == 'POST' else {}
         if request.method == 'POST' and (not origin_ok(ctx, request) or not signin.valid_csrf(token, values.get('csrf', ''))):
@@ -164,6 +169,9 @@ async def route(ctx, request, ask_id):
         row = await ledger.page_read(conn, ask_id, person['id'], lock=request.method == 'POST')
         if not row:
             return missing('The request was not found.')
+        if file_position is not None:
+            file = await outside.read(conn, file_position, ask_id=ask_id)
+            return file_response(file['data'], file['media_type']) if file else missing('The request was not found.')
         if request.method == 'GET':
             return html(await page(ctx, conn, row, person, token))
         if person['id'] != row['owner_person_id']:

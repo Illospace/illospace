@@ -4,9 +4,11 @@ from datetime import datetime
 from typing import Annotated, Literal
 from unicodedata import category
 
+import httpx
 from pydantic import Field, field_validator
 
 from illo.tools.registry import Arguments
+from illo.tools.web import normalize_url
 
 
 class ImageRef(Arguments):
@@ -22,6 +24,23 @@ class ImageRef(Arguments):
         return value
 
 
+class ImageUrl(Arguments):
+    url: str = Field(max_length=2000)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def address(cls, value):
+        if isinstance(value, str):
+            try:
+                if any(category(c) == "Cc" for c in value):
+                    raise ValueError
+                normalize_url(value)
+            except (ValueError, httpx.InvalidURL) as exc:
+                # Do not repeat an address that can contain credentials.
+                raise ValueError("The address is not a public HTTPS address.") from exc
+        return value
+
+
 class Text(Arguments):
     kind: Literal["text"]
     title: str = Field(default="", max_length=80)
@@ -34,13 +53,13 @@ class Preview(Arguments):
     name: str = Field(max_length=80)
     label: str = Field(default="", max_length=80)
     text: str = Field(max_length=6000)
-    image: ImageRef | None = None
+    image: ImageRef | ImageUrl | None = None
 
 
 class Image(Arguments):
     kind: Literal["image"]
     title: str = Field(default="", max_length=80)
-    image: ImageRef
+    image: ImageRef | ImageUrl
     caption: str = Field(default="", max_length=200)
     alt: str = Field(default="", max_length=200)
 

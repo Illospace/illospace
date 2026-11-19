@@ -276,7 +276,18 @@ Collectors can report a batch and their health:
 
 Use one short sentence of 240 characters at most, and two to five options.
 If you give a recommendation, it must name an option id.
-Put the rest in `proof.text` or `proof.body`. Other named entries also appear on the request page.
+Put the words to send in a `preview` block. Put a picture in an `image` block.
+Use `text`, `preview`, `image`, `checks`, or `bars`, as in `task_page`. Give at most 12 blocks.
+The page shows the blocks in order, before the proof. A check with a result gets a check time.
+Put other material in `proof.text` or `proof.body`. Other named entries also appear on the request page.
+
+```json
+{"question":"Can you approve this reply?","options":[{"id":"yes","label":"Send"},{"id":"no","label":"Wait"}],"recommended":"yes","blocks":[{"kind":"preview","name":"acme-example","text":"We can send the pictures tomorrow."},{"kind":"image","image":{"url":"https://example.com/reply.png"},"caption":"The proposed picture."}]}
+```
+
+`pages.outside_images` controls pictures from addresses. See [Task pages](pages.md) for the limits.
+When the setting is off, each picture shows as a link. The result includes a `notes` list.
+When pages are off, a call with blocks fails before it writes an ask.
 The page shows nested lists and named values. Picture addresses appear as links. `proof.links` shows all links.
 The `area` entry selects an owner and stays hidden.
 The proof has at most 40 values, 20,000 bytes as compact JSON, and three levels. The proof object is level one.

@@ -98,7 +98,7 @@ TOOLS = {
             schemas.AskCreate,
             asks.create,
             "write_internal",
-            "Ask a person one short question with two to five `options` (each an `id` and a `label`); `recommended` must be one of the ids. The person sees the question, the proof, and the options, and nothing else: name no ID that a person cannot open. Put the material in `proof`: `text` (your words), `links`, and other named entries. A value `saved:<number>` shows that saved item to the person. `owner` is a person key, email, GitHub login, or Slack id, and defaults to the token's person. The person gets a card, or a standing rule of theirs answers; poll `ask_pull` for the answer. A repeated `source_ref` returns the first ask.",
+            'Ask a person one short question with two to five `options` (each an `id` and a `label`); `recommended` must be one of the ids. The person sees the question, the page, and the options, and nothing else: name no ID that a person cannot open. Put what the person must read, copy, or look at in `blocks`, with the block kinds of `task_page`: the words to send as a `preview` block, a picture as an `image` block with `{"url": "https://..."}`, facts with their sources as a `checks` block. Do not send the person to a page outside Illo for content that fits in blocks. Put the other material in `proof`: `text` (your words), `links`, and other named entries. A value `saved:<number>` shows that saved item to the person. `owner` is a person key, email, GitHub login, or Slack id, and defaults to the token\'s person. The person gets a card, or a standing rule of theirs answers; poll `ask_pull` for the answer. A repeated `source_ref` returns the first ask.',
         ),
         agent_tool(
             "ask_pull",

@@ -328,6 +328,7 @@ class ConnectConfig(Model):
 
 class PagesConfig(Model):
     enabled: bool = False
+    outside_images: bool = False
     url: str | None = None
 
     @field_validator("url")

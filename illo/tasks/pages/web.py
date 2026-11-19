@@ -14,7 +14,7 @@ from illo.db import one
 from illo.ledger import audit, tasks
 from illo.ledger.tokens import digest
 from illo.tasks import pages
-from illo.tasks.pages import ask_page, images, render, signin
+from illo.tasks.pages import ask_page, images, outside, render, signin
 
 
 def html(body, status=200, headers=render.HEADERS):
@@ -176,13 +176,20 @@ async def task_page(ctx, request, task_id, *, file_position=None):
         image = page['blocks'][file_position].get('image')
         if not image:
             return missing()
+        if 'url' in image:
+            file = await outside.read(conn, file_position, task_id=task_id)
+            return file_response(file['data'], file['media_type']) if file else missing()
         try:
             _, data, content_type = await images.read(ctx, image)
         except ValueError:
             return missing()
-        return Response(data, media_type=content_type, headers={
-            **render.HEADERS, 'Content-Security-Policy': "default-src 'none'",
-            'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline'})
+        return file_response(data, content_type)
+
+
+def file_response(data, content_type):
+    return Response(data, media_type=content_type, headers={
+        **render.HEADERS, 'Content-Security-Policy': "default-src 'none'",
+        'Cache-Control': 'private, no-store', 'Content-Disposition': 'inline'})
 
 
 async def decide(ctx, request, task_id):
@@ -248,6 +255,7 @@ async def setup(ctx):
     ctx.slack_actions.register('web-open:', signin.open_action)
     ctx.slack_actions.register('web-open-ask:', signin.open_action)
     ctx.every(300, lambda: signin.cleanup(ctx))
+    ctx.every(86400, lambda: outside.cleanup(ctx))
 
     async def route(request: Request):
         path = request.url.path
@@ -274,11 +282,12 @@ async def setup(ctx):
         if 'ask_id' in request.path_params:
             try:
                 ask_id = int(request.path_params['ask_id'])
+                position = int(request.path_params['position']) if 'position' in request.path_params else None
                 if ask_id <= 0 or ask_id > 2**63-1:
                     raise ValueError
             except ValueError:
                 return missing('The request was not found.')
-            return await ask_page.route(ctx, request, ask_id)
+            return await ask_page.route(ctx, request, ask_id, file_position=position)
         try:
             task_id = int(request.path_params['task_id'])
             position = int(request.path_params['position']) if 'position' in request.path_params else None
@@ -292,6 +301,6 @@ async def setup(ctx):
 
     for path, methods in [('/web/signin', ['GET', 'POST']), ('/web/signout', ['POST']),
                           ('/web/app.css', ['GET']), ('/web/a/{ask_id}', ['GET']),
-                          ('/web/a/{ask_id}/answer', ['POST']), ('/t/{task_id}', ['GET']),
+                          ('/web/a/{ask_id}/answer', ['POST']), ('/web/a/{ask_id}/file/{position}', ['GET']), ('/t/{task_id}', ['GET']),
                           ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
         ctx.app.add_api_route(path, route, methods=methods)

@@ -3,13 +3,15 @@
 import hashlib
 from datetime import UTC, datetime
 from html import escape as e
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from illo.channels.slack.tasks import _can_review, _visible, holder_name
 from illo.db import all_rows, one
 from illo.ledger import digest_snapshot, tasks
 from illo.tasks import list_page, pages
-from illo.tasks.pages import images, markdown, signin
+from illo.tasks.pages import images, markdown, outside, signin
+from illo.tools.web import normalize_url
 
 HEADERS = {
     "Cache-Control": "no-store",
@@ -67,15 +69,34 @@ def form(task_id, csrf, stamp, action, label, *, reason=False):
             + f'<button class="btn go">{e(label)}</button></form>')
 
 
-async def block_html(ctx, task_id, position, block, person):
+async def block_html(ctx, file_base, position, block, person, *, files=(), repo_images=True):
     kind = block['kind']
     heading = '<h2>' + e(block['title']) + '</h2>' if block.get('title') else ''
     image = ''
-    if block.get('image'):
-        try:
-            await images.read(ctx, block['image'], data=False)
-            image = f'<img src="/t/{task_id}/file/{position}" alt="{e(block.get("alt", ""))}">'
-        except ValueError:
+    if picture := block.get('image'):
+        available = False
+        if 'url' in picture:
+            if position in files:
+                available = True
+            elif block.get('image_link'):
+                from illo.asks import proof
+
+                address = str(normalize_url(picture['url']))
+                _, name = proof.address(address) or (address, address)
+                if not name.startswith('Picture: '):
+                    name = 'Picture: ' + unquote(urlsplit(address).path.rsplit('/', 1)[-1])
+                image = markdown.link(address, name)
+        elif not repo_images:
+            available = position in files
+        else:
+            try:
+                await images.read(ctx, picture, data=False)
+                available = True
+            except ValueError:
+                pass
+        if available:
+            image = f'<img src="{e(file_base)}/{position}" alt="{e(block.get("alt", ""))}">'
+        elif not image:
             image = '<div class="missing">The picture is not available.</div>'
     if kind == 'image':
         caption = '<figcaption>' + e(block['caption']) + '</figcaption>' if block.get('caption') else ''
@@ -159,8 +180,9 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
                 body += notice(_visible(wake['text']))
             break
     if stored:
+        files = await outside.positions(conn, task_id=task_id)
         for position, block in enumerate(stored['blocks']):
-            body += await block_html(ctx, task_id, position, block, person)
+            body += await block_html(ctx, f'/t/{task_id}/file', position, block, person, files=files)
         author = await holder_name(ctx, conn, stored['author']) if stored['author'] not in {'code', 'illo'} else 'Illo'
         body += '<p class="by">' + e(f"{author} wrote this page on {time(stored['written_at'], person)} for version {stored['result_version']} of the result.") + '</p>'
         if await pages.stale(conn, row, stored):

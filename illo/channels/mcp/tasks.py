@@ -44,6 +44,14 @@ async def handle(ctx, name, args):
         return {"tasks": [{**compact(row), "new_for_you": row["last_actor"] != viewer.actor}
                           for row in rows[:args["limit"]]]}
     common = {"workspace": workspace, "viewer": viewer}
+    if name == "task_page":
+        from illo.tasks.pages import outside
+
+        row = await ledger.get(ctx.conn, args["task"], viewer=viewer)
+        if not row:
+            raise ledger.TaskError("The task was not found.")
+        ledger._working_holder(row, viewer)
+        files = await outside.prepare(ctx.app, args["blocks"])
     if name in {"task_write", "task_post", "task_create", "task_page"}:
         # The task lock makes the hourly cap exact across simultaneous calls.
         await mcp.lock_token(ctx.conn, ctx.token["id"], "tasks")
@@ -53,9 +61,9 @@ async def handle(ctx, name, args):
         if count["n"] >= 60:
             raise ledger.TaskError("The token has reached its limit of 60 task changes per hour.")
     if name == "task_page":
-        from illo.tasks.pages import write
+        from illo.tasks.pages import _write
 
-        return await write(ctx.conn, ctx.app, viewer, args, holder_only=True)
+        return await _write(ctx.conn, ctx.app, viewer, args, files, holder_only=True)
     if name == "task_get":
         row = await ledger.get(ctx.conn, args["id"], viewer=viewer)
         if not row:

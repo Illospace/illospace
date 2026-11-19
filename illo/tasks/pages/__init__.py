@@ -1,12 +1,10 @@
 """Current task pages share the task's identity and transaction boundary."""
 
-from datetime import UTC, datetime
-
 from psycopg.types.json import Jsonb
 
 from illo.db import one
 from illo.ledger import tasks
-from illo.tasks.pages import images
+from illo.tasks.pages import outside
 from illo.tasks.pages.schema import Write
 
 
@@ -62,7 +60,8 @@ async def read(conn, ctx, viewer, task_id):
     if not row:
         raise tasks.TaskError("The task was not found.")
     page = await one(conn, "SELECT * FROM task_pages WHERE task_id=%s", (task_id,))
-    return {"task": task_id, "blocks": page["blocks"] if page else [],
+    return {"task": task_id, "blocks": [{k: v for k, v in block.items() if k != "image_link"}
+                       for block in page["blocks"]] if page else [],
             "result_version": page["result_version"] if page else None,
             "current_result_version": row["result_version"], "stale": await stale(conn, row, page),
             "url": url(ctx, task_id),
@@ -71,24 +70,29 @@ async def read(conn, ctx, viewer, task_id):
             "visibility": row["visibility"]}
 
 
-@tasks._mutation
 async def write(conn, ctx, viewer, args, *, holder_only=False):
+    """Write a page for a run of Illo's own model. This path makes no request to an outside address.
+
+    The run holds its lock here, and its model read text that Illo does not trust. A picture address
+    from that model shows as a link.
+    """
     if not enabled(ctx):
         raise tasks.TaskError("Task pages are off.")
     args = Write.model_validate(args).model_dump()
+    try:
+        files = await outside.prepare(ctx, args["blocks"], link_only=True)
+    except ValueError as exc:
+        raise tasks.TaskError(str(exc)) from None
+    return await _write(conn, ctx, viewer, args, files, holder_only=holder_only)
+
+
+@tasks._mutation
+async def _write(conn, ctx, viewer, args, files, *, holder_only=False):
     row = await tasks._require(conn, args["task"], viewer)
     if holder_only:
         tasks._working_holder(row, viewer)
     blocks = args["blocks"]
-    for block in blocks:
-        if block.get("image"):
-            try:
-                block["image"], _, _ = await images.read(ctx, block["image"])
-            except ValueError as exc:
-                raise tasks.TaskError(str(exc)) from None
-        for item in block.get("items", []):
-            if item["state"] != "open" and item["checked_at"] is None:
-                item["checked_at"] = datetime.now(UTC).isoformat()
+    await outside.replace(conn, files, task_id=row["id"])
     before = await one(conn, "SELECT blocks FROM task_pages WHERE task_id=%s", (row["id"],))
     # The task lock is held, so no event of this task can come between this read and the write.
     last = await one(conn, "SELECT max(id) AS id FROM task_events WHERE task_id=%s", (row["id"],))
@@ -103,4 +107,5 @@ async def write(conn, ctx, viewer, args, *, holder_only=False):
         # A person who asks Illo for a page gets the address in the answer, and a wait check sends its own message.
         await tasks._event(conn, row, "code", "message", "The page of this task is ready for your review.",
                            {"notify": True})
-    return await read(conn, ctx, viewer, row["id"])
+    result = await read(conn, ctx, viewer, row["id"])
+    return {**result, **({"notes": outside.notes(blocks)} if outside.notes(blocks) else {})}

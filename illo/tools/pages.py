@@ -32,7 +32,7 @@ async def handle(ctx, args, *, writing):
         viewer = await run_viewer(ctx)
         if writing:
             result = await pages.write(ctx.conn, ctx.app, viewer, args)
-            return {key: result[key] for key in ("task", "url", "result_version", "written_at")}
+            return {key: result[key] for key in ("task", "url", "result_version", "written_at", "notes") if key in result}
         return await pages.read(ctx.conn, ctx.app, viewer, args["task"])
     except TaskError as exc:
         raise Refusal(str(exc)) from None

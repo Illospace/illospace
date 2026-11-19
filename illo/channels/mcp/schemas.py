@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from illo.asks import proof
+from illo.tasks.pages.schema import Block
 from illo.tools.registry import Refusal
 
 Source = Literal["t3", "claude-code", "codex", "github", "manual", "email"]
@@ -145,6 +146,7 @@ class AskCreate(Arguments):
     options: list[Option] = Field(min_length=2, max_length=5)
     recommended: str | None = None
     proof: dict[str, Any] = Field(default_factory=dict)
+    blocks: list[Block] = Field(default_factory=list, max_length=12)
     owner: str | None = None
     due_at: str | None = None
     expires_at: str | None = None

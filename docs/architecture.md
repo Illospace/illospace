@@ -472,7 +472,8 @@ The existing agent OAuth flow keeps its own state and behaviour.
 | `POST /web/signout` | Delete the session after a CSRF check. |
 | `GET /web/app.css` | Serve the page stylesheet with no cache. |
 | `GET /t/{id}` | Show a task visible to the signed-in person. |
-| `GET /t/{id}/file/{position}` | Read one pinned image through the same visibility check. Positions start at zero. |
+| `GET /t/{id}/file/{position}` | Read one repository or stored picture through the same visibility check. Positions start at zero. |
+| `GET /web/a/{id}/file/{position}` | Read one stored picture for a signed-in participant of the request. Positions start at zero. |
 | `POST /t/{id}/decide` | Call the existing Done, reopen, or message function. |
 
 These routes return 404 when `pages.enabled` is false. All HTML uses no-store and a strict CSP.

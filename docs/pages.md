@@ -42,7 +42,7 @@ A new write replaces the old blocks. The brief stays separate.
 |---|---|
 | `text` | An optional title and text with basic Markdown: headings, lists with one more level, tables, code, quotes, links. |
 | `preview` | The author name, label, plain text, and an optional image. It shows work as its reader sees it. |
-| `image` | An image, caption, and alternative text. |
+| `image` | An image from a repository or an HTTPS address, a caption, and alternative text. |
 | `checks` | Up to 12 claims with `yes`, `no`, or `open`, a source URL, and a check time. |
 | `bars` | Up to 12 labels and finite values of zero or more. Each row can have a unit. |
 
@@ -50,11 +50,33 @@ Text and preview text have a limit of 6,000 characters per block.
 The server escapes all text. It accepts no HTML or script from a model.
 The page warns when the result is newer than the blocks.
 
-An image must be a file in a configured repository mirror.
+An image can name a file in a configured repository mirror with `repo`, `ref`, and `path`.
 The server resolves its reference to a fixed commit when it writes the page.
 The file must be PNG, JPEG, WebP, or GIF, and no larger than 8 MB.
-The browser reads the image through the signed-in task route. The page fetches no outside image.
+The browser reads the image through the signed-in task route.
 If the mirror loses the commit, the page shows that the picture is unavailable.
+
+An image can also use `{"url": "https://example.com/picture.png"}`. A preview can use either image form.
+The address has at most 2,000 characters. It has no credentials or control characters.
+`pages.outside_images` is off by default. Illo makes no request when it is off.
+The page shows a picture link and the caption. The call returns a note for each such block.
+That choice stays with the block if the setting changes.
+
+When `pages.outside_images` is on, Illo gets one copy before it writes the page or ask.
+Use a public HTTPS address on port 443. Give the final address, with no redirect.
+Illo checks every DNS answer and pins a public answer for the request.
+A fetch has a total limit of 10 seconds. Each file has a limit of 5 MB and 8,000 pixels per side.
+Illo reads the file header. It accepts PNG, JPEG, WebP, and GIF only.
+A call gets pictures in order. The process gets at most two pictures at once.
+If a picture fails, the whole call fails and writes nothing.
+Only an agent at the agent door (`task_page`, `ask_create`) can give a picture address that Illo gets.
+A page that Illo's own model writes shows such an address as a link. That model reads text that Illo does not trust.
+
+The picture store has a total limit of 500 MB. A task page write replaces its stored pictures.
+The browser reads a stored picture through a signed-in file route. It makes no outside request.
+Each day, Illo deletes pictures of closed asks created more than 90 days ago.
+It also deletes pictures of done or cancelled tasks with no change for 90 days.
+The page then shows “The picture is not available.”
 
 ## Tools and decisions
 
@@ -84,7 +106,9 @@ If the work changes after you open the page, read it again before you act.
 An agent's ask has a request page at `/web/a/{id}` when pages are on.
 `ask_create` returns this address in `page_url`. It returns null when pages are off.
 `card_text` contains the card's first line and question as plain text.
-The page shows who asks, the question, the proof, every link, and the options.
+The page shows who asks, the question, the blocks, the proof, every link, and the options.
+`ask_create` accepts the same five block kinds, with at most 12 blocks. Blocks appear before the proof.
+The request file route is `/web/a/{id}/file/{position}`. Only the two participants can read its pictures.
 Only the active owner and requester can open it. A workspace owner has no extra access.
 The owner can choose an option or give another answer of 1 to 4,000 characters.
 The requester can read the page but cannot answer. Slack and the page use the same answer service.
@@ -116,6 +140,7 @@ Pages are off by default. Add this block to `illo.yaml`:
 ```yaml
 pages:
   enabled: true
+  outside_images: false
   url: https://illo.example.com
 ```
 

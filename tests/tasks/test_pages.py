@@ -109,7 +109,7 @@ async def test_disabled_routes_tools_and_links(ctx, browser, app, http):
         assert response.status_code == 404
         assert response.headers['content-security-policy'] == render.HEADERS['Content-Security-Policy']
     build = await agent(app, http, 'build')
-    assert 'task_page' not in str((await build.rpc('tools/list')).json())
+    assert 'task_page' not in {tool['name'] for tool in (await build.rpc('tools/list')).json()['result']['tools']}
     await build.call('task_page', {'task': row['id'], 'blocks': TEXT}, error=True)
     async with ctx.pool.connection() as conn:
         person = await people.get(conn, 'ada')
@@ -980,7 +980,7 @@ async def test_page_render_does_not_read_the_picture_data(ctx, monkeypatch):
 
     monkeypatch.setattr(images, '_read', fake)
     block = {'kind': 'image', 'image': {'repo': 'r', 'ref': 'a' * 40, 'path': 'x.png'}, 'caption': 'c', 'alt': 'a'}
-    html = await render.block_html(ctx, 1, 0, block, {'timezone': 'UTC'})
+    html = await render.block_html(ctx, '/t/1/file', 0, block, {'timezone': 'UTC'})
     assert calls == [False] and '/t/1/file/0' in html
     await images.read(ctx, block['image'])
     assert calls == [False, True]
@@ -988,7 +988,7 @@ async def test_page_render_does_not_read_the_picture_data(ctx, monkeypatch):
 
 async def test_bars_use_progress_elements(ctx):
     block = {'kind': 'bars', 'title': 'T', 'rows': [{'label': 'x' * 40, 'value': 2, 'unit': ''}, {'label': 'short', 'value': 0.5, 'unit': 'ms'}]}
-    html = await render.block_html(ctx, 1, 0, block, {'timezone': 'UTC'})
+    html = await render.block_html(ctx, '/t/1/file', 0, block, {'timezone': 'UTC'})
     assert '<progress max="2" value="2"></progress><span>2</span>' in html
     assert '<span>short</span><progress max="2" value="0.5"></progress><span>0.5 ms</span>' in html
     assert 'x' * 40 in html and '<svg' not in html and 'style' not in html
@@ -1037,9 +1037,9 @@ async def test_optional_titles_render(ctx, monkeypatch):
         return image, None, None
     monkeypatch.setattr(images, 'read', ok)
     ref = {'repo': 'r', 'ref': 'a' * 40, 'path': 'x.png'}
-    html = await render.block_html(ctx, 1, 0, {'kind': 'image', 'title': 'Picture', 'image': ref, 'caption': '', 'alt': ''}, {'timezone': 'UTC'})
+    html = await render.block_html(ctx, '/t/1/file', 0, {'kind': 'image', 'title': 'Picture', 'image': ref, 'caption': '', 'alt': ''}, {'timezone': 'UTC'})
     assert '<h2>Picture</h2>' in html and 'figcaption' not in html
-    html = await render.block_html(ctx, 1, 0, {'kind': 'preview', 'title': 'Post', 'name': 'Ex', 'text': 't'}, {'timezone': 'UTC'})
+    html = await render.block_html(ctx, '/t/1/file', 0, {'kind': 'preview', 'title': 'Post', 'name': 'Ex', 'text': 't'}, {'timezone': 'UTC'})
     assert '<h2>Post</h2>' in html and '<small></small>' in html
 
 
@@ -1048,7 +1048,7 @@ async def test_optional_titles_render(ctx, monkeypatch):
      'blocks.0.checks.items.0.checked_at: The value is not valid'),
     ([{'kind': 'text', 'text': 'ok', 'SECRET_TOKEN_123': 'hidden'}], 'blocks.0.text.?: Extra inputs are not permitted'),
     ([{'kind': 'image', 'image': {'repo': 'r', 'ref': 'main', 'path': '../SECRET_TOKEN_123'}}],
-     'blocks.0.image.image.path: The value is not valid'),
+     'blocks.0.image.image.?.path: The value is not valid'),
 ])
 def test_schema_reason_never_repeats_caller_text(blocks, expected):
     from illo.tools.registry import schema_reason

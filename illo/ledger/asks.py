@@ -15,6 +15,7 @@ async def create(
     options: list[dict] | None = None,
     recommended_option: str | None = None,
     proof: dict | None = None,
+    blocks: list[dict] | None = None,
     lane_id: int | None = None,
     requester_token_id: int | None = None,
     requester_person_id: int | None = None,
@@ -48,8 +49,8 @@ async def create(
         """
         INSERT INTO asks (owner_person_id,question,kind,options,recommended_option,proof,lane_id,
                           requester_token_id,requester_person_id,due_at,expires_at,source_ref,
-                          area,allow_rule,permission,proof_order)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
+                          area,allow_rule,permission,proof_order,blocks)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
     """,
         (
             owner_person_id,
@@ -68,6 +69,7 @@ async def create(
             allow_rule,
             permission,
             Jsonb(list(proof or {})),
+            Jsonb(blocks or []),
         ),
     )
 
