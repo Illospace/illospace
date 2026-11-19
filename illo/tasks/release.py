@@ -14,13 +14,29 @@ CHECK_TIMEOUT_S = 20
 
 
 async def _agent(ctx, conn, row, entry, now):
+    grace = timedelta(minutes=ctx.workspace.config.tasks.stop_grace_minutes)
+    key = f"task:stop-pending:{row['id']}"
+    pending = await kv.get(conn, key)
+    if pending:
+        at = datetime.fromisoformat(pending["at"])
+        holder_since = row["holder_since"].isoformat() if row["holder_since"] else None
+        live = await one(conn, "SELECT key FROM kv WHERE key LIKE %s LIMIT 1", (f"task:lane-live:{row['id']}:%",))
+        valid = (row["state"] in {"todo", "working"} and row["waits_for"] == row["holder"]
+                 and pending["holder_since"] == holder_since and not live
+                 and (not row["alive_at"] or row["alive_at"] <= at))
+        if not valid or now - at >= grace:
+            await kv.delete(conn, key)
+            if valid:
+                await tasks._event(conn, row, "code", "state",
+                    "The agent's run stopped and the work is not returned.", {"lane": pending["lane"]})
+                await conn.execute("UPDATE tasks SET stopped_at=%s WHERE id=%s", (at, row["id"]))
+                row["stopped_at"] = at
     if row["state"] not in {"todo", "working"} or row["waits_for"] != row["holder"]:
         return
     last = await one(conn, """SELECT max(at) AS at FROM task_events
         WHERE task_id=%s AND kind='woken' AND at>=%s""", (row["id"], row["holder_since"]))
     base = max(t for t in (row["last_activity_at"], row["alive_at"], last["at"]) if t)
     hours = max(0, (now-base).total_seconds()/3600)
-    grace = timedelta(minutes=ctx.workspace.config.tasks.stop_grace_minutes)
     stopped = bool(row["stopped_at"]) and now - row["stopped_at"] >= grace
     if not stopped and hours <= entry.silence.agent_hours:
         return

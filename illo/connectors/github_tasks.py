@@ -409,16 +409,30 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
         linked = any(link.get("kind") in {"ticket", "change"} and link.get("url") in urls for link in row["links"])
         if not (row["id"] == task_id or linked or names_ticket(title, row)):
             continue
-        key = f"task:lane-stop:{row['id']}:{lane['id']}:{row['holder_since']}"
         live = f"task:lane-live:{row['id']}:{lane['id']}"
         if lane["state"] == "working":
-            await kv.delete(conn, key)
             await kv.set(conn, live, True)
             await tasks.alive(conn, row["id"], lane["source"])
         elif lane["state"] in {"done", "failed", "unknown"}:
             await kv.delete(conn, live)
             # One run can stop while another run still does the work.
             if await one(conn, "SELECT key FROM kv WHERE key LIKE %s LIMIT 1", (f"task:lane-live:{row['id']}:%",)):
+                continue
+            period = await one(conn, """SELECT
+                max(at) FILTER (WHERE kind IN ('reopened','woken','handed')) AS started,
+                max(at) FILTER (WHERE kind='state' AND data ? 'lane') AS stopped
+                FROM task_events WHERE task_id=%s""", (row["id"],))
+            since = max(t for t in (row["holder_since"], period["started"], row["created_at"]) if t)
+            # Closed lanes keep their first closing time across repeated reports.
+            ended = lane.get("closed_at")
+            if not ended:
+                last = await one(conn, """SELECT at,data->>'state' AS state FROM lane_events
+                    WHERE lane_id=%s AND kind='state' ORDER BY at DESC,id DESC LIMIT 1""", (lane["id"],))
+                if last and last["state"] == lane["state"]:
+                    ended = last["at"]
+            if ended and ended < since:
+                continue
+            if period["stopped"] and period["stopped"] >= since:
                 continue
             tickets = [link for link in row["links"] if link.get("kind") == "ticket"]
             is_open = False
@@ -427,11 +441,13 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
                 is_open |= bool(item and item.get("state") == "open")
             if not is_open:
                 continue
-            if await kv.get(conn, key):
+            key = f"task:stop-pending:{row['id']}"
+            pending = await kv.get(conn, key)
+            holder_since = row["holder_since"].isoformat() if row["holder_since"] else None
+            if pending and pending["holder_since"] == holder_since:
                 continue
-            await kv.set(conn, key, True)
-            await tasks._event(conn, row, "code", "state", "The agent's run stopped and the work is not returned.", {"lane": lane["id"]})
-            await conn.execute("UPDATE tasks SET stopped_at=now() WHERE id=%s", (row["id"],))
+            await kv.set(conn, key, {"at": datetime.now(UTC).isoformat(), "lane": lane["id"],
+                                     "holder_since": holder_since})
 
 
 def names_ticket(title, row):

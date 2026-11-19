@@ -8,7 +8,7 @@ import pytest
 from illo.channels.mcp import lanes as lane_tools
 from illo.connectors import github_tasks as connector
 from illo.db import all_rows, one
-from illo.ledger import people, tasks
+from illo.ledger import kv, people, tasks
 from illo.sources.github import poll
 from illo.tasks import release, wake
 from tests.github.test_triage import alert, trust
@@ -271,7 +271,7 @@ async def test_owner_card_assignment_sets_holder(app, ctx, fake_brain, github_cl
 
 
 @pytest.mark.parametrize("plain_url", [False, True])
-async def test_working_lane_alive_stopped_lane_releases_now(ctx, github_client, plain_url):
+async def test_stopped_lane_waits_before_history_and_release(ctx, github_client, plain_url):
     row = await make(ctx)
     await wake.tick(ctx)
     issue = github_client.issues[0]
@@ -286,10 +286,22 @@ async def test_working_lane_alive_stopped_lane_releases_now(ctx, github_client, 
     async with ctx.pool.connection() as conn:
         caller.conn = conn
         await lane_tools.report_one(caller, {**values, "state": "unknown"})
-    assert (await get(ctx, row["id"]))["stopped_at"]
+        pending = await kv.get(conn, f"task:stop-pending:{row['id']}")
+        await lane_tools.report_one(caller, {**values, "state": "unknown"})
+        assert await kv.get(conn, f"task:stop-pending:{row['id']}") == pending
+    assert (await get(ctx, row["id"]))["stopped_at"] is None
+    assert not [e for e in await events(ctx, row["id"]) if "lane" in e["data"]]
     await release.tick(ctx)
     assert not [e for e in await events(ctx, row["id"]) if e["kind"] == "released"]  # the grace period
     await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=32))
+    record = await events(ctx, row["id"])
+    assert len([e for e in record if "lane" in e["data"]]) == 1
+    assert [e for e in record if e["kind"] == "released"][0]["data"]["stopped"] is True
+    async with ctx.pool.connection() as conn:
+        caller.conn = conn
+        await lane_tools.report_one(caller, {**values, "state": "unknown"})
+        assert not await kv.get(conn, f"task:stop-pending:{row['id']}")
     await wake.tick(ctx)
     assert any(c["method"] == "remove_label" for c in github_client.calls)
     assert any(c["method"] == "unassign_issue" for c in github_client.calls)
@@ -297,7 +309,70 @@ async def test_working_lane_alive_stopped_lane_releases_now(ctx, github_client, 
     async with ctx.pool.connection() as conn:
         caller.conn = conn
         await lane_tools.report_one(caller, {**values, "state": "unknown"})
+        assert not await kv.get(conn, f"task:stop-pending:{row['id']}")
+        await lane_tools.report_one(caller, values)
+        await lane_tools.report_one(caller, {**values, "state": "done"})
+        assert await kv.get(conn, f"task:stop-pending:{row['id']}")
     assert (await get(ctx, row["id"]))["stopped_at"] is None
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
+    record = await events(ctx, row["id"])
+    assert len([e for e in record if "lane" in e["data"]]) == 2
+    assert len([e for e in record if e["kind"] == "released"]) == 2
+
+
+@pytest.mark.parametrize("state", ["done", "failed", "unknown"])
+async def test_send_back_ignores_old_stopped_lane(ctx, github_client, state):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        token = {"person_key": "ada", "person_id": ada["id"], "id": 1, "label": "build"}
+        caller = SimpleNamespace(app=ctx, conn=conn, token=token)
+        values = {"source": "codex", "external_id": "run-1", "state": state, "task": row["id"]}
+        await lane_tools.report_one(caller, values)
+        assert await kv.get(conn, f"task:stop-pending:{row['id']}")
+        await tasks.return_work(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, message="Please check.")
+        assert not await kv.get(conn, f"task:stop-pending:{row['id']}")
+    github_client.issues[0]["state"] = "closed"
+    async with ctx.pool.connection() as conn:
+        await tasks.reopen(conn, row["id"], workspace=ctx.workspace, viewer=ADA, reason="Check again.")
+    await wake.tick(ctx)
+    assert github_client.issues[0]["state"] == "open"
+    async with ctx.pool.connection() as conn:
+        caller.conn = conn
+        await lane_tools.report_one(caller, values)
+        assert not await kv.get(conn, f"task:stop-pending:{row['id']}")
+        await lane_tools.report_one(caller, {**values, "state": "working"})
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
+    assert (await get(ctx, row["id"]))["stopped_at"] is None
+    assert not [e for e in await events(ctx, row["id"]) if "lane" in e["data"]]
+
+
+async def test_lane_restart_clears_pending_stop(ctx):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    lane = {"id": 7, "source": "codex", "state": "working", "links": []}
+    async with ctx.pool.connection() as conn:
+        for state in ("working", "done", "working"):
+            await connector.lane_signal(ctx, conn, {**lane, "state": state},
+                task_id=row["id"], token={"person_key": "ada"})
+            pending = await kv.get(conn, f"task:stop-pending:{row['id']}")
+            assert bool(pending) == (state == "done")
+        assert (await get_without_pool(conn, row["id"]))["stopped_at"] is None
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
+    assert not [e for e in await events(ctx, row["id"]) if "lane" in e["data"]]
+
+
+async def test_closed_ticket_records_no_pending_stop(ctx, github_client):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    github_client.issues[0]["state"] = "closed"
+    async with ctx.pool.connection() as conn:
+        await connector.lane_signal(ctx, conn, {"id": 7, "source": "codex", "state": "done", "links": []},
+            task_id=row["id"], token={"person_key": "ada"})
+        assert not await kv.get(conn, f"task:stop-pending:{row['id']}")
+        assert (await get_without_pool(conn, row["id"]))["stopped_at"] is None
+    assert not [e for e in await events(ctx, row["id"]) if "lane" in e["data"]]
 
 
 async def test_explicit_task_lane_and_other_owner_cannot_change_it(ctx):
@@ -390,8 +465,15 @@ async def test_run_title_that_names_the_ticket_links_the_run(ctx, github_client)
         helper = {**lane, "id": 9, "state": "done", "title": f"Review acme-example/engine#{number}"}
         await connector.lane_signal(ctx, conn, helper, token={"person_key": "ada"})
         assert not (await get_without_pool(conn, row["id"]))["stopped_at"]
+        assert not await kv.get(conn, f"task:stop-pending:{row['id']}")
         await connector.lane_signal(ctx, conn, {**lane, "state": "done"}, token={"person_key": "ada"})
-        assert (await get_without_pool(conn, row["id"]))["stopped_at"]
+        pending = await kv.get(conn, f"task:stop-pending:{row['id']}")
+        assert pending["lane"] == lane["id"]
+        await connector.lane_signal(ctx, conn, helper, token={"person_key": "ada"})
+        assert await kv.get(conn, f"task:stop-pending:{row['id']}") == pending
+        assert not (await get_without_pool(conn, row["id"]))["stopped_at"]
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
+    assert len([e for e in await events(ctx, row["id"]) if "lane" in e["data"]]) == 1
 
 
 async def test_hand_over_adds_no_comment(ctx, github_client):

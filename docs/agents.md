@@ -350,8 +350,11 @@ Illo never logs the token or the complete URL query.
 `lane_report` accepts an optional `task` ID, including on each lane in a batch.
 A working lane refreshes that task's liveness. Matching ticket and change links also work.
 The token can affect only tasks of its person or that person's agents.
-A stopped lane with an open ticket tells Illo to restart the holder at the next silence check.
-A repeated stopped report does not cause repeated restarts. A new working report starts a new run period.
+A stopped lane with an open ticket starts a wait of `tasks.stop_grace_minutes`.
+A working report during this wait clears the pending stop without a history event.
+After the wait, Illo confirms the stop and can restart the holder in the same check.
+Illo ignores lanes that closed before the task's latest hand-over, send-back, or successful wake.
+Repeated stopped reports keep the first pending time and cause at most one stop event per work period.
 
 The task list supplies the work facts for both morning briefs. Lanes supply raw run evidence.
 The T3 collector includes linked pull request URLs from the thread JSON.

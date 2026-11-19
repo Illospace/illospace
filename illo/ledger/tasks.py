@@ -117,6 +117,8 @@ async def _event(conn, row, actor, kind, text="", data=None):
     row.update(stamps)
     if actor == row.get("holder") or kind == "reopened":
         await conn.execute("UPDATE tasks SET stopped_at=NULL WHERE id=%s", (row["id"],))
+    if row["state"] not in {"todo", "working"} or kind in {"handed", "reopened", "released", "woken"}:
+        await kv.delete(conn, f"task:stop-pending:{row['id']}")
     data = {**(data or {}), "waits_for": row["waits_for"]}
     if kind == "released":
         data["holder"] = row["holder"]
@@ -146,6 +148,7 @@ async def timing(conn, row, now=None):
 async def alive(conn, task_id, source, at=None):
     await conn.execute("""UPDATE tasks SET alive_at=GREATEST(alive_at,%s),stopped_at=NULL
         WHERE id=%s AND state IN ('todo','working')""", (at or datetime.now(UTC), task_id))
+    await kv.delete(conn, f"task:stop-pending:{task_id}")
 
 
 async def _holder(conn, workspace, entry, holder):

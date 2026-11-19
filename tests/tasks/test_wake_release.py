@@ -9,7 +9,7 @@ from pydantic import SecretStr
 
 from illo.channels.slack import tasks as surface
 from illo.db import all_rows, one
-from illo.ledger import tasks
+from illo.ledger import kv, tasks
 from illo.tasks import release, wake
 from illo.tasks.connectors import WakeConfig, WebhookConfig
 from illo.vault import Vault
@@ -263,6 +263,92 @@ async def test_release_lock_serializes_two_instances(ctx):
     await age(ctx, row["id"])
     await asyncio.gather(release.tick(ctx), release.tick(ctx))
     assert len([e for e in (await record(ctx, row["id"]))[1] if e["kind"] == "released"]) == 1
+
+
+@pytest.mark.parametrize("busy", [False, True])
+async def test_pending_stop_confirms_once_and_keeps_release_time(ctx, busy):
+    row = await make(ctx, holder="agent:build")
+    if not busy:
+        await wake.tick(ctx)
+    at = datetime.now(UTC)
+    grace = timedelta(minutes=ctx.workspace.config.tasks.stop_grace_minutes)
+    key = f"task:stop-pending:{row['id']}"
+    async with ctx.pool.connection() as conn:
+        await kv.set(conn, key, {"at": at.isoformat(), "lane": 7, "holder_since": row["holder_since"].isoformat()})
+    await release.tick(ctx, at + grace - timedelta(seconds=1))
+    current, events = await record(ctx, row["id"])
+    assert current["stopped_at"] is None
+    assert not [e for e in events if "lane" in e["data"] or e["kind"] == "released"]
+    await release.tick(ctx, at + grace)
+    current, events = await record(ctx, row["id"])
+    stops = [e for e in events if "lane" in e["data"]]
+    assert len(stops) == 1 and stops[0]["data"]["lane"] == 7
+    assert stops[0]["kind"] == "state"
+    assert stops[0]["text"] == "The agent's run stopped and the work is not returned."
+    async with ctx.pool.connection() as conn:
+        assert not await kv.get(conn, key)
+        if busy:
+            assert current["stopped_at"] == at
+            assert not [e for e in events if e["kind"] == "released"]
+            await conn.execute("UPDATE task_wakes SET finished_at=now() WHERE task_id=%s", (row["id"],))
+    await release.tick(ctx, at + grace)
+    await release.tick(ctx, at + grace + timedelta(minutes=1))
+    current, events = await record(ctx, row["id"])
+    releases = [e for e in events if e["kind"] == "released"]
+    assert len(releases) == 1 and releases[0]["data"]["stopped"] is True
+    assert current["stopped_at"] is None
+    assert len([e for e in events if "lane" in e["data"]]) == 1
+
+
+@pytest.mark.parametrize("change", ["hand", "return", "done", "cancel", "reopen"])
+async def test_task_change_clears_pending_stop(ctx, change):
+    row = await make(ctx, holder="agent:build")
+    await wake.tick(ctx)
+    key = f"task:stop-pending:{row['id']}"
+    async with ctx.pool.connection() as conn:
+        await kv.set(conn, key, {"at": datetime.now(UTC).isoformat(), "lane": 7,
+                                 "holder_since": row["holder_since"].isoformat()})
+        if change == "hand":
+            await tasks.hand(conn, row["id"], workspace=ctx.workspace, viewer=ADA, holder="agent:build")
+        elif change == "return":
+            await tasks.return_work(conn, row["id"], workspace=ctx.workspace, viewer=BUILD, message="Please check.")
+        elif change == "done":
+            await tasks.done(conn, row["id"], workspace=ctx.workspace, viewer=ADA)
+        elif change == "cancel":
+            await tasks.cancel(conn, row["id"], workspace=ctx.workspace, viewer=ADA)
+        else:
+            await tasks.reopen(conn, row["id"], workspace=ctx.workspace, viewer=ADA, reason="Check again.")
+        assert not await kv.get(conn, key)
+    await release.tick(ctx, datetime.now(UTC) + timedelta(minutes=31))
+    current, events = await record(ctx, row["id"])
+    assert current["stopped_at"] is None
+    assert not [e for e in events if "lane" in e["data"]]
+
+
+@pytest.mark.parametrize("change", ["holder_since", "state", "waits_for", "alive_at", "live"])
+async def test_expired_stop_checks_current_facts(ctx, change):
+    row = await make(ctx, holder="agent:build")
+    await wake.tick(ctx)
+    key = f"task:stop-pending:{row['id']}"
+    at = datetime.now(UTC)
+    async with ctx.pool.connection() as conn:
+        await kv.set(conn, key, {"at": at.isoformat(), "lane": 7, "holder_since": row["holder_since"].isoformat()})
+        if change == "holder_since":
+            await conn.execute("UPDATE tasks SET holder_since=holder_since+interval '1 second' WHERE id=%s", (row["id"],))
+        elif change == "state":
+            await conn.execute("UPDATE tasks SET state='review' WHERE id=%s", (row["id"],))
+        elif change == "waits_for":
+            await conn.execute("UPDATE tasks SET waits_for='person:ada' WHERE id=%s", (row["id"],))
+        elif change == "alive_at":
+            await conn.execute("UPDATE tasks SET alive_at=%s WHERE id=%s", (at + timedelta(seconds=1), row["id"]))
+        else:
+            await kv.set(conn, f"task:lane-live:{row['id']}:8", True)
+    await release.tick(ctx, at + timedelta(minutes=31))
+    async with ctx.pool.connection() as conn:
+        assert not await kv.get(conn, key)
+    current, events = await record(ctx, row["id"])
+    assert current["stopped_at"] is None
+    assert not [e for e in events if "lane" in e["data"] or e["kind"] == "released"]
 
 
 async def test_question_reminder_keeps_wait_start_after_messages(ctx):

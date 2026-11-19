@@ -203,6 +203,8 @@ A blocking question that waits for a person prevents release.
 A stopped collector run can cause an early release when its linked ticket stays open.
 Illo waits `tasks.stop_grace_minutes` (default 30) first, because a run can start again by itself.
 A new working report in that time cancels the release.
+Illo records the stop in the task history only after this wait.
+The same check can release the holder. The silence limit stays separate.
 
 `tasks.alive(conn, task_id, source, at=None)` records liveness without an event.
 A connector or collector calls it when the holder shows activity. Reads never count.
