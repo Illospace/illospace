@@ -401,3 +401,10 @@ async def test_board_keeps_supported_text_blocks(client):
     post = await ada.call("board_post", {"title": "Proof", "text": "See the checks", "blocks": blocks})
     result = await ada.call("board_read", {"thread_id": post["thread_id"]})
     assert [block["kind"] for block in result["posts"][0]["blocks"]] == ["preview", "checks", "links"]
+
+
+def test_board_config_allows_unknown_future_keys():
+    from illo.workspace import BoardConfig
+
+    cfg = BoardConfig.model_validate({"enabled": True, "coordinator": {"enabled": False}})
+    assert cfg.enabled is True

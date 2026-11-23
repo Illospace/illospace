@@ -385,6 +385,8 @@ class MemoryConfig(Model):
 
 
 class BoardConfig(Model):
+    model_config = ConfigDict(extra="allow")
+
     enabled: bool = True
     max_consecutive_agent_posts: int = Field(default=20, ge=1, le=100)
     wake_github: bool = True

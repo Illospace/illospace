@@ -243,7 +243,7 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
                     "stalled_reason": "turn_cap",
                 }, is_error=True)
             else:
-                if has_board and name != "board_inbox":
+                if has_board and name != "board_inbox" and isinstance(value, dict):
                     await add_board_unread(ctx, value)
                 result = tool_result(value)
         except ValidationError as exc:
