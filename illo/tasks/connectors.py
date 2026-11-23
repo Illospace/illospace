@@ -13,7 +13,7 @@ class WakeConfig(BaseModel):
 class WebhookConfig(WakeConfig):
     type: str = "webhook"
     url: HttpUrl
-    secret: str = Field(min_length=1)
+    secret: str | None = Field(default=None, min_length=1)
 
     @field_validator("url")
     @classmethod

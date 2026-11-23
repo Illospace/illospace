@@ -54,21 +54,34 @@ def agent_for(ctx, login):
                  and a.wake.assignee.lower() == (login or "").lower()), None)
 
 
+class GitHubWriteLimit(ValueError):
+    pass
+
+
+async def lock_writes(conn):
+    await conn.execute("SELECT pg_advisory_xact_lock(12000004)")
+
+
+async def reserve_write(ctx, conn):
+    """Count one GitHub write attempt while the caller holds the write lock."""
+    budget = await kv.get(conn, "tasks:github-writes") or []
+    now = datetime.now(UTC).timestamp()
+    budget = [at for at in budget if now - at < 3600]
+    if len(budget) >= ctx.workspace.config.tasks.github_writes_per_hour:
+        raise GitHubWriteLimit("The task limit for GitHub writes per hour is reached.")
+    await kv.set(conn, "tasks:github-writes", [*budget, now])
+
+
 async def write(ctx, conn, task, event, step, method, *args, **kwargs):
     """Count each attempt and keep a receipt for each action of a wake event."""
     failure = None
     async with conn.transaction():
         key = f"task:action:{event['id']}:{step}"
-        await conn.execute("SELECT pg_advisory_xact_lock(12000004)")
+        await lock_writes(conn)
         receipt = await kv.get(conn, key)
         if receipt is not None:
             return receipt
-        budget = await kv.get(conn, "tasks:github-writes") or []
-        now = datetime.now(UTC).timestamp()
-        budget = [at for at in budget if now-at < 3600]
-        if len(budget) >= ctx.workspace.config.tasks.github_writes_per_hour:
-            raise ValueError("The task limit for GitHub writes per hour is reached.")
-        await kv.set(conn, "tasks:github-writes", [*budget, now])
+        await reserve_write(ctx, conn)
         await audit.write(conn, principal="code", tool="task_github_" + method, args={"id": task["id"], "step": step},
                           decision="allow", reason="The write belongs to a task action.", target=f"task {task['id']}")
         try:

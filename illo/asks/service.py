@@ -146,7 +146,7 @@ async def prepare_card(ctx, conn, data):
     return data
 
 
-async def answer(conn, ask_id, person_id, *, option=None, text=None):
+async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=None):
     """All direct person answers lock the ask and write the same decision."""
     ask = await ledger.lock_ask(conn, ask_id)
     owner = await one(conn, 'SELECT id FROM people WHERE id=%s AND active FOR SHARE', (person_id,))
@@ -156,6 +156,6 @@ async def answer(conn, ask_id, person_id, *, option=None, text=None):
         return None
     answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
     if answered:
-        await board.record_decision(conn, answered)
+        await board.record_decision(conn, answered, workspace=workspace)
         await ledger.decision(conn, answered)
     return answered

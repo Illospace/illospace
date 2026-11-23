@@ -131,15 +131,19 @@ async def setup(ctx) -> None:
     if ctx.github_client is None:
         token = config.github_token.get_secret_value() if config.github_token else None
         key = None
-        if not token and config.github_app_id and config.github_app_installation_id:
-            if config.github_app_private_key_file:
-                key = config.github_app_private_key_file.read_text()
-            elif config.vault_key:
-                async with ctx.pool.connection() as conn:
-                    key = await Vault(config.vault_key.get_secret_value()).get(
-                        conn, config.github_app_private_key_secret
-                    )
-            if not key:
+        if config.github_app_id and config.github_app_installation_id:
+            try:
+                if config.github_app_private_key_file:
+                    key = config.github_app_private_key_file.read_text()
+                elif config.vault_key:
+                    async with ctx.pool.connection() as conn:
+                        key = await Vault(config.vault_key.get_secret_value()).get(
+                            conn, config.github_app_private_key_secret
+                        )
+            except (OSError, ValueError):
+                if not token:
+                    raise
+            if not key and not token:
                 raise ValueError("The GitHub App private key is absent")
         if token or key:
             reports = []

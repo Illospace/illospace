@@ -14,6 +14,8 @@ from illo.tasks.connectors import WakeResult, wake_types
 
 async def send_webhook(ctx, conn, task, agent, reason, event):
     config = agent.wake
+    if not config.secret:
+        return WakeResult(False, "The wake secret is missing or cannot be read.")
     try:
         token = await vault(ctx).get(conn, config.secret)
     except ValueError:

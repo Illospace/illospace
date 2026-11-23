@@ -227,7 +227,8 @@ async def route(ctx, request, ask_id, *, file_position=None):
             return html(render.document('<main><p>This action is not available.</p></main>'), 403)
         if option is None and (not text.strip() or len(text) > 4000):
             return html(await page(ctx, conn, row, person, token, message='Give an answer of 1 to 4,000 characters.'))
-        answered = await service.answer(conn, ask_id, person['id'], option=option, text=text if option is None else None)
+        answered = await service.answer(conn, ask_id, person['id'], option=option,
+                                        text=text if option is None else None, workspace=ctx.workspace)
         if not answered:
             row = await ledger.page_read(conn, ask_id, person['id'])
             return html(await page(ctx, conn, row, person, token, message='This question is closed. No answer is needed.'))
