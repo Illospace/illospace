@@ -7,7 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 from illo.asks import cards, proof
 from illo.db import one
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import asks, rules, sensors
+from illo.ledger import asks, board, rules, sensors
 from illo.tasks import pages
 
 log = logging.getLogger(__name__)
@@ -156,5 +156,6 @@ async def answer(conn, ask_id, person_id, *, option=None, text=None):
         return None
     answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
     if answered:
+        await board.record_decision(conn, answered)
         await ledger.decision(conn, answered)
     return answered

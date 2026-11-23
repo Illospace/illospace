@@ -1,6 +1,7 @@
 """Stateless agent MCP transport. Client tokens never become brain tokens."""
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,10 +14,13 @@ from illo.brain.server import _error, initialize_result, tool_result
 from illo.channels.signals import submit as signal_submit
 from illo.gateway import InboundEvent
 from illo.ledger import audit, tokens
+from illo.ledger import board as board_ledger
 from illo.ledger import mcp as ledger
 from illo.tools.registry import Tool, schema_reason
 
-from . import asks, lanes, reads, schemas, submissions, tasks
+from . import asks, board, lanes, reads, schemas, submissions, tasks
+
+log = logging.getLogger(__name__)
 
 PROFILES = frozenset({"agent_request"})
 COLLECTOR_TOOLS = frozenset(
@@ -33,9 +37,10 @@ COLLECTOR_TOOLS = frozenset(
 AGENT_TOOLS = COLLECTOR_TOOLS | {"illo_submit", "illo_read", "illo_get_result"} | tasks.NAMES
 
 
-def allowed_tools(token: dict, *, pages_enabled=False) -> frozenset[str]:
+def allowed_tools(token: dict, *, pages_enabled=False, board_enabled=True) -> frozenset[str]:
     if token["scopes"] == ["agent"]:
-        return AGENT_TOOLS if pages_enabled else AGENT_TOOLS - {"task_page"}
+        names = AGENT_TOOLS if pages_enabled else AGENT_TOOLS - {"task_page"}
+        return names | board.NAMES if board_enabled else names
     if token["scopes"] == ["collector"]:
         return COLLECTOR_TOOLS
     return frozenset()
@@ -132,6 +137,7 @@ TOOLS = {
 }
 
 TOOLS.update({tool.name: tool for tool in tasks.tools(agent_tool)})
+TOOLS.update({tool.name: tool for tool in board.tools(agent_tool)})
 
 
 @dataclass
@@ -145,6 +151,19 @@ class ClientContext:
     @property
     def principal(self) -> str:
         return f"person:{self.token['person_key']}"
+
+
+async def add_board_unread(ctx, value):
+    try:
+        async with ctx.conn.transaction():
+            count = await board_ledger.unread_count(
+                ctx.conn, workspace=ctx.app.workspace, token=ctx.token
+            )
+    except Exception:
+        log.warning("Could not count unread board mentions.")
+        return
+    if count:
+        value["unread_board_mentions"] = count
 
 
 async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, str]:
@@ -177,8 +196,12 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
             "Invalid request id",
         )
     name, args, decision, reason = method, params, "allow", "The request is allowed"
+    config = ctx.app.workspace.config
+    allowed = allowed_tools(ctx.token, pages_enabled=config.pages.enabled,
+                            board_enabled=config.board.enabled)
+    has_board = "board_inbox" in allowed
     if method == "initialize":
-        result = initialize_result(params, "illo-agents")
+        result = initialize_result(params, "illo-agents", instructions=board.INSTRUCTIONS if has_board else None)
     elif method == "ping":
         result = {}
     elif method == "tools/list":
@@ -186,7 +209,7 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
             "tools": [
                 tool.declaration()
                 for tool in TOOLS.values()
-                if tool.name in allowed_tools(ctx.token, pages_enabled=ctx.app.workspace.config.pages.enabled)
+                if tool.name in allowed
             ]
         }
     elif method == "tools/call":
@@ -203,16 +226,26 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
         if not tool:
             return _error(request_id, -32602, "Unknown tool"), name, args, "deny", "Unknown tool"
         try:
-            if name == "task_page" and not ctx.app.workspace.config.pages.enabled:
+            if name == "task_page" and not config.pages.enabled:
                 raise ValueError("Task pages are off.")
-            if name not in allowed_tools(ctx.token, pages_enabled=ctx.app.workspace.config.pages.enabled):
+            if name not in allowed:
                 raise ValueError("The token scope does not allow this tool")
             validated = tool.arguments.model_validate(args)
             # Reports are snapshots: omitted fields must not reset a stored lane.
             clean = validated.model_dump(exclude_unset=name == "lane_report")
             async with ctx.conn.transaction():
                 value = await tool.handler(ctx, clean)
-            result = tool_result(value)
+            if isinstance(value, board_ledger.TurnCapReached):
+                decision, reason = "deny", "The thread needs a human decision to reset its turn limit."
+                result = tool_result({
+                    "error": {"code": "turn_cap", "message": reason},
+                    "thread_id": value.thread_id,
+                    "stalled_reason": "turn_cap",
+                }, is_error=True)
+            else:
+                if has_board and name != "board_inbox":
+                    await add_board_unread(ctx, value)
+                result = tool_result(value)
         except ValidationError as exc:
             decision, reason = "deny", schema_reason(exc, tool.arguments)
             ctx.events.clear()

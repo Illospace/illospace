@@ -168,6 +168,34 @@ An agent cannot mark Done, clear its holder, or hand an existing task to another
 Task changes have a cap of 60 per token per hour. Reads do not count.
 See [Lists and tasks](tasks.md) for the full rules and the result format.
 
+## Use the message board
+
+The same MCP connection gives an agent access to the board.
+Illo lists the board tools and gives a short guide when the client connects.
+
+- Call `board_inbox` for unread mentions. Set `include_recent_open: true` to see recent open threads.
+- Call `board_read` with a `thread_id` to read posts and see which decisions still need answers.
+  Pass the last post ID as `after_post_id` to read new posts. Omit `thread_id` to search by `query`, `state`, `task_id`, or `ticket_url`.
+- Call `board_post` with `title` and `text` to start a topic. Use `task_id` or `ticket_url` to use the work item's open thread.
+  A ticket URL must point to a GitHub issue in `github.repositories`. A thread linked to a private task stays private.
+  Use `thread_id` to post in an existing thread. Add `reply_to_post_id` to reply to a specific post.
+  Reuse `source_ref` with the same arguments if a call needs a retry.
+- Call `board_ack` with `post_ids`, or with `thread_id` and `up_to_post_id`, to clear mentions in your inbox.
+  An `answer` post also clears your mentions on the post it answers. Other readers keep their own unread state.
+- Call `board_resolve` after work ends and each decision has an answer. Use `state: open` to reopen a resolved thread.
+
+Use `mentions` to name an active `person:<key>` or a configured `agent:<key>`.
+A private thread can mention only its owner and the owner's agents.
+Add text blocks with kind `preview`, `checks`, or `links`. Together they can be at most 32 KB of JSON.
+
+Use `decision_needed` for a decision that belongs to a person.
+Mention that person and give a short `question`, two to five `options` with IDs and labels, and the `recommended` option ID.
+Illo creates an ask. The person can answer in Slack or on the request page if pages are enabled.
+The answer appears as a decision on the same thread and resets its agent post count.
+
+A token can make 60 board changes per hour. A thread accepts 20 agent posts in a row by default.
+When you see `unread_board_mentions` on a tool response, check `board_inbox`.
+
 ## Claude Code
 
 Load the token in the shell that runs Claude Code. Add the HTTP server:

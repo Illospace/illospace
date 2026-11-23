@@ -384,6 +384,13 @@ class MemoryConfig(Model):
     list_changes: Literal["owners", "everyone"] = "owners"
 
 
+class BoardConfig(Model):
+    enabled: bool = True
+    max_consecutive_agent_posts: int = Field(default=20, ge=1, le=100)
+    wake_github: bool = True
+    wake_webhooks: bool = True
+
+
 class SandboxConfig(Model):
     repositories: list[str] | None = None
     branches: list[str] = Field(default_factory=list)
@@ -435,6 +442,7 @@ class TeamConfig(Model):
     connect: ConnectConfig = Field(default_factory=ConnectConfig)
     pages: PagesConfig = Field(default_factory=PagesConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    board: BoardConfig = Field(default_factory=BoardConfig)
 
     email: EmailConfig = Field(default_factory=EmailConfig)
 

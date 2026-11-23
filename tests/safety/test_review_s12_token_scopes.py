@@ -28,9 +28,13 @@ async def test_rule_01_token_scope_controls_list_and_calls(app, http, scope):
         raw = await tokens.create(conn, ada["id"], "collector-box", scopes=[scope])
     agent = AgentClient(app, http, raw, None, ada["id"])
     listed = (await agent.rpc("tools/list")).json()["result"]["tools"]
-    expected = COLLECTOR_TOOLS | (
-        {"illo_submit", "illo_read", "illo_get_result", "task_mine", "task_get", "task_write", "task_post", "task_create", "task_lists"} if scope == "agent" else set()
-    )
+    expected = COLLECTOR_TOOLS
+    if scope == "agent":
+        expected = expected | {
+            "illo_submit", "illo_read", "illo_get_result", "task_mine", "task_get",
+            "task_write", "task_post", "task_create", "task_lists",
+            "board_inbox", "board_read", "board_post", "board_ack", "board_resolve",
+        }
     assert {t["name"] for t in listed} == expected
     await agent.call("lane_search")
     if scope == "collector":
