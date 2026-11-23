@@ -485,8 +485,11 @@ async def test_item_migration_with_concurrent_writer(corpus, pool):
                 WHERE pid=pg_backend_pid() AND c.relname IN ('items','events')""")
             assert {r["mode"] for r in locks} <= {"AccessShareLock"}
             started = perf_counter()
-            async with asyncio.timeout(2):
+            # A write that waits for a lock of the open migration fails after 2 seconds.
+            # The total limit is larger, because a slow CI runner needs time for the search query.
+            async with asyncio.timeout(60):
                 # These writes use the old schema while the migration transaction stays open.
+                await writer.execute("SET LOCAL lock_timeout='2s'")
                 await items.upsert(writer, source_ref="saved:concurrent", title="newword", body="newword")
                 for field, ref in [("title", "note:1"), ("summary", "decision:2"), ("body", "saved:3")]:
                     await writer.execute(f"UPDATE items SET {field}='newword' WHERE source_ref=%s", (ref,))
