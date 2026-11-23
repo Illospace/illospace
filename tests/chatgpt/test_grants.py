@@ -63,7 +63,11 @@ async def test_missing_person_never_borrows_team_grant(chatgpt_app, replay, fake
     assert result["text"] == chatgpt.MISSING
     assert not fake_brain.requests
     async with app.state.ctx.pool.connection() as conn:
-        assert not await one(conn, "SELECT 1 FROM runs")
+        rows = await (await conn.execute("SELECT * FROM runs")).fetchall()
+    run, = rows
+    assert run["event_id"] == result["event_id"] and run["route"] == "person_dm"
+    assert run["status"] == "failed" and run["usage"]["failure_category"] == "no_payer"
+    assert run["payer"] is None and run["token_hash"] is None
 
 
 async def test_missing_can_use_explicit_api_fallback(chatgpt_app, replay, fake_brain):
@@ -265,7 +269,8 @@ async def test_s5_skipped_tainted_run_has_text_and_a_ledger_record(
     assert not fake_brain.requests
     async with app.state.ctx.pool.connection() as conn:
         row = await one(conn, "SELECT * FROM runs WHERE event_id=%s", (result["event_id"],))
-    assert row["tainted"] and row["status"] == "completed"
+    assert row["tainted"] and row["status"] == "failed"
+    assert row["usage"]["failure_category"] == "no_payer"
     assert row["usage"]["skipped"] == "no_model_credential"
     assert row["ended_at"] and row["token_hash"] is None
 
@@ -293,7 +298,8 @@ async def test_n1_every_token_endpoint_401_breaks_the_grant(chatgpt_app, replay,
     assert len(calls) == 1
 
 
-async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app, replay):
+@pytest.mark.parametrize("status", [503, 401])
+async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app, replay, status):
     import httpx
 
     app, _ = chatgpt_app
@@ -303,7 +309,7 @@ async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app,
 
     def unavailable(request):
         calls.append(request)
-        return httpx.Response(503)
+        return httpx.Response(status)
 
     ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(unavailable))
 
@@ -313,12 +319,17 @@ async def test_n7_refresh_failure_after_provider_401_has_retry_text(chatgpt_app,
 
     ctx.brain_client = RejectBrain()
     result = await replay()
-    assert result["text"] == chatgpt.TEMPORARY
+    if status == 503:
+        assert result["text"] == chatgpt.TEMPORARY
+    else:
+        assert result["category"] == "provider"
     assert len(calls) == 1
     async with ctx.pool.connection() as conn:
         row = await one(conn, "SELECT * FROM runs")
     assert row["status"] == "failed" and row["token_hash"] is None
-    assert row["error"] == "The model sign-in service is unavailable"
+    assert row["usage"]["failure_category"] == "sign_in"
+    if status == 503:
+        assert row["error"] == "The model sign-in service is unavailable"
 
 
 @pytest.mark.parametrize("fallback", [False, True])

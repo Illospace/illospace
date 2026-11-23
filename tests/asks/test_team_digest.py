@@ -12,8 +12,8 @@ from illo.ledger.digest_snapshot import TEAM_STATE_KEY
 from illo.routines.scheduler import tick_routines
 from illo.routines.team_digest import DEFAULT_INSTRUCTIONS, send_team_due
 from illo.tools.checks import in_grant
-from illo.workspace import RouteSettings, Routine, TeamDigestConfig
-from tests.asks.test_digest import NOW, posts
+from illo.workspace import Routine, TeamDigestConfig
+from tests.asks.test_digest import NOW, occupy_deep_queue, posts
 from tests.tool_results import read_result, snapshot_data
 
 
@@ -114,12 +114,7 @@ async def test_team_fallback_on_failure_and_timeout(
 
         monkeypatch.setattr(run_manager, "select_payer", auth)
     elif failure == "queue":
-        ctx.workspace.config.brain.routes["deep"] = RouteSettings(timeout_s=0.01)
-
-        async def wait(*args, **kwargs):
-            await asyncio.Event().wait()
-
-        monkeypatch.setattr(ctx.gateway.run_manager, "execute", wait)
+        await occupy_deep_queue(ctx)
     else:
 
         async def fail(request):
@@ -137,6 +132,10 @@ async def test_team_fallback_on_failure_and_timeout(
         "Morning, team.\nWaiting on people:"
     )
     assert "Stuck:\n• #1 Check-plan: past the due time. Ada must act." in posts(slack_client)[0]["text"]
+    if failure == "queue":
+        async with ctx.pool.connection() as conn:
+            brief = await one(conn, "SELECT state,run_id FROM deep_runs WHERE kind='brief'")
+        assert brief == {"state": "queued", "run_id": None}
 
 
 async def test_empty_team_day_is_recorded_without_model_or_delivery(app, fake_brain, slack_client):

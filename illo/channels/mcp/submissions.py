@@ -162,15 +162,19 @@ async def get_result(ctx, args: dict) -> dict:
     saved = row["desired_outcome"] == "preserve_knowledge"
     status = row["status"]
     run_status = "completed" if saved else run["status"] if run else None
+    category = run["usage"].get("failure_category") if run else None
+    sign_in_failed = category in {"no_payer", "sign_in"}
+    sign_in_reply = status == "completed" and sign_in_failed and run["payer"] is None
     # Reconcile a run after a restart, even if delivery did not complete.
-    if run_status in {"failed", "timeout"}:
+    if run_status in {"failed", "timeout"} and not sign_in_reply:
         status = "failed"
     terminal = status in {"completed", "failed"}
     completed = row["completed_at"] or (run["ended_at"] if run else None)
     failure = result.get("failure")
     if status == "failed" and not failure:
-        category = (run.get("usage") or {}).get("failure_category") if run else None
-        if category not in FAILURE_TEXTS:
+        if sign_in_failed:
+            category = "provider"
+        elif category not in FAILURE_TEXTS:
             category = "timeout" if run_status == "timeout" else "internal"
         failure = {"category": category, "message": error_text(category)}
     return {

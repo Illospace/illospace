@@ -24,7 +24,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - `resolve` in `illo/gateway/principal.py` sets the principal from a verified identity: a Slack user id, an authenticated email sender, a routine file, or an MCP token.
-- `RunManager.execute` in `illo/brain/run_manager.py` stores it on the run with a per-run token.
+- `RunManager.start_run` in `illo/brain/run_manager.py` stores it on the run with a per-run token.
 - `Registry.call` reads the principal from the run. The `Arguments` class in `illo/tools/registry.py` refuses any extra argument, such as a principal.
 - An agent token writes only the lanes of its own person. `report_one` in `illo/channels/mcp/lanes.py` refuses a lane that another person owns and every `github` lane.
 

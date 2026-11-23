@@ -6,14 +6,14 @@ from contextlib import suppress
 from psycopg.types.json import Jsonb
 
 from illo.brain.routes import resolve_route
-from illo.brain.run_manager import RunOptions
+from illo.brain.run_manager import DeepContext
 from illo.db import one
 from illo.deep.delivery import send
-from illo.deep.ports import refresh_repos
-from illo.gateway import InboundEvent
+from illo.gateway.events import InboundEvent, record_event
 from illo.gateway.principal import Authority
 from illo.gateway.replies import failure_category
-from illo.ledger import audit, runs, sensors
+from illo.ledger import audit, sensors
+from illo.ledger.runs import expire_run
 
 WORKER_LOCK = 15001501
 
@@ -26,12 +26,13 @@ async def recover(conn):
     ).fetchall()
     for row in rows:
         if row["run_id"]:
-            await runs.finish(conn, row["run_id"], "timeout", error=row["error"])
-            await conn.execute(
-                "UPDATE events SET status='failed' WHERE id=(SELECT event_id FROM runs WHERE id=%s)",
-                (row["run_id"],),
-            )
+            await expire_run(conn, row["run_id"], row["error"])
     return rows
+
+
+def _route_timeout(ctx):
+    # The worker uses the route timeout only for the lease and the result wait.
+    return resolve_route(ctx.workspace, "deep").timeout_s
 
 
 async def claim(ctx, conn, only_id=None):
@@ -48,78 +49,39 @@ async def claim(ctx, conn, only_id=None):
         conn,
         """UPDATE deep_runs SET state='running',started_at=now(),
         lease_until=clock_timestamp()+%s * interval '1 second' WHERE id=%s RETURNING *""",
-        (resolve_route(ctx.workspace, "deep").timeout_s, row["id"]),
+        (_route_timeout(ctx), row["id"]),
+    )
+
+
+def _deep_context(row):
+    context = row["context"]
+    person_id = row["person_id"] if row["principal"].startswith("person:") else None
+    return DeepContext(
+        deep_run_id=row["id"], kind=row["kind"], deliver=row["deliver"],
+        authority=Authority(row["principal"], row["profile"], person_id),
+        task_actor=context.get("task_actor"), requester_id=row["person_id"],
+        customer_read=bool(context.get("customer_read")), personal_read=bool(context.get("personal_read")),
     )
 
 
 async def execute(ctx, row):
-    route = resolve_route(ctx.workspace, "deep")
     state, text, error = "failed", None, None
-    inbound = None
+    event_id = None
     try:
-        async with asyncio.timeout(route.timeout_s):
-            context = {
-                **row["context"],
-                "deep_run_id": row["id"],
-                "deep_kind": row["kind"],
-                "deliver": row["deliver"],
-            }
-            event = InboundEvent(
-                channel="deep",
-                external_id=str(row["id"]),
-                kind=row["kind"],
-                text=row["job"],
-                payload=context,
-            )
-            authority = Authority(
-                row["principal"],
-                row["profile"],
-                row["person_id"] if row["principal"].startswith("person:") else None,
-            )
-            async with ctx.pool.connection() as conn:
-                inbound = await one(
-                    conn,
-                    """INSERT INTO events(channel,external_id,kind,principal,person_id,payload)
-                    VALUES ('deep',%s,%s,%s,%s,%s) RETURNING id""",
-                    (
-                        event.external_id,
-                        event.kind,
-                        authority.principal,
-                        authority.person_id,
-                        Jsonb(
-                            {
-                                "text": event.text,
-                                "payload": context,
-                                **(
-                                    {"task_actor": context["task_actor"]}
-                                    if context.get("task_actor")
-                                    else {}
-                                ),
-                            }
-                        ),
-                    ),
-                )
-            if row["person_id"]:
-                async with ctx.pool.connection() as conn:
-                    if not await one(
-                        conn, "SELECT id FROM people WHERE id=%s AND active", (row["person_id"],)
-                    ):
-                        raise ValueError("The person is inactive")
-            await refresh_repos(ctx)
-            # Personal runs keep their existing initial provider-search limit.
-            options = RunOptions(
-                row["id"],
-                row["kind"],
-                ctx.workspace.config.web.search == "provider"
-                and row["kind"] != "brief"
-                and row["profile"] != "person_dm",
-                customer_read=bool(row["context"].get("customer_read")),
-                personal_read=bool(row["context"].get("personal_read")),
-            )
-            text = await ctx.gateway.run_manager.execute(
-                event, authority, inbound["id"], deep=options
-            )
-            state = "done"
+        deep = _deep_context(row)
+        context = {**row["context"], "deep_run_id": deep.deep_run_id, "deep_kind": deep.kind,
+                   "deliver": deep.deliver}
+        event = InboundEvent(channel="deep", external_id=str(deep.deep_run_id), kind=deep.kind,
+                             text=row["job"], payload=context)
+        payload = {"text": event.text, "payload": context}
+        if deep.task_actor:
+            payload["task_actor"] = deep.task_actor
+        async with ctx.pool.connection() as conn:
+            event_id = await record_event(conn, event, payload, authority=deep.authority)
+        if event_id is None:
+            raise RuntimeError("The deep event already exists")
+        text = await ctx.gateway.run_manager.start_run(event, deep.authority, event_id, deep=deep)
+        state = "done"
     except asyncio.CancelledError:
         error, state = "The deep work was cancelled.", "cancelled"
         raise
@@ -131,40 +93,14 @@ async def execute(ctx, row):
         }.get(failure_category(exc), "The deep run failed.")
     finally:
         async with ctx.pool.connection() as conn:
-            stored = await one(conn, "SELECT run_id FROM deep_runs WHERE id=%s", (row["id"],))
-            if stored["run_id"] is None and inbound:
-                # A failed sign-in or setup still has a terminal ledger run.
-                failed = await runs.create(
-                    conn,
-                    principal=row["principal"],
-                    person_id=authority.person_id,
-                    profile=row["profile"],
-                    route=route.kind,
-                    provider=route.provider,
-                    model=route.model,
-                    tool_limit=route.max_tool_calls,
-                    event_id=inbound["id"],
-                )
-                await conn.execute(
-                    "UPDATE runs SET deep_run_id=%s,deep_kind=%s WHERE id=%s",
-                    (row["id"], row["kind"], failed["id"]),
-                )
-                await runs.finish(conn, failed["id"], "failed", error=error)
-                await conn.execute(
-                    "UPDATE deep_runs SET run_id=%s WHERE id=%s", (failed["id"], row["id"])
-                )
             current = await one(
                 conn,
                 "UPDATE deep_runs SET state=%s,result=%s,error=%s,ended_at=now() WHERE id=%s RETURNING *",
                 (state, text, error, row["id"]),
             )
             await conn.execute(
-                "UPDATE events SET status=%s,payload=payload || %s WHERE channel='deep' AND external_id=%s",
-                (
-                    "handled" if state == "done" else "failed",
-                    Jsonb({"final_answer": text}),
-                    str(row["id"]),
-                ),
+                "UPDATE events SET status=%s,payload=payload || %s WHERE id=%s",
+                ("handled" if state == "done" else "failed", Jsonb({"final_answer": text}), event_id),
             )
             if current["run_id"]:
                 await audit.write(
@@ -243,7 +179,7 @@ async def tick(ctx, only_id=None):
 
 async def result(ctx, deep_id):
     """Brief schedules retain their existing delivery lock and fallback path."""
-    async with asyncio.timeout(resolve_route(ctx.workspace, "deep").timeout_s):
+    async with asyncio.timeout(_route_timeout(ctx)):
         while True:
             await tick(ctx, deep_id)
             async with ctx.pool.connection() as conn:

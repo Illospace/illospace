@@ -1,9 +1,13 @@
 """Failure replies use fixed words. Logs never contain exception text."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
+from illo.brain import run_manager
 from illo.brain.client import BrainEvent
 from illo.channels.slack.adapter import SlackAdapter
+from illo.connectors import chatgpt
 from illo.db import one
 from illo.gateway import InboundEvent
 
@@ -74,6 +78,21 @@ async def test_agent_receipt_keeps_the_failure_category(app, http, category):
         await conn.execute("UPDATE submissions SET result=result-'failure'")
     result = await agent.call("illo_get_result", {"event_id": accepted["event_id"]})
     assert result["failure"] == {"category": category, "message": TEXTS[category]}
+
+
+@pytest.mark.parametrize("temporary", [False, True])
+async def test_agent_receipt_keeps_the_reply_when_no_payer_is_selected(app, http, monkeypatch, temporary):
+    from tests.mcp.client import AgentClient
+
+    payer = AsyncMock(return_value=None, side_effect=chatgpt.TemporaryRefresh if temporary else None)
+    monkeypatch.setattr(run_manager, "select_payer", payer)
+    agent = await AgentClient.create(app, http)
+    accepted = await agent.call("illo_submit", {"message": "Check the release."})
+    await agent.settle()
+    result = await agent.call("illo_get_result", {"event_id": accepted["event_id"]})
+    assert result["final_answer"] == (chatgpt.TEMPORARY if temporary else chatgpt.MISSING)
+    assert result["status"] == "completed" and result["run_status"] == "failed"
+    assert result["failure"] is None
 
 
 @pytest.mark.parametrize("error,category", [(TimeoutError, "timeout"), (ConnectionError, "internal")])

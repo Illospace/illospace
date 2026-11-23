@@ -239,7 +239,7 @@ Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is on
 ## 6. The gateway and a run
 
 1. A channel builds an `InboundEvent` (`channel`, `external_id`, `kind`, `sender`, `text`, `payload`, `reply_to`) and gives it to `gateway.receive(event)`.
-2. The gateway inserts it into `events`. A duplicate stops here.
+2. The gateway calls `record_event` in `illo/gateway/events.py` to insert it into `events`. A duplicate stops here.
 3. The gateway finds the principal:
    - A Slack DM from a known person → `person:<key>`, profile `person_dm`.
    - A Slack DM from an unknown sender → no answer (rule 7).
@@ -251,21 +251,26 @@ Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is on
 4. Preparers run (`register_preparer`). They change verified input before any claim: Slack reads the transcript of a clip, and the Google sign-in code removes a callback address.
 5. Claims run (`register_claim`). A claim takes an event that continues a flow of its area: a thread reply to an ask, a corrected note, a pasted sign-in address. A claimed event gets no brain run.
 6. The gateway shows the first sign of work itself, in code, in less than one second: in Slack it posts a short placeholder message, and later it edits that message with the answer. The model is not in this path. In Slack this step also adds the thread history. If that history has a bot or an unknown user, the gateway makes the run `tainted` (`Gateway.context_authority`).
-7. The run manager classifies the run kind, resolves its route, and selects the payer (`illo/brain/routes.py`). It inserts a `runs` row with the route, the provider, the model, the payer and the tool limit. It makes a per-run token (random, stored as a hash, valid until the run ends), and calls the brain service: `POST /run` with the system prompt, the message, the URL of the tool server, the token and the route values.
+7. `RunManager.start_run` classifies the run kind and resolves its route. It inserts a `runs` row with the route, the provider, the model and the tool limit. Then it does the setup and selects the payer. It makes a per-run token and calls `POST /run` with the prompt, the message, the tool server and the route values. Every failed run stores a category in `runs.usage.failure_category`.
 8. The brain service streams events: `started`, `text`, `tool_call`, `final`, `error`. The run manager can show a tool call as a status line.
 9. The gateway gives the final text to the channel that the event came from. Each other write goes through a tool and its checks.
-10. The run ends. The token stops to work. `runs` gets the status, the usage, and the end time.
+10. The run ends. The run manager revokes the token and stores the status, the payer, the usage and the end time.
 
 A run has a time limit and a tool-call limit from its route. A failed run gives the person a short honest message.
+
+A deep run is a normal run on the `deep` route. The worker calls `record_event` with the stored authority and keeps `task_actor` in the event payload. It passes a `DeepContext` to `start_run` with the request ID, kind, authority, actor, delivery target and read flags. The run manager links the run to the deep request when it inserts the run. It checks that the requester is active and refreshes the repositories before it selects a payer. The route timeout covers these steps and the brain stream.
 
 **Run kinds, routes and payers.** Each concept has one function in `illo/brain/routes.py`:
 
 - `run_kind(event, authority, *, deep)` classifies the run from the verified event channel and the authority: `deep` for a deep run; `tainted` for a tainted authority; `slack` or `email` with profile `person_dm` or `team_channel` gives that kind; `routine` gives `routine`; `digest` and `team_digest` give `digest`; `mcp` gives `agent_request`; `signals` gives `tainted`. Any other pair is an error. The profile alone is not enough: a personal routine and a personal digest have the `person_dm` profile, but they are `routine` and `digest` runs.
 - `resolve_route(workspace, kind)` gives the `default` route with the kind's route on top.
 - `select_payer(ctx, route, authority)` gives who pays: the API key of the route's provider, or the ChatGPT grant of one person. It reads the authority and never changes it. It keeps every rule of `brain.chatgpt`: own or team grants, the explicit team grant for tainted runs, the allowed accounts, and the fallback before the run.
+- `sends_refresh_notice(kind)` permits sign-in refresh notices for all run kinds except `digest` and `deep`.
+- `raises_failure(kind)` tells the run manager to raise payer and sign-in failures for `digest` and `deep`. Other kinds get the sign-in reply.
+- `web_search_allowed(workspace, route, provider, deep)` controls provider search at the start of a deep run. It checks the workspace setting, the deep kind and profile, the read flags, and the selected provider's `web_search` capability.
 - `check_routes(workspace, providers)` checks each route against `GET /providers`. At start, a failure stops the app; while the brain is not reachable, the app waits. At reload, a failure keeps the last valid workspace and logs the reason.
 
-The brain interface (`illo/brain/client.py`): `run(request)`, `providers()` and `transcribe(...)`. `RunRequest`: `run_id`, `system_prompt`, `images`, `user_message`, `mcp_url`, `mcp_token`, `provider`, `model`, `effort`, `max_tool_calls`, `timeout_s`, `max_output_tokens`, `web_search`, `provider_auth` (ChatGPT only), `fallback_provider`, `smoke`. The brain answers an unknown provider or a missing capability with the `config` category. The brain caps each run at `min(timeout_s, ILLO_BRAIN_MAX_TIMEOUT_S)`. The brain events are `started`, `text`, `tool_call`, `web_search`, `payer`, `final` and `error`. `payer` says that the brain changed to the fallback provider during the run; the app records the new payer at once. A fake brain in `illo/brain/fake.py` plays a script of tool calls. Each test uses it, with the provider description of the brain's built-in providers. The real wire adapters live in the `brain/` service.
+The brain interface (`illo/brain/client.py`): `run(request)`, `providers()` and `transcribe(...)`. `RunRequest`: `run_id`, `system_prompt`, `images`, `user_message`, `mcp_url`, `mcp_token`, `provider`, `model`, `effort`, `max_tool_calls`, `timeout_s`, `max_output_tokens`, `web_search`, `provider_auth` (ChatGPT only), `fallback_provider`, `smoke`. The brain answers an unknown provider or a missing capability with the `config` category. The brain caps each run at `min(timeout_s, ILLO_BRAIN_MAX_TIMEOUT_S)`. The brain events are `started`, `text`, `tool_call`, `web_search`, `payer`, `final` and `error`. The `payer` event marks a switch to the fallback provider during the run. The run keeps the first payer in its payer fields and records the fallback in its usage. A fake brain in `illo/brain/fake.py` plays a script of tool calls. Each test uses it, with the provider description of the brain's built-in providers. The real wire adapters live in the `brain/` service.
 
 ### The brain loop
 
@@ -324,6 +329,7 @@ Tool names use `family_verb`. Each family is one file in `illo/tools/`. The regi
 | `email` | `email_draft` (always a draft) |
 
 Section 4 says which profile gets which tool.
+The deep kind controls access to `shell` and `web_fetch`. See [Deep work](deep.md) for the rules.
 
 ## 8. The MCP endpoint for agents
 

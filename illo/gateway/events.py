@@ -2,7 +2,11 @@
 
 from typing import Any, Protocol
 
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+from illo.db import Connection, one
+from illo.gateway.principal import Authority
 
 
 class InboundEvent(BaseModel):
@@ -17,6 +21,20 @@ class InboundEvent(BaseModel):
     text: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
     reply_to: str | None = None
+
+
+async def record_event(
+    conn: Connection, event: InboundEvent, payload: dict, *, authority: Authority | None = None
+) -> int | None:
+    """Store an event once and return its ID."""
+    row = await one(
+        conn,
+        """INSERT INTO events (channel,external_id,kind,principal,person_id,payload)
+        VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (channel,external_id) DO NOTHING RETURNING id""",
+        (event.channel, event.external_id, event.kind, authority.principal if authority else None,
+         authority.person_id if authority else None, Jsonb(payload)),
+    )
+    return row["id"] if row else None
 
 
 class ChannelAdapter(Protocol):

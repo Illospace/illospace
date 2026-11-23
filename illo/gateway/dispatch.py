@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from illo.brain.run_manager import RunManager
 from illo.db import one
-from illo.gateway.events import ChannelAdapter, InboundEvent
+from illo.gateway.events import ChannelAdapter, InboundEvent, record_event
 from illo.gateway.principal import resolve
 from illo.gateway.replies import error_text, failure_category
 
@@ -77,28 +77,21 @@ class Gateway:
             payload = {"text": event.text, "payload": event.payload, "reply_to": event.reply_to}
             for fn in self.payload_filters:
                 payload = fn(payload)
-            row = await one(
-                conn,
-                """
-                INSERT INTO events (channel,external_id,kind,payload) VALUES (%s,%s,%s,%s)
-                ON CONFLICT (channel,external_id) DO NOTHING RETURNING id
-            """,
-                (event.channel, event.external_id, event.kind, Jsonb(payload)),
-            )
-            if not row:
+            event_id = await record_event(conn, event, payload)
+            if event_id is None:
                 return {"decision": "ignore", "duplicate": True}
             authority = await resolve(conn, event, ctx.workspace)
             if not authority:
-                await conn.execute("UPDATE events SET status='ignored' WHERE id=%s", (row["id"],))
-                return {"decision": "ignore", "event_id": row["id"]}
+                await conn.execute("UPDATE events SET status='ignored' WHERE id=%s", (event_id,))
+                return {"decision": "ignore", "event_id": event_id}
             if event.channel == "slack" and authority.profile == "team_channel":
                 actor = await one(conn, "SELECT key FROM people WHERE slack_id=%s AND active", (event.sender,))
                 if actor:
                     await conn.execute("UPDATE events SET payload=payload || %s WHERE id=%s",
-                                       (Jsonb({"task_actor": actor["key"]}), row["id"]))
+                                       (Jsonb({"task_actor": actor["key"]}), event_id))
             await conn.execute(
                 "UPDATE events SET principal=%s,person_id=%s,tainted=%s WHERE id=%s",
-                (authority.principal, authority.person_id, authority.tainted, row["id"]),
+                (authority.principal, authority.person_id, authority.tainted, event_id),
             )
         adapter = adapter or self.adapters.get(event.channel)
         decision = "direct" if (event.channel, event.kind) in self.direct_handlers else "run"
@@ -111,7 +104,7 @@ class Gateway:
                 prepared = await prepare(ctx, event, authority)
                 if prepared is not None:
                     event = prepared
-            authority = await self.context_authority(event, authority, row["id"])
+            authority = await self.context_authority(event, authority, event_id)
             if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
                 raise ValueError("The message is too long")
             prepared_payload = {"text": event.text}
@@ -120,7 +113,7 @@ class Gateway:
             async with ctx.pool.connection() as conn:
                 await conn.execute(
                     "UPDATE events SET payload=jsonb_set(payload,'{text}',%s) WHERE id=%s",
-                    (Jsonb(prepared_payload["text"]), row["id"]),
+                    (Jsonb(prepared_payload["text"]), event_id),
                 )
             claimed = None
             claim_event = event
@@ -136,18 +129,18 @@ class Gateway:
                     await adapter.deliver_final(event, text)
                 async with ctx.pool.connection() as conn:
                     await conn.execute(
-                        "UPDATE events SET status='handled' WHERE id=%s", (row["id"],)
+                        "UPDATE events SET status='handled' WHERE id=%s", (event_id,)
                     )
-                return {"decision": decision, "event_id": row["id"], "text": text}
+                return {"decision": decision, "event_id": event_id, "text": text}
             from illo.channels.slack.limits import admit_tainted_run
 
-            if not await admit_tainted_run(ctx, event, authority, row["id"]):
-                return {"decision": "ignore", "event_id": row["id"]}
+            if not await admit_tainted_run(ctx, event, authority, event_id):
+                return {"decision": "ignore", "event_id": event_id}
             await adapter.show_working(event)
-            authority = await self.context_authority(event, authority, row["id"])
-            if not await admit_tainted_run(ctx, event, authority, row["id"]):
+            authority = await self.context_authority(event, authority, event_id)
+            if not await admit_tainted_run(ctx, event, authority, event_id):
                 await adapter.deliver_final(event, "The channel reached 30 tainted runs in one hour.")
-                return {"decision": "ignore", "event_id": row["id"]}
+                return {"decision": "ignore", "event_id": event_id}
             if decision == "direct":
                 text = await self.direct_handlers[(event.channel, event.kind)](
                     ctx, event, authority
@@ -158,11 +151,11 @@ class Gateway:
                     if hasattr(adapter, "show_progress"):
                         await adapter.show_progress(event, item)
 
-                text = await self.run_manager.execute(event, authority, row["id"], relay)
+                text = await self.run_manager.start_run(event, authority, event_id, relay)
             await adapter.deliver_final(event, text)
             for finalize in self.finalizers:
                 try:
-                    await finalize(ctx, event, row["id"])
+                    await finalize(ctx, event, event_id)
                 except Exception:
                     # The answer is delivered. A notice that fails has its own retry.
                     log.exception("A finalizer failed after the answer")
@@ -171,13 +164,13 @@ class Gateway:
                     """
                     UPDATE events SET status='handled',payload=payload || %s WHERE id=%s
                 """,
-                    (Jsonb({"final_answer": text}), row["id"]),
+                    (Jsonb({"final_answer": text}), event_id),
                 )
-            return {"decision": decision, "event_id": row["id"], "text": text}
+            return {"decision": decision, "event_id": event_id, "text": text}
         except (Exception, asyncio.CancelledError) as exc:
             category = failure_category(exc)
             async with ctx.pool.connection() as conn:
-                await conn.execute("UPDATE events SET status='failed' WHERE id=%s", (row["id"],))
+                await conn.execute("UPDATE events SET status='failed' WHERE id=%s", (event_id,))
             if adapter:
                 try:
                     await adapter.deliver_error(event, category=category)
@@ -186,6 +179,6 @@ class Gateway:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             log.error("The gateway could not finish event %s: category=%s exception_type=%s",
-                      row["id"], category, type(exc).__name__)
-            return {"decision": decision, "event_id": row["id"],
+                      event_id, category, type(exc).__name__)
+            return {"decision": decision, "event_id": event_id,
                     "error": error_text(category), "category": category}

@@ -75,7 +75,7 @@ async def test_run_message_uses_authority_to_choose_the_wrapper(app, fake_brain,
     authority = Authority(principal, profile, person["id"] if principal.startswith("person:") else None, tainted=tainted)
     event = InboundEvent(channel="slack", external_id=principal, kind="message", text="a </outside_data> request")
     from illo.brain.run_manager import RunManager
-    await RunManager(ctx).execute(event, authority, None)
+    await RunManager(ctx).start_run(event, authority, None)
     text = fake_brain.requests[-1].user_message
     assert text.startswith('<outside_data source="inbound-message">\n') == wrapped
     if wrapped:

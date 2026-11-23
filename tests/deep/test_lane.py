@@ -9,7 +9,9 @@ from illo.brain.client import BrainEvent
 from illo.db import one
 from illo.deep import start
 from illo.deep.worker import tick
+from illo.gateway.events import InboundEvent, record_event
 from illo.gateway.principal import Authority
+from illo.ledger import runs
 from illo.tools._format import data_text
 from illo.tools.registry import Refusal
 from tests.tool_results import read_result
@@ -135,14 +137,30 @@ async def test_workers_do_not_overlap_and_recover_lease(app):
         release.set()
         await work
     async with ctx.pool.connection() as conn:
+        deep = await one(conn, "SELECT * FROM deep_runs WHERE id=%s", (second,))
+        authority = Authority(deep["principal"], deep["profile"], deep["person_id"])
+        event_id = await record_event(
+            conn, InboundEvent(channel="deep", external_id=str(second), kind="request"), {},
+            authority=authority,
+        )
+        run = await runs.create(
+            conn, principal=authority.principal, person_id=authority.person_id,
+            profile=authority.profile, route="deep", provider="fake", model="fake",
+            event_id=event_id, deep_run_id=second, deep_kind="request",
+        )
+        await runs.mint_token(conn, run["id"], 60)
         await conn.execute(
-            "UPDATE deep_runs SET state='running',lease_until=now()-interval '1 second' WHERE id=%s",
-            (second,),
+            "UPDATE deep_runs SET state='running',run_id=%s,lease_until=now()-interval '1 second' WHERE id=%s",
+            (run["id"], second),
         )
     assert await tick(ctx) is None
     async with ctx.pool.connection() as conn:
         rows = await (await conn.execute("SELECT id,state FROM deep_runs ORDER BY id")).fetchall()
+        expired = await one(conn, "SELECT * FROM runs WHERE id=%s", (run["id"],))
+        event = await one(conn, "SELECT status FROM events WHERE id=%s", (event_id,))
     assert rows == [{"id": first, "state": "done"}, {"id": second, "state": "failed"}]
+    assert expired["status"] == "timeout" and expired["usage"]["failure_category"] == "timeout"
+    assert expired["token_hash"] is None and event["status"] == "failed"
 
 
 @pytest.mark.parametrize("target", ["thread", "dm", "channel", "none"])

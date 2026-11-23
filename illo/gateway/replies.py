@@ -19,8 +19,9 @@ RUN_ERROR = error_text()
 
 
 class RunFailure(RuntimeError):
-    def __init__(self, category):
+    def __init__(self, category, *, detail=None):
         self.category = category if category in FAILURE_TEXTS else "internal"
+        self.detail = detail
         super().__init__(error_text(self.category))
 
 

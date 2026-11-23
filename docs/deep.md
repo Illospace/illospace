@@ -72,7 +72,8 @@ digest:
 
 `max_tool_calls` accepts 1 to 200. `timeout_s` accepts up to 3600 seconds.
 `web.search` accepts `provider` or `off`. `web.fetch` accepts `on` or `off`.
-A provider with the `web_search` capability offers provider search. Other providers can use `web_fetch`.
+Provider search needs the `web_search` capability on the provider that pays for the deep route.
+The `web_fetch` tool follows the deep kind and the read flags.
 The API-key path uses `max_output_tokens`. The ChatGPT path keeps its provider limit.
 The brain service also caps each run with `ILLO_BRAIN_MAX_TIMEOUT_S`, which defaults to 1800 seconds.
 `deep.max_queue` counts queued runs. The daily limit uses the UTC day and includes scheduled personal runs.
