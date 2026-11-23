@@ -12,6 +12,32 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from brain.models import RunRequest
+from brain.providers import BUILT_IN, Provider
+
+FAKE = BUILT_IN["fake"]
+CHATGPT = BUILT_IN["chatgpt"]
+
+
+def openai(base_url="https://api.openai.com/v1", api_key="fake-api-key"):
+    """The built-in openai provider with a test key and address."""
+    return Provider(**{**BUILT_IN["openai"].wire_dict(), "base_url": base_url.rstrip("/"),
+                       "api_key": api_key})
+
+
+def chat(base_url, api_key="fake-key", efforts=()):
+    """A custom provider on the Chat Completions wire."""
+    return Provider("local", "chat", base_url.rstrip("/"), api_key, efforts=tuple(efforts))
+
+
+@pytest.fixture(autouse=True)
+def provider_environment(monkeypatch):
+    """Only the fake provider, whatever the host environment holds."""
+    import os
+
+    for name in os.environ:
+        if name.startswith("ILLO_PROVIDER_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("ILLO_PROVIDER_FAKE", "1")
 
 TOOLS = [
     {
@@ -40,8 +66,9 @@ def run_request():
         user_message="Find the release",
         mcp_url="http://127.0.0.1:1/mcp",
         mcp_token="fake-run-token",
-        runtime="echo",
+        provider="fake",
         model="test-model",
+        effort="low",
         timeout_s=5,
     )
 

@@ -143,7 +143,7 @@ async def test_shared_drive_team_run_has_no_personal_read(google_app, rpc):
             principal="team",
             person_id=None,
             profile="team_channel",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

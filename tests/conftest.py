@@ -94,7 +94,7 @@ async def run(conn, ada):
         principal="person:ada",
         person_id=ada["id"],
         profile="person_dm",
-        runtime="fake",
+        provider="fake", tool_limit=12,
         model="fake",
     )
 
@@ -172,7 +172,7 @@ async def rpc_token(app):
             principal="person:ada",
             person_id=ada["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

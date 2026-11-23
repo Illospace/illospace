@@ -59,8 +59,8 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 - An agent request never reads a personal connector. The scope check and the Google handler require `person_dm`, even without a tool profile list.
 - `complete` in `illo/connectors/oauth.py` checks the Google account against the person's addresses in `people.yaml` (`GoogleClient.verify_account` in `illo/connectors/google.py`). It revokes a grant for another account. The web callback needs the `__Host-` browser cookie that the start link set.
 - The pasted sign-in address works only as the only text of an untainted person DM (`claim` in `illo/connectors/oauth.py`).
-- ChatGPT model sign-in is separate from personal data tools. `credential_person` in `illo/brain/run_manager.py` selects the model payer.
-  With the default `brain.person_credential: own`, person runs use the requester's grant.
+- ChatGPT model sign-in is separate from personal data tools. `select_payer` in `illo/brain/routes.py` selects the model payer.
+  With the default `brain.chatgpt.person_credential: own`, person runs use the requester's grant.
   Person DMs and person routines never borrow another member's grant in this default mode.
   A missing personal grant never selects another person's grant in this default mode.
   The workspace owner can explicitly choose `person_credential: team` to use `team_credential` for all untainted person runs.
@@ -69,9 +69,10 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
   This includes mail, calendar, drive, asks, and `digest_snapshot`. An agent request still cannot read personal tools.
   A run with no person uses only the configured team credential.
   Channel runs share the explicit team credential and that account's ChatGPT limit.
-  Tainted and outsider model runs stop by default. `brain.tainted_credential` can allow `team` or `api_key`.
-  Subscription mode requires `brain.team_credential` to name an active person.
-  If the team credential has no usable grant, team runs use the API key only when `api_key_fallback` is true.
+  Tainted and outsider model runs stop by default. `brain.chatgpt.tainted_credential` can allow `team` or `api_key`.
+  A route on the `chatgpt` provider requires `brain.chatgpt.team_credential` to name an active person.
+  If the team credential has no usable grant, team runs use the API key only when `brain.chatgpt.fallback` names a provider.
+  One function selects the payer: `select_payer` in `illo/brain/routes.py`. It reads the authority and never changes it.
 - `illo/connectors/chatgpt_oauth.py` binds the paste flow to the person, DM, thread, expiry, and one use. The gateway removes callback addresses before it stores events. The main app refreshes the encrypted grant under a row lock. The brain receives only the access token and account ID for one run.
 
 **ChatGPT tests.** `tests/safety/test_rule_01_02_10_chatgpt.py`, `tests/chatgpt/`, and `tests/brain_service/test_chatgpt.py`.
@@ -254,11 +255,12 @@ Without the rule, a later web request can send that data to the outsider.
 ## Voice privacy
 
 Illo uses only Slack's transcript by default. Audio stays in Slack.
-An owner can set `voice.transcription: openai` in `illo.yaml` to allow audio transcription.
-With this choice, Illo sends the clip audio to the configured OpenAI transcription endpoint.
+An owner can set `voice.transcription: brain` in `illo.yaml` to allow audio transcription.
+With this choice, the main app sends the clip audio to the brain service (`POST /transcribe`).
+The brain sends it to the transcription endpoint of the provider in `brain.transcription`.
 It sends the model ID and a fixed filename. It does not send the Slack user ID, thread history, or bot token.
-`OPENAI_BASE_URL` can select another HTTPS endpoint. That endpoint receives the audio and API key.
-The main app needs `OPENAI_API_KEY`. A ChatGPT subscription does not provide this API operation.
+The provider's base URL in the brain environment file selects the endpoint. That endpoint receives the audio and the provider's API key.
+The main app holds no provider key. A ChatGPT subscription does not provide this API operation.
 
 Only a verified, active team member can use the fallback. The Slack file must belong to that person.
 Bot, webhook, unknown sender, outside workspace, and tainted events cannot trigger an audio download or transcription.
@@ -326,7 +328,9 @@ The rules limit damage. They do not make hostile text harmless. These risks rema
 | `github_create_issue` | 3 |
 | `github_comment_issue` | 5 |
 
-All tool calls of one run together stop at `brain.max_turns` (default 12). The run also stops at `brain.timeout_s` (default 300 seconds).
+All tool calls of one run together stop at the `max_tool_calls` of its route (default 12), stored in `runs.tool_limit`. The run also stops at the `timeout_s` of its route (default 300 seconds).
+
+**Provider keys.** Only the brain container loads the brain environment file with the provider keys. The app container never loads it. `deploy/install.sh` and `deploy/update.sh` refuse an app environment file with an `ILLO_PROVIDER_`, `OPENAI_`, or `ANTHROPIC_` variable. The brain worker gets only the key of its run's provider. `GET /providers` gives no key and no address.
 
 **Calls of one MCP token** (`illo/ledger/mcp.py`):
 - 20 open asks and 30 new asks per hour for each owner.

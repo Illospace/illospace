@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 
 from illo.brain.client import BrainClient, RunRequest
-from illo.brain.run_manager import provider_auth
+from illo.brain.routes import resolve_route, select_payer
 from illo.connectors.chatgpt import ChatGPTClient, TemporaryRefresh
 from illo.db import all_rows, create_pool
 from illo.gateway.principal import Authority
@@ -24,18 +24,15 @@ def http_status(value):
     return value if type(value) is int and 100 <= value <= 599 else "none"
 
 
-async def smoke(config, person_id, *, auth="chatgpt"):
+async def smoke(config, person_id, *, route="person_dm"):
+    """Check the route's provider, model, and payer with one function call."""
     started = time.monotonic()
     auth_kind, model, round_trip, usage = "none", "unknown", False, {}
     reason, status = "The smoke check did not finish", "none"
     try:
         workspace = load_workspace(config.workspace_dir)
-        brain = workspace.config.brain
-        brain.check_runtime(config.brain_runtime)
-        runtime = config.brain_runtime or brain.runtime
-        model = safe_model(config.brain_model or brain.model)
-        if runtime != "openai_responses":
-            raise ValueError("The smoke check needs openai_responses")
+        route = resolve_route(workspace, route)
+        model = safe_model(route.model)
         async with create_pool(config.database_url, min_size=1, max_size=2) as pool:
             ctx = SimpleNamespace(
                 config=config,
@@ -54,32 +51,34 @@ async def smoke(config, person_id, *, auth="chatgpt"):
                 raise ValueError("The person is missing, inactive, or ambiguous")
             person = people[0]
             authority = Authority("person:" + person["key"], "person_dm", person["id"])
-            auth = await provider_auth(ctx, authority, runtime, auth_kind=auth)
-            if auth is None:
+            payer = await select_payer(ctx, route, authority)
+            if payer is None:
                 raise ValueError("The person has no usable ChatGPT grant. API fallback is off")
-            auth_kind = auth.kind
+            auth_kind = payer.kind
+            fallback = workspace.config.brain.chatgpt.fallback
             request = RunRequest(
                 run_id=0,
                 system_prompt="Call smoke_ping once. Then reply Ready.",
                 user_message="Check the function tool.",
                 mcp_url=config.public_url.rstrip("/") + "/brain/mcp",
                 mcp_token="smoke-no-mcp-access",
-                runtime=runtime,
-                model=config.brain_model or brain.model,
-                max_turns=2,
-                timeout_s=brain.timeout_s,
-                provider_auth=auth,
-                api_key_fallback=brain.api_key_fallback,
+                provider=payer.provider,
+                model=route.model,
+                effort=route.effort,
+                max_tool_calls=2,
+                timeout_s=route.timeout_s,
+                provider_auth=payer.auth,
+                fallback_provider=fallback if payer.kind == "chatgpt" and fallback != "none" else None,
                 smoke=True,
             )
             async with (
-                asyncio.timeout(brain.timeout_s),
+                asyncio.timeout(route.timeout_s),
                 aclosing(BrainClient(config.brain_url).run(request)) as stream,
             ):
                 async for item in stream:
                     if item.type == "error":
                         usage = item.usage
-                        if item.api_key_fallback_failed:
+                        if item.fallback_failed:
                             auth_kind = "api_key"
                         status = http_status(getattr(item, "http_status", None))
                         reason = item.failure_reason()
@@ -99,7 +98,6 @@ async def smoke(config, person_id, *, auth="chatgpt"):
             str(error)
             if str(error)
             in {
-                "The smoke check needs openai_responses",
                 "The person is missing, inactive, or ambiguous",
                 "The person has no usable ChatGPT grant. API fallback is off",
             }

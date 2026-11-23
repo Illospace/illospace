@@ -80,7 +80,7 @@ async def test_filtered_list_denial_and_audit(app, rpc):
             principal="team",
             person_id=None,
             profile="team_channel",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)
@@ -146,10 +146,23 @@ async def test_tool_failure_rolls_back_but_keeps_audit(app, rpc, rpc_token):
         ] == "deny"
 
 
-async def test_server_enforces_tool_call_limit(app, rpc, rpc_token):
+@pytest.mark.parametrize("deep", [False, True])
+async def test_server_enforces_tool_call_limit(app, rpc, rpc_token, deep):
+    """The run's stored limit decides. No workspace value can raise it."""
     run, token = rpc_token
-    app.state.ctx.workspace.config.brain.max_turns = 1
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE runs SET tool_limit=1,deep_kind=%s WHERE id=%s",
+                           ("request" if deep else None, run["id"]))
+    app.state.ctx.workspace.config.brain.routes["default"].max_tool_calls = 50
     assert not (await rpc(token, "tools/call", {"name": "people_list"})).json()["result"]["isError"]
+    result = (await rpc(token, "tools/call", {"name": "people_list"})).json()["result"]
+    assert result["isError"] and "turn limit" in result["structuredContent"]["reason"]
+
+
+async def test_a_run_with_no_tool_limit_gets_no_tool_call(app, rpc, rpc_token):
+    run, token = rpc_token
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE runs SET tool_limit=NULL WHERE id=%s", (run["id"],))
     result = (await rpc(token, "tools/call", {"name": "people_list"})).json()["result"]
     assert result["isError"] and "turn limit" in result["structuredContent"]["reason"]
 

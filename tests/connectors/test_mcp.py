@@ -99,7 +99,7 @@ async def test_write_without_person_and_write_after_personal_read_are_denied(mcp
             principal="team",
             person_id=None,
             profile="team_channel",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

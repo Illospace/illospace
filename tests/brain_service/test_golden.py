@@ -23,15 +23,17 @@ from brain.errors import failure_event
 from brain.loop import conversation
 from brain.models import RunRequest as ServiceRequest
 from brain.server import create_app as create_brain
-from brain.worker import RUNTIMES
+from brain.worker import RUNNERS
 from illo.brain.client import BrainClient
 from illo.connectors import chatgpt
 from illo.db import one
+from illo.workspace import RouteSettings
 from tests.chatgpt.conftest import FakeTokenEndpoint, save_grant
 
 FIXTURES = Path(__file__).parent / "golden"
 RECORD = os.getenv("ILLO_GOLDEN_RECORD") == "1"
-WIRES = {"responses": "openai_responses", "chat": "openai_compat"}
+# The provider of each wire. `local` is a custom Chat Completions provider.
+WIRES = {"responses": "openai", "chat": "local"}
 SYSTEM = "Use the Acme tools."
 IMAGE = base64.b64encode(b"\x89PNG\r\n\x1a\nAcme golden image").decode()
 TOOLS = [
@@ -76,7 +78,7 @@ CASES = {
         "results": [result("Lane: release"), result("Ask: review"), result("Owner: Ada")],
     },
     "limit_then_last_request": {
-        "max_turns": 2,
+        "max_tool_calls": 2,
         "turns": [
             calls(*[("lanes_search", json.dumps({"query": f"lane {i}"})) for i in range(3)]),
             answer("I checked two lanes. I did not check the third."),
@@ -289,7 +291,7 @@ class Session:
         return CallToolResult.model_validate(value)
 
 
-async def drive(request, session, transport):
+async def drive(request, provider, fallback, session, transport):
     """The one entry point of the brain loop that the golden cases use.
 
     It runs the loop with the worker's adapter for the wire, without the MCP connection.
@@ -297,27 +299,30 @@ async def drive(request, session, transport):
     async with httpx.AsyncClient(
         timeout=request.timeout_s, follow_redirects=False, transport=transport
     ) as http:
-        wire = RUNTIMES[request.runtime].args[0]
-        async for item in conversation(wire, request, session, TOOLS, http):
+        wire = RUNNERS[provider.wire].args[0]
+        async for item in conversation(wire, request, provider, session, TOOLS, http, fallback):
             yield item
 
 
 async def golden_run(app, replay, monkeypatch, wire, case):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-golden-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-golden-key")
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_API_KEY", "fake-golden-key")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_WIRE", "chat")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_BASE_URL", "https://provider.example/v1")
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "fake-golden-secret")
-    for name in ("ILLO_BRAIN_EFFORT", "ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT"):
-        monkeypatch.delenv(name, raising=False)
     ctx = app.state.ctx
     ctx.workspace = ctx.workspace.model_copy(deep=True)
     brain = ctx.workspace.config.brain
-    brain.runtime = WIRES[wire]
-    brain.model = "golden-model"
-    brain.max_turns = case.get("max_turns", 4)
-    brain.api_key_fallback = case.get("fallback", False)
+    # The chat provider takes no effort. The Responses runs keep the effort of a DM.
+    default = RouteSettings(provider=WIRES[wire], model="golden-model",
+                            effort="medium" if wire == "responses" else None,
+                            max_tool_calls=case.get("max_tool_calls", 4), timeout_s=120)
+    brain.routes = {"default": default}
+    brain.chatgpt.fallback = "openai" if case.get("fallback") else "none"
     backend = FakeTokenEndpoint()
     if case.get("auth") == "chatgpt" and wire == "responses":
-        brain.auth = "chatgpt"
+        default.provider = "chatgpt"
         ctx.config.vault_key = SecretStr(Fernet.generate_key().decode())
         ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(backend.respond))
         await save_grant(ctx, access=case.get("access", "fake-access"))
@@ -325,14 +330,15 @@ async def golden_run(app, replay, monkeypatch, wire, case):
     session = Session(case.get("results", []))
     brain_runs = []
 
-    async def runner(body):
+    async def runner(body, selected, fallback):
         request = ServiceRequest.model_validate(
             {**body.wire(), "system_prompt": SYSTEM, **case.get("brain", {})}
         )
         events = []
         brain_runs.append(events)
         try:
-            async for item in drive(request, session, httpx.MockTransport(provider.respond)):
+            async for item in drive(request, selected, fallback, session,
+                                    httpx.MockTransport(provider.respond)):
                 events.append(dict(item))
                 yield item
         except Exception as error:
@@ -344,6 +350,7 @@ async def golden_run(app, replay, monkeypatch, wire, case):
     client = BrainClient(
         "http://brain", "fake-golden-secret", transport=httpx.ASGITransport(app=service)
     )
+    ctx.providers = await client.providers()
     delivered = []
 
     class Recorder:

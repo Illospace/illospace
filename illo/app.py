@@ -9,11 +9,13 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
 from illo.brain.client import BrainClient
+from illo.brain.routes import check_routes
 from illo.brain.server import endpoint
 from illo.config import Config
 from illo.db import create_pool, migrate, one
@@ -24,6 +26,7 @@ from illo.tools.registry import Registry
 from illo.workspace import Workspace, fingerprint, load_workspace
 
 log = logging.getLogger(__name__)
+BRAIN_RETRY_S = 2
 SETUP_MODULES = (
     "illo.channels.slack",
     "illo.channels.email",
@@ -65,6 +68,8 @@ class AppContext:
     registry: Registry
     brain_client: Any
     app: FastAPI
+    # The brain's description of its providers, read at start and at each reload.
+    providers: dict[str, dict] = field(default_factory=dict)
     slack_client: Any = None
     github_client: Any = None
     sandbox: Any = None
@@ -91,11 +96,33 @@ class AppContext:
     async def reload(self) -> None:
         """Validate first. Keep the old workspace if validation or sync fails."""
         async with self.reload_lock:
-            workspace = load_workspace(self.config.workspace_dir)
-            workspace.config.brain.check_runtime(self.config.brain_runtime)
+            try:
+                workspace = load_workspace(self.config.workspace_dir)
+                providers = await brain_providers(self.brain_client, wait=False)
+                check_routes(workspace, providers)
+            except ValueError as error:
+                log.error("The workspace reload failed. Illo keeps the last valid workspace: %s",
+                          error)
+                raise
             async with self.pool.connection() as conn:
                 await workspace.sync_people(conn)
-            self.workspace = workspace
+            self.workspace, self.providers = workspace, providers
+
+
+async def brain_providers(brain, *, wait: bool) -> dict[str, dict]:
+    """Read the providers. At start, wait while the brain is not reachable."""
+    while True:
+        try:
+            return await brain.providers()
+        except httpx.TransportError:
+            if not wait:
+                raise ValueError("The brain service is not reachable") from None
+            log.warning("The brain service is not reachable. Illo tries again in %s seconds.",
+                        BRAIN_RETRY_S)
+            await asyncio.sleep(BRAIN_RETRY_S)
+        except httpx.HTTPStatusError as error:
+            raise ValueError("The brain service refused GET /providers: HTTP "
+                             f"{error.response.status_code}") from None
 
 
 def create_app(config: Config | None = None, *, brain_client=None, pool=None) -> FastAPI:
@@ -111,23 +138,19 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
         if owned_pool:
             await db_pool.open(wait=True)
         ctx = None
+        brain = brain_client or BrainClient(config.brain_url)
         try:
             async with db_pool.connection() as conn:
                 if config.migrate_on_start:
                     await migrate(conn)
-                workspace = load_workspace(config.workspace_dir)
-                workspace.config.brain.check_runtime(config.brain_runtime)
+            workspace = load_workspace(config.workspace_dir)
+            providers = await brain_providers(brain, wait=True)
+            check_routes(workspace, providers)
+            async with db_pool.connection() as conn:
                 await workspace.sync_people(conn)
             registry = Registry()
             registry.discover()
-            ctx = AppContext(
-                config,
-                db_pool,
-                workspace,
-                registry,
-                brain_client or BrainClient(config.brain_url),
-                app,
-            )
+            ctx = AppContext(config, db_pool, workspace, registry, brain, app, providers)
             app.state.ctx = ctx
             for name in SETUP_MODULES:
                 await importlib.import_module(name).setup(ctx)

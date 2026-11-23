@@ -274,7 +274,7 @@ async def test_personal_status_uses_only_the_readers_grant(server):
                 principal="person:" + key,
                 person_id=reader["id"],
                 profile="person_dm",
-                runtime="fake",
+                provider="fake", tool_limit=12,
                 model="fake",
             )
             result = await status(ToolContext(conn, run, ctx), {})

@@ -6,7 +6,7 @@ the payer: the ChatGPT grant of one person, the API key, no payer, or a temporar
 
 import pytest
 
-from illo.brain.run_manager import provider_auth
+from illo.brain.routes import resolve_route, select_payer
 from illo.connectors.chatgpt import TemporaryRefresh
 from illo.db import one
 from illo.gateway.principal import Authority
@@ -26,24 +26,26 @@ def ben(_):
 def policy(ctx, *, chatgpt=True, fallback=False, **settings):
     """The call site of the policy. `chatgpt=False` is a route on an API-key provider."""
     brain = ctx.workspace.config.brain
-    brain.runtime = "openai_responses"
-    brain.auth = "chatgpt" if chatgpt else "api_key"
-    brain.api_key_fallback = fallback
+    brain.routes["default"].provider = "chatgpt" if chatgpt else "openai"
+    brain.chatgpt.fallback = "openai" if fallback else "none"
     for key, value in settings.items():
-        setattr(brain, key, value)
+        setattr(brain.chatgpt, key, value)
 
 
 async def payer(ctx, authority):
     """The call site of payer selection. Give (kind, person key), None, or "temporary"."""
     try:
-        auth = await provider_auth(ctx, authority, "openai_responses")
+        selected = await select_payer(ctx, resolve_route(ctx.workspace, "person_dm"), authority)
     except TemporaryRefresh:
         return "temporary"
-    if auth is None:
+    if selected is None:
         return None
-    if auth.kind == "api_key":
+    if selected.kind == "api_key":
+        assert selected.provider == "openai" and selected.person_id is None
         return API_KEY
-    return ("chatgpt", auth.access_token.get_secret_value().removesuffix("-token"))
+    key = selected.auth.access_token.get_secret_value().removesuffix("-token")
+    assert selected.person_key == key and selected.provider == "chatgpt"
+    return ("chatgpt", key)
 
 
 def people(ids):
@@ -155,3 +157,19 @@ async def test_payer(chatgpt_app, settings, grants, who, expected, notice):
         for key in ("team", "tainted"):
             sensor = await one(conn, "SELECT 1 FROM sensors WHERE key=%s", ("chatgpt:" + key,))
             assert bool(sensor) == (notice == key), key
+
+
+@pytest.mark.parametrize("route", ["chatgpt", "openai"])
+async def test_each_new_run_row_has_its_route_provider_payer_and_limit(chatgpt_app, replay, route):
+    ctx = chatgpt_app[0].state.ctx
+    policy(ctx, chatgpt=route == "chatgpt", team_credential="ben")
+    ctx.workspace.config.brain.routes["default"].max_tool_calls = 7
+    ada = await save_grant(ctx, "ada", access="ada-token")
+    await replay()
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM runs ORDER BY id DESC LIMIT 1")
+    assert (row["route"], row["provider"], row["model"], row["tool_limit"]) == (
+        "person_dm", route, "fake", 7)
+    assert (row["payer"], row["payer_person_id"]) == (
+        ("chatgpt", ada["id"]) if route == "chatgpt" else ("api_key", None))
+    assert row["runtime"] is None

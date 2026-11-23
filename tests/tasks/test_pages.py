@@ -113,7 +113,7 @@ async def test_disabled_routes_tools_and_links(ctx, browser, app, http):
     await build.call('task_page', {'task': row['id'], 'blocks': TEXT}, error=True)
     async with ctx.pool.connection() as conn:
         person = await people.get(conn, 'ada')
-        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', runtime='fake', model='fake')
+        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', provider="fake", tool_limit=12, model='fake')
         tc = ToolContext(conn, run, ctx)
         assert not {'page_read', 'page_write'} & {t['name'] for t in await ctx.registry.list_tools_for(tc)}
         assert (await ctx.registry.call(tc, 'page_write', {'task': row['id'], 'blocks': TEXT}))['decision'] == 'deny'
@@ -327,7 +327,7 @@ async def test_replace_and_tool_profiles(ctx, app, http):
     for profile, writes, reads in [('person_dm', True, True), ('routine', True, True), ('team_channel', False, True), ('tainted', False, False), ('outsider', False, False)]:
         async with ctx.pool.connection() as conn:
             person = await people.get(conn, 'ada')
-            run = await runs.create(conn, principal='outsider' if profile == 'outsider' else 'person:ada', person_id=person['id'] if profile != 'outsider' else None, profile='person_dm' if profile == 'outsider' else profile, runtime='fake', model='fake')
+            run = await runs.create(conn, principal='outsider' if profile == 'outsider' else 'person:ada', person_id=person['id'] if profile != 'outsider' else None, profile='person_dm' if profile == 'outsider' else profile, provider="fake", tool_limit=12, model='fake')
             tc = ToolContext(conn, run, ctx)
             names = {t['name'] for t in await ctx.registry.list_tools_for(tc)}
             assert ('page_write' in names) is writes
@@ -593,7 +593,7 @@ async def test_page_read_keeps_the_whole_block_list(ctx):
     await write(ctx, row, blocks)
     async with ctx.pool.connection() as conn:
         person = await people.get(conn, 'ada')
-        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', runtime='fake', model='fake')
+        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', provider="fake", tool_limit=12, model='fake')
         result = await ctx.registry.call(ToolContext(conn, run, ctx), 'page_read', {'task': row['id']})
         assert result['decision'] == 'allow' and len(result['result']['blocks']) == 12
         assert result['result']['blocks'][-1]['text'] == 'x' * 6000
@@ -1014,7 +1014,7 @@ async def test_schema_refusal_names_the_fields_and_no_values(ctx):
               {'kind': 'checks', 'items': [{'claim': 'c', 'state': secret}]}]
     async with ctx.pool.connection() as conn:
         person = await people.get(conn, 'ada')
-        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', runtime='fake', model='fake')
+        run = await runs.create(conn, principal='person:ada', person_id=person['id'], profile='person_dm', provider="fake", tool_limit=12, model='fake')
         result = await ctx.registry.call(ToolContext(conn, run, ctx), 'page_write', {'task': row['id'], 'blocks': blocks})
         stored = await one(conn, "SELECT reason FROM audit WHERE run_id=%s AND tool='page_write'", (run['id'],))
     reason = result['reason']

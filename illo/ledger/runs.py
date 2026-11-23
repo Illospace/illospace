@@ -14,19 +14,28 @@ async def create(
     principal: str,
     person_id: int | None,
     profile: str,
-    runtime: str,
+    provider: str,
     model: str,
+    route: str | None = None,
+    payer: str | None = None,
+    payer_person_id: int | None = None,
+    tool_limit: int | None = None,
     event_id: int | None = None,
     tainted: bool = False,
 ) -> dict:
-    """The gateway sets the principal once, before the brain starts."""
+    """The gateway sets the principal once, before the brain starts.
+
+    A brain run has a route, a payer, and a tool limit. A direct run has none of them.
+    """
     return await one(
         conn,
         """
-        INSERT INTO runs (principal,person_id,profile,runtime,model,event_id,tainted)
-        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *
+        INSERT INTO runs (principal,person_id,profile,provider,model,route,payer,payer_person_id,
+                          tool_limit,event_id,tainted)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
     """,
-        (principal, person_id, profile, runtime, model, event_id, tainted),
+        (principal, person_id, profile, provider, model, route, payer, payer_person_id,
+         tool_limit, event_id, tainted),
     )
 
 

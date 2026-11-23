@@ -176,7 +176,7 @@ async def test_timeout_finishes_and_revokes_token(app, replay, channel):
 
     brain = SlowBrain()
     app.state.ctx.brain_client = brain
-    app.state.ctx.workspace.config.brain.timeout_s = 0.01
+    app.state.ctx.workspace.config.brain.routes["default"].timeout_s = 0.01
     result = await replay()
     assert result.get("error") and channel.errors
     async with app.state.ctx.pool.connection() as conn:
@@ -206,7 +206,7 @@ async def test_turn_limit_finishes_run(app, replay):
             yield BrainEvent(type="final", text="This must not be sent")
 
     app.state.ctx.brain_client = ManyTurns()
-    app.state.ctx.workspace.config.brain.max_turns = 1
+    app.state.ctx.workspace.config.brain.routes["default"].max_tool_calls = 1
     assert (await replay()).get("error")
 
 
@@ -286,7 +286,7 @@ async def test_g1_limited_answer_keeps_token_until_the_final_request(app, replay
             yield BrainEvent(type="final", text="I checked one source.", usage={"limited": True})
 
     ctx.brain_client = LimitedBrain()
-    ctx.workspace.config.brain.max_turns = 1
+    ctx.workspace.config.brain.routes["default"].max_tool_calls = 1
     changes = ({"kind": "channel", "payload": {"channel_id": "C_ACME_ALERTS", "bot": True}}
                if tainted else {})
     result = await replay(**changes)

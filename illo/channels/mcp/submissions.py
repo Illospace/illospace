@@ -170,7 +170,7 @@ async def get_result(ctx, args: dict) -> dict:
     failure = result.get("failure")
     if status == "failed" and not failure:
         category = (run.get("usage") or {}).get("failure_category") if run else None
-        if category not in {"limit", "timeout", "provider", "internal"}:
+        if category not in {"limit", "timeout", "provider", "config", "internal"}:
             category = "timeout" if run_status == "timeout" else "internal"
         failure = {"category": category, "message": error_text(category)}
     return {

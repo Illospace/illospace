@@ -66,7 +66,7 @@ async def test_rule_02_private_thread_refuses_team_run(app, rpc, slack_client):
     slack_client.conversations_info = private_info
     async with app.state.ctx.pool.connection() as conn:
         run = await runs.create(conn, principal="team", person_id=None, profile="team_channel",
-                                runtime="fake", model="fake")
+                                provider="fake", tool_limit=12, model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     response = await rpc(token, "tools/call", {"name": "slack_read_thread", "arguments": {
         "channel": "C_ACME_TEAM", "thread_ts": "100.1",

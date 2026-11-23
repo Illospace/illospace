@@ -35,7 +35,7 @@ TEMPORARY = "I could not reach the model sign-in service. Try again in a minute.
 def team_person(workspace):
     return next(
         person for person in workspace.people
-        if person.key == workspace.config.brain.team_credential and person.active
+        if person.key == workspace.config.brain.chatgpt.team_credential and person.active
     )
 
 
@@ -303,11 +303,11 @@ async def notify_broken(ctx, person):
 async def notify_team_missing(ctx, *, tainted=False):
     key = "chatgpt:tainted" if tainted else "chatgpt:team"
     message = (
-        'I skip model runs for messages from outside the team. Set brain.tainted_credential to team or api_key to allow them.'
+        'I skip model runs for messages from outside the team. Set brain.chatgpt.tainted_credential to team or api_key to allow them.'
         if tainted
-        else 'I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key.'
+        else 'I have no model sign-in for team runs. Set brain.chatgpt.team_credential in illo.yaml, or set brain.chatgpt.fallback.'
     )
-    if not tainted and ctx.workspace.config.brain.person_credential == "team":
+    if not tainted and ctx.workspace.config.brain.chatgpt.person_credential == "team":
         message = team_missing(ctx.workspace)
     async with ctx.pool.connection() as conn:
         await sensors.error(conn, key, message)

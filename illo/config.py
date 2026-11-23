@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
@@ -18,8 +17,6 @@ class Config(BaseModel):
     sandbox_url: str | None = None
     repos_dir: Path | None = None
     brain_url: str = "http://127.0.0.1:8001"
-    brain_runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] | None = None
-    brain_model: str | None = None
     slack_bot_token: SecretStr | None = None
     slack_app_token: SecretStr | None = None
     github_token: SecretStr | None = None

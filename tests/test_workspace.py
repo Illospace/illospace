@@ -132,18 +132,20 @@ async def test_oversized_workspace_reload_keeps_active_workspace(app, example):
     assert ctx.workspace is previous
 
 
-@pytest.mark.parametrize("brain,error", [
-    ({"auth": "api_key", "team_credential": "ada"}, "brain.person_credential"),
-    ({"auth": "chatgpt"}, "brain.team_credential"),
-    ({"auth": "chatgpt", "team_credential": "missing"}, "brain.team_credential"),
-    ({"auth": "chatgpt", "team_credential": "ben"}, "brain.team_credential"),
+@pytest.mark.parametrize("provider,policy,error", [
+    ("openai", {"team_credential": "ada"}, "brain.chatgpt: no route uses the chatgpt provider"),
+    ("chatgpt", {}, "brain.chatgpt.team_credential"),
+    ("chatgpt", {"team_credential": "missing"}, "brain.chatgpt.team_credential"),
+    ("chatgpt", {"team_credential": "ben"}, "brain.chatgpt.team_credential"),
 ])
-async def test_team_person_credential_rejects_bad_config_and_reload(app, example, brain, error):
+async def test_team_person_credential_rejects_bad_config_and_reload(app, example, provider,
+                                                                     policy, error):
     path = example / "illo.yaml"
     data = yaml.safe_load(path.read_text())
-    data["brain"].update(runtime="openai_responses", person_credential="team", **brain)
+    data["brain"]["routes"]["default"]["provider"] = provider
+    data["brain"]["chatgpt"] = {"person_credential": "team", **policy}
     path.write_text(yaml.safe_dump(data))
-    if brain.get("team_credential") == "ben":
+    if policy.get("team_credential") == "ben":
         path = example / "people.yaml"
         data = yaml.safe_load(path.read_text())
         next(person for person in data["people"] if person["key"] == "ben")["active"] = False
@@ -159,14 +161,56 @@ async def test_team_person_credential_rejects_bad_config_and_reload(app, example
 
 
 def test_person_credential_defaults_to_own_and_accepts_explicit_team(example):
-    assert load_workspace(example).config.brain.person_credential == "own"
+    assert load_workspace(example).config.brain.chatgpt.person_credential == "own"
     path = example / "illo.yaml"
     data = yaml.safe_load(path.read_text())
-    data["brain"].update(
-        auth="chatgpt", runtime="openai_responses", person_credential="team", team_credential="ada",
-    )
+    data["brain"]["chatgpt"] = {"person_credential": "team", "team_credential": "ada"}
     path.write_text(yaml.safe_dump(data))
-    assert load_workspace(example).config.brain.person_credential == "team"
+    assert load_workspace(example).config.brain.chatgpt.person_credential == "team"
+
+
+@pytest.mark.parametrize("key,new", [
+    ("runtime", "brain.routes.default.provider"),
+    ("model", "brain.routes.default.model"),
+    ("max_turns", "brain.routes.default.max_tool_calls"),
+    ("timeout_s", "brain.routes.default.timeout_s"),
+    ("effort", "brain.routes.<run kind>.effort"),
+    ("deep", "brain.routes.deep"),
+    ("auth", "brain.routes.<run kind>.provider"),
+    ("team_credential", "brain.chatgpt.team_credential"),
+    ("person_credential", "brain.chatgpt.person_credential"),
+    ("tainted_credential", "brain.chatgpt.tainted_credential"),
+    ("chatgpt_allowed_accounts", "brain.chatgpt.allowed_accounts"),
+    ("api_key_fallback", "brain.chatgpt.fallback"),
+])
+def test_an_old_brain_key_stops_the_load_and_names_the_new_key(example, key, new):
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["brain"][key] = "old value"
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(WorkspaceError) as error:
+        load_workspace(example)
+    assert f"brain.{key} was removed. Use {new}" in str(error.value)
+
+
+@pytest.mark.parametrize("brain,error", [
+    ({"routes": {"default": {"provider": "openai"}}}, "needs a provider and a model"),
+    ({"routes": {"default": {"provider": "openai", "model": "m"}, "dm": {}}}, "routes.dm"),
+    ({"routes": {"default": {"provider": "openai", "model": "m", "max_tool_calls": 0}}},
+     "max_tool_calls"),
+    ({"routes": {"default": {"provider": "openai", "model": "m", "timeout_s": "slow"}}},
+     "timeout_s"),
+    ({"routes": {"default": {"provider": "openai", "model": "m", "temperature": 1}}},
+     "temperature"),
+    ({"routes": {"default": {"provider": "Open AI", "model": "m"}}}, "provider"),
+])
+def test_route_shape_is_checked_at_load(example, brain, error):
+    path = example / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    data["brain"] = brain
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(WorkspaceError, match=error):
+        load_workspace(example)
 
 
 def test_fixed_prompt_size_names_config_file(example):

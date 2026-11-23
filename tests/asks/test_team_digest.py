@@ -12,7 +12,7 @@ from illo.ledger.digest_snapshot import TEAM_STATE_KEY
 from illo.routines.scheduler import tick_routines
 from illo.routines.team_digest import DEFAULT_INSTRUCTIONS, send_team_due
 from illo.tools.checks import in_grant
-from illo.workspace import Routine, TeamDigestConfig
+from illo.workspace import RouteSettings, Routine, TeamDigestConfig
 from tests.asks.test_digest import NOW, posts
 from tests.tool_results import read_result, snapshot_data
 
@@ -47,9 +47,8 @@ async def test_team_model_principal_credential_single_tool_and_once_per_local_da
 
     ctx = app.state.ctx
     config = configure(ctx)
-    config.brain.auth = "chatgpt"
-    config.brain.runtime = "openai_responses"
-    config.brain.team_credential = "ben"
+    config.brain.routes["default"].provider = "chatgpt"
+    config.brain.chatgpt.team_credential = "ben"
     payers = []
 
     async def access(ctx, person, **kwargs):
@@ -85,7 +84,7 @@ async def test_team_model_principal_credential_single_tool_and_once_per_local_da
     }
     assert {"team_snapshot", "task_list", "task_get", "lists", "shell", "github_get_issue", "search_all"} <= granted
     assert not {"web_fetch", "task_create", "deep_start", "slack_send_dm"} & granted
-    assert request.deep and not request.web_search
+    assert run["route"] == "deep" and run["tool_limit"] == 80 and not request.web_search
     assert (
         posts(slack_client)[0]["text"]
         == "Morning, team. <https://example.com/plan|Check the plan>."
@@ -113,9 +112,9 @@ async def test_team_fallback_on_failure_and_timeout(
                 raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
             return None
 
-        monkeypatch.setattr(run_manager, "provider_auth", auth)
+        monkeypatch.setattr(run_manager, "select_payer", auth)
     elif failure == "queue":
-        ctx.workspace.config.brain.deep.timeout_s = 0.01
+        ctx.workspace.config.brain.routes["deep"] = RouteSettings(timeout_s=0.01)
 
         async def wait(*args, **kwargs):
             await asyncio.Event().wait()
@@ -172,7 +171,7 @@ async def test_team_retry_uses_frozen_snapshot_text_and_delivery_key(
         async def no_auth(*args, **kwargs):
             return None
 
-        monkeypatch.setattr(run_manager, "provider_auth", no_auth)
+        monkeypatch.setattr(run_manager, "select_payer", no_auth)
     else:
         fake_brain.script = [{"name": "team_snapshot", "arguments": {}}]
         original = fake_brain.run

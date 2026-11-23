@@ -17,7 +17,7 @@ from illo.channels.slack.blocks import message_text
 from illo.channels.slack.channels import member_channels
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.threads import read_context, read_dm_history
-from illo.channels.slack.voice import OpenAITranscriber
+from illo.channels.slack.voice import Transcriber
 from illo.db import one
 from illo.gateway import InboundEvent
 from illo.ledger import items, kv, people, sensors
@@ -258,8 +258,8 @@ class SlackIntake:
         await self.adapter.show_working(event, prepare=False)
         voice = ctx.workspace.config.voice
         fallback = None
-        if voice.transcription == "openai":
-            fallback = OpenAITranscriber(
+        if voice.transcription == "brain":
+            fallback = Transcriber(
                 ctx, event, authority, self.bot_id,
                 self.adapter.working.get(event.external_id), transport=self.voice_transport,
                 slack_timeout=self.clip_timeout, slack_poll=self.clip_poll,

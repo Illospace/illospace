@@ -380,7 +380,7 @@
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
-    "api_key_fallback_failed": false,
+    "fallback_failed": false,
     "run_id": 1
    },
    {
@@ -390,7 +390,7 @@
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
-    "api_key_fallback_failed": false,
+    "fallback_failed": false,
     "catalog": [
      "asks_list",
      "lanes_search"
@@ -404,7 +404,7 @@
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
-    "api_key_fallback_failed": false,
+    "fallback_failed": false,
     "message": "The provider returned a credential",
     "run_id": 1
    }

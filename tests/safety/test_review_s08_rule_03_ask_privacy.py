@@ -47,7 +47,7 @@ async def test_rule_03_laneless_ask_is_invisible_to_tainted_run(app, rpc):
             person_id=ada["id"],
             profile="person_dm",
             tainted=True,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

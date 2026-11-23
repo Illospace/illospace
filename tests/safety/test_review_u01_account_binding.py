@@ -28,7 +28,7 @@ async def test_account_binding(
     backend.device = device
     backend.pending = False
     if shared:
-        ctx.workspace.config.brain.chatgpt_allowed_accounts = [email]
+        ctx.workspace.config.brain.chatgpt.allowed_accounts = [email]
     state, person, _, _ = await issue_start(ctx, paste=not device)
 
     async def exchange(*args):

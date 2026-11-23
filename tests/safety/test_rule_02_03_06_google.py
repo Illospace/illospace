@@ -50,7 +50,7 @@ async def test_rule_02_06_never_borrows_another_grant(app, rpc, principal, profi
             person_id=person["id"] if person else None,
             profile=profile,
             tainted=tainted,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, row["id"], 60)

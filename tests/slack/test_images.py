@@ -35,7 +35,6 @@ def image(file_id="F_ACME_IMAGE", **changes):
 @pytest.fixture
 def image_io(app, slack_client):
     ctx = app.state.ctx
-    ctx.config.brain_runtime = "openai_responses"
     ctx.config.slack_bot_token = SecretStr("test-bot-token")
     state = {"files": {}, "downloads": [], "body": PNG, "status": 200, "delay": 0}
 
@@ -256,7 +255,7 @@ async def test_disabled_tainted_and_text_runtime_download_nothing(
     elif mode == "tainted":
         changes = {"bot_id": "B_BOT", "subtype": "bot_message"}
     else:
-        app.state.ctx.config.brain_runtime = "claude"
+        app.state.ctx.workspace.config.brain.routes["default"].provider = "anthropic"
     result = await intake.receive(mention(message, files=[image()], **changes))
     assert "error" not in result
     assert not image_io["downloads"]

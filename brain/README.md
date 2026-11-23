@@ -5,12 +5,26 @@ It has no dependency on the `illo` package or the ledger.
 The gateway owns the run, the principal, the grant, and the final destination.
 The Illo MCP server checks each tool call with the run token.
 
-## Runtimes
+## Providers
 
-- `claude` is the default. It uses `claude-agent-sdk==0.2.180` and its bundled Claude CLI.
-- `openai_responses` uses the OpenAI Responses API. It offers only the Illo MCP functions.
-- `openai_compat` is experimental. It uses a small streaming Chat Completions loop over HTTP. Its tests use a fake model server only.
-- `echo` calls MCP `tools/list` and returns the tool names. It makes no model request.
+The service builds its provider table once at start (`providers.py`). Only that module reads provider keys.
+`GET /providers` describes each provider: its name, its wire, and its capabilities (`images`, `web_search`, `efforts`).
+It never gives a key or an address.
+
+| Provider | Wire | Key variable |
+| --- | --- | --- |
+| `chatgpt` | Responses, at the ChatGPT backend | None. The app sends the person's tokens with each run. |
+| `openai` | Responses, default `https://api.openai.com/v1` | `ILLO_PROVIDER_OPENAI_API_KEY` |
+| `anthropic` | The Claude Agent SDK (`claude-agent-sdk==0.2.180` and its bundled Claude CLI) | `ILLO_PROVIDER_ANTHROPIC_API_KEY` |
+| `fake` | Calls MCP `tools/list` and returns the tool names. No model request. | `ILLO_PROVIDER_FAKE=1` (tests and the deploy smoke) |
+
+`ILLO_PROVIDER_<NAME>_BASE_URL` changes the address of a provider.
+A custom provider also sets `ILLO_PROVIDER_<NAME>_WIRE` (`responses` or `chat`) and
+`ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,effort:low,effort:high`.
+A provider with no key is not in the table, except `chatgpt`.
+A wrong `ILLO_PROVIDER_` variable stops the service at start. The error names the variable, never its value.
+The worker of a run gets only the provider of that run, on its standard input. Its environment has no provider key.
+A key change needs a new brain container. Then check `GET /providers`.
 
 Claude uses `tools=[]` to remove built-in tools.
 It accepts only the explicit MCP server named `illo`.
@@ -25,7 +39,7 @@ The loop (`loop.py`) serves both OpenAI wire formats. Each format has an adapter
 The loop offers only the tools from the authenticated MCP `tools/list` response.
 It sends tool results back through the wire format and streams the answer.
 It refuses a tool name outside that run's catalog.
-The limit `max_turns` counts tool calls, not model requests. Each call of a batch counts.
+The limit `max_tool_calls` counts tool calls, not model requests. Each call of a batch counts.
 After a call over the limit, one last request has no tools and asks for the answer.
 MCP tool errors remain tool results, so the model can explain them.
 Provider errors end the run. The service does not retry an MCP write.
@@ -34,12 +48,10 @@ The wire format follows the [OpenAI function calling guide](https://developers.o
 
 ### OpenAI Responses API
 
-Use `openai_responses` for current OpenAI models that require Responses for function tools.
-Set `OPENAI_API_KEY` and select the model in the request or `ILLO_BRAIN_MODEL`.
-`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
-The request gives the reasoning effort for each run. The workspace sets it in `brain.effort`.
-`ILLO_BRAIN_EFFORT` is the default for a request that names no effort.
-The request sends this value as `reasoning.effort`.
+Use the `openai` provider for current OpenAI models that require Responses for function tools.
+Set `ILLO_PROVIDER_OPENAI_API_KEY`. The request names the model.
+The request gives the reasoning effort for each run. The workspace sets it in the route.
+The request sends this value as `reasoning.effort`. A request with no effort sends none.
 If the provider rejects that parameter, the loop retries once without it.
 The worker remembers that choice for its process lifetime. A new worker starts a new cache.
 Other HTTP failures do not trigger a retry.
@@ -80,24 +92,24 @@ The subscription endpoint can still reject this tool. The retry applies there to
 
 ### ChatGPT subscriptions
 
-The same `openai_responses` loop also supports `provider_auth.kind: chatgpt`.
+The `chatgpt` provider uses the same Responses loop with `provider_auth.kind: chatgpt`.
 The main app owns sign-in, the encrypted grant, refresh, and credential selection.
 The brain receives this object over the private app-to-brain connection for one run:
 
 ```json
-{"provider_auth":{"kind":"chatgpt","access_token":"<secret>","account_id":"<account>"},"api_key_fallback":false}
+{"provider":"chatgpt","provider_auth":{"kind":"chatgpt","access_token":"<secret>","account_id":"<account>"},"fallback_provider":null}
 ```
 
 The token fields use secret types. Normal model dumps and representations hide them.
 The explicit wire serializer sends them through the HTTP request and the worker's standard input.
 No token enters a file, process argument, prompt, tool result, log, or exception message.
 The service removes credential echoes. The runtime refuses an echo before it can enter a tool call.
-`{"provider_auth":{"kind":"api_key"}}` uses the brain's `OPENAI_API_KEY` as before.
+Every other provider uses `{"provider_auth":{"kind":"api_key"}}`: the key of that provider in the brain.
 Requests that omit `provider_auth` keep this API-key behavior.
 
 ChatGPT uses `https://chatgpt.com/backend-api/codex/responses`.
 Headers include `Authorization: Bearer <access_token>`, `chatgpt-account-id`, and `originator: illo-brain`.
-`OPENAI_BASE_URL` does not change the ChatGPT address. It applies only to API-key requests.
+`ILLO_PROVIDER_OPENAI_BASE_URL` does not change the ChatGPT address. Each provider has its own address.
 The request includes `instructions`, `store: false`, `stream: true`, and `tool_choice: auto`.
 It omits the API-only `max_output_tokens` field.
 Reasoning options, function tools, encrypted reasoning, and function outputs use the same loop as the API-key path.
@@ -107,7 +119,7 @@ The backend reports subscription exhaustion as HTTP 429 with `error.type: usage_
 Illo also accepts that identifier in `error.code`, and in streamed errors.
 An integer `resets_at` gives the reset time as Unix seconds. Illo displays it in UTC.
 The run replies `Your ChatGPT limit is reached.` and adds that time when available.
-With `api_key_fallback: true`, the loop switches once to an explicit API-key request.
+With a `fallback_provider` (an API-key provider on the Responses wire), the loop switches once to that provider.
 It resumes the current turn with its existing tool outputs. It does not repeat completed MCP calls.
 The final answer reports the switch. A second provider failure ends the run.
 The switch drops subscription reasoning items. Messages and completed tool results stay.
@@ -229,29 +241,28 @@ python3 -m venv .venv
 ```
 
 Create an Anthropic API key with billing in your own Anthropic Console account.
-Supply `ANTHROPIC_API_KEY` through the deployment secret manager or enter it without terminal echo:
+Supply `ILLO_PROVIDER_ANTHROPIC_API_KEY` through the deployment secret manager or enter it without terminal echo:
 
 ```bash
-read -rsp 'Anthropic API key: ' ANTHROPIC_API_KEY
-export ANTHROPIC_API_KEY
+read -rsp 'Anthropic API key: ' ILLO_PROVIDER_ANTHROPIC_API_KEY
+export ILLO_PROVIDER_ANTHROPIC_API_KEY
 ```
 
 The product uses an Anthropic API key; it does not offer a Claude subscription login flow.
 The Claude Agent SDK terms restrict subscription login for third-party products.
 
-`ANTHROPIC_BASE_URL` can point Claude at an operator's API gateway.
+`ILLO_PROVIDER_ANTHROPIC_BASE_URL` can point Claude at an operator's API gateway.
 No credential file or sign-in cache needs a host mount.
 Never copy a personal credential file into this image.
 
-For `openai_compat`, create an API key in your own provider account and set `OPENAI_API_KEY`.
-Set `OPENAI_BASE_URL` to the API base, including `/v1` when the provider needs it.
-The default base is `https://api.openai.com/v1`.
-Supply the provider's model name in the run request.
+For a Chat Completions provider, add a custom provider with `ILLO_PROVIDER_<NAME>_WIRE=chat`.
+Set `ILLO_PROVIDER_<NAME>_BASE_URL` to the API base, including `/v1` when the provider needs it.
+Set `ILLO_PROVIDER_<NAME>_API_KEY`. A local server with no key still needs a placeholder value.
+The route gives the provider's model name.
 Ollama (`http://ollama:11434/v1`) and vLLM (`http://vllm:8000/v1`) are untested examples.
-An explicit base URL allows a local server with no API key.
-Set `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` only when the provider needs `reasoning_effort`.
-For example, some models need `none` to accept tools through Chat Completions.
-The loop omits that parameter when the setting is blank.
+List an effort in `_CAPABILITIES` (for example `effort:none`) only when the provider needs `reasoning_effort`.
+Some models need `none` to accept tools through Chat Completions.
+The loop omits that parameter when the route has no effort.
 A compatible provider must accept `stream_options.include_usage`.
 
 Set the same `ILLO_BRAIN_SECRET` on the gateway and the brain service.
@@ -260,9 +271,12 @@ The service refuses all runs when that secret is absent.
 
 ## HTTP contract
 
-`GET /healthz` returns `status: ok` and each runtime's `usable` value.
-This checks the presence of environment authentication. It does not test a key with the provider.
-`echo` is always usable. The reply contains no credential or provider address.
+`GET /healthz` returns `status: ok`.
+`GET /providers` requires the `X-Illo-Brain-Secret` header. It lists the providers of the table.
+It does not test a key with the provider. The reply contains no credential or provider address.
+`POST /transcribe?provider=&model=&extension=` requires the same header. The body is the audio.
+It sends the audio to `<base URL>/audio/transcriptions` of that provider and returns `{"text": ...}`.
+An unknown provider, or one with no key, gives HTTP 422 with `category: config`.
 
 `POST /run` requires the `X-Illo-Brain-Secret` header.
 Its JSON body has these fields:
@@ -272,17 +286,17 @@ Its JSON body has these fields:
 | `run_id` | The gateway run ID, as an integer or string. |
 | `system_prompt` | The system prompt. |
 | `user_message` | The event text. |
-| `images` | Optional list of `mime` and base64 `data` fields. Only `openai_responses` shows these images. |
+| `images` | Optional list of `mime` and base64 `data` fields. The provider needs the `images` capability. |
 | `mcp_url` | The gateway's HTTP MCP endpoint, normally `/brain/mcp`. |
 | `mcp_token` | The bearer token for this run. |
-| `runtime` | `claude`, `openai_responses`, `openai_compat`, or `echo`. Default: `claude`. |
-| `model` | The model name. Default: `ILLO_BRAIN_MODEL`, then `claude-opus-5-5`. |
-| `max_turns` | Maximum tool calls for Responses, from 1 to 200. Default: 8. Other runtimes count their turns. |
-| `deep` | Use the separate deep timeout cap. Default: `false`. |
-| `effort` | `low`, `medium`, `high`, or `xhigh`. Default: `low`. |
+| `provider` | A provider of the table. Required. |
+| `model` | The model name. Required. |
+| `effort` | Optional. One of the provider's efforts. |
+| `max_tool_calls` | Maximum tool calls, from 1 to 200. Default: 8. The SDK counts its own turns. |
 | `max_output_tokens` | Optional output cap for the API-key Responses path. The ChatGPT path omits it. |
-| `web_search` | Add the provider web search tool in Responses. Default: `false`. |
-| `timeout_s` | Active run deadline in seconds, up to 3600. Default: 300. |
+| `web_search` | Add the provider web search tool. The provider needs the `web_search` capability. Default: `false`. |
+| `timeout_s` | Active run deadline in seconds, up to 3600. Default: 300. The service caps it. |
+| `fallback_provider` | Optional. An API-key Responses provider for a ChatGPT limit. Only with `chatgpt`. |
 
 The response uses `application/x-ndjson`. Each line is one JSON object with `type` and `run_id`.
 
@@ -295,9 +309,10 @@ The response uses `application/x-ndjson`. Each line is one JSON object with `typ
 ```
 
 The first `started` event confirms admission. A later `started` event gives the runtime catalog.
-`openai_responses`, `openai_compat`, and `echo` use the MCP names without the Claude `mcp__illo__` prefix.
+The Responses, Chat Completions, and fake wires use the MCP names without the Claude `mcp__illo__` prefix.
 A run ends with one `final` or `error` event.
-An error has `message` and `category`: `auth`, `timeout`, `runtime`, or `limit`.
+An error has `message` and `category`: `auth`, `timeout`, `runtime`, `limit`, `config`, or `internal`.
+`config` means that the table cannot serve the request: an unknown provider, a missing capability, an effort that the provider does not accept, or a wrong fallback. No worker starts.
 Provider failures also carry `code`, `provider_type`, and the HTTP status when available.
 Only short identifiers enter those fields. Invalid or absent identifiers become `unknown`.
 The event and service log omit provider message text, prompts, tool results, and keys.
@@ -313,11 +328,8 @@ Validation errors and provider exceptions do not echo the request or secrets.
 | --- | --- | --- |
 | `ILLO_BRAIN_SECRET` | Required | Shared secret for the gateway. |
 | `ILLO_BRAIN_CONCURRENCY` | `4` | Maximum active workers. Other requests wait. |
-| `ILLO_BRAIN_TIMEOUT_S` | `300` | Maximum active duration for normal runs, also capped by `timeout_s`. |
-| `ILLO_BRAIN_DEEP_TIMEOUT_S` | `1800` | Maximum active duration when `deep: true`, also capped by `timeout_s`. |
-| `ILLO_BRAIN_MODEL` | `claude-opus-5-5` | Model when the request omits it. |
-| `ILLO_BRAIN_EFFORT` | Unset | Default effort for a request that names none. The request's effort wins. |
-| `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` | Unset | Optional Chat Completions `reasoning_effort`. |
+| `ILLO_BRAIN_MAX_TIMEOUT_S` | `1800` | The one cap. Each run stops at `min(timeout_s, cap)`. |
+| `ILLO_PROVIDER_*` | Unset | The provider table. See [Providers](#providers). |
 | `ILLO_BRAIN_TMPDIR` | System temp folder | Parent folder for each run's private files. |
 
 The gateway also enforces the full deadline, including its wait for a run slot.
@@ -373,15 +385,11 @@ The rule 10 test lists the actual runtime catalog and checks a hostile request.
 It also records three runs with a first tool call and a final answer.
 It skips live requests unless `ILLO_LIVE_BRAIN=1`.
 
-A host with an existing local provider can set `ILLO_BRAIN_USE_HOST_PROVIDER=1` for that test.
-This test-only mode accepts `ANTHROPIC_AUTH_TOKEN` only with a loopback `ANTHROPIC_BASE_URL`.
-It passes that environment credential to bare mode in memory.
-It does not read, copy, or change any host sign-in file.
-The product container uses `ANTHROPIC_API_KEY` instead.
+The live test reads `ILLO_PROVIDER_ANTHROPIC_API_KEY` and, if set, `ILLO_PROVIDER_ANTHROPIC_BASE_URL`.
 
 ### Subscription smoke check
 
-Run `illo chatgpt smoke --person <key-or-id>` from the main app environment after sign-in.
+Run `illo chatgpt smoke --person <key-or-id> [--route <run kind>]` from the main app environment after sign-in.
 See [Workspace files](../docs/workspace.md#check-the-chatgpt-connection).
 The request sets `smoke: true` on the normal `/run` contract and passes per-run `provider_auth`.
 This check offers only the fixed `smoke_ping` function. It does not connect to the team MCP endpoint.

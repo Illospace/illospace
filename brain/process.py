@@ -10,10 +10,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from brain.models import BrainEvent, RunRequest, event
+from brain.providers import PREFIX, Provider
+
+
+def worker_environment() -> dict:
+    """The worker gets its provider on standard input. It never sees the other keys."""
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(PREFIX) and k != "ILLO_BRAIN_SECRET"}
 
 
 async def run_worker(
-    request: RunRequest, command: list[str] | None = None
+    request: RunRequest, provider: Provider, fallback: Provider | None = None,
+    command: list[str] | None = None,
 ) -> AsyncIterator[BrainEvent]:
     process = None
     with TemporaryDirectory(prefix="illo-brain-", dir=os.getenv("ILLO_BRAIN_TMPDIR")) as temporary:
@@ -28,9 +36,13 @@ async def run_worker(
                 stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,
                 cwd=directory,
+                env=worker_environment(),
                 limit=4 * 1024 * 1024,
             )
-            process.stdin.write(json.dumps(request.wire()).encode() + b"\n")
+            providers = {"provider": provider.wire_dict(),
+                         "fallback": fallback.wire_dict() if fallback else None}
+            process.stdin.write(json.dumps(request.wire()).encode() + b"\n"
+                                + json.dumps(providers).encode() + b"\n")
             await process.stdin.drain()
             process.stdin.close()
             terminal = False

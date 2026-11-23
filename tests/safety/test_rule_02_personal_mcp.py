@@ -83,7 +83,7 @@ async def make_run(
         principal=principal or ("person:" + key if key else "team"),
         person_id=member["id"] if member else None,
         profile=profile,
-        runtime="fake",
+        provider="fake", tool_limit=12,
         model="fake",
         tainted=tainted,
     )

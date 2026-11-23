@@ -102,14 +102,14 @@ async def test_cli_migrate_token_and_secret(pool, monkeypatch, capsys):
     await execute(parser().parse_args(["secret", "delete", "example"]), config)
 
 
-async def test_n3_doctor_checks_the_runtime_override(app, monkeypatch, capsys):
+async def test_n3_doctor_checks_the_routes_against_the_brain(app, monkeypatch, capsys):
     from illo.cli import doctor
 
     ctx = app.state.ctx
-    ctx.workspace.config.brain.auth = "chatgpt"
-    ctx.workspace.config.brain.runtime = "openai_responses"
-    ctx.config.brain_runtime = "claude"
+    ctx.workspace.config.brain.routes["default"].provider = "gemini"
     ctx.config.database_url = ctx.pool.conninfo
     monkeypatch.setattr("illo.cli.load_workspace", lambda _: ctx.workspace)
+    monkeypatch.setattr("illo.brain.client.BrainClient", lambda url: ctx.brain_client)
     assert await doctor(ctx.config) == 1
-    assert "openai_responses" in capsys.readouterr().out
+    assert "The routes need a fix: brain.routes.person_dm: the brain has no provider gemini" in (
+        capsys.readouterr().out)

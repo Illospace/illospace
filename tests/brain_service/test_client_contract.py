@@ -15,9 +15,9 @@ async def test_foundation_client_echo_contract(fake_mcp, monkeypatch):
         user_message="List the tools",
         mcp_url=fake_mcp.url,
         mcp_token="fake-run-token",
-        runtime="echo",
+        provider="fake",
         model="none",
-        max_turns=1,
+        max_tool_calls=1,
         timeout_s=5,
     )
     async with serve(create_app()) as base:
@@ -40,9 +40,9 @@ async def test_foundation_client_wrong_secret(fake_mcp, monkeypatch):
         user_message="List the tools",
         mcp_url=fake_mcp.url,
         mcp_token="fake-run-token",
-        runtime="echo",
+        provider="fake",
         model="none",
-        max_turns=1,
+        max_tool_calls=1,
         timeout_s=5,
     )
     async with serve(create_app()) as base:
@@ -68,9 +68,9 @@ async def test_real_gateway_mcp_catalog(app, rpc_token, monkeypatch):
             user_message="List tools",
             mcp_url=gateway_base + "/brain/mcp",
             mcp_token=token,
-            runtime="echo",
+            provider="fake",
             model="none",
-            max_turns=1,
+            max_tool_calls=1,
             timeout_s=5,
         )
         events = [item async for item in BrainClient(brain_base).run(request)]
@@ -106,15 +106,6 @@ async def test_run_manager_keeps_safe_failure(app, replay, category, code, expec
     assert "PRIVATE" not in row["error"]
 
 
-def test_responses_workspace_and_env_override(monkeypatch):
-    from illo.config import Config
-    from illo.workspace import BrainConfig
-
-    assert BrainConfig(runtime="openai_responses").runtime == "openai_responses"
-    monkeypatch.setenv("ILLO_BRAIN_RUNTIME", "openai_responses")
-    assert Config.from_env().brain_runtime == "openai_responses"
-
-
 def test_s1_default_wire_accepts_a_brain_without_smoke():
     from pydantic import create_model
 
@@ -122,7 +113,7 @@ def test_s1_default_wire_accepts_a_brain_without_smoke():
 
     request = RunRequest(
         run_id=1, system_prompt="Acme", user_message="Hello", mcp_url="http://test/brain/mcp",
-        mcp_token="fake", runtime="openai_responses", model="test", max_turns=1, timeout_s=5,
+        mcp_token="fake", provider="openai", model="test", max_tool_calls=1, timeout_s=5,
     )
     fields = {
         name: (field.annotation, field)
@@ -150,12 +141,19 @@ KNOWN = {
     "mcp_url": (TEXT, {**TEXT, "format": "uri", "maxLength": 2083, "minLength": 1},
                 "The service checks the URL format."),
     "mcp_token": (TEXT, SECRET, "The service keeps the token out of logs and errors."),
-    "runtime": (TEXT, {**TEXT, "default": "claude",
-                       "enum": ["claude", "openai_responses", "openai_compat", "echo"]},
-                "The service refuses an unknown runtime; the client sends any name."),
+    "provider": (TEXT, {**TEXT, "pattern": "^[a-z][a-z0-9_]{0,31}$"},
+                 "The service checks the name. Its provider table checks the rest."),
     "model": (TEXT, {**TEXT, "maxLength": 128, "minLength": 1},
-              "Only the service has a default model (see test_effective_defaults)."),
-    "max_turns": ({"type": "integer"},
+              "The service bounds the name."),
+    "effort": ({"anyOf": [TEXT, {"type": "null"}], "default": None},
+               {"anyOf": [{**TEXT, "pattern": "^[a-z]{1,16}$"}, {"type": "null"}], "default": None},
+               "The service checks the shape. The provider's efforts decide the value."),
+    "fallback_provider": (
+        {"anyOf": [TEXT, {"type": "null"}], "default": None},
+        {"anyOf": [{**TEXT, "pattern": "^[a-z][a-z0-9_]{0,31}$"}, {"type": "null"}],
+         "default": None},
+        "The service checks the name. Its provider table checks the rest."),
+    "max_tool_calls": ({"type": "integer"},
                   {"type": "integer", "default": 8, "minimum": 1, "maximum": 200},
                   "The app always sends the limit; the service has a default and bounds."),
     "timeout_s": ({"type": "number"},
@@ -178,8 +176,8 @@ KNOWN = {
         "One client model, two service models. test_wire_inputs.py pins the inputs."),
 }
 # The client must send these settings. The service has its own defaults for them.
-REQUIRED_BY_CLIENT = {"runtime", "model", "max_turns", "timeout_s"}
-REQUIRED = {"run_id", "system_prompt", "user_message", "mcp_url", "mcp_token"}
+REQUIRED_BY_CLIENT = {"max_tool_calls", "timeout_s"}
+REQUIRED = {"run_id", "system_prompt", "user_message", "mcp_url", "mcp_token", "provider", "model"}
 
 
 def contract(model) -> tuple[dict, dict]:
@@ -238,20 +236,15 @@ def test_one_wire_contract_in_two_copies():
         assert (client[name], service[name]) == expected, name
 
 
-@pytest.mark.parametrize("model_env", [None, "fake-env-model"])
-def test_effective_defaults(monkeypatch, model_env):
+def test_effective_defaults():
     """Default factories are not in the schema. Compare the values that the models make."""
     from pydantic import BaseModel
 
     from brain.models import RunRequest as ServiceRequest
 
-    if model_env is None:
-        monkeypatch.delenv("ILLO_BRAIN_MODEL", raising=False)
-    else:
-        monkeypatch.setenv("ILLO_BRAIN_MODEL", model_env)
     sent = {"run_id": 1, "system_prompt": "Acme", "user_message": "Hello",
             "mcp_url": "http://illo.example/brain/mcp", "mcp_token": "fake-token",
-            "runtime": "echo", "model": "fake-model", "max_turns": 3, "timeout_s": 5}
+            "provider": "fake", "model": "fake-model", "max_tool_calls": 3, "timeout_s": 5}
     client = RunRequest(**sent)
     service = ServiceRequest(**{name: sent[name] for name in REQUIRED})
 
@@ -262,5 +255,4 @@ def test_effective_defaults(monkeypatch, model_env):
     for name in set(RunRequest.model_fields) - set(sent):
         assert effective(client, name) == effective(service, name), name
     assert {name: effective(service, name) for name in REQUIRED_BY_CLIENT} == {
-        "runtime": "claude", "model": model_env or "claude-opus-5-5", "max_turns": 8,
-        "timeout_s": 300}
+        "max_tool_calls": 8, "timeout_s": 300}

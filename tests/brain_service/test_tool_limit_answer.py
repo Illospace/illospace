@@ -8,6 +8,7 @@ from mcp.types import Tool
 
 from brain import loop
 from brain.wire.chat import Chat
+from tests.brain_service.conftest import chat
 from tests.brain_service.test_chatgpt import collect, subscription
 from tests.brain_service.test_review_responses import call, complete, message, stream
 from tests.fakes import FakeMCPSession
@@ -16,9 +17,8 @@ from tests.fakes import FakeMCPSession
 @pytest.mark.parametrize("auth", ["api_key", "chatgpt"])
 @pytest.mark.parametrize("batch", [False, True])
 async def test_responses_forces_one_answer_without_extra_tools(run_request, monkeypatch, auth, batch):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-api-key")
     request = subscription(run_request) if auth == "chatgpt" else run_request
-    request.max_turns = 2
+    request.max_tool_calls = 2
     bodies = []
 
     def respond(wire):
@@ -55,7 +55,7 @@ def completion(calls=None, text=""):
 
 @pytest.mark.parametrize("batch", [False, True])
 async def test_compat_counts_calls_and_forces_one_answer(run_request, batch):
-    run_request.max_turns = 2
+    run_request.max_tool_calls = 2
     bodies = []
     session = FakeMCPSession()
 
@@ -72,7 +72,8 @@ async def test_compat_counts_calls_and_forces_one_answer(run_request, batch):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         events = [e async for e in loop.conversation(
-            Chat, run_request, session, [Tool(name="lanes_search", inputSchema={"type": "object"})], http
+            Chat, run_request, chat("https://api.example/v1"), session,
+            [Tool(name="lanes_search", inputSchema={"type": "object"})], http
         )]
     assert len(session.calls) == 2
     assert len(bodies) == (2 if batch else 4)
@@ -80,7 +81,7 @@ async def test_compat_counts_calls_and_forces_one_answer(run_request, batch):
 
 
 async def test_compat_exact_limit_keeps_the_normal_last_request(run_request):
-    run_request.max_turns = 1
+    run_request.max_tool_calls = 1
     bodies = []
     session = FakeMCPSession()
 
@@ -90,7 +91,8 @@ async def test_compat_exact_limit_keeps_the_normal_last_request(run_request):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         events = [e async for e in loop.conversation(
-            Chat, run_request, session, [Tool(name="lanes_search", inputSchema={"type": "object"})], http
+            Chat, run_request, chat("https://api.example/v1"), session,
+            [Tool(name="lanes_search", inputSchema={"type": "object"})], http
         )]
     assert len(session.calls) == 1 and len(bodies) == 2
     assert bodies[-1].get("tools") and bodies[-1].get("tool_choice") != "none"

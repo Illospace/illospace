@@ -27,7 +27,7 @@ async def test_wait_result_refused_by_list_and_direct_call(app, profile, princip
     async with ctx.pool.connection() as conn:
         person_id = (await one(conn, "SELECT id FROM people WHERE key='ada'"))["id"] if principal.startswith("person:") else None
         run = await runs.create(conn, principal=principal, person_id=person_id, profile=profile, tainted=tainted,
-                                runtime="fake", model="fake")
+                                provider="fake", tool_limit=12, model="fake")
         await conn.execute("UPDATE runs SET deep_kind=%s WHERE id=%s", (kind, run["id"]))
         run["deep_kind"] = kind
         assert "wait_result" not in {t["name"] for t in ctx.registry.list_tools(run)}

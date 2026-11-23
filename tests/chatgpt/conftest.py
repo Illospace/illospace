@@ -101,8 +101,7 @@ async def chatgpt_app(app):
     ctx = app.state.ctx
     ctx.config.vault_key = SecretStr(Fernet.generate_key().decode())
     # The example workspace is local to this app instance.
-    ctx.workspace.config.brain.runtime = "openai_responses"
-    ctx.workspace.config.brain.auth = "chatgpt"
+    ctx.workspace.config.brain.routes["default"].provider = "chatgpt"
     backend = FakeTokenEndpoint()
     ctx.chatgpt_client = chatgpt.ChatGPTClient(httpx.MockTransport(backend.respond))
     return app, backend
@@ -111,9 +110,17 @@ async def chatgpt_app(app):
 @pytest.fixture
 async def team_chatgpt_app(chatgpt_app):
     ctx = chatgpt_app[0].state.ctx
-    ctx.workspace.config.brain.person_credential = "team"
-    ctx.workspace.config.brain.team_credential = "ada"
+    ctx.workspace.config.brain.chatgpt.person_credential = "team"
+    ctx.workspace.config.brain.chatgpt.team_credential = "ada"
     return chatgpt_app
+
+
+async def auth_for(ctx, authority):
+    """The ChatGPT token or the API key that pays for a run of this authority, or None."""
+    from illo.brain.routes import resolve_route, select_payer
+
+    payer = await select_payer(ctx, resolve_route(ctx.workspace, "person_dm"), authority)
+    return payer.auth if payer else None
 
 
 async def save_grant(ctx, key="ada", *, expires=3600, access="fake-access"):

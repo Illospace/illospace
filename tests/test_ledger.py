@@ -326,7 +326,7 @@ async def test_claim_is_atomic_across_connections(pool):
 
     async with pool.connection() as conn:
         row = await runs.create(
-            conn, principal="team", person_id=None, profile="routine", runtime="fake", model="fake"
+            conn, principal="team", person_id=None, profile="routine", provider="fake", tool_limit=12, model="fake"
         )
 
     async def take():

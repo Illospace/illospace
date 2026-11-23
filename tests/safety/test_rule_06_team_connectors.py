@@ -37,7 +37,7 @@ async def test_rule_06_tainted_connector_read_requires_opt_in(app, rpc):
             person_id=None,
             profile="tainted",
             tainted=True,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)
@@ -92,7 +92,7 @@ async def test_rule_06_tainted_search_cannot_bypass_shared_drive_grant(app, rpc,
             person_id=None,
             profile="tainted",
             tainted=True,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

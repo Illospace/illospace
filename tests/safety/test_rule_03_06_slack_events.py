@@ -15,7 +15,7 @@ async def test_rule_03_06_tainted_runs_cannot_search_or_read_other_channel_event
     async with ctx.pool.connection() as conn:
         row = await event(conn, channel_id="C_ACME_TEAM", text="A team-only Nebula decision.")
         run = await runs.create(conn, principal=principal, person_id=ada["id"] if principal.startswith("person:") else None, profile=profile,
-                                tainted=True, runtime="fake", model="fake")
+                                tainted=True, provider="fake", tool_limit=12, model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     tools = (await rpc(token, "tools/list")).json()["result"]["tools"]
     assert not {"search_all", "search_get"} & {t["name"] for t in tools}

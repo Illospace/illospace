@@ -9,9 +9,11 @@ from pathlib import Path
 import httpx
 import pytest
 
+from brain import providers
 from brain.models import event
 from brain.process import run_worker
-from brain.server import create_app
+from brain.server import FAKE_TRANSCRIPT, create_app
+from tests.brain_service.conftest import FAKE, openai
 
 
 async def post(app, request, secret="service-test-secret", **overrides):
@@ -61,24 +63,163 @@ async def test_secret_and_safe_validation(run_request, monkeypatch):
     assert "fake-run-token" not in response.text
 
 
-async def test_health_does_not_expose_auth(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-provider-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+async def describe(app, secret="service-test-secret"):
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=create_app()), base_url="http://brain"
+        transport=httpx.ASGITransport(app=app), base_url="http://brain"
     ) as http:
-        response = await http.get("/healthz")
-    assert response.json()["runtimes"]["claude"]["usable"]
-    assert response.json()["runtimes"]["openai_compat"]["experimental"]
-    assert response.json()["runtimes"]["openai_responses"]["usable"]
-    assert "fake-provider-key" not in response.text
-    assert "fake-openai-key" not in response.text
+        return await http.get("/providers", headers={"X-Illo-Brain-Secret": secret})
+
+
+async def test_providers_hold_no_secret(monkeypatch):
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-openai-secret")
+    monkeypatch.setenv("ILLO_PROVIDER_ANTHROPIC_API_KEY", "fake-anthropic-secret")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_API_KEY", "fake-local-secret")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_WIRE", "chat")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_BASE_URL", "https://fake-private-host.example/v1")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_CAPABILITIES", "effort:none")
+    app = create_app()
+    assert (await describe(app, "wrong")).status_code == 401
+    response = await describe(app)
+    described = {item["name"]: item for item in response.json()["providers"]}
+    assert set(described) == {"chatgpt", "fake", "openai", "anthropic", "local"}
+    assert described["local"] == {"name": "local", "wire": "chat", "capabilities": {
+        "images": False, "web_search": False, "efforts": ["none"]}}
+    assert described["chatgpt"]["wire"] == "responses"
+    assert described["anthropic"]["capabilities"]["images"] is False
+    for secret in ("fake-openai-secret", "fake-anthropic-secret", "fake-local-secret",
+                   "fake-private-host", "chatgpt.com", "api.openai.com"):
+        assert secret not in response.text
+    assert (await http_get(app, "/healthz")).json() == {"status": "ok"}
+
+
+async def http_get(app, path):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://brain"
+    ) as http:
+        return await http.get(path)
+
+
+def test_a_provider_without_a_key_is_not_in_the_table():
+    table = providers.load({"ILLO_PROVIDER_OPENAI_BASE_URL": "https://api.example/v1",
+                            "ILLO_PROVIDER_ANTHROPIC_API_KEY": ""})
+    assert set(table) == {"chatgpt"}
+    table = providers.load({"ILLO_PROVIDER_OPENAI_API_KEY": "fake-key",
+                            "ILLO_PROVIDER_OPENAI_BASE_URL": "https://api.example/v1/",
+                            "ILLO_PROVIDER_CHATGPT_BASE_URL": "https://proxy.example/codex"})
+    assert table["openai"].base_url == "https://api.example/v1"
+    assert table["openai"].api_key == "fake-key" and "fake-key" not in repr(table["openai"])
+    assert table["chatgpt"].base_url == "https://proxy.example/codex"
+    assert "fake" not in table
+
+
+@pytest.mark.parametrize("environ,variable", [
+    ({"ILLO_PROVIDER_OPENAI_APIKEY": "fake-key"}, "ILLO_PROVIDER_OPENAI_APIKEY"),
+    ({"ILLO_PROVIDER_FAKE_API_KEY": "fake-key"}, "ILLO_PROVIDER_FAKE_API_KEY"),
+    ({"ILLO_PROVIDER_OPENAI_WIRE": "chat"}, "ILLO_PROVIDER_OPENAI"),
+    ({"ILLO_PROVIDER_CHATGPT_API_KEY": "fake-key"}, "ILLO_PROVIDER_CHATGPT_API_KEY"),
+    ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key"}, "ILLO_PROVIDER_LOCAL"),
+    ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "agent_sdk",
+      "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1"}, "ILLO_PROVIDER_LOCAL"),
+    ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
+      "ILLO_PROVIDER_LOCAL_BASE_URL": "https://user:fake-secret@models.example/v1"},
+     "ILLO_PROVIDER_LOCAL_BASE_URL"),
+    ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
+      "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1",
+      "ILLO_PROVIDER_LOCAL_CAPABILITIES": "shell"}, "ILLO_PROVIDER_LOCAL_CAPABILITIES"),
+])
+def test_a_wrong_provider_variable_stops_the_service(environ, variable):
+    with pytest.raises(ValueError, match=variable) as error:
+        providers.load(environ)
+    assert "fake-key" not in str(error.value) and "fake-secret" not in str(error.value)
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"provider": "anthropic"}, "no provider with this name"),
+    ({"provider": "chatgpt"}, "ChatGPT sign-in"),
+    ({"effort": "extreme"}, "effort"),
+    ({"web_search": True, "provider": "local"}, "web search"),
+    ({"smoke": True}, "Responses wire"),
+    ({"fallback_provider": "openai"}, "fallback"),
+])
+async def test_a_route_that_does_not_fit_is_a_config_error(run_request, change, reason):
+    from brain.providers import Provider
+
+    table = {"fake": FAKE, "openai": openai(), "chatgpt": providers.BUILT_IN["chatgpt"],
+             "local": Provider("local", "chat", "http://x", "k")}
+    called = []
+
+    async def runner(request, *_):
+        called.append(request)
+        yield event("final", text="no", usage={})
+
+    for key, value in change.items():
+        setattr(run_request, key, value)
+    events = lines(await post(create_app(runner=runner, table=table), run_request))
+    assert events[-1]["category"] == "config" and reason in events[-1]["message"]
+    assert not called
+
+
+async def test_one_service_serves_chatgpt_and_openai_with_their_own_keys(run_request, monkeypatch):
+    """The openai key comes from its own variable. ChatGPT tokens come with each run."""
+    from brain.models import ChatGPTAuth
+
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-key-a")
+    seen = []
+
+    seen_tokens = []
+
+    async def runner(request, provider, fallback):
+        seen.append((request.provider, provider.name, provider.api_key, provider.base_url,
+                     fallback.name if fallback else None))
+        if provider.name == "chatgpt":
+            seen_tokens.append(request.provider_auth.access_token.get_secret_value())
+        yield event("final", text="ok", usage={})
+
+    app = create_app(runner=runner)
+    run_request.provider = "openai"
+    assert lines(await post(app, run_request))[-1]["type"] == "final"
+    run_request.provider = "chatgpt"
+    run_request.fallback_provider = "openai"
+    run_request.provider_auth = ChatGPTAuth(access_token="fake-access", account_id="fake-account")
+    assert lines(await post(app, run_request))[-1]["type"] == "final"
+    assert seen == [
+        ("openai", "openai", "fake-key-a", "https://api.openai.com/v1", None),
+        ("chatgpt", "chatgpt", None, "https://chatgpt.com/backend-api/codex", "openai"),
+    ]
+    assert seen_tokens == ["fake-access"]
+
+
+async def test_transcribe_with_the_fake_provider(monkeypatch):
+    app = create_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://brain"
+    ) as http:
+        params = {"provider": "fake", "model": "fake-model", "extension": "m4a"}
+        refused = await http.post("/transcribe", params=params, content=b"audio")
+        response = await http.post("/transcribe", params=params, content=b"audio",
+                                   headers={"X-Illo-Brain-Secret": "service-test-secret"})
+        missing = await http.post("/transcribe", params={**params, "provider": "chatgpt"},
+                                  content=b"audio",
+                                  headers={"X-Illo-Brain-Secret": "service-test-secret"})
+    assert refused.status_code == 401
+    assert response.json() == {"text": FAKE_TRANSCRIPT}
+    assert missing.status_code == 422 and missing.json() == {"category": "config"}
+
+
+async def test_the_worker_never_sees_the_other_keys(run_request, tmp_path, monkeypatch):
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-other-key")
+    code = ("import json,os,sys; sys.stdin.readline(); given=json.loads(sys.stdin.readline()); "
+            "print(json.dumps({'type':'final','text':json.dumps(sorted(k for k in os.environ "
+            "if k.startswith('ILLO_PROVIDER_') or k=='ILLO_BRAIN_SECRET')),"
+            "'given':given['provider']['name']}),flush=True)")
+    events = [e async for e in run_worker(run_request, FAKE, None, [sys.executable, "-c", code])]
+    assert json.loads(events[-1]["text"]) == [] and events[-1]["given"] == "fake"
 
 
 async def test_timeout_and_cancellation_close_runner(run_request):
     closed = asyncio.Event()
 
-    async def slow(request):
+    async def slow(request, *_):
         try:
             await asyncio.sleep(10)
             yield event("final", text="late", usage={})
@@ -97,7 +238,7 @@ async def test_concurrency_waits(run_request):
     count = 0
     maximum = 0
 
-    async def blocking(request):
+    async def blocking(request, *_):
         nonlocal count, maximum
         count += 1
         maximum = max(maximum, count)
@@ -121,7 +262,7 @@ async def test_concurrency_waits(run_request):
 
 
 async def test_redact_output_and_do_not_emit_exception(run_request):
-    async def echo_secret(request):
+    async def echo_secret(request, *_):
         yield event("text", text=request.mcp_token.get_secret_value())
         raise RuntimeError("private provider details")
 
@@ -170,7 +311,7 @@ async def test_process_tree_killed_and_directory_removed(
     ready = asyncio.Event()
 
     async def consume():
-        async with aclosing(run_worker(run_request, [sys.executable, "-c", code])) as stream:
+        async with aclosing(run_worker(run_request, FAKE, None, [sys.executable, "-c", code])) as stream:
             async for item in stream:
                 pids.update(item)
                 ready.set()
@@ -197,18 +338,10 @@ async def test_process_tree_killed_and_directory_removed(
     assert list(tmp_path.iterdir()) == []
 
 
-async def test_missing_claude_auth_returns_auth_error(run_request, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ILLO_BRAIN_USE_HOST_PROVIDER", raising=False)
-    run_request.runtime = "claude"
-    response = await post(create_app(), run_request)
-    assert lines(response)[-1]["category"] == "auth"
-
-
 async def test_provider_identifiers_cannot_log_secrets(run_request, caplog, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-sensitive-key")
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-sensitive-key")
 
-    async def failure(request):
+    async def failure(request, *_):
         yield event(
             "error",
             category="runtime",
@@ -222,18 +355,8 @@ async def test_provider_identifiers_cannot_log_secrets(run_request, caplog, monk
     assert "http_status=400" in caplog.text
 
 
-async def test_responses_health_requires_key(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:1/v1")
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=create_app()), base_url="http://brain"
-    ) as http:
-        response = await http.get("/healthz")
-    assert not response.json()["runtimes"]["openai_responses"]["usable"]
-
-
 async def test_worker_exit_without_an_answer_is_an_internal_failure(run_request):
-    events = [e async for e in run_worker(run_request, [sys.executable, "-c", "pass"])]
+    events = [e async for e in run_worker(run_request, FAKE, None, [sys.executable, "-c", "pass"])]
     assert events[-1]["type"] == "error" and events[-1]["category"] == "internal"
 
 

@@ -73,7 +73,7 @@ async def test_rule_08_agent_token_cannot_answer_with_free_instructions(app, rpc
             principal="person:ada",
             person_id=ada["id"],
             profile="agent_request",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

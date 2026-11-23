@@ -20,7 +20,7 @@ REASONS = {
     "outside_sender": "outside sender",
     "disabled": "images are off",
     "not_allowed": "this run cannot read images",
-    "runtime": "this runtime cannot show images",
+    "provider": "this model provider cannot show images",
     "type": "file type is not supported",
     "too_large": "too large",
     "too_many": "too many",
@@ -63,7 +63,7 @@ def sniff(body):
     return next((mime for mime in sorted(MIMES) if matches(mime, body)), None)
 
 
-async def for_run(ctx, event, authority, runtime):
+async def for_run(ctx, event, authority, shows_images: bool):
     if event.channel != "slack":
         return [], ""
     config = ctx.workspace.config.slack
@@ -138,8 +138,8 @@ async def for_run(ctx, event, authority, runtime):
                         reason = "disabled"
                     elif not allowed:
                         reason = "not_allowed"
-                    elif runtime not in {"openai_responses", "fake"}:
-                        reason = "runtime"
+                    elif not shows_images:
+                        reason = "provider"
                     elif file.get("mimetype") not in MIMES:
                         reason = "type"
                     elif type(file.get("size")) is not int or file["size"] <= 0:

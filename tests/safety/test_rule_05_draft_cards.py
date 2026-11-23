@@ -24,7 +24,7 @@ async def test_rule_05_draft_card_ownership(app, invalid):
             principal="person:ada",
             person_id=ada["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         row = await ledger.create(

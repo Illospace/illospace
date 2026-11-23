@@ -1,12 +1,11 @@
 """The Chat Completions adapter. It knows only the format. This wire sends text only."""
 
-import os
-
 from mcp.types import Tool
 
 from brain.errors import RunError, provider_error
 from brain.loop import Turn
 from brain.models import RunRequest, event
+from brain.providers import Provider
 from brain.tools import Call
 from brain.usage import Usage
 
@@ -24,29 +23,19 @@ class Chat:
     reads_run_flags = False
     missing_id = "The model requested a tool outside the run catalog"
 
-    def __init__(self, request: RunRequest, tools: list[Tool]):
+    def __init__(self, request: RunRequest, tools: list[Tool], provider: Provider):
+        self.provider = provider
         self.catalog = function_tools(tools)
         self.messages = [
             {"role": "system", "content": request.system_prompt},
             {"role": "user", "content": request.user_message},
         ]
 
-    @staticmethod
-    def url(request) -> str:
-        # Compose passes an empty value when the operator sets none. Treat empty as not set.
-        base = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
-        return base.rstrip("/") + "/chat/completions"
+    def url(self, request) -> str:
+        return self.provider.base_url + "/chat/completions"
 
-    @staticmethod
-    def check(request) -> None:
-        """A local server can need no key."""
-        if not os.getenv("OPENAI_API_KEY") and not os.getenv("OPENAI_BASE_URL"):
-            raise RunError("auth", "Set OPENAI_API_KEY for the OpenAI-compatible runtime")
-
-    @staticmethod
-    def headers(request) -> dict:
-        key = os.getenv("OPENAI_API_KEY")
-        return {"Authorization": "Bearer " + key} if key else {}
+    def headers(self, request) -> dict:
+        return {"Authorization": "Bearer " + self.provider.api_key}
 
     def payload(self, request, *, tools_disabled):
         self.text, self.calls, self.stop, self.tools_disabled = [], {}, None, tools_disabled
@@ -60,8 +49,8 @@ class Chat:
             payload["tool_choice"] = "none"
         elif self.catalog:
             payload["tools"] = self.catalog
-        if effort := os.getenv("ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT"):
-            payload["reasoning_effort"] = effort
+        if request.effort:
+            payload["reasoning_effort"] = request.effort
         return payload
 
     def rejected(self, request, payload, status, error) -> bool:

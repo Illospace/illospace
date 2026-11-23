@@ -178,7 +178,7 @@ async def test_concurrent_assignments_share_the_durable_hourly_limit(app, github
     async def assign(number):
         async with ctx.pool.connection() as conn:
             run = await runs.create(conn, principal="team", person_id=None, profile="tainted",
-                                    tainted=True, runtime="fake", model="fake")
+                                    tainted=True, provider="fake", tool_limit=12, model="fake")
             return await auto_assign(ToolContext(conn, run, ctx), event, REPO, number)
 
     results = await asyncio.gather(*(assign(n) for n in range(1, 4)))

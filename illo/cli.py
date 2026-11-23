@@ -5,6 +5,7 @@ import asyncio
 import getpass
 import sys
 from pathlib import Path
+from typing import get_args
 from urllib.parse import urlsplit
 
 import httpx
@@ -18,7 +19,7 @@ from illo.db import migrate, one
 from illo.ledger import ask_workflow, people, tokens
 from illo.log import configure
 from illo.vault import Vault, delete, get_names
-from illo.workspace import load_workspace
+from illo.workspace import RunKind, load_workspace
 
 
 def parser() -> argparse.ArgumentParser:
@@ -68,16 +69,16 @@ def parser() -> argparse.ArgumentParser:
     chatgpt.add_parser("status")
     smoke = chatgpt.add_parser("smoke")
     smoke.add_argument("--person", required=True)
-    smoke.add_argument("--auth", choices=("chatgpt", "api_key"), default="chatgpt")
+    smoke.add_argument("--route", choices=get_args(RunKind), default="person_dm")
     return result
 
 
 async def doctor(config: Config) -> int:
     """Report missing requirements without exposing credentials."""
     failed = False
+    workspace = None
     try:
         workspace = load_workspace(config.workspace_dir)
-        workspace.config.brain.check_runtime(config.brain_runtime)
         print("The workspace is valid.")
         for warning in workspace.warnings:
             print(f"Note: {warning}" if "Illo checks it in Slack at run time." in warning
@@ -85,6 +86,19 @@ async def doctor(config: Config) -> int:
     except ValueError as exc:
         print(f"The workspace needs a fix: {exc}")
         failed = True
+    if workspace is not None:
+        from illo.brain.client import BrainClient
+        from illo.brain.routes import check_routes
+
+        try:
+            check_routes(workspace, await BrainClient(config.brain_url).providers())
+            print("The brain has a provider for each route.")
+        except ValueError as exc:
+            print(f"The routes need a fix: {exc}")
+            failed = True
+        except httpx.HTTPError:
+            print("The brain service is unavailable. Check ILLO_BRAIN_URL and ILLO_BRAIN_SECRET.")
+            failed = True
     try:
         async with await AsyncConnection.connect(
             config.database_url, row_factory=dict_row, connect_timeout=3
@@ -138,7 +152,7 @@ async def execute(args, config: Config) -> int:
     if args.command == "chatgpt" and args.action == "smoke":
         from illo.connectors.chatgpt_smoke import smoke
 
-        return await smoke(config, args.person, auth=args.auth)
+        return await smoke(config, args.person, route=args.route)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "reload":
@@ -187,7 +201,7 @@ async def execute(args, config: Config) -> int:
         elif args.command == "chatgpt":
             from illo.ledger.chatgpt import status
 
-            brain = load_workspace(config.workspace_dir).config.brain
+            brain = load_workspace(config.workspace_dir).config.brain.chatgpt
             print(
                 f"Person credential: {brain.person_credential}; "
                 f"team credential: {brain.team_credential or 'none'}"

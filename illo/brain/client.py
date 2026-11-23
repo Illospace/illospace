@@ -52,16 +52,15 @@ class RunRequest(BaseModel):
     user_message: str
     mcp_url: str
     mcp_token: str = Field(repr=False)
-    runtime: str
+    provider: str
     model: str
-    max_turns: int
+    effort: str | None = None
+    max_tool_calls: int
     timeout_s: float
-    provider_auth: ProviderAuth = Field(default_factory=ProviderAuth, repr=False)
-    effort: Literal["low", "medium", "high", "xhigh"] = "low"
-    deep: bool = False
     max_output_tokens: int | None = Field(default=None, ge=1)
     web_search: bool = False
-    api_key_fallback: bool = False
+    provider_auth: ProviderAuth = Field(default_factory=ProviderAuth, repr=False)
+    fallback_provider: str | None = None
     smoke: bool = False
 
     def wire(self):
@@ -76,10 +75,10 @@ class BrainEvent(BaseModel):
     type: Literal["started", "text", "tool_call", "web_search", "final", "error"]
     text: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
-    category: Literal["auth", "timeout", "runtime", "limit", "internal"] = "runtime"
+    category: Literal["auth", "timeout", "runtime", "limit", "config", "internal"] = "runtime"
     code: str = "unknown"
     resets_at: int | None = None
-    api_key_fallback_failed: bool = False
+    fallback_failed: bool = False
 
     def failure_reason(self) -> str:
         code = self.code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.code) else "unknown"
@@ -94,16 +93,30 @@ class BrainClient:
         self.url = url.rstrip("/")
         self._secret = secret if secret is not None else os.getenv("ILLO_BRAIN_SECRET", "")
 
+    def client(self, timeout: float) -> httpx.AsyncClient:
+        options = {"transport": self.transport} if self.transport is not None else {}
+        return httpx.AsyncClient(base_url=self.url, timeout=timeout,
+                                 headers={"X-Illo-Brain-Secret": self._secret}, **options)
+
+    async def providers(self) -> dict[str, dict]:
+        """The brain's one description of its providers: name, wire, and capabilities."""
+        async with self.client(10) as client:
+            response = await client.get("/providers")
+            response.raise_for_status()
+        return {item["name"]: item for item in response.json()["providers"]}
+
+    async def transcribe(self, provider: str, model: str, extension: str, audio: bytes,
+                         timeout: float) -> str | None:
+        async with self.client(timeout) as client:
+            response = await client.post("/transcribe", content=audio, params={
+                "provider": provider, "model": model, "extension": extension})
+        text = response.json().get("text") if response.status_code == 200 else None
+        return text if isinstance(text, str) and text.strip() else None
+
     async def run(self, request: RunRequest) -> AsyncIterator[BrainEvent]:
         """The outer run manager also enforces the full wall-clock timeout."""
-        options = {"transport": self.transport} if self.transport is not None else {}
-        async with httpx.AsyncClient(timeout=request.timeout_s, **options) as client:
-            async with client.stream(
-                "POST",
-                f"{self.url}/run",
-                json=request.wire(),
-                headers={"X-Illo-Brain-Secret": self._secret},
-            ) as response:
+        async with self.client(request.timeout_s) as client:
+            async with client.stream("POST", "/run", json=request.wire()) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if line.strip():

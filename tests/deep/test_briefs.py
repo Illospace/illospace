@@ -31,7 +31,10 @@ async def test_brief_modes(app, fake_brain, deep, team):
     await (send_team_due(ctx, NOW) if team else send_due(ctx, NOW))
     assert len(fake_brain.requests) == 1
     request = fake_brain.requests[0]
-    assert request.deep is deep and not request.web_search
+    assert not request.web_search
+    async with ctx.pool.connection() as conn:
+        run = await one(conn, "SELECT route FROM runs WHERE id=%s", (request.run_id,))
+    assert (run["route"] == "deep") is deep
     results = [read_result(r) for r in fake_brain.results]
     assert [r["decision"] for r in results] == ["allow", "allow" if deep else "deny", "deny"]
     async with ctx.pool.connection() as conn:

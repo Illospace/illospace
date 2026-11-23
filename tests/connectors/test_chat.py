@@ -276,7 +276,7 @@ async def propose(ctx, key="acme-crm", auth="none", kind="connect_propose_mcp", 
             principal="person:" + who,
             person_id=owner["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         result = await ctx.registry.call(ToolContext(conn, run, ctx), kind, args)
@@ -395,7 +395,7 @@ async def test_mcp_full_add_allow_write_and_remove(connect_ctx, caplog, auth):
             principal="person:ada",
             person_id=owner["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         result = await ctx.registry.call(
@@ -475,7 +475,7 @@ async def test_status_start_profiles_and_private_dm(connect_ctx):
             principal="person:ada",
             person_id=ada["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         tc = ToolContext(conn, run, ctx)
@@ -545,7 +545,7 @@ async def test_status_reads_only_the_requesters_grant(connect_ctx):
                 principal="person:" + owner["key"],
                 person_id=owner["id"],
                 profile="person_dm",
-                runtime="fake",
+                provider="fake", tool_limit=12,
                 model="fake",
             )
             result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_status", {})

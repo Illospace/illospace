@@ -92,7 +92,7 @@ async def test_profiles_hide_slack_writes_and_all_slack_from_taint(app, rpc):
                 person_id=None if profile == "outsider" else person["id"],
                 profile="tainted" if profile == "outsider" else profile,
                 tainted=profile in {"tainted", "outsider"},
-                runtime="fake",
+                provider="fake", tool_limit=12,
                 model="fake",
             )
             token = await runs.mint_token(conn, run["id"], 60)
@@ -121,7 +121,7 @@ async def test_tools_without_client_fail_without_external_calls(app):
             principal="person:ada",
             person_id=person["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         result = await ctx.registry.call(

@@ -68,17 +68,19 @@ def test_token_cli_accepts_agent():
     assert args.agent == "build" and args.scope == "agent"
 
 
-def test_effort_config_defaults_and_validation():
+def test_route_config_defaults_and_validation():
     from pydantic import ValidationError
 
     from illo.workspace import BrainConfig
 
-    config = BrainConfig()
-    assert config.timeout_s == 300
-    assert config.effort == {"person_dm": "medium", "team_channel": "medium", "agent_request": "medium"}
-    for effort in ({"person_dm": "extreme"}, {"unknown": "high"}):
+    default = {"provider": "fake", "model": "fake-model"}
+    config = BrainConfig(routes={"default": default})
+    assert config.chatgpt.person_credential == "own" and config.chatgpt.fallback == "none"
+    assert config.transcription.provider == "openai"
+    for routes in ({"default": {**default, "effort": "Extreme"}}, {"default": default, "unknown": {}},
+                   {"default": {**default, "timeout_s": 0}}):
         with pytest.raises(ValidationError):
-            BrainConfig(effort=effort)
+            BrainConfig(routes=routes)
 
 
 async def test_live_reload_keeps_old_lists_on_error(app, tmp_path):
@@ -111,9 +113,12 @@ async def test_token_cli_checks_owner_and_lists_agent(pool, root, capsys):
         await execute(parser().parse_args(collector), config)
 
 
-async def test_doctor_prints_task_reference_warnings(pool, root, capsys):
+async def test_doctor_prints_task_reference_warnings(pool, root, capsys, monkeypatch):
+    from illo.brain.fake import FakeBrain
     from illo.cli import doctor
     from illo.config import Config
+
+    monkeypatch.setattr("illo.brain.client.BrainClient", lambda url: FakeBrain())
 
     (root / "lists/warn.md").write_text("---\nname: Warn\nholders: [agent:missing]\ndone: [fake:missing]\n---\nInstructions")
     assert await doctor(Config(database_url=pool.conninfo, workspace_dir=root)) == 0

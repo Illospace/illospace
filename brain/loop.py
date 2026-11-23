@@ -5,7 +5,6 @@ web search), `Usage` reports, and one `Turn` with the answer, the tool calls and
 """
 
 import json
-import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass, field
@@ -17,6 +16,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 from brain.errors import RunError, error_body, provider_error
 from brain.models import ApiKeyAuth, BrainEvent, RunRequest, event
 from brain.outside_data import data_text
+from brain.providers import Provider
 from brain.tools import Call, check_call, check_echo, connect, execute, list_tools
 from brain.usage import Usage, add_usage
 
@@ -50,13 +50,6 @@ class SmokeSession:
             raise RunError("runtime", "The smoke tool needs no arguments")
         self.calls += 1
         return CallToolResult(content=[TextContent(type="text", text="Ready.")])
-
-
-def run_effort(request: RunRequest) -> str:
-    """The request names the effort of its run. The environment is only the default."""
-    if "effort" in request.model_fields_set:
-        return request.effort
-    return os.getenv("ILLO_BRAIN_EFFORT") or request.effort
 
 
 def last_answer(text: str, usage: dict, *, asked_for_tools: bool = False) -> str:
@@ -139,18 +132,19 @@ async def send(wire, request: RunRequest, http: httpx.AsyncClient, *, tools_disa
             response.raise_for_status()
             async for chunk in chunks(response):
                 if wire.checks_echo:
-                    check_echo(request, chunk, error=wire.failed(chunk))
+                    check_echo(request, chunk, wire.provider.api_key, error=wire.failed(chunk))
                 for part in wire.read(request, chunk):
                     yield part
             return
 
 
 async def conversation(
-    wire_type, request: RunRequest, session, tools: list[Tool], http: httpx.AsyncClient
+    wire_type, request: RunRequest, provider: Provider, session, tools: list[Tool],
+    http: httpx.AsyncClient, fallback: Provider | None = None,
 ) -> AsyncIterator[BrainEvent]:
     names = {tool.name for tool in tools}
     yield event("started", catalog=sorted(names))
-    wire = wire_type(request, tools)
+    wire = wire_type(request, tools, provider)
     usage = {}
     fallback_notice = ""
     subscription_limit = None
@@ -167,12 +161,12 @@ async def conversation(
             except Exception as error:
                 if subscription_limit is not None:
                     raise RunError("limit", str(subscription_limit) + " The API fallback failed.",
-                                   **subscription_limit.details, api_key_fallback_failed=True) from None
+                                   **subscription_limit.details, fallback_failed=True) from None
                 if (
                     not isinstance(error, RunError)
                     or attempt
                     or request.provider_auth.kind != "chatgpt"
-                    or not request.api_key_fallback
+                    or fallback is None
                     or error.details.get("code") != "usage_limit_reached"
                 ):
                     raise
@@ -181,13 +175,13 @@ async def conversation(
                     # tool use. The golden case subscription_limit_in_stream_fallback records it.
                     limited = True
                 # Resume the current turn with its tool results. Never replay an MCP write.
-                wire.new_payer()
+                wire.new_payer(fallback)
                 fallback_notice = str(error) + " I used the API key for this request.\n\n"
                 subscription_limit = error
-                # The next request checks for an API key. A failure still reports the limit.
-                request = request.model_copy(
-                    update={"provider_auth": ApiKeyAuth(), "api_key_fallback": False}
-                )
+                # A failure of the fallback request still reports the limit.
+                request = request.model_copy(update={
+                    "provider_auth": ApiKeyAuth(), "provider": fallback.name,
+                    "fallback_provider": None})
         turn = None
         for part in wire.finish(request):
             if isinstance(part := take(part, usage), Turn):
@@ -207,7 +201,7 @@ async def conversation(
         # The limit counts tool calls, not model turns. Each call of a batch counts.
         for call in turn.calls:
             check_call(call, names, wire.missing_id)
-            if tool_calls >= request.max_turns:
+            if tool_calls >= request.max_tool_calls:
                 limited = True
                 wire.add_result(call, LIMIT_RESULT)
                 continue
@@ -219,9 +213,9 @@ async def conversation(
 
 
 async def run(
-    wire_type, request: RunRequest, directory: Path, *, transport=None
+    wire_type, request: RunRequest, provider: Provider, directory: Path, *,
+    fallback: Provider | None = None, transport=None,
 ) -> AsyncIterator[BrainEvent]:
-    wire_type.check(request)  # Check the credential before the MCP connection.
     async with AsyncExitStack() as stack:
         http = await stack.enter_async_context(httpx.AsyncClient(
             timeout=request.timeout_s, follow_redirects=False, transport=transport))
@@ -230,7 +224,7 @@ async def run(
         else:
             session = await stack.enter_async_context(connect(request))
             tools = await list_tools(session)
-        async for item in conversation(wire_type, request, session, tools, http):
+        async for item in conversation(wire_type, request, provider, session, tools, http, fallback):
             if request.smoke and item["type"] == "final":
                 item["tool_round_trip"] = session.calls == 1
             yield item

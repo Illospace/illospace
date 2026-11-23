@@ -145,7 +145,7 @@ async def test_tool_matches_dm_in_every_profile_and_mode(guide, kind):
             run = await runs.create(
                 conn, principal="person:ada" if personal else "team",
                 person_id=person["id"] if personal else None,
-                profile=profile, runtime="fake", model="fake",
+                profile=profile, provider="fake", tool_limit=12, model="fake",
             )
             result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_guide", {"app": kind})
             assert result["decision"] == "allow", result
@@ -193,7 +193,7 @@ async def test_guide_rejects_invalid_arguments(guide, args):
     async with ctx.pool.connection() as conn:
         person = await one(conn, "SELECT id FROM people WHERE key='ada'")
         run = await runs.create(conn, principal="person:ada", person_id=person["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_guide", args)
         assert result["decision"] == "deny"
         assert result["reason"].startswith("The tool arguments do not match its schema: ")
@@ -207,7 +207,7 @@ async def test_guide_denies_outside_runs_with_a_person_profile(guide, principal,
         person = await one(conn, "SELECT id FROM people WHERE key='ada'")
         run = await runs.create(
             conn, principal=principal, person_id=None if principal == "outsider" else person["id"],
-            profile="person_dm", tainted=tainted, runtime="fake", model="fake",
+            profile="person_dm", tainted=tainted, provider="fake", tool_limit=12, model="fake",
         )
         assert "connect_guide" not in {t["name"] for t in ctx.registry.list_tools(run)}
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_guide", {})
