@@ -14,7 +14,7 @@ See [Team memory](memory.md) for chat saves, correction buttons, and memory limi
 
 Design goals, in order:
 1. **Safe by code, not by prompt.** The ten safety rules of section 4 live in server code and have tests.
-2. **Small.** A person can read the whole engine. No web app. No ORM. No queue service. One Postgres.
+2. **Small.** A person can read the whole engine. Pages and one board for decisions. No ORM. No queue service. One Postgres.
 3. **Easy to install.** A new team installs it with the README in less than 30 minutes: one install command, a Slack app from a manifest file, `people.yaml`, a model sign-in, one collector.
 4. **Truth comes from the source system, not from the model.** A task state, an ask state, and a card are data in the ledger. The model reads them through tools. It never invents them.
 
@@ -508,9 +508,11 @@ The existing agent OAuth flow keeps its own state and behaviour.
 
 | Route | Purpose |
 |---|---|
-| `GET /web/signin` | Show the start button, the code, or the result. It makes no request. A local task path is the only accepted destination. With the `key` of a link, show whose link it is and a Continue form. |
+| `GET /web/signin` | Show the start button, the code, or the result. It makes no request. Only local task, request, and board paths are accepted destinations. With the `key` of a link, show whose link it is and a Continue form. |
 | `POST /web/signin` | Make one sign-in request for this browser, then show the code. With the `key` of a link, exchange the key for a session. |
 | `POST /web/signout` | Delete the session after a CSRF check. |
+| `GET /web/board` | Show the signed-in person's three board columns. |
+| `GET /web/board.js` | Serve the canvas script with no cache. It has no person data and needs no session. |
 | `GET /web/app.css` | Serve the page stylesheet with no cache. |
 | `GET /t/{id}` | Show a task visible to the signed-in person. |
 | `GET /t/{id}/progress` | Show computed task progress. The frame reads itself each 15 seconds while the task is in work. |
@@ -519,7 +521,10 @@ The existing agent OAuth flow keeps its own state and behaviour.
 | `POST /t/{id}/decide` | Call the existing Done, reopen, or message function. |
 
 These routes return 404 when `pages.enabled` is false. All HTML uses no-store and a strict CSP.
-The page contains no script or inline style. Agent text is escaped data.
+Task and request pages contain no script or inline style. Agent text is escaped data.
+The board alone adds `script-src 'self'` to the page CSP and loads `/web/board.js`.
+It contains no inline script, inline style, or outside request. The script sets its transform through CSSOM.
+The server renders the full board. Forms and page scroll work without the script.
 
 | Tool | Risk | Profiles when pages are on |
 |---|---|---|

@@ -78,8 +78,10 @@ async def _require(conn, task_id, viewer):
 
 
 async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_for=None,
-                 parent_id=None, query="", open=False, limit=30, mine_refs=None, offset=0):
+                 parent_id=None, query="", open=False, limit=30, mine_refs=None, offset=0, board=None):
     person = await _identity(conn, viewer)
+    if board:
+        return await _board_search(conn, viewer, person, board, limit)
     rows = await all_rows(conn, """SELECT t.*,
         (SELECT count(*) FROM tasks c WHERE c.parent_id=t.id
           AND c.state NOT IN ('done','cancelled')) AS open_pieces,
@@ -98,6 +100,30 @@ async def search(conn, *, viewer, list_key=None, holder=None, state=None, waits_
          "person:" + viewer.person if viewer.person else None, query, query, f"%{query}%", min(100, max(1, limit)), max(0, offset)))
 
     return [await timing(conn, row) for row in rows]
+
+
+async def _board_search(conn, viewer, person, column, limit):
+    # search has checked the identity. Keep its task visibility rule here.
+    filters = {
+        'needs': "t.waits_for=%s AND t.state NOT IN ('done','cancelled')",
+        'work': "t.waits_for IS DISTINCT FROM %s AND t.state IN ('todo','working')",
+        'done': "t.state='done' AND t.done_at>=clock_timestamp()-interval '24 hours' AND %s::text IS NOT NULL",
+    }
+    order = {'needs': 'wait_since,id', 'work': 'updated_at DESC,id DESC', 'done': 'done_at DESC,id DESC'}[column]
+    wait = """COALESCE((SELECT e.at FROM task_events e WHERE e.task_id=t.id
+        AND e.id>COALESCE((SELECT max(b.id) FROM task_events b WHERE b.task_id=t.id
+            AND b.data->>'waits_for' IS DISTINCT FROM t.waits_for),0) ORDER BY e.id LIMIT 1),t.created_at)"""
+    return await all_rows(conn, """SELECT selected.*,
+        COALESCE((SELECT jsonb_agg(e ORDER BY e.id) FROM task_events e
+            WHERE e.task_id=selected.id AND (%s='needs' OR e.kind='done')), '[]') AS board_events
+        FROM (SELECT t.*, """ + (wait if column == 'needs' else 't.created_at') + """ AS wait_since,
+        count(*) OVER () AS board_total,
+        count(*) FILTER (WHERE holder LIKE 'agent:%%') OVER () AS board_agents,
+        count(*) FILTER (WHERE holder LIKE 'person:%%') OVER () AS board_people
+        FROM tasks t WHERE (t.visibility='team' OR t.owner_person_id=%s) AND """ + filters[column]
+        + ' ORDER BY ' + order + ' LIMIT %s) selected ORDER BY ' + order,
+        (column, person['id'] if person and not viewer.team_only else None,
+         viewer.actor, min(30, max(1, limit))))
 
 
 async def events(conn, task_id, *, viewer, limit=20):

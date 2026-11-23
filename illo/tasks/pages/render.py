@@ -43,8 +43,9 @@ MARK = ('<svg class="mark" viewBox="0 37 176 176" aria-hidden="true"><g transfor
         '<circle cx="331.7" cy="99.7" r="11"/><circle cx="324.6" cy="173.6" r="11"/><circle cx="336" cy="64" r="17"/></g></svg>')
 
 
-def top(label, person, csrf):
-    return ('<header class="top">' + MARK + '<b>' + e(label) + '</b><span class="grow"></span><span>'
+def top(label, person, csrf, *, extra='', board=False):
+    return ('<header class="top">' + MARK + '<b>' + e(label) + '</b>' + extra + '<span class="grow"></span>'
+            + ('<a href="/web/board">Board</a><span>' if not board else '<span>')
             + e(person['name']) + '</span><form method="post" action="/web/signout">'
             f'<input type="hidden" name="csrf" value="{e(csrf)}"><button>Sign out</button></form></header>')
 
@@ -64,11 +65,12 @@ def time(at, person):
     return at.astimezone(ZoneInfo(person["timezone"])).strftime('%d %b, %H:%M') if at else ''
 
 
-def form(task_id, csrf, stamp, action, label, *, reason=False):
+def form(task_id, csrf, stamp, action, label, *, reason=False, board=False):
     return (f'<form method="post" action="/t/{task_id}/decide">'
             f'<input type="hidden" name="csrf" value="{e(csrf)}">'
             f'<input type="hidden" name="seen" value="{e(stamp)}">'
             f'<input type="hidden" name="action" value="{e(action)}">'
+            + ('<input type="hidden" name="from" value="board">' if board else '')
             + ('<textarea name="reason" required maxlength="4000" placeholder="What must change?"></textarea>' if reason else '')
             + f'<button class="btn go">{e(label)}</button></form>')
 
@@ -151,18 +153,13 @@ def collapse(events):
     return result
 
 
-async def page(ctx, conn, row, person, token, *, message='', failed=None):
-    task_id = row['id']
+async def task_intro(ctx, conn, row, person, events, *, board=False):
     viewer = tasks.Viewer(person['key'], 'person:' + person['key'], human=True)
-    stored = await one(conn, 'SELECT * FROM task_pages WHERE task_id=%s', (task_id,))
-    events = await all_rows(conn, 'SELECT * FROM task_events WHERE task_id=%s ORDER BY id', (task_id,))
     since, period = digest_snapshot.wait_record(row, events)
     holder = await holder_name(ctx, conn, row['holder'])
     wait = 'you' if row['waits_for'] == viewer.actor else await holder_name(ctx, conn, row['waits_for'])
     days = max(0, (datetime.now(UTC) - since).days)
-    entry = next((entry for entry in ctx.workspace.lists if entry.key == row['list_key']), None)
-    csrf, stamp = signin.csrf(token), seen(row, stored)
-    body = top(f"Task {task_id} · {entry.name if entry else row['list_key']}", person, csrf) + '<main><ul class="chips">'
+    body = '<ul class="chips">'
     if row['waits_for']:
         since_words = 'today' if days == 0 else '1 day' if days == 1 else f'{days} days'
         body += '<li class="wait">' + e(f'Waits for {wait} · {since_words}') + '</li>'
@@ -172,7 +169,43 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
     # The brief writes this reason inside a sentence. On the page it stands alone.
     ask = digest_snapshot.wait_reason(row, period, holder)
     ask = ask[:1].upper() + ask[1:]
-    body += '</ul><h1>' + e(row['title']) + '</h1><p class="ask">' + e(ask) + '</p>'
+    body += '</ul><h1>' + (f'<a href="/t/{row["id"]}">' + e(row['title']) + '</a>' if board else e(row['title'])) + '</h1><p class="ask">' + e(ask) + '</p>'
+    return body
+
+
+async def task_actions(ctx, conn, row, person, csrf, stamp, *, failed=None, board=False):
+    def action_form(action, label, **kwargs):
+        return form(row['id'], csrf, stamp, action, label, board=board, **kwargs)
+
+    actions = ''
+    if row['state'] == 'review' and await _can_review(conn, ctx.workspace, row, person):
+        actions += action_form('done', 'Approve')
+        actions += '<details><summary class="btn">Send back…</summary>' + action_form('reopen', 'Send to the holder', reason=True) + '</details>'
+        if failed:
+            actions += '<div class="prose">' + ''.join('<p>' + e(c['text']) + '</p>' for c in failed if not c['ok']) + '</div>'
+            actions += '<details open><summary class="btn">Confirm anyway…</summary>' + action_form('force', 'Confirm anyway', reason=True) + '</details>'
+    elif row['state'] in {'todo', 'working'}:
+        actions += '<details><summary class="btn">Message the holder…</summary>' + action_form('message', 'Send to the holder', reason=True) + '</details>'
+    return '<div class="decide"><div class="in">' + actions + '</div></div>' if actions else ''
+
+
+async def page_blocks(ctx, conn, task_id, stored, person):
+    if not stored:
+        return ''
+    files = await outside.positions(conn, task_id=task_id)
+    return ''.join([await block_html(ctx, f'/t/{task_id}/file', position, block, person, files=files)
+                    for position, block in enumerate(stored['blocks'])])
+
+
+async def page(ctx, conn, row, person, token, *, message='', failed=None):
+    task_id = row['id']
+    viewer = tasks.Viewer(person['key'], 'person:' + person['key'], human=True)
+    stored = await one(conn, 'SELECT * FROM task_pages WHERE task_id=%s', (task_id,))
+    events = await all_rows(conn, 'SELECT * FROM task_events WHERE task_id=%s ORDER BY id', (task_id,))
+    entry = next((entry for entry in ctx.workspace.lists if entry.key == row['list_key']), None)
+    csrf, stamp = signin.csrf(token), seen(row, stored)
+    body = top(f"Task {task_id} · {entry.name if entry else row['list_key']}", person, csrf) + '<main>'
+    body += await task_intro(ctx, conn, row, person, events)
     body += notice(message)
     for event in reversed(events):
         if event['kind'] in {'done', 'reopened'} and event['actor'].startswith('person:'):
@@ -188,9 +221,7 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
         n = len(value.get('steps') or [])
         body += f'<iframe class="progress s{n}" src="/t/{task_id}/progress" title="Progress" loading="lazy"></iframe>'
     if stored:
-        files = await outside.positions(conn, task_id=task_id)
-        for position, block in enumerate(stored['blocks']):
-            body += await block_html(ctx, f'/t/{task_id}/file', position, block, person, files=files)
+        body += await page_blocks(ctx, conn, task_id, stored, person)
         author = await holder_name(ctx, conn, stored['author']) if stored['author'] not in {'code', 'illo'} else 'Illo'
         body += '<p class="by">' + e(f"{author} wrote this page on {time(stored['written_at'], person)} for version {stored['result_version']} of the result.") + '</p>'
         if await pages.stale(conn, row, stored):
@@ -216,17 +247,7 @@ async def page(ctx, conn, row, person, token, *, message='', failed=None):
         body += '<li><time>' + e(time(event['at'], person)) + '</time> · <span class="actor">' + e(name) + '</span>'
         body += markdown.render(event['text']) + (f'<p>Reminders: {count}</p>' if count > 1 else '') + '</li>'
     body += '</ol></details></main>'
-    actions = ''
-    if row['state'] == 'review' and await _can_review(conn, ctx.workspace, row, person):
-        actions += form(task_id, csrf, stamp, 'done', 'Approve')
-        actions += '<details><summary class="btn">Send back…</summary>' + form(task_id, csrf, stamp, 'reopen', 'Send to the holder', reason=True) + '</details>'
-        if failed:
-            actions += '<div class="prose">' + ''.join('<p>' + e(c['text']) + '</p>' for c in failed if not c['ok']) + '</div>'
-            actions += '<details open><summary class="btn">Confirm anyway…</summary>' + form(task_id, csrf, stamp, 'force', 'Confirm anyway', reason=True) + '</details>'
-    elif row['state'] in {'todo', 'working'}:
-        actions += '<details><summary class="btn">Message the holder…</summary>' + form(task_id, csrf, stamp, 'message', 'Send to the holder', reason=True) + '</details>'
-    if actions:
-        body += '<div class="decide"><div class="in">' + actions + '</div></div>'
+    body += await task_actions(ctx, conn, row, person, csrf, stamp, failed=failed)
     return document(body, title=f'Task {task_id} · Illo')
 
 

@@ -14,7 +14,7 @@ from illo.db import one
 from illo.ledger import ask_workflow, tasks
 from illo.ledger.agent_oauth import PAIR_ALPHABET, limit
 from illo.ledger.tokens import digest
-from illo.tasks.pages import base_url, enabled
+from illo.tasks.pages import base_url, enabled, person_path
 
 REQUEST_COOKIE = "illo_web_request"
 SESSION_COOKIE = "illo_web_session"
@@ -25,8 +25,8 @@ LINKS_PER_HOUR = 20
 
 
 def next_path(value):
-    # Limit the destination to task and request pages. Encoded separators and controls cannot change its host.
-    return value if re.fullmatch(r"/(?:t|web/a)/[1-9][0-9]*(?:/)?", value or "") else ""
+    # Only local pages and board frame targets can follow sign-in.
+    return value if re.fullmatch(r"(?:/(?:t|web/a)/[1-9][0-9]*/?|/web/board(?:#[ta][1-9][0-9]*)?)", value or "") else ""
 
 
 def pairing_line(handle):
@@ -155,9 +155,10 @@ async def link(conn, ctx, person, task_id, *, ask=False):
     # The click in Slack is the approval, so the row starts as approved. The key works one time,
     # in the same exchange as the handle of a browser that got an approval. No pairing code matches it.
     key = secrets.token_urlsafe(32)
+    destination = await person_path(conn, ctx.workspace, person, task_id, ask=ask)
     await conn.execute("""INSERT INTO web_signins(pairing_hash,browser_hash,next_path,person_id,paired_at,decision)
         VALUES (%s,%s,%s,%s,clock_timestamp(),'approved')""",
-        (digest("link:" + key), digest(key), f"/{'web/a' if ask else 't'}/{task_id}", person["id"]))
+        (digest("link:" + key), digest(key), destination, person["id"]))
     return key
 
 
