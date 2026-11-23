@@ -168,12 +168,16 @@ class SlackConnection:
                         await self.socket.connect()
                     if await self.alive(time.monotonic()):
                         self.misses = 0
-                        now = time.time()
-                        if not self.stopping and last_ok is not None and now - last_ok > MIN_GAP_S:
-                            task = asyncio.create_task(self.recover(last_ok, now))
-                            self.pending.add(task)
-                            task.add_done_callback(self.pending.discard)
-                        last_ok = now
+                        # Only a greeting proves that events arrive. Before it, keep the
+                        # old time, so a socket that never gets events stays in the gap.
+                        if self.greeted == self.session:
+                            now = time.time()
+                            if (not self.stopping and last_ok is not None
+                                    and now - last_ok > MIN_GAP_S):
+                                task = asyncio.create_task(self.recover(last_ok, now))
+                                self.pending.add(task)
+                                task.add_done_callback(self.pending.discard)
+                            last_ok = now
                         await self.report(True)
                     else:
                         self.misses += 1

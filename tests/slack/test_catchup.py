@@ -264,8 +264,12 @@ async def test_failed_reads_do_not_stop_the_other_conversations(
     assert "Acme private request" not in owner
 
 
-@pytest.mark.parametrize("gap", [120, 60, 30, None])
-async def test_connection_uses_the_persisted_last_good_time(app, slack_client, monkeypatch, gap):
+@pytest.mark.parametrize(("gap", "greet"), [
+    (120, True), (120, False), (60, True), (30, True), (None, True),
+])
+async def test_connection_uses_the_persisted_last_good_time(
+    app, slack_client, monkeypatch, gap, greet
+):
     ctx = app.state.ctx
     ctx.config.slack_app_token = SecretStr("invented-app-token")
     slack_client.session = None
@@ -283,7 +287,9 @@ async def test_connection_uses_the_persisted_last_good_time(app, slack_client, m
             self.on_message_listeners = []
 
         async def connect(self):
-            pass
+            # Without the greeting, Slack sends no events, so the gap stays open.
+            for listener in self.on_message_listeners if greet else []:
+                await listener(SimpleNamespace(data='{"type": "hello"}'))
 
         async def session_id(self):
             return "s_acme"
@@ -321,7 +327,7 @@ async def test_connection_uses_the_persisted_last_good_time(app, slack_client, m
         await asyncio.gather(*slack.pending)
         async with ctx.pool.connection() as conn:
             sensor = await one(conn, "SELECT * FROM sensors WHERE key='slack:catch-up'")
-        if gap == 120:
+        if gap == 120 and greet:
             recover.assert_awaited_once_with(ctx, slack.intake, NOW - gap, NOW)
             assert sensor["last_ok_at"] and not sensor["last_error_at"]
         else:
