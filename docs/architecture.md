@@ -345,6 +345,7 @@ Tools. The first three keep the request and answer fields that agents use today.
   - `knowledge.get`: `source_ref`. Returns the full item if the person of the token may read it.
   - `workspace.search`: the same search as `knowledge.search`. It exists so that an old caller gets real results.
 - `lane_report`: upsert of one lane. A token writes only the lanes of its own person. It cannot write a `github` lane: only the GitHub poller writes those. `source`, `external_id`, `title`, `state`, `summary`, `links`, `repo`, `machine`, `owner` (a person key, GitHub login, email, or Slack id; default: the person of the token; another person only for a new `team` lane), `visibility` (`team` or `private`), `event` (one line of what happened), `end_summary` (when the lane closes; it also becomes an item).
+  For a closed lane, `last_signal_at` records its last change because an unchanged report leaves the lane as it is.
 - `lane_search`: `query`, `state`, `owner`, `limit`.
 - `ask_create`: `lane` (`source`, `external_id`), `kind`, `question`, `options`, `recommended`, `proof`, `owner` (optional), `due_at`, `expires_at`, `source_ref`. Returns `ask_id` and, if a rule answered at once, the answer.
 - `ask_pull`: returns the answers that wait for the lanes of this token (`ask_id`, lane, option, text, who, when, via). `ask_ack`: `ask_id` → the answer is delivered. An answer that gets no ack is given again. After the end date the delivery state is `failed` and the owner sees it in the digest.

@@ -5,6 +5,21 @@ from datetime import UTC, datetime
 
 from illo.ledger import items, lanes, mcp, people, sensors
 
+SNAPSHOT_KEYS = (
+    "title",
+    "state",
+    "summary",
+    "links",
+    "repo",
+    "machine",
+    "visibility",
+    "end_summary",
+    "is_step",
+    "parent_ref",
+    "progress",
+    "owner_person_id",
+)
+
 
 async def owner(ctx, value: str | None) -> dict:
     if not value:
@@ -47,25 +62,7 @@ async def report_one(ctx, args: dict) -> dict:
     values = {key: value for key, value in args.items() if key not in {"owner", "event", "task"}}
     # An omitted field keeps the stored snapshot, including its private visibility.
     base = (
-        {
-            key: previous[key]
-            for key in (
-                "source",
-                "external_id",
-                "title",
-                "state",
-                "summary",
-                "links",
-                "repo",
-                "machine",
-                "visibility",
-                "end_summary",
-                "is_step",
-                "parent_ref",
-                "progress",
-                "owner_person_id",
-            )
-        }
+        {key: previous[key] for key in ("source", "external_id", *SNAPSHOT_KEYS)}
         if previous
         else {}
     )
@@ -75,10 +72,20 @@ async def report_one(ctx, args: dict) -> dict:
         base["owner_person_id"] = (await owner(ctx, args.get("owner")))["id"]
     if base.get("visibility") == "private" and base["owner_person_id"] != ctx.token["person_id"]:
         raise ValueError("A private lane must belong to the calling person")
-    lane = await lanes.upsert(ctx.conn, **base)
+    unchanged_closed = (
+        previous is not None
+        and previous["state"] in {"done", "failed"}
+        and "event" not in args
+        and all(base.get(key) == previous[key] for key in SNAPSHOT_KEYS)
+    )
+    # An unchanged closed lane still runs the task checks.
+    # Keep the lane row as it is so last_signal_at records the last change.
+    lane = previous if unchanged_closed else await lanes.upsert(ctx.conn, **base)
     from illo.tasks.connectors import lane as task_lane
 
     await task_lane(ctx.app, ctx.conn, lane, task_id=args.get("task"), token=ctx.token)
+    if unchanged_closed:
+        return {"lane_id": lane["id"], "state": lane["state"]}
     await mcp.sync_lane_summary_visibility(ctx.conn, lane)
     changed = previous is None or previous["state"] != lane["state"]
     if args.get("event") or changed:

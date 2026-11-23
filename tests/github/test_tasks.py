@@ -12,6 +12,7 @@ from illo.ledger import kv, people, tasks
 from illo.sources.github import poll
 from illo.tasks import release, wake
 from tests.github.test_triage import alert, trust
+from tests.mcp.client import AgentClient
 
 ADA = tasks.Viewer("ada", "person:ada", human=True)
 BUILD = tasks.Viewer("ada", "agent:build")
@@ -318,6 +319,62 @@ async def test_stopped_lane_waits_before_history_and_release(ctx, github_client,
     record = await events(ctx, row["id"])
     assert len([e for e in record if "lane" in e["data"]]) == 2
     assert len([e for e in record if e["kind"] == "released"]) == 2
+
+
+@pytest.mark.parametrize("state", ["done", "failed"])
+async def test_closed_lane_refresh_checks_for_a_stop_without_rewriting_lane(
+    app, http, ctx, github_client, state,
+):
+    row = await make(ctx)
+    await wake.tick(ctx)
+    agent = await AgentClient.create(app, http)
+    values = {"source": "t3", "external_id": "acme-run", "task": row["id"]}
+    await agent.call("lane_report", {**values, "state": "working"})
+    closed = {**values, "state": state}
+    result = await agent.call("lane_report", closed)
+    pending_key = f"task:stop-pending:{row['id']}"
+    lane_query = "SELECT xmin::text,updated_at FROM lanes WHERE id=%s"
+    lane_id = (result["lane_id"],)
+    async with ctx.pool.connection() as conn:
+        before = await one(conn, lane_query, lane_id)
+        pending = await kv.get(conn, pending_key)
+        assert pending["lane"] == result["lane_id"]
+
+    call_count = len(github_client.calls)
+    assert await agent.call("lane_report", closed) == result
+    assert not any(call["method"] == "get_issue" for call in github_client.calls[call_count:])
+    async with ctx.pool.connection() as conn:
+        assert await kv.get(conn, pending_key) == pending
+        await tasks.alive(conn, row["id"], "github")
+        assert await kv.get(conn, pending_key) is None
+
+    assert await agent.call("lane_report", closed) == result
+    async with ctx.pool.connection() as conn:
+        assert (await kv.get(conn, pending_key))["lane"] == result["lane_id"]
+        assert await one(conn, lane_query, lane_id) == before
+
+
+async def test_closed_lane_refresh_links_a_pull_that_appears_later(app, http, ctx, github_client):
+    from illo.ledger import github
+
+    row = await make(ctx)
+    await wake.tick(ctx)
+    issue = github_client.issues[0]
+    change = f"https://github.com/{REPO}/pull/22"
+    agent = await AgentClient.create(app, http)
+    closed = {"source": "t3", "external_id": "acme-run", "state": "done", "links": [change]}
+    result = await agent.call("lane_report", closed)
+    async with ctx.pool.connection() as conn:
+        await github.sync_item(conn, REPO, {
+            "number": 22, "title": "Repair the export", "body": f"Fixes #{issue['number']}",
+            "state": "open", "pull_request": {}, "html_url": change,
+        }, {})
+        current = await get_without_pool(conn, row["id"])
+        assert not any(link["kind"] == "change" for link in current["links"])
+
+    assert await agent.call("lane_report", closed) == result
+    current = await get(ctx, row["id"])
+    assert any(link["kind"] == "change" and link["url"] == change for link in current["links"])
 
 
 @pytest.mark.parametrize("state", ["done", "failed", "unknown"])
