@@ -1,11 +1,11 @@
-"""Discover the run's tools without a model request."""
+"""The fake adapter lists the run's tools and makes no model request."""
 
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from brain.mcp_client import connect, list_tools
 from brain.models import BrainEvent, RunRequest, event
+from brain.tools import connect, list_tools
 
 
 async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:

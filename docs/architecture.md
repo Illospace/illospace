@@ -260,6 +260,38 @@ A run has a time limit and a turn limit from the config. A failed run gives the 
 
 The brain interface (`illo/brain/client.py`): `async def run(request: RunRequest) -> AsyncIterator[BrainEvent]`. `RunRequest`: `run_id`, `system_prompt`, `user_message`, `mcp_url`, `mcp_token`, `runtime`, `model`, `max_turns`, `timeout_s`. A `fake` runtime in `illo/brain/fake.py` plays a script of tool calls. Each test uses it. The real runtimes live in the `brain/` service. `openai_responses` uses stateless OpenAI Responses; `openai_compat` keeps Chat Completions for other providers and local servers.
 
+### The brain loop
+
+The brain service has one agent loop, `brain/loop.py`. Each wire format has one small adapter in `brain/wire/`:
+
+- `responses.py`: the Responses wire, for the ChatGPT backend and the OpenAI API (`openai_responses`).
+- `chat.py`: the Chat Completions wire (`openai_compat`).
+- `agent_sdk.py`: the Claude Agent SDK (`claude`). It is the self-looping exception below.
+- `fake.py`: lists the tools of the run and makes no model request (`echo`).
+
+An adapter knows only the provider format. It builds one request from the history, the tools and the options. It reads the provider stream and gives back text, tool calls, the raw usage and a stop reason. It maps a provider error to an error category. An adapter does not call a tool, does not count, and does not send a request again. An adapter never imports another adapter. `brain/worker.py` selects the adapter for the runtime of the request.
+
+The loop owns the rules of a run:
+
+- **The counting rule.** The limit (`max_turns`) counts tool calls, not model turns. Each call of a batch counts. The loop does not run a call after the limit. That call gets the result "The tool limit is reached. This tool did not run."
+- **The last request.** After a call over the limit, the loop sends one last request with no tools. It tells the model to answer now. The usage of the run then has `limited: true`. When the run reaches the limit exactly, the next request is a normal request.
+- **The usage sum.** The loop adds the raw usage of each response (`brain/usage.py`). It keeps each numeric field and each detail object.
+- **The subscription fallback.** When the ChatGPT limit stops a request and the request allows `api_key_fallback`, the loop sends that request once again with the API key. It keeps the tool results of the run and does not run a tool again. The usage adds both parts.
+- **The sign-in refresh.** When the provider rejects the sign-in, the brain sends an `auth` error. The brain cannot refresh the grant. The app run manager refreshes it once, if no tool call happened, and starts the run again.
+- **The image retry.** When the provider refuses the images, the loop sends the request once again as text. The text tells the model that it could not see the images.
+
+Other owners:
+
+- `brain/tools.py` is the Illo MCP boundary. It parses the tool arguments, maps an MCP failure to a tool result, and makes the result text. On the Responses wire, it refuses a provider chunk that echoes a credential or private image data. The Chat Completions wire has no such check today; the service redaction removes the credential from its events. On the Responses wire, it reads the run flags: a customer read, a personal read, or a result with no flag metadata closes web search for the rest of the run. The Chat Completions wire reads no run flags today, because it never sends web search. The app makes the run flags (`illo/brain/server.py`).
+- `brain/errors.py` has the error categories: `auth`, `timeout`, `runtime`, `limit`, `internal`. A provider message never enters an event or a log.
+- `brain/server.py` (`redact`) removes credentials from each event line before the line leaves the service.
+
+**The self-looping exception.** The Agent SDK runs the tools itself, so the Claude adapter cannot use the loop. The SDK starts the Claude Code CLI as a subprocess with its built-in tools off. It sees only the Illo MCP server (`tools.SDK_SERVER`), and `tests/safety/test_rule_10_brain_tools.py` checks this. The SDK counts its own turns, so the adapter gives it `max_turns + 1`. The adapter gives its events and one provider operation to `self_looping` in the loop: a function that sends one request with no tools (a new SDK client with no MCP server and `max_turns=1`). `self_looping` decides when the last request starts (at the SDK `limit` error), writes its prompt (the transcript as outside data and the instruction of the last request), adds its usage, marks the usage `limited` and chooses the answer (`last_answer`). The adapter maps its errors with `errors.py`.
+
+**One wire contract in two copies.** `brain/models.py` and `illo/brain/client.py` have the same request models. The brain image has only the `brain/` folder, so the two packages cannot share one module. `tests/brain_service/test_client_contract.py` compares the JSON schema of the two copies, field by field: the names, the types, the defaults, the required fields, the literal values, the bounds and the formats. It also compares the defaults that each model makes, with and without `ILLO_BRAIN_MODEL`. The copies differ today in ten named fields, for example the sign-in models and the bounds that only the service checks. The test pins the exact schema of each side for these fields and gives the reason. Any other difference fails. `tests/brain_service/test_wire_inputs.py` pins the payloads that each copy accepts.
+
+`tests/brain_service/test_golden.py` records the events, the provider requests and the `runs.usage` value of each wire for a fixed set of runs.
+
 ## 7. The tools that the brain sees
 
 Tool names use `family_verb`. Each family is one file in `illo/tools/`. The registry finds each file by itself, so two builders never edit the same file.
@@ -368,7 +400,7 @@ illo/
   sources/       search github slack_index drive archive
   connectors/    mcp_client google oauth github_client
   routines/      scheduler digest reminders stale heartbeat
-brain/           the sandbox service: server, runtimes, Dockerfile
+brain/           the sandbox service: server, loop, wire adapters, Dockerfile
 collectors/      t3/  hooks/ (Claude Code and Codex)
 deploy/          compose.yaml  Dockerfile  install.sh  update.sh  slack/manifest.yaml  env.example
 workspace.example/

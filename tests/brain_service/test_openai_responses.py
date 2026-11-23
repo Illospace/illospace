@@ -6,7 +6,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from brain.runtimes import openai_responses
+from brain import loop
+from brain.wire.responses import Responses
 from tests.brain_service.conftest import serve
 from tests.brain_service.test_service import lines, post
 
@@ -204,7 +205,7 @@ async def test_safe_http_error(run_request, fake_mcp, monkeypatch, caplog, statu
 
 
 async def test_effort_retry_and_process_cache(run_request, fake_mcp, monkeypatch, tmp_path):
-    from brain.worker import failure_event
+    from brain.errors import failure_event
 
     provider = FakeResponses(retry=True)
     monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
@@ -213,7 +214,7 @@ async def test_effort_retry_and_process_cache(run_request, fake_mcp, monkeypatch
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         for _ in range(2):
             try:
-                events = [e async for e in openai_responses.run(run_request, tmp_path)]
+                events = [e async for e in loop.run(Responses, run_request, tmp_path)]
             except Exception as error:
                 pytest.fail(str(failure_event(error)))
             assert events[-1]["type"] == "final"
@@ -301,7 +302,7 @@ async def test_default_base_and_effort(run_request, monkeypatch, base):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         events = [
-            item async for item in openai_responses.conversation(run_request, None, [], client)
+            item async for item in loop.conversation(Responses, run_request, None, [], client)
         ]
     assert events[-1]["text"] == "Ready."
     assert str(received[0].url) == "https://api.openai.com/v1/responses"

@@ -7,9 +7,10 @@ import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent, Tool
 
+from brain import loop
 from brain.models import ChatGPTAuth, event
-from brain.runtimes.openai_responses import WEB_UNAVAILABLE, build_request, conversation
 from brain.server import create_app
+from brain.wire.responses import WEB_UNAVAILABLE, Responses, build_request
 from tests.brain_service.test_service import lines, post
 
 SEARCH = {
@@ -101,7 +102,7 @@ async def test_search_body_and_stateless_replay(run_request, monkeypatch, auth):
         return stream([final()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        events = [item async for item in conversation(run_request, Session(), TOOLS, client)]
+        events = [item async for item in loop.conversation(Responses, run_request, Session(), TOOLS, client)]
     assert SEARCH in bodies[1]["input"]
     assert final("Source") in bodies[1]["input"]
     assert len([item for item in events if item["type"] == "web_search"]) == 1
@@ -130,7 +131,7 @@ async def test_provider_rejection_retries_once_without_search(run_request, monke
         return stream([final()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        events = [item async for item in conversation(run_request, Session(), TOOLS, client)]
+        events = [item async for item in loop.conversation(Responses, run_request, Session(), TOOLS, client)]
     assert len(bodies) == 2
     assert {"type": "web_search"} not in bodies[1]["tools"]
     assert bodies[1]["input"][0]["content"].endswith(WEB_UNAVAILABLE)
@@ -187,6 +188,6 @@ async def test_subscription_fallback_keeps_search_ids(run_request, monkeypatch):
         return stream([final()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        events = [item async for item in conversation(run_request, Session(), TOOLS, client)]
+        events = [item async for item in loop.conversation(Responses, run_request, Session(), TOOLS, client)]
     assert len(bodies) == 3
     assert events[-1]["usage"]["auth_kind"] == "api_key"

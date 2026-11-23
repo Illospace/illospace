@@ -132,3 +132,135 @@ def test_s1_default_wire_accepts_a_brain_without_smoke():
     assert old_request.model_validate(request.wire()).run_id == 1
     request.smoke = True
     assert request.wire()["smoke"] is True
+
+
+TEXT = {"type": "string"}
+SECRET = {"format": "password", "type": "string", "writeOnly": True}
+OPTIONAL_SECRET = {"anyOf": [SECRET, {"type": "null"}], "default": None}
+
+# The differences between the two copies that exist today. Each entry pins the exact schema
+# of each side, so a change on one side still fails. Entry: (client, service, reason).
+KNOWN = {
+    "run_id": ({"type": "integer"}, {"anyOf": [TEXT, {"type": "integer"}]},
+               "The app sends ledger IDs. The service also takes a text ID (its tests use one)."),
+    "system_prompt": (TEXT, {**TEXT, "maxLength": 100_000},
+                      "The service limits the size at its trust boundary."),
+    "user_message": (TEXT, {**TEXT, "maxLength": 100_000},
+                     "The service limits the size at its trust boundary."),
+    "mcp_url": (TEXT, {**TEXT, "format": "uri", "maxLength": 2083, "minLength": 1},
+                "The service checks the URL format."),
+    "mcp_token": (TEXT, SECRET, "The service keeps the token out of logs and errors."),
+    "runtime": (TEXT, {**TEXT, "default": "claude",
+                       "enum": ["claude", "openai_responses", "openai_compat", "echo"]},
+                "The service refuses an unknown runtime; the client sends any name."),
+    "model": (TEXT, {**TEXT, "maxLength": 128, "minLength": 1},
+              "Only the service has a default model (see test_effective_defaults)."),
+    "max_turns": ({"type": "integer"},
+                  {"type": "integer", "default": 8, "minimum": 1, "maximum": 200},
+                  "The app always sends the limit; the service has a default and bounds."),
+    "timeout_s": ({"type": "number"},
+                  {"type": "number", "default": 300, "exclusiveMinimum": 0, "maximum": 3600},
+                  "The app always sends the timeout; the service has a default and bounds."),
+    "provider_auth": (
+        {"type": "object", "additionalProperties": False, "properties": {
+            "kind": {"default": "api_key", "enum": ["api_key", "chatgpt"], "type": "string"},
+            "access_token": OPTIONAL_SECRET, "account_id": OPTIONAL_SECRET}},
+        {"discriminator": {"propertyName": "kind", "mapping": {
+            "api_key": "#/$defs/ApiKeyAuth", "chatgpt": "#/$defs/ChatGPTAuth"}},
+         "oneOf": [
+            {"type": "object", "additionalProperties": False, "properties": {
+                "kind": {"const": "api_key", "default": "api_key", "type": "string"}}},
+            {"type": "object", "additionalProperties": False, "properties": {
+                "kind": {"const": "chatgpt", "default": "chatgpt", "type": "string"},
+                "access_token": SECRET, "account_id": SECRET},
+             "required": ["access_token", "account_id"]},
+         ]},
+        "One client model, two service models. test_wire_inputs.py pins the inputs."),
+}
+# The client must send these settings. The service has its own defaults for them.
+REQUIRED_BY_CLIENT = {"runtime", "model", "max_turns", "timeout_s"}
+REQUIRED = {"run_id", "system_prompt", "user_message", "mcp_url", "mcp_token"}
+
+
+def contract(model) -> tuple[dict, dict]:
+    return schema_contract(model.model_json_schema(), client=model is RunRequest)
+
+
+def schema_contract(schema: dict, *, client: bool) -> tuple[dict, dict]:
+    """Give the top-level schema keys, and each field with its references resolved.
+
+    Pydantic makes each title from a name, so the titles are not compared.
+    """
+    schema = dict(schema)
+    definitions = schema.pop("$defs", {})
+
+    def walk(node):
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        keywords = {key: {name: walk(item) for name, item in value.items()}
+                    if key == "properties" else walk(value)
+                    for key, value in node.items() if key not in ("$ref", "title")}
+        if "$ref" not in node:
+            return keywords
+        # Keep the keywords beside a reference too, for example a bound or a default.
+        resolved = walk(definitions[node["$ref"].removeprefix("#/$defs/")])
+        return {"$ref": resolved, **keywords} if keywords else resolved
+
+    fields = {name: walk(field) for name, field in schema.pop("properties").items()}
+    required = set(schema.pop("required"))
+    assert required == REQUIRED | (REQUIRED_BY_CLIENT if client else set())
+    return walk(schema), fields
+
+
+def test_contract_sees_a_keyword_beside_a_reference():
+    schema = RunRequest.model_json_schema()
+    name, field = next((name, field) for name, field in schema["properties"].items() if "$ref" in field)
+    changed = {**schema, "properties": {**schema["properties"], name: {**field, "maxProperties": 1}}}
+    assert contract(RunRequest)[1][name] != schema_contract(changed, client=True)[1][name]
+    # A property named "title" beside a reference is a field, not a schema title.
+    titled = {**field, "properties": {"title": {"type": "string"}}}
+    other = {**field, "properties": {"title": {"type": "integer"}}}
+    fields = [schema_contract({**schema, "properties": {**schema["properties"], name: value}}, client=True)[1][name]
+              for value in (titled, other)]
+    assert fields[0] != fields[1]
+
+
+def test_one_wire_contract_in_two_copies():
+    from brain.models import RunRequest as ServiceRequest
+
+    (client_top, client), (service_top, service) = contract(RunRequest), contract(ServiceRequest)
+    assert client_top == service_top
+    assert list(client) == list(service)
+    for name in client:
+        expected = KNOWN.get(name, (client[name], client[name], ""))[:2]
+        assert (client[name], service[name]) == expected, name
+
+
+@pytest.mark.parametrize("model_env", [None, "fake-env-model"])
+def test_effective_defaults(monkeypatch, model_env):
+    """Default factories are not in the schema. Compare the values that the models make."""
+    from pydantic import BaseModel
+
+    from brain.models import RunRequest as ServiceRequest
+
+    if model_env is None:
+        monkeypatch.delenv("ILLO_BRAIN_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("ILLO_BRAIN_MODEL", model_env)
+    sent = {"run_id": 1, "system_prompt": "Acme", "user_message": "Hello",
+            "mcp_url": "http://illo.example/brain/mcp", "mcp_token": "fake-token",
+            "runtime": "echo", "model": "fake-model", "max_turns": 3, "timeout_s": 5}
+    client = RunRequest(**sent)
+    service = ServiceRequest(**{name: sent[name] for name in REQUIRED})
+
+    def effective(request, name):
+        value = getattr(request, name)
+        return value.model_dump(mode="json", exclude_none=True) if isinstance(value, BaseModel) else value
+
+    for name in set(RunRequest.model_fields) - set(sent):
+        assert effective(client, name) == effective(service, name), name
+    assert {name: effective(service, name) for name in REQUIRED_BY_CLIENT} == {
+        "runtime": "claude", "model": model_env or "claude-opus-5-5", "max_turns": 8,
+        "timeout_s": 300}

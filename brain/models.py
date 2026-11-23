@@ -1,4 +1,8 @@
-"""The gateway and the service share this wire format."""
+"""The wire contract of the service. `illo/brain/client.py` is the app copy.
+
+`tests/brain_service/test_client_contract.py` compares the two copies. It names each
+difference that exists today, and fails on any other difference.
+"""
 
 import os
 from typing import Any, Literal
@@ -39,16 +43,12 @@ class RunRequest(BaseModel):
     mcp_url: HttpUrl
     mcp_token: SecretStr
     runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] = "claude"
-    model: str = Field(
-        default_factory=lambda: os.getenv("ILLO_BRAIN_MODEL", "claude-opus-5-5"),
-        min_length=1,
-        max_length=128,
-    )
+    model: str = Field(default_factory=lambda: os.getenv("ILLO_BRAIN_MODEL", "claude-opus-5-5"),
+                       min_length=1, max_length=128)
     max_turns: int = Field(default=8, ge=1, le=200)
     timeout_s: float = Field(default=300, gt=0, le=3600)
-    provider_auth: ApiKeyAuth | ChatGPTAuth = Field(
-        default_factory=ApiKeyAuth, discriminator="kind", repr=False
-    )
+    provider_auth: ApiKeyAuth | ChatGPTAuth = Field(default_factory=ApiKeyAuth, discriminator="kind",
+                                                    repr=False)
     effort: Literal["low", "medium", "high", "xhigh"] = "low"
     deep: bool = False
     max_output_tokens: int | None = Field(default=None, ge=1)
@@ -71,22 +71,12 @@ class RunRequest(BaseModel):
     def wire(self) -> dict:
         data = self.model_dump(mode="json")
         data["mcp_token"] = self.mcp_token.get_secret_value()
-        if isinstance(self.provider_auth, ChatGPTAuth):
-            data["provider_auth"] = {
-                "kind": "chatgpt",
-                "access_token": self.provider_auth.access_token.get_secret_value(),
-                "account_id": self.provider_auth.account_id.get_secret_value(),
-            }
+        if isinstance(auth := self.provider_auth, ChatGPTAuth):
+            data["provider_auth"] = {"kind": "chatgpt", "access_token": auth.access_token.get_secret_value(),
+                                     "account_id": auth.account_id.get_secret_value()}
         data["images"] = [image.wire() for image in self.images]
         return data
 
 
 def event(kind: str, **fields: Any) -> BrainEvent:
     return {"type": kind, **fields}
-
-
-class RunError(Exception):
-    def __init__(self, category: str, message: str, **details: Any) -> None:
-        super().__init__(message)
-        self.category = category
-        self.details = details

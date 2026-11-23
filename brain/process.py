@@ -41,11 +41,8 @@ async def run_worker(
                 if terminal:
                     break
             if not terminal:
-                yield event(
-                    "error",
-                    category="internal",
-                    message="The brain worker stopped without an answer",
-                )
+                yield event("error", category="internal",
+                            message="The brain worker stopped without an answer")
         finally:
             if process is not None:
                 try:
