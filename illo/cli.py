@@ -83,7 +83,7 @@ async def _report_collector_versions(conn: Connection) -> None:
     for row in await sensors.recent_collectors(conn):
         try:
             detail = json.loads(row["detail"])
-        except (ValueError, RecursionError):
+        except (TypeError, ValueError, RecursionError):
             detail = None
         version = detail.get("version") if isinstance(detail, dict) else None
         if version == CODE_VERSION:
