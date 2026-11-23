@@ -33,6 +33,11 @@ async def test_initialize_list_and_alias_header(app, http):
         "task_post",
         "task_create",
         "task_lists",
+        "board_inbox",
+        "board_read",
+        "board_post",
+        "board_ack",
+        "board_resolve",
     }
     assert all(t["inputSchema"]["additionalProperties"] is False for t in tools)
     async with app.state.ctx.pool.connection() as conn:

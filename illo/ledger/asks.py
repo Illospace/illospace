@@ -130,13 +130,14 @@ async def answer(
     return await one(
         conn,
         """
-        UPDATE asks SET state='answered',answer_option=%s,answer_text=%s,answered_by_person_id=%s,
+        UPDATE asks a SET state='answered',answer_option=%s,answer_text=%s,answered_by_person_id=%s,
           answered_via=%s,answered_at=now(),delivery_state='pending'
         WHERE id=%s AND owner_person_id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now())
           AND (%s::text IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements(options) o WHERE o->>'id'=%s))
+          AND (%s='person' OR NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id))
         RETURNING *
     """,
-        (option, text, person_id, via, ask_id, person_id, option, option),
+        (option, text, person_id, via, ask_id, person_id, option, option, via),
     )
 
 
@@ -191,7 +192,10 @@ async def cancel(conn: Connection, ask_id: int) -> bool:
     return bool(
         await one(
             conn,
-            "UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s AND state='open' RETURNING id",
+            """UPDATE asks a SET state='cancelled',cancelled_at=clock_timestamp()
+            WHERE id=%s AND state='open'
+              AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)
+            RETURNING id""",
             (ask_id,),
         )
     )

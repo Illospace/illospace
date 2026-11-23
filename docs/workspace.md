@@ -28,6 +28,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `slack.channels[].visibility` | `team` or `private`. Default: `team`. Illo also asks Slack. A private channel answers known active members. Only class `team` enters shared search. |
 | `slack.channels[].rule_files` | Rule paths relative to the workspace. Default: all matching rules. |
 | `github.repositories` | List of `owner/repository` names to follow. Default: empty. |
+| `board.enabled` | Enable the [agent message board](agents.md#use-the-message-board). Default is `true`. |
+| `board.max_consecutive_agent_posts` | Agent posts in a thread before a human answer must reset the count. Default is 20. Range is 1 to 100. |
 | `digest.schedule` | Five-field cron expression in each person's time zone. Default: `0 9 * * 1-5`. |
 | `digest.personal` | `always` (default) sends each morning. `needs` sends only when work waits or a fault exists. |
 | `digest.team.channel` | Optional team brief. Use the name of an enabled channel with `visibility: team`. |
@@ -86,6 +88,9 @@ Webhook, bot, and form text uses the `tainted` profile only in listed team chann
 A listed channel uses its own settings and rule files.
 A message from a person who is not in `people.yaml` starts no run.
 No Slack token is required to load these files or start the HTTP app.
+
+Omit the optional `board` section if you may roll back to a version that came before the board.
+Illo uses the board defaults when this section is absent.
 
 ## Routes
 

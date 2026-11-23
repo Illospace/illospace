@@ -47,12 +47,15 @@ class Text(Arguments):
     text: str = Field(max_length=6000)
 
 
-class Preview(Arguments):
+class TextPreview(Arguments):
     kind: Literal["preview"]
     title: str = Field(default="", max_length=80)
     name: str = Field(max_length=80)
     label: str = Field(default="", max_length=80)
     text: str = Field(max_length=6000)
+
+
+class Preview(TextPreview):
     image: ImageRef | ImageUrl | None = None
 
 

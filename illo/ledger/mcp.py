@@ -260,6 +260,7 @@ async def cancel_ask(conn, token, ask_id, source_ref) -> dict | None:
         """SELECT a.* FROM asks a JOIN tokens t ON t.id=a.requester_token_id
         WHERE t.person_id=%s AND ((%s::bigint IS NOT NULL AND a.id=%s)
           OR (%s::text IS NOT NULL AND a.source_ref=%s AND a.requester_token_id=%s))
+          AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)
         FOR UPDATE OF a""",
         (token["person_id"], ask_id, ask_id, source_ref, source_ref, token["id"]),
     )
