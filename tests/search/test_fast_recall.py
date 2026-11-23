@@ -457,6 +457,17 @@ async def old_ledger_items(
 
 
 async def test_item_migration_with_concurrent_writer(corpus, pool):
+    try:
+        await migration_with_concurrent_writer(corpus, pool)
+    finally:
+        # The test drops the search tables of the shared test database. Put them back after a failure.
+        await corpus.rollback()
+        if not (await one(corpus, "SELECT to_regclass('item_search') IS NOT NULL AS ok"))["ok"]:
+            await migrate(corpus)
+            await corpus.commit()
+
+
+async def migration_with_concurrent_writer(conn, pool):
     import asyncio
     from pathlib import Path
 
@@ -464,7 +475,6 @@ async def test_item_migration_with_concurrent_writer(corpus, pool):
 
     from illo.ledger import items
 
-    conn = corpus
     await conn.execute("DROP FUNCTION illo_item_search_vector() CASCADE")
     await conn.execute("DROP FUNCTION illo_slack_event_search_vector() CASCADE")
     await conn.execute("DROP TABLE item_search,slack_event_search")
