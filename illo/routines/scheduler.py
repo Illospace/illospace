@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 class Scheduler:
     def __init__(self, ctx):
         self.ctx = ctx
+        self.started_at = datetime.now(UTC)
         self.tasks: list[asyncio.Task] = []
         self.names: set[str] = set()
 

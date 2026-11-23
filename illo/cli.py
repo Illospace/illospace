@@ -5,6 +5,7 @@ import asyncio
 import getpass
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 from illo.config import Config
 from illo.db import Connection, migrate, one
 from illo.ledger import ask_workflow, people, sensors, tokens
+from illo.ledger.jobs import report_time, silent_jobs
 from illo.log import configure
 from illo.vault import Vault, delete, get_names
 from illo.workspace import load_workspace
@@ -137,6 +139,12 @@ async def doctor(config: Config) -> int:
                 failed = True
             else:
                 print("The database is ready.")
+                silent = await silent_jobs(conn, datetime.now(UTC))
+                if not silent:
+                    print("Scheduled jobs: all report on time.")
+                for row in silent:
+                    print(f"Warning: the scheduled job {row['job']} is silent. "
+                          f"Its last report was at {report_time(row['since'])}.")
                 from illo.sandbox.repos import status
 
                 print(await status(conn))

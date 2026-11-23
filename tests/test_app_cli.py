@@ -2,6 +2,7 @@
 
 import json
 import shutil
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -18,7 +19,9 @@ from tests.conftest import ROOT
 
 async def test_health_and_stub_setup(http, app):
     response = await http.get("/healthz")
-    assert response.json() == {"status": "ok", "database": "ok", "revision": "test-revision"}
+    assert response.json() == {
+        "status": "ok", "database": "ok", "revision": "test-revision", "jobs": "ok",
+    }
     assert app.state.ctx.config.slack_bot_token is None
     assert all(__import__(name, fromlist=["setup"]).setup for name in SETUP_MODULES)
 
@@ -154,6 +157,27 @@ async def test_doctor_reports_recent_collector_versions(app, monkeypatch, capsys
     assert "the collector acme-missing runs other code (no version)." in output
     assert "the collector acme-bad-json runs other code (no version)." in output
     assert f"the collector acme-long runs other code ({long_version[:60]})." in output
+
+
+async def test_doctor_reports_silent_jobs_without_failure(app, monkeypatch, capsys):
+    from illo.cli import doctor
+
+    ctx = app.state.ctx
+    ctx.config.database_url = ctx.pool.conninfo
+    monkeypatch.setattr("illo.cli.load_workspace", lambda _: ctx.workspace)
+    monkeypatch.setattr("illo.brain.client.BrainClient", lambda url: ctx.brain_client)
+    assert await doctor(ctx.config) == 0
+    assert "Scheduled jobs: all report on time." in capsys.readouterr().out
+    since = datetime.now(UTC) - timedelta(minutes=11)
+    async with ctx.pool.connection() as conn:
+        await conn.execute(
+            """INSERT INTO sensors (key,last_ok_at,expected_every_s)
+            VALUES ('job:acme.example.check_briefs',%s,30)""",
+            (since,),
+        )
+    assert await doctor(ctx.config) == 0
+    assert (f"Warning: the scheduled job acme.example.check_briefs is silent. "
+            f"Its last report was at {since:%Y-%m-%d %H:%M UTC}." in capsys.readouterr().out)
 
 
 @pytest.mark.parametrize("old_key", [False, True])

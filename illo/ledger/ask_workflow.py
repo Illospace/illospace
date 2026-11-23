@@ -1,5 +1,7 @@
 """Ledger queries for cards, routing, and the decision log."""
 
+from datetime import datetime
+
 from illo.db import Connection, all_rows, one
 from illo.ledger import asks, items
 
@@ -248,11 +250,17 @@ async def draft_failed(conn: Connection, draft_id):
     )
 
 
-async def digest_sent(conn: Connection, person_key, now):
+async def record_digest_run(conn: Connection, key: str, when: datetime, status: str) -> None:
+    """Keep the latest daily brief result."""
     await conn.execute(
-        "INSERT INTO routine_state (key,last_run_at,last_status) VALUES (%s,%s,'ok') ON CONFLICT (key) DO UPDATE SET last_run_at=EXCLUDED.last_run_at,last_status='ok'",
-        (f"digest:{person_key}", now),
+        """INSERT INTO routine_state (key,last_run_at,last_status) VALUES (%s,%s,%s)
+        ON CONFLICT (key) DO UPDATE SET last_run_at=EXCLUDED.last_run_at,last_status=EXCLUDED.last_status""",
+        (key, when, status),
     )
+
+
+async def digest_sent(conn: Connection, person_key, now):
+    await record_digest_run(conn, f"digest:{person_key}", now, "ok")
 
 
 async def digest_last_sent(conn: Connection, person_key):

@@ -406,7 +406,7 @@ illo/
   channels/      slack/ email/ mcp/ signals/
   sources/       search github slack_index drive archive
   connectors/    mcp_client google oauth github_client
-  routines/      scheduler digest reminders stale heartbeat
+  routines/      scheduler digest reminders stale heartbeat watchdog
 brain/           the sandbox service: server, providers, loop, wire adapters, Dockerfile
 collectors/      t3/  hooks/ (Claude Code and Codex)
 deploy/          compose.yaml  Dockerfile  install.sh  update.sh  slack/manifest.yaml
@@ -438,6 +438,16 @@ It reads `heartbeat.json` from the `ops/heartbeat` branch of this repository.
 The watcher alarms after 12 minutes without a fresh heartbeat. It keeps its
 state in `deadman-state.json` on the same branch. It sends the notice before
 it writes the new state. A failed write can cause a duplicate notice.
+
+## Job watchdog
+
+The watchdog checks job reports every 60 seconds on its own database connection.
+It measures from the last report or the process start, whichever is later.
+A job is silent after more than 10 job intervals, with a minimum of 10 minutes.
+The watchdog sends one alert and one recovery message by Slack DM to active workspace owners
+(`role: owner` in `people.yaml`).
+`/healthz` returns HTTP 200 when the database answers and shows `ok`, `silent`, or `unknown` in `jobs`.
+`illo doctor` lists silent jobs.
 
 ## The brain tool endpoint
 
