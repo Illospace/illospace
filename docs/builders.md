@@ -6,6 +6,7 @@ The context has `config`, `pool`, `workspace`, `registry`, `gateway`, `slack_cli
 The Slack and GitHub clients can be `None`. The channel builder creates its client.
 Use `ctx.every(seconds, fn)` or `ctx.cron(expr, fn)` for async jobs without arguments.
 The scheduler reports each job through `sensors`. It cancels jobs at shutdown.
+The watchdog notifies owners if a job stays silent for more than 10 intervals or 10 minutes, whichever is longer.
 
 ## Add a tool
 

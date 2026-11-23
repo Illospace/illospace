@@ -7,6 +7,7 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -20,6 +21,7 @@ from illo.brain.server import endpoint
 from illo.config import Config
 from illo.db import create_pool, migrate, one
 from illo.gateway import Gateway
+from illo.ledger.jobs import silent_jobs
 from illo.routines.scheduler import Scheduler
 from illo.slackapi import ActionRouter
 from illo.tools.registry import Registry
@@ -51,6 +53,7 @@ SETUP_MODULES = (
     "illo.routines.reminders",
     "illo.routines.stale",
     "illo.routines.heartbeat",
+    "illo.routines.watchdog",
     "illo.asks",
     "illo.notes",
     "illo.memory",
@@ -174,9 +177,19 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
     @app.get("/healthz")
     async def healthz(request: Request):
         try:
-            async with request.app.state.ctx.pool.connection(timeout=3) as conn:
+            ctx = request.app.state.ctx
+            async with ctx.pool.connection(timeout=3) as conn:
                 await one(conn, "SELECT 1")
-            return {"status": "ok", "database": "ok", "revision": config.revision}
+                try:
+                    async with conn.transaction():
+                        silent = await silent_jobs(
+                            conn, datetime.now(UTC), names=ctx.scheduler.names,
+                            started_at=ctx.scheduler.started_at,
+                        )
+                    jobs = "silent" if silent else "ok"
+                except Exception:
+                    jobs = "unknown"
+            return {"status": "ok", "database": "ok", "revision": config.revision, "jobs": jobs}
         except Exception:
             return JSONResponse(
                 {"status": "error", "database": "unavailable", "revision": config.revision},

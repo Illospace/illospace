@@ -1,6 +1,7 @@
 """Send one model-written morning brief in each person's time zone."""
 
 import asyncio
+import logging
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -17,6 +18,10 @@ from illo.db import one
 from illo.gateway.events import InboundEvent
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import briefs, kv, people
+
+log = logging.getLogger(__name__)
+ON_TIME = timedelta(minutes=2)
+LATE_LIMIT = timedelta(hours=2)
 
 DEFAULT_INSTRUCTIONS = """Write the morning brief for {name}. Call `digest_snapshot` first. Use only its data.
 
@@ -262,7 +267,11 @@ async def send_due(ctx, now=None):
     now = now or datetime.now(UTC)
     from illo.routines.team_digest import send_team_due
 
-    await send_team_due(ctx, now)
+    team_error = None
+    try:
+        await send_team_due(ctx, now)
+    except Exception as exc:
+        team_error = exc
     async with ctx.pool.connection() as conn:
         members = await people.list_people(conn)
     for person in members:
@@ -276,8 +285,6 @@ async def send_due(ctx, now=None):
             due = croniter(
                 briefs.schedule(ctx.workspace.config, preferences), local + timedelta(microseconds=1)
             ).get_prev(datetime)
-            if local - due > timedelta(minutes=2):
-                continue
             last = await ledger.digest_last_sent(conn, person["key"])
             if last and (last >= due or last.astimezone(zone).date() >= local.date()):
                 continue
@@ -285,16 +292,20 @@ async def send_due(ctx, now=None):
                 conn, "SELECT payload FROM events WHERE channel='digest' AND external_id=%s",
                 (f"{person['id']}:{due.isoformat()}",),
             )
+            state_key = f"digest:{person['key']}"
+            age = local - due
+            if age > ON_TIME and not stored:
+                continue
+            if age > LATE_LIMIT:
+                await ledger.record_digest_run(conn, state_key, due, "skipped")
+                log.warning("The personal brief passed its retry limit")
+                continue
             data = (stored["payload"]["payload"]["digest_snapshot"] if stored
                     else await snapshot(conn, person, ctx, now))
             if ctx.workspace.config.digest.personal == "needs" and not any(
                 data.get(key) for key in ("needs_you", "asks", "faults")
             ):
-                await ledger.digest_sent(conn, person["key"], now)
-                await conn.execute(
-                    "UPDATE routine_state SET last_status='skipped' WHERE key=%s",
-                    (f"digest:{person['key']}",),
-                )
+                await ledger.record_digest_run(conn, state_key, now, "skipped")
                 continue
             # The model run can take minutes, and its tools take the same locks.
             # End the transaction first: no lock stays across the run.
@@ -319,6 +330,8 @@ async def send_due(ctx, now=None):
                 await conn.execute(
                     "UPDATE brief_preferences SET announced=true WHERE person_id=%s", (person["id"],)
                 )
+    if team_error is not None:
+        raise team_error
 
 
 async def setup(ctx):

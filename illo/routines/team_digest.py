@@ -1,5 +1,6 @@
 """Send the team brief once per local day with a stable delivery key."""
 
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -11,8 +12,18 @@ from illo.channels.slack.channels import resolve_channel
 from illo.db import one
 from illo.ledger import ask_workflow, kv
 from illo.ledger.digest_snapshot import TEAM_STATE_KEY, team_snapshot
-from illo.routines.digest import counted, finished_lines, sentence, task_label, write_brief
+from illo.routines.digest import (
+    LATE_LIMIT,
+    ON_TIME,
+    counted,
+    finished_lines,
+    sentence,
+    task_label,
+    write_brief,
+)
 from illo.routines.scheduler import deliver_routine
+
+log = logging.getLogger(__name__)
 
 LEGACY_INSTRUCTIONS = """Write the team brief for {team}. Call `team_snapshot` first. Use only its data.
 
@@ -85,8 +96,21 @@ async def send_team_due(ctx, now=None):
     zone = ZoneInfo(config.timezone)
     local = now.astimezone(zone)
     due = croniter(team.schedule, local + timedelta(microseconds=1)).get_prev(datetime)
-    if local - due > timedelta(minutes=2):
-        return
+    key = f"digest-team:{due.isoformat()}"
+    age = local - due
+    if age > ON_TIME:
+        async with ctx.pool.connection() as conn:
+            event = await one(
+                conn, "SELECT 1 FROM events WHERE channel='team_digest' AND external_id=%s", (key,)
+            )
+            if not event:
+                return
+            if age > LATE_LIMIT:
+                await ask_workflow.lock_digest(conn, TEAM_STATE_KEY)
+                if not await sent_since(conn, due, local):
+                    await ask_workflow.record_digest_run(conn, TEAM_STATE_KEY, due, "skipped")
+                    log.warning("The team brief passed its retry limit")
+                return
     async with ctx.pool.connection() as conn:
         try:
             channel = await resolve_channel(ctx, team.channel, conn=conn)
@@ -99,7 +123,6 @@ async def send_team_due(ctx, now=None):
         await ask_workflow.lock_digest(conn, TEAM_STATE_KEY)
         if await sent_since(conn, due, local):
             return
-        key = f"digest-team:{due.isoformat()}"
         # A failed send must retry the event even if the current work is now empty.
         event = await one(
             conn,
@@ -141,8 +164,4 @@ async def send_team_due(ctx, now=None):
             )
         if active or event:
             await kv.set(conn, "brief:sent:" + TEAM_STATE_KEY, now.isoformat())
-        await conn.execute(
-            """INSERT INTO routine_state (key,last_run_at,last_status) VALUES (%s,%s,%s)
-            ON CONFLICT (key) DO UPDATE SET last_run_at=EXCLUDED.last_run_at,last_status=EXCLUDED.last_status""",
-            (TEAM_STATE_KEY, now, "ok" if active or event else "skipped"),
-        )
+        await ask_workflow.record_digest_run(conn, TEAM_STATE_KEY, now, "ok" if active or event else "skipped")
