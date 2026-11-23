@@ -44,7 +44,7 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 ## What Illo will not be
 
-- **Not a dashboard.** People work in Slack. Illo has web pages only for what a message cannot show: the task page, the task list, and the sign-in pages. A person reaches a page from a link in a message.
+- **Pages and one board for decisions.** Each frame shows the work and the forms to act on it. Slack stays the place for talk. A person can reach the board or a page from a link in a message.
 - **Not a coding agent.** Illo does not write code, run commands, release, merge, or delete. It files a ticket, and an agent or a person does the work.
 - **Not a copy of your data.** Illo searches most sources where they live. The ledger stores tasks, run evidence, asks, decisions, notes, and saved items, with links. It also stores messages from the configured public Slack channels, and each message to Illo with its answer. The model provider that the team chooses receives the prompts and the tool results of each run.
 - **Not a second inbox.** It does not send progress messages.

@@ -22,7 +22,15 @@ async def full(conn, workspace, row, viewer, *, limit=20, ctx=None):
         AND kind IN ('woken','wake_failed') ORDER BY id DESC LIMIT 1""", (row["id"],))
     result["progress"] = await progress.read(conn, row, viewer)
     if workspace.config.pages.enabled:
-        result["page_url"] = pages.url(getattr(ctx, "app", ctx), row["id"]) if ctx else pages.workspace_url(workspace, row["id"])
+        on_board = False
+        if viewer.human and workspace.config.pages.open == 'board':
+            from illo.tasks.pages.board import needs
+
+            person = await tasks._identity(conn, viewer)
+            frames, _ = await needs(conn, person)
+            on_board = any(kind == 't' and task['id'] == row['id'] for _, kind, task in frames)
+        result["page_url"] = (pages.url(getattr(ctx, "app", ctx), row["id"], on_board=on_board) if ctx
+                              else pages.workspace_url(workspace, row["id"], on_board=on_board))
     result["wake"] = data_text("task-wake", latest["text"]) if latest else None
     agent = next((a for a in workspace.agents if "agent:" + a.key == row["holder"]), None)
     if agent and await one(conn, "SELECT 1 FROM task_wakes WHERE task_id=%s AND finished_at IS NULL", (row["id"],)):

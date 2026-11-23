@@ -20,7 +20,7 @@ def title_link(ctx, row):
     if ctx.workspace.config.pages.enabled:
         from illo.tasks.pages import url
 
-        return "<" + escape(url(ctx, row["id"])) + "|" + escape(row["title"]) + ">"
+        return "<" + escape(row.get("page_url") or url(ctx, row["id"])) + "|" + escape(row["title"]) + ">"
     return escape(row["title"])
 
 
@@ -106,8 +106,8 @@ async def _thread(ctx, conn, row, entry, person):
             + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(state_label(row["state"])))
     sent = await ctx.slack_client.chat_postMessage(channel=channel, text=text,
         unfurl_links=False, client_msg_id=message_id("root", row["id"]))
-    row = await one(conn, "UPDATE tasks SET slack_channel=%s,slack_ts=%s WHERE id=%s RETURNING *",
-                    (channel, sent["ts"], row["id"]))
+    row.update(await one(conn, "UPDATE tasks SET slack_channel=%s,slack_ts=%s WHERE id=%s RETURNING *",
+                         (channel, sent["ts"], row["id"])))
     await kv.set(conn, f"slack:thread:{channel}:{sent['ts']}", True)
     if channel.startswith("D"):
         await kv.set(conn, f"task:dm-owner:{row['id']}", person["key"])
@@ -218,11 +218,12 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
         await conn.execute("DELETE FROM kv WHERE key=%s AND value=%s",
                            (f"task:pending:{task_id}", Jsonb(pending_version)))
         return
-    row = await _thread(ctx, conn, row, entry, person)
     if ctx.workspace.config.pages.enabled:
-        from illo.tasks.pages import url
+        from illo.tasks.pages import base_url, person_path, url
 
-        row["page_url"] = url(ctx, row["id"])
+        row["page_url"] = (base_url(ctx) + await person_path(conn, ctx.workspace, person, row['id'])
+                           if person else url(ctx, row['id']))
+    row = await _thread(ctx, conn, row, entry, person)
     root_text = ("Task: " + title_link(ctx, row) + " · " + escape(entry.name) + " · "
                  + escape(await holder_name(ctx, conn, row["holder"])) + " · " + escape(state_label(row["state"])))
     if await kv.get(conn, f"task:root:{task_id}") != root_text:

@@ -327,6 +327,7 @@ class ConnectConfig(Model):
 
 
 class PagesConfig(Model):
+    open: Literal["page", "board"] = "page"
     enabled: bool = False
     outside_images: bool = False
     url: str | None = None
