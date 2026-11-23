@@ -10,6 +10,7 @@ from illo.connectors.google import personal_call
 from illo.ledger import people, runs
 from illo.tools.registry import ToolContext
 from tests.fakes import FakeGoogleClient
+from tests.tool_results import read_result
 
 
 async def prepare(app):
@@ -27,7 +28,7 @@ async def prepare(app):
 
 async def call(rpc, token, name, args):
     response = await rpc(token, "tools/call", {"name": name, "arguments": args})
-    return response.json()["result"]["structuredContent"]
+    return read_result(response.json()["result"])
 
 
 @pytest.mark.parametrize(

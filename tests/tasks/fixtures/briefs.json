@@ -1,0 +1,18 @@
+{
+  "personal": {
+    "name": "Ada",
+    "needs_you_total": 1,
+    "needs_you": [{"id": 12, "title": "Choose the export format", "reason": "CSV or JSON?", "age_hours": 3}],
+    "your_agents": [{"name": "Build agents", "count": 2, "silent": [14], "restarts": 1, "restart_tasks": [14]}],
+    "finished_total": 1,
+    "finished": [{"id": 10, "title": "Repair the export", "holder": "Build agents", "done_by": "the Done rule", "proof": ["The ticket is closed."], "proof_links": []}],
+    "due": [{"id": 15, "title": "Review the video", "due_at": "2026-11-11T10:00:00+00:00"}]
+  },
+  "team": {
+    "finished_total": 1,
+    "finished": [{"id": 10, "title": "Repair the export", "holder": "Build agents", "done_by": "the Done rule", "proof": ["The ticket is closed."], "proof_links": []}],
+    "waiting": [{"name": "Ada", "count": 2, "oldest_hours": 3, "oldest": {"id": 12, "title": "Choose the export format"}}],
+    "stuck": [{"id": 14, "title": "Repair the runner", "fact": "the holder stays silent after 2 restarts", "action_by": "Ada"}],
+    "in_work": {"agents": 2, "people": 1}
+  }
+}

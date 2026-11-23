@@ -3,10 +3,13 @@ ARG ILLO_REVISION=unknown
 LABEL org.opencontainers.image.revision=$ILLO_REVISION
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ILLO_REVISION=$ILLO_REVISION
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md LICENSE* ./
 COPY illo ./illo
 COPY collectors ./collectors
 RUN pip install --no-cache-dir . && chmod -R a+rX /app && groupadd --gid 10001 illo && useradd --uid 10001 --gid illo --create-home illo
+# A new volume takes the mode of this folder. A deployment can run the gateway with its own ILLO_UID.
+RUN mkdir -p /repos && chown 10001:10001 /repos && chmod 1777 /repos
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=5s --timeout=5s --start-period=30s --retries=12 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]

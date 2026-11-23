@@ -10,6 +10,12 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+MCP_RESERVED = frozenset({"google", "calendar", "mail", "gmail", "drive", "chatgpt", "aws"})
+
+
+AWS_SERVICES = ("logs", "cloudwatch", "autoscaling", "elbv2", "codebuild", "ecs", "lambda", "rds")
+
+
 GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -31,12 +37,13 @@ class ConnectorTool(Model):
 
 
 class Auth(Model):
-    type: Literal["bearer", "oauth", "service_account"] = "bearer"
+    type: Literal["bearer", "oauth", "service_account", "access_key"] = "bearer"
     secret: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
     authorization_url: str | None = None
     token_url: str | None = None
+    token_endpoint_auth_method: Literal["none", "client_secret_post", "client_secret_basic"] | None = None
     scopes: list[str] = Field(default_factory=list)
     redirect_uri: str = "http://127.0.0.1:8765/callback"
 
@@ -61,9 +68,14 @@ def validate_url(value):
 
 class Connector(Model):
     key: str = Field(pattern=r"^[a-z][a-z0-9_-]*$")
-    kind: Literal["mcp", "google", "github"]
+    kind: Literal["mcp", "google", "github", "aws"]
     scope: Literal["team", "personal"]
+    customer_data: bool | None = None
+    region: str = Field(default="us-east-1", pattern=r"^[a-z]{2}(?:-[a-z]+)+-\d+$")
+    services: list[str] = Field(default_factory=lambda: list(AWS_SERVICES))
     url: str | None = None
+    description: str = ""
+    discovered_tools: dict[str, str] = Field(default_factory=dict)
     tools: list[ConnectorTool] = Field(default_factory=list)
     auth: Auth | None = None
     scopes: list[str] = Field(default_factory=lambda: list(GOOGLE_SCOPES))
@@ -87,11 +99,30 @@ class Connector(Model):
 
     @model_validator(mode="after")
     def valid_connector(self):
+        if self.kind == "mcp" and self.scope == "personal":
+            if self.customer_data is not None:
+                raise ValueError("A personal connector uses the personal data rules")
+            if not self.auth or self.auth.type != "oauth":
+                raise ValueError("A personal MCP connector needs browser sign-in with OAuth")
+        if self.kind in {"mcp", "aws"} and self.scope == "team" and self.customer_data is None:
+            self.customer_data = True
+        if self.kind == "google" and self.customer_data is not None:
+            raise ValueError("Google connectors use the personal data rules")
+        if self.kind == "aws":
+            if self.key != "aws" or self.scope != "team":
+                raise ValueError("Use the team AWS connector with key aws")
+            if not self.auth or self.auth.type != "access_key" or not self.auth.secret:
+                raise ValueError("AWS needs an access key in the vault")
+            if not self.services or not set(self.services) <= set(AWS_SERVICES):
+                raise ValueError("Use only the supported AWS read services")
         names = [t.name for t in self.tools]
         if len(names) != len(set(names)):
             raise ValueError("Use unique tool names")
-        if self.kind == "mcp" and (not self.url or self.scope != "team"):
-            raise ValueError("An MCP connector needs a team scope and URL")
+        if self.kind == "mcp":
+            if not self.url:
+                raise ValueError("An MCP connector needs a URL")
+            if self.key in MCP_RESERVED:
+                raise ValueError("This name belongs to a built-in connector. Use another name.")
         if self.kind == "google":
             if not self.scopes or not set(self.scopes) <= set(GOOGLE_SCOPES):
                 raise ValueError("Use only the three Google read-only scopes")

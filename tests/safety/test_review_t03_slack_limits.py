@@ -45,7 +45,7 @@ async def test_rule_06_owner_notices_are_capped_and_remaining_links_reach_one_di
         }} for k in range(3)]
         assert (await intake.receive(post(n)))["decision"] == "run"
     notices = [c for c in slack_client.calls if c["method"] == "chat_postMessage"
-               and "not assigned" in c.get("text", "")]
+               and "New ticket from outside text" in str(c.get("blocks", []))]
     assert len(github_client.issues) == 21
     assert len(notices) == 6
     async with ctx.pool.connection() as conn:
@@ -59,7 +59,7 @@ async def test_rule_06_owner_notices_are_capped_and_remaining_links_reach_one_di
     await limits.flush_owner_notices(ctx)
     digests = [c for c in slack_client.calls[before:] if c["method"] == "chat_postMessage"]
     assert len(digests) == 1
-    combined = "\n".join(c["text"] for c in notices + digests)
+    combined = "\n".join(str(c.get("blocks", [])) + c["text"] for c in notices + digests)
     assert all(issue["html_url"] in combined for issue in github_client.issues)
 
 

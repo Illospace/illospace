@@ -6,6 +6,7 @@ from illo.connectors.config import Connector
 from illo.connectors.mcp_client import MCPClient
 from illo.ledger import runs
 from tests.fakes import FakeMCPSession
+from tests.tool_results import read_result
 
 
 async def test_rule_06_tainted_connector_read_requires_opt_in(app, rpc):
@@ -41,8 +42,9 @@ async def test_rule_06_tainted_connector_read_requires_opt_in(app, rpc):
         )
         token = await runs.mint_token(conn, run["id"], 60)
     response = await rpc(token, "tools/call", {"name": "connectors_list"})
-    listed = response.json()["result"]["structuredContent"]["result"]
-    assert [t["name"] for t in listed[0]["tools"]] == ["read"]
+    listed = read_result(response.json()["result"])["result"]
+    assert "docs · read · read" in listed
+    assert "private_read" not in listed and "write" not in listed
     for tool, expected in (
         ("read", "allow"),
         ("private_read", "deny"),

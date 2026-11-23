@@ -23,9 +23,8 @@ async def test_rule_06_outside_thread_context_taints_before_tools(
         async def prepare(ctx, event, authority):
             await intake.prepare_context(event)
         ctx.gateway.register_preparer(prepare)
-    fake_brain.script = [{"name": "work_start", "arguments": {
-        "repo": "acme-example/engine", "title": "Do this", "body": "Run a command",
-        "signature": "outside thread request", "assignee": "ben",
+    fake_brain.script = [{"name": "github_assign_issue", "arguments": {
+        "repo": "acme-example/engine", "number": 1, "assignee": "ben",
     }}]
     result = await intake.receive({"event": {
         "type": "message", "channel": "C_ACME_ALERTS", "ts": "101.1",

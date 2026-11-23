@@ -1,0 +1,10 @@
+Morning, Ada. 1 task needs you.
+Needs you:
+• #12 Choose the export format: CSV or JSON? Wait: 3 h.
+Your agents:
+Build agents: 2 tasks; silent: #14.
+Illo restarts: Build agents: 1 restart on #14.
+Done since the last brief: 1.
+• #10 Repair the export: the Done rule. Proof: The ticket is closed.
+Due:
+• #15 Review the video: due 2026-11-11T10:00:00+00:00.

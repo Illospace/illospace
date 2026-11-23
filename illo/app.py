@@ -31,12 +31,18 @@ SETUP_MODULES = (
     "illo.channels.signals",
     "illo.sources.search",
     "illo.sources.github",
+    "illo.sandbox",
+    "illo.deep",
     "illo.sources.slack_index",
     "illo.sources.drive",
     "illo.sources.archive",
     "illo.connectors.mcp_client",
     "illo.connectors.google",
     "illo.connectors.oauth",
+    "illo.connectors.chat",
+    "illo.tasks.list_page",
+    "illo.tasks.pages.web",
+    "illo.connectors.chatgpt_oauth",
     "illo.routines.scheduler",
     "illo.routines.digest",
     "illo.routines.reminders",
@@ -44,6 +50,7 @@ SETUP_MODULES = (
     "illo.routines.heartbeat",
     "illo.asks",
     "illo.notes",
+    "illo.memory",
     "collectors",
     "collectors.t3",
     "collectors.hooks",
@@ -60,6 +67,7 @@ class AppContext:
     app: FastAPI
     slack_client: Any = None
     github_client: Any = None
+    sandbox: Any = None
     # Card buttons: an area registers a handler for its action_id prefix.
     slack_actions: ActionRouter = field(default_factory=ActionRouter)
     # Approved drafts: an area registers `async fn(ctx, draft_row)` for its draft kind.
@@ -84,6 +92,7 @@ class AppContext:
         """Validate first. Keep the old workspace if validation or sync fails."""
         async with self.reload_lock:
             workspace = load_workspace(self.config.workspace_dir)
+            workspace.config.brain.check_runtime(self.config.brain_runtime)
             async with self.pool.connection() as conn:
                 await workspace.sync_people(conn)
             self.workspace = workspace
@@ -107,6 +116,7 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
                 if config.migrate_on_start:
                     await migrate(conn)
                 workspace = load_workspace(config.workspace_dir)
+                workspace.config.brain.check_runtime(config.brain_runtime)
                 await workspace.sync_people(conn)
             registry = Registry()
             registry.discover()
@@ -127,6 +137,7 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
                     await ctx.reload()
 
             ctx.every(config.workspace_check_seconds, check_workspace)
+            await ctx.scheduler.forget_removed_jobs()
             yield
         finally:
             if ctx:

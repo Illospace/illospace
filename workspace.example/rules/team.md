@@ -12,10 +12,10 @@ Owners:
 Tickets:
 • Each ticket goes to `acme-example/engine`.
 • Assign a ticket to the owner of its area. If the area is not clear, assign Ada.
-• A ticket from outside text stays unassigned. A person assigns it.
+• For outside text, code decides the owner. Report the assignment result from the tool.
 • The title says what is wrong, not the cause: "Export fails for files over 2 GB".
 • One problem gets one ticket. Search open and closed tickets first.
 
 Updates:
-• Read the lane before you report its state. Give the source link.
-• A question for a person becomes an ask, not a message.
+• Read the task and its record before you report its state. Give the proof link.
+• Use a task question when the holder needs a person. Use an ask for a separate request.

@@ -35,12 +35,12 @@ def initialize_result(params: dict, name: str) -> dict:
     }
 
 
-def tool_result(value: dict, *, is_error: bool = False) -> dict:
-    """Keep the JSON text envelope equal across both MCP endpoints."""
+def tool_result(value: dict, *, is_error: bool = False, brain: bool = False) -> dict:
+    """Keep agent contracts. Brain results have only one data channel."""
     value = jsonable_encoder(value)
     return {
-        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
-        "structuredContent": value,
+        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}],
+        "structuredContent": {k: value[k] for k in ("decision", "reason")} if brain else value,
         "isError": is_error,
     }
 
@@ -79,7 +79,7 @@ async def endpoint(request: Request):
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
-                result = {"tools": ctx.registry.list_tools(run)}
+                result = {"tools": await ctx.registry.list_tools_for(ToolContext(conn, run, ctx))}
             elif method == "tools/call":
                 name, args = params.get("name"), params.get("arguments", {})
                 if not isinstance(name, str) or not isinstance(args, dict):
@@ -96,7 +96,7 @@ async def endpoint(request: Request):
                         request_id, -32602, "A tool name and argument object are required"
                     )
                 count = run["usage"].get("tool_calls", 0)
-                if count >= ctx.workspace.config.brain.max_turns:
+                if count >= (run.get("tool_limit") or ctx.workspace.config.brain.max_turns):
                     # Count and audit denied calls without running a handler.
                     await audit.write(
                         conn,
@@ -118,7 +118,12 @@ async def endpoint(request: Request):
                         (count + 1, run["id"]),
                     )
                     called = await ctx.registry.call(ToolContext(conn, run, ctx), name, args)
-                result = tool_result(called, is_error=called["decision"] == "deny")
+                result = tool_result(called, is_error=called["decision"] == "deny", brain=True)
+                # This metadata comes from the locked run, never from remote tool text.
+                result["structuredContent"]["run_flags"] = {
+                    "customer_read": bool(run.get("customer_read")),
+                    "personal_read": bool(run.get("personal_read")),
+                }
             else:
                 return _error(request_id, -32601, "Method not found")
             return JSONResponse(

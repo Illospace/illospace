@@ -4,12 +4,13 @@ import pytest
 
 from illo.db import all_rows, one
 from illo.ledger import people, runs
+from tests.tool_results import read_result
 
 
 async def test_rule_03_note_after_personal_read_is_draft(app, rpc, rpc_token, slack_client):
     run, token = rpc_token
     async with app.state.ctx.pool.connection() as conn:
-        await conn.execute("UPDATE runs SET personal_read=true WHERE id=%s", (run["id"],))
+        await conn.execute("UPDATE runs SET personal_read=true,profile='agent_request' WHERE id=%s", (run["id"],))
     response = await rpc(
         token,
         "tools/call",
@@ -18,7 +19,7 @@ async def test_rule_03_note_after_personal_read_is_draft(app, rpc, rpc_token, sl
             "arguments": {"title": "Private fact", "text": "A personal fact", "about": "Private"},
         },
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "draft"
     assert not slack_client.calls
     async with app.state.ctx.pool.connection() as conn:

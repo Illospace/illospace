@@ -70,6 +70,7 @@ async def test_health_does_not_expose_auth(monkeypatch):
         response = await http.get("/healthz")
     assert response.json()["runtimes"]["claude"]["usable"]
     assert response.json()["runtimes"]["openai_compat"]["experimental"]
+    assert response.json()["runtimes"]["openai_responses"]["usable"]
     assert "fake-provider-key" not in response.text
     assert "fake-openai-key" not in response.text
 
@@ -126,7 +127,7 @@ async def test_redact_output_and_do_not_emit_exception(run_request):
 
     response = await post(create_app(runner=echo_secret), run_request)
     assert lines(response)[1]["text"] == "[redacted]"
-    assert lines(response)[-1]["category"] == "runtime"
+    assert lines(response)[-1]["category"] == "internal"
     assert "private provider details" not in response.text
 
 
@@ -202,3 +203,43 @@ async def test_missing_claude_auth_returns_auth_error(run_request, monkeypatch):
     run_request.runtime = "claude"
     response = await post(create_app(), run_request)
     assert lines(response)[-1]["category"] == "auth"
+
+
+async def test_provider_identifiers_cannot_log_secrets(run_request, caplog, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-sensitive-key")
+
+    async def failure(request):
+        yield event(
+            "error",
+            category="runtime",
+            code="fake-sensitive-key",
+            provider_type="fake-sensitive-key",
+            http_status=400,
+        )
+
+    response = await post(create_app(runner=failure), run_request)
+    assert "fake-sensitive-key" not in response.text + caplog.text
+    assert "http_status=400" in caplog.text
+
+
+async def test_responses_health_requires_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:1/v1")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app()), base_url="http://brain"
+    ) as http:
+        response = await http.get("/healthz")
+    assert not response.json()["runtimes"]["openai_responses"]["usable"]
+
+
+async def test_worker_exit_without_an_answer_is_an_internal_failure(run_request):
+    events = [e async for e in run_worker(run_request, [sys.executable, "-c", "pass"])]
+    assert events[-1]["type"] == "error" and events[-1]["category"] == "internal"
+
+
+def test_unknown_worker_exception_keeps_only_the_internal_category():
+    from brain.worker import failure_event
+
+    result = failure_event(ValueError("fake-credential-in-an-error"))
+    assert result["category"] == "internal"
+    assert "fake-credential" not in json.dumps(result)

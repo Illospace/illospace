@@ -85,14 +85,19 @@ async def test_loop_probe_skips_publication_after_a_stall(app, github_client, mo
     monkeypatch.setattr(heartbeat.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(ctx, "every", lambda seconds, fn: jobs.update({seconds: fn}))
     await heartbeat.setup(ctx)
+
+    def writes():
+        # Other timers of the app also call the fake client. Count only the heartbeat write.
+        return [call for call in github_client.calls if call["method"] == "write_file"]
+
     await jobs[180]()
-    assert not github_client.calls
+    assert not writes()
     now[0] += 15
     await jobs[15]()
     await jobs[180]()
-    assert github_client.calls[-1]["method"] == "write_file"
+    assert len(writes()) == 1
     github_client.calls.clear()
     now[0] += 120
     await jobs[15]()
     await jobs[180]()
-    assert not github_client.calls
+    assert not writes()

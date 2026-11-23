@@ -2,10 +2,19 @@
 
 Search uses Postgres full text. It reads items and the last 20 events of each lane.
 It merges each source's ordered results by reciprocal rank. It removes duplicate source refs.
-A small recency boost breaks close item scores. It uses no vectors.
+Match strength and age set the order before the source rank bonus. Search uses no semantic vectors.
 Private items and lanes appear only for their active owner. A private result sets `personal_read` on the run.
 Tainted and outsider runs cannot use these tools.
 Slack items come only from configured public channels.
+GIN indexes find matching items, lanes, and inbound Slack events before rank work starts.
+Search builds snippets after the per-source result limit.
+The `lane_search` table stores each lane vector. Database triggers keep the last 20 events current.
+The `item_search` and `slack_event_search` tables store item and inbound Slack vectors.
+Triggers cover text changes, new rows, and Slack eligibility changes. Deletes remove vectors through foreign keys.
+Search ranks those vectors before the limit. It reads bodies and payloads only for returned rows.
+Migration `0406_search_items.sql` backfills without a source writer lock.
+It briefly locks writers to check row versions, install triggers, and add foreign keys.
+The old application can keep its existing write paths during the migration.
 
 `search_all(query, kinds?, limit?)` returns compact text. The limit is 1–50; the default is 10.
 `search_get(source_ref)` returns a full item, a lane with its events, or a GitHub issue.
@@ -53,6 +62,11 @@ A dry run changes no rows. Repeated imports update the same item.
 
 ## Keep a note
 
+People save team notes at once with `note_save` in a DM or team channel.
+Code posts Correct and Forget buttons after the answer. See [Team memory](memory.md).
+After a personal read, `note_save` sends the Keep card below and returns `draft`.
+`notes_propose` remains available only to agent requests.
+
 `notes_search(query)` reads confirmed team notes.
 `notes_propose(title, text, about)` sends the requester a DM card.
 The card says `I noted: <text>` and has Keep, Correct…, and Remove buttons.
@@ -60,8 +74,7 @@ Keep writes the file. Correct… requests the replacement text in that DM thread
 The owner's next reply in that thread writes the corrected file. Remove deletes the proposal.
 A button must belong to that owner and that card in the DM.
 
-A team or tainted run cannot propose a note.
-A run that reads personal data first creates a draft for the requester.
+An agent run that reads personal data first creates a draft for the requester.
 Draft approval permits a proposal; Keep still confirms the team note.
 A note always has team visibility.
 
@@ -89,6 +102,8 @@ workspace:
   git_push: true
 ```
 
-The default is false. The workspace needs a Git checkout and a remote.
+The default is false. Direct memory saves still make local commits.
+The host pushes them with `git -C <workspace> push`. The container holds no git credential.
+Automatic pushes need a Git checkout and a remote.
 The commit contains only the note. A failed commit or push leaves the file in place.
 The `workspace` sensor reports the failure. Git credentials stay outside the workspace.

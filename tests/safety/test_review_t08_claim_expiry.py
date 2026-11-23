@@ -3,6 +3,7 @@
 from illo.db import all_rows
 from illo.ledger import claims
 from illo.routines.stale import reconcile
+from tests.tool_results import read_result
 
 
 async def test_rule_06_old_model_claim_expires(app, rpc, rpc_token):
@@ -25,4 +26,4 @@ async def test_rule_06_old_model_claim_expires(app, rpc, rpc_token):
             "arguments": {"key": "old-alert"},
         },
     )
-    assert response.json()["result"]["structuredContent"]["result"] is True
+    assert read_result(response.json()["result"])["result"] is True

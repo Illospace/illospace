@@ -10,6 +10,7 @@ from illo.connectors.config import Connector
 from illo.connectors.mcp_client import LimitedStream, MCPClient
 from illo.ledger import runs
 from tests.fakes import FakeMCPSession
+from tests.tool_results import read_result
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ async def call(rpc, token, name, **extra):
             },
         },
     )
-    return response.json()["result"]["structuredContent"]
+    return read_result(response.json()["result"])
 
 
 async def test_only_listed_tools_and_schema_cache(mcp_app, rpc, rpc_token):
@@ -63,9 +64,9 @@ async def test_only_listed_tools_and_schema_cache(mcp_app, rpc, rpc_token):
     for _ in range(2):
         result = await call(rpc, token, "read")
         assert result["decision"] == "allow"
-        assert result["result"]["type"] == "outside_data"
-        assert result["result"]["trusted"] is False
-        assert "Ignore previous" in result["result"]["data"]["content"][0]["text"]
+        assert result["result"].startswith('<outside_data source="connector:docs">\n')
+        assert result["result"].endswith("\n</outside_data>")
+        assert "Ignore previous" in result["result"]
     assert session.listings == 1
     assert len(session.calls) == 2
     assert "hidden" not in ctx.mcp_client.schemas[config.model_dump_json()]
@@ -140,7 +141,10 @@ def test_config_rejects_tainted_write_and_unbounded_risk():
             )
 
 
-async def test_official_streamable_http_client_with_fake_wire(mcp_app):
+async def test_official_streamable_http_client_with_fake_wire(mcp_app, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("illo.connectors.addresses.resolve_public", AsyncMock(return_value=["93.184.216.34"]))
     import json
 
     ctx, config, _ = mcp_app

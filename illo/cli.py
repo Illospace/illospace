@@ -33,6 +33,8 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("stats")
     commands.add_parser("reload")
     commands.add_parser("routines").add_subparsers(dest="action", required=True).add_parser("list")
+    scout = commands.add_parser("scout").add_subparsers(dest="action", required=True)
+    scout.add_parser("run").add_argument("--person")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -45,6 +47,7 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--person", required=True)
     create.add_argument("--label", required=True)
     create.add_argument("--scope", choices=("collector", "agent"), default="collector")
+    create.add_argument("--agent")
     listing = token.add_parser("list")
     listing.add_argument("--person")
     token.add_parser("revoke").add_argument("id", type=int)
@@ -61,6 +64,11 @@ def parser() -> argparse.ArgumentParser:
     login.add_argument("--person")
     status = commands.add_parser("connectors").add_subparsers(dest="action", required=True)
     status.add_parser("status")
+    chatgpt = commands.add_parser("chatgpt").add_subparsers(dest="action", required=True)
+    chatgpt.add_parser("status")
+    smoke = chatgpt.add_parser("smoke")
+    smoke.add_argument("--person", required=True)
+    smoke.add_argument("--auth", choices=("chatgpt", "api_key"), default="chatgpt")
     return result
 
 
@@ -68,8 +76,12 @@ async def doctor(config: Config) -> int:
     """Report missing requirements without exposing credentials."""
     failed = False
     try:
-        load_workspace(config.workspace_dir)
+        workspace = load_workspace(config.workspace_dir)
+        workspace.config.brain.check_runtime(config.brain_runtime)
         print("The workspace is valid.")
+        for warning in workspace.warnings:
+            print(f"Note: {warning}" if "Illo checks it in Slack at run time." in warning
+                  else f"Warning: {warning}")
     except ValueError as exc:
         print(f"The workspace needs a fix: {exc}")
         failed = True
@@ -84,9 +96,21 @@ async def doctor(config: Config) -> int:
                 failed = True
             else:
                 print("The database is ready.")
+                from illo.sandbox.repos import status
+
+                print(await status(conn))
     except Exception:
         print("The database is unavailable. Check ILLO_DATABASE_URL and the database service.")
+        print("Repository mirrors: count and last sync are unavailable.")
         failed = True
+    from illo.sandbox.client import SandboxClient
+
+    if config.sandbox_url:
+        healthy = await SandboxClient(config.sandbox_url).healthy()
+        print("The sandbox is reachable." if healthy else "The sandbox is unavailable.")
+        failed = failed or not healthy
+    else:
+        print("The sandbox is not configured.")
     if config.vault_key:
         try:
             Vault(config.vault_key.get_secret_value())
@@ -111,6 +135,10 @@ async def execute(args, config: Config) -> int:
         from illo.channels.mcp.check import check
 
         return await check(args.url, args.token_file)
+    if args.command == "chatgpt" and args.action == "smoke":
+        from illo.connectors.chatgpt_smoke import smoke
+
+        return await smoke(config, args.person, auth=args.auth)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "reload":
@@ -132,11 +160,20 @@ async def execute(args, config: Config) -> int:
         if args.command == "migrate":
             applied = await migrate(conn)
             print(f"Applied {len(applied)} migration(s).")
+        elif args.command == "scout":
+            from types import SimpleNamespace
+
+            from illo.routines.scout import queue
+
+            workspace = load_workspace(config.workspace_dir)
+            await workspace.sync_people(conn)
+            print(await queue(SimpleNamespace(workspace=workspace), conn, person_key=args.person))
         elif args.command == "import-archive":
             from illo.sources.archive import import_archive
 
             async with conn.transaction(force_rollback=args.dry_run):
-                await load_workspace(config.workspace_dir).sync_people(conn)
+                workspace = load_workspace(config.workspace_dir)
+                await workspace.sync_people(conn)
                 counts = await import_archive(conn, args.file, dry_run=args.dry_run)
             print(("Dry run. " if args.dry_run else "") + counts.text())
 
@@ -147,6 +184,23 @@ async def execute(args, config: Config) -> int:
                 print(
                     f"{row['name']}  {row['next_run_at'] or 'not scheduled'}  {row['last_status']}"
                 )
+        elif args.command == "chatgpt":
+            from illo.ledger.chatgpt import status
+
+            brain = load_workspace(config.workspace_dir).config.brain
+            print(
+                f"Person credential: {brain.person_credential}; "
+                f"team credential: {brain.team_credential or 'none'}"
+            )
+            for row in await status(conn):
+                state = (
+                    "broken"
+                    if row["broken_at"]
+                    else "connected"
+                    if row["expires_at"] and not row["revoked_at"]
+                    else "missing"
+                )
+                print(f"{row['person']}  {state}  {row['expires_at'] or 'no expiry'}")
         elif args.command == "stats":
             counts = await ask_workflow.stats(conn)
             print("Cards sent for each person and day:")
@@ -161,18 +215,19 @@ async def execute(args, config: Config) -> int:
             await connector_execute(conn, args, config)
         elif args.command == "token":
             if args.action == "create":
-                await load_workspace(config.workspace_dir).sync_people(conn)
+                workspace = load_workspace(config.workspace_dir)
+                await workspace.sync_people(conn)
                 person = await people.get(conn, args.person)
                 if not person:
                     raise ValueError("The person is missing or inactive")
-                print(await tokens.create(conn, person["id"], args.label, scopes=[args.scope]))
+                print(await tokens.create(conn, person["id"], args.label, scopes=[args.scope], agent_key=args.agent, workspace=workspace))
             elif args.action == "list":
                 person = await people.get(conn, args.person) if args.person else None
                 if args.person and not person:
                     raise ValueError("The person is missing or inactive")
                 for row in await tokens.list_tokens(conn, person["id"] if person else None):
                     state = "revoked" if row["revoked_at"] else "active"
-                    print(f"{row['id']}  {row['label']}  {','.join(row['scopes'])}  {state}")
+                    print(f"{row['id']}  {row['label']}  {','.join(row['scopes'])}  {row['agent_key'] or '-'}  {state}")
             elif args.action == "revoke":
                 print(
                     "The token was revoked."

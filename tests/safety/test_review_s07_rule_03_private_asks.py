@@ -4,6 +4,7 @@ import pytest
 
 from illo.db import one
 from illo.ledger import asks, lanes, people, rules
+from tests.tool_results import read_result
 
 
 @pytest.mark.parametrize("tool", ["asks_get", "asks_list", "rules_list", "asks_digest"])
@@ -33,7 +34,7 @@ async def test_rule_03_private_read_requires_approval_for_shared_write(app, rpc,
         "tools/call",
         {"name": tool, "arguments": {"id": ask["id"]} if tool == "asks_get" else {}},
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow"
     async with ctx.pool.connection() as conn:
         stored = await one(conn, "SELECT * FROM runs WHERE id=%s", (run["id"],))

@@ -1,0 +1,1 @@
+team_snapshot: Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.

@@ -1,0 +1,8 @@
+Morning, team.
+Done: 1.
+• #10 Repair the export: Build agents. Proof: The ticket is closed.
+Waiting on people:
+• Ada: 2 tasks; oldest wait 3 h: #12 Choose the export format.
+Stuck:
+• #14 Repair the runner: the holder stays silent after 2 restarts. Ada must act.
+In work: agents hold 2 tasks; people hold 1 task.

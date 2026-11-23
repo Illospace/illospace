@@ -1,5 +1,12 @@
 # Install Illo
 
+## Push the workspace from the host
+
+Memory changes make local commits in the workspace repository.
+The container holds no git credential. The host pushes the workspace.
+Use `git -C <workspace> push` in a host timer with the host's own git sign-in.
+`workspace.git_push` stays off by default. See [Team memory](memory.md).
+
 Use one Linux host with Git, Bash, Python 3.9 or later, and Docker Engine.
 Give the Docker user access to Docker before you start.
 Allow at least 3 GB of memory and outbound HTTPS.
@@ -65,17 +72,38 @@ Direct Compose commands must pass the same file with `--env-file`.
 
 ## Set up the team
 
+DM context uses the Slack `im:history` scope in `deploy/slack/manifest.yaml`.
+Illo reads up to 20 earlier messages, with a 6,000-character history limit.
+If Slack refuses the read, Illo answers without history. Check the `slack:dm-history` sensor.
+
 1. Create a Slack app from `deploy/slack/manifest.yaml`.
    Enable Socket Mode and install the app in your Slack workspace.
    Add its bot token and app token to the environment file.
 2. Edit `people.yaml` in the workspace folder.
    Replace the example people with your team members and their real Slack IDs.
-   Edit `illo.yaml` for the team's channels, repositories, and model.
+   Edit `illo.yaml` for the team's repositories and model.
+   Add Illo to a Slack channel, then mention it. No channel entry is required.
 3. For the `claude` runtime, set `ANTHROPIC_API_KEY`.
    You can also set `ANTHROPIC_BASE_URL`.
    The runtime uses the Claude Agent SDK.
+   For OpenAI, set `ILLO_BRAIN_RUNTIME=openai_responses` and `OPENAI_API_KEY`.
+   Set `ILLO_BRAIN_MODEL` to the OpenAI model and `ILLO_BRAIN_EFFORT` to its reasoning effort (default `low`).
+   `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
+   This runtime uses Responses with `store: false` and only the Illo MCP tools.
+   To use each person's ChatGPT subscription, set `brain.runtime: openai_responses` and `brain.auth: chatgpt` in `illo.yaml`.
+   Keep `ILLO_VAULT_KEY` in the main app's environment, outside the checkout.
+   Each member sends `connect my ChatGPT` in their own Slack DM with Illo.
+   The DM gives a device code. ChatGPT sign-in needs no public Illo address.
+   Send `connect my ChatGPT with a link` to use the OpenAI link and paste the final local address.
+   Set `brain.team_credential` to an active person key, or omit it to use `default_owner`.
+   `brain.api_key_fallback` defaults to `false`. Set it to `true` only to allow the brain's API key as a fallback.
+   The brain needs no sign-in file, refresh token, or host mount.
+   Check that the provider's terms allow this use. An API key is the alternative.
+   See [The model sign-in](connectors.md#the-model-sign-in) for the device and paste steps.
    For `openai_compat`, set `ILLO_BRAIN_RUNTIME=openai_compat`, `OPENAI_API_KEY`, and `OPENAI_BASE_URL`.
    Set `ILLO_BRAIN_MODEL` to the model name that the provider accepts.
+   Set `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` only if that provider needs it.
+   See [the brain guide](../brain/README.md) for API details and live measurements.
    The `echo` runtime needs no model key and is only for tests.
 4. Recreate the services after an environment change.
    Use the saved revision so Compose starts the correct image tags:
@@ -104,7 +132,7 @@ The MCP endpoint is `http://127.0.0.1:8484/mcp`.
 It also accepts requests at `/api/mcp`.
 Use `Authorization: Bearer <token>`.
 A remote collector needs a private tunnel or a reverse proxy with HTTPS.
-Publish only the routes that you need, such as `/mcp` and `/oauth/`.
+Publish only the routes that you need, such as `/mcp`, `/oauth/`, and `/list`.
 Do not publish Postgres, the brain, `/brain/mcp`, or the admin reload route.
 
 Optional GitHub and mailbox settings appear in `deploy/env.example`.
@@ -112,8 +140,92 @@ For email, set `ILLO_EMAIL_AUTHSERV_ID` to the name of the receiving server, suc
 [connectors.md](connectors.md) explains the sender check.
 For a GitHub App, mount its private key from an external file into the app container.
 Set `ILLO_GITHUB_APP_PRIVATE_KEY_FILE` to its container path.
-Google connector credentials go into the vault through `illo secret set`.
+The owner writes `connect Google` in a Slack DM to set up Google through a private form.
+The environment variables `ILLO_GOOGLE_CLIENT_ID` and `ILLO_GOOGLE_CLIENT_SECRET` remain an alternative.
 Do not put connector secrets in the workspace.
+
+## The public sign-in address
+
+The internal `ILLO_PUBLIC_URL` can stay at the address that the brain uses.
+To give a browser a separate address, set this block in the workspace's `illo.yaml`:
+
+```yaml
+connect:
+  public_url: https://illo.example.com
+```
+
+Use HTTPS. Do not include credentials, a query, or a fragment.
+Expose `/oauth/` and `/list` when those features are used.
+For task pages, also expose `/t/` and `/web/`. Prefer the team’s private network.
+Keep the brain, `/brain/mcp`, Postgres, and the admin routes private.
+A reverse proxy can forward these paths to the local Illo service.
+For example, use these Nginx locations inside your HTTPS server block:
+
+```nginx
+location /oauth/ {
+    proxy_pass http://127.0.0.1:8484;
+    access_log off;
+}
+location = /list {
+    proxy_pass http://127.0.0.1:8484;
+    access_log off;
+}
+location = /web/signin {
+    proxy_pass http://127.0.0.1:8484;
+    access_log off;
+}
+```
+
+Keep the sign-in query, the list key, and the key of a page sign-in link out of all proxy logs.
+Google and MCP OAuth sign-in then complete in the same browser after one click on the DM link.
+The MCP callback address is `https://illo.example.com/oauth/mcp/callback`.
+The task list uses the same base address.
+If the setting is absent, both use `ILLO_PUBLIC_URL`, as before.
+A local Google sign-in still needs the final address pasted into the person's DM.
+The chat setup message always shows the callback address in use.
+After you change this setting, write `connect Google` and add the shown address to the Google client.
+The installer already sets `ILLO_VAULT_KEY`. Keep this key outside the checkout.
+The chat forms need Slack Socket Mode and the normal bot sign-in.
+Apply the database migrations before this app version starts.
+Migration `1610_mcp_browser_oauth.sql` separates the browser sign-in providers in the state table.
+
+## Sign in with Slack
+
+App sign-in at the agent door needs a public HTTPS origin. See [Agents](agents.md#operator-setup-for-app-sign-in).
+The code method stays available without the Slack sign-in client.
+
+1. On the Slack app page, open **Basic Information**.
+   Copy **Client ID** and **Client Secret** from **App Credentials**.
+2. Open **OAuth & Permissions → Redirect URLs**.
+   Add `https://illo.example.com/oauth/agent/slack/callback` with your own public host.
+   `deploy/slack/manifest.yaml` supplies that example under `oauth_config.redirect_urls`.
+   It also supplies `openid` under `oauth_config.scopes.user`.
+   Slack sign-in requests only `openid`. Keep it separate from the bot installation flow.
+3. Store both values in the vault. The installer already sets `ILLO_VAULT_KEY`.
+   Each command asks for its value with hidden input. Do not put the value in the command.
+
+   ```sh
+   docker compose --env-file "$ILLO_ENV_FILE" -f deploy/compose.yaml exec illo illo secret set slack-client-id
+   docker compose --env-file "$ILLO_ENV_FILE" -f deploy/compose.yaml exec illo illo secret set slack-client-secret
+   ```
+
+   With the CLI outside Docker, use:
+
+   ```sh
+   illo secret set slack-client-id
+   illo secret set slack-client-secret
+   ```
+
+4. Confirm that the Slack connection works. It records the workspace team ID for the HTTP routes.
+   Add your own Slack ID to an active entry in `people.yaml`.
+   Start Connect in your app, then click **Sign in with Slack** and **Allow**.
+
+The values take effect on the next request. No new environment variable or restart is needed.
+Without both values, the authorization page keeps only the pairing code.
+The Slack sign-in document does not state whether this manifest change needs an app reinstall.
+Each person grants the sign-in scope in the separate OpenID flow.
+See [Slack's sign-in guide](https://docs.slack.dev/authentication/sign-in-with-slack/)
+and [the manifest reference](https://docs.slack.dev/reference/app-manifest/).
 
 ## Run it on your laptop to try it
 
@@ -247,3 +359,35 @@ ILLO_ENV_FILE="$HOME/.config/illo/env" docker compose --env-file "$HOME/.config/
 docker volume rm illo_postgres
 rm -rf illospace
 ```
+
+## Slack channel access
+
+Add Illo to a channel in Slack, then mention it.
+A channel needs no entry in `illo.yaml`.
+List a channel only for coordinator mode, its own rules, or `mode: off`.
+`slack.default_mode: listen` is the default. `off` accepts only listed channels.
+`slack.default_rule_files` selects rule files for channels with no entry. Its default is an empty list.
+
+The optional join notice uses the `member_joined_channel` bot event in `deploy/slack/manifest.yaml`.
+For an existing install, add this event on the Slack app page under Event Subscriptions, Bot Events.
+All channel features work without this event.
+Illo sends the notice at most once per channel. A failed send does not block channel use.
+
+A public channel has class `team` and supports shared search and the team brief.
+For a private channel with no entry, Illo checks that its humans are exactly the active people in `people.yaml`.
+For a listed private channel, set `team_members_only: true` and keep `visibility: team` for this proof.
+Illo accepts its own bot and other bot users. Bots in the channel can read its messages.
+Illo checks all member pages and caches the class for ten minutes.
+
+Every other private channel has class `members`. `visibility: private` also selects this class.
+Illo answers known active people who mention it there. It uses team tools and no personal data.
+It does not put the channel text in shared search. A private thread read needs live proof of membership.
+Tasks that people request there go to the normal team list.
+A Slack error blocks the message and its index write. Illo records the missed event and a sensor error.
+
+## Optional shell sandbox
+
+Compose builds the sandbox with the gateway and brain. The sandbox uses no credentials.
+The gateway keeps repository copies on a shared volume. See [Sandbox](sandbox.md) for settings, limits, and disable steps.
+
+See [Task pages](pages.md) to enable browser sign-in and the task routes.

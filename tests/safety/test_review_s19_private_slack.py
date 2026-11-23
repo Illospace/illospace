@@ -5,6 +5,7 @@ import pytest
 from illo.channels.slack.intake import SlackIntake
 from illo.db import one
 from illo.ledger import items, runs
+from tests.tool_results import read_result
 
 
 async def private_info(**kwargs):
@@ -46,7 +47,7 @@ async def test_rule_02_03_private_thread_requires_live_member_and_marks_read(
     response = await rpc(token, "tools/call", {"name": "slack_read_thread", "arguments": {
         "channel": "C_ACME_TEAM", "thread_ts": "100.1",
     }})
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == ("allow" if member else "deny")
     assert pages == [None, "page2"]
     assert any(c["method"] == "conversations_replies" for c in slack_client.calls) == member

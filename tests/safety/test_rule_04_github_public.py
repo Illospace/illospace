@@ -12,7 +12,6 @@ from tests.github.test_tools import CREATE, REPO, call
         ("github_create_issue", CREATE),
         ("github_assign_issue", {"repo": REPO, "number": 1, "assignee": "ada"}),
         ("github_comment_issue", {"repo": REPO, "number": 1, "body": "Example"}),
-        ("work_start", CREATE),
     ],
 )
 async def test_rule_04_public_write_becomes_draft(

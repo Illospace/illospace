@@ -3,6 +3,8 @@
 import logging
 from datetime import UTC, datetime, timedelta
 
+from psycopg.types.json import Jsonb
+
 from illo.asks import cards
 from illo.asks.service import post_dm
 from illo.ledger import ask_workflow as ledger
@@ -30,19 +32,20 @@ async def sync_card(ctx, conn, draft):
             await ctx.slack_client.chat_update(
                 channel=draft["slack_channel"],
                 ts=draft["slack_ts"],
-                text=f"Draft for {draft['destination']}",
+                text=cards.draft_fallback(draft),
                 blocks=blocks,
             )
     elif draft["state"] == "pending":
         person = await ledger.draft_owner(conn, draft)
         sent = await post_dm(
-            ctx, person, f"Draft for {draft['destination']}", blocks, "draft", draft["id"]
+            ctx, person, cards.draft_fallback(draft), blocks, "draft", draft["id"]
         )
     else:
         return
     if sent:
         await ledger.save_draft_card(conn, draft["id"], sent, digest)
         await sensors.ok(conn, "drafts:slack")
+    return sent
 
 
 async def tick(ctx):
@@ -102,7 +105,7 @@ async def perform(ctx, draft):
 
 async def handle(ctx, person, action):
     parts = action.get("action_id", "").split(":")
-    if len(parts) != 3 or not parts[1].isdigit() or parts[2] not in {"approve", "reject"}:
+    if len(parts) != 3 or not parts[1].isdigit() or parts[2] not in {"approve", "personal", "reject"}:
         return
     draft_id = int(parts[1])
     approved = False
@@ -118,6 +121,18 @@ async def handle(ctx, person, action):
             or action.get("message_ts") != draft["slack_ts"]
         ):
             return
+        if draft["kind"] in {"connect_propose_mcp", "connect_allow_tools", "connect_remove", "connect_data_policy"}:
+            from illo.connectors.chat import active_person
+
+            try:
+                await active_person(conn, person["id"], owner=True)
+            except ValueError:
+                return
+        if parts[2] == "personal" and not (
+            draft["kind"] == "connect_propose_mcp"
+            and draft["content"]["arguments"]["auth"] == "oauth"
+        ):
+            return
         run = await runs.get(conn, draft["run_id"])
         if not run or run["person_id"] != person["id"]:
             return
@@ -126,9 +141,9 @@ async def handle(ctx, person, action):
             return
         if draft["created_at"] + timedelta(hours=24) <= datetime.now(UTC):
             await ledger.expire_draft(conn, draft_id)
-        elif parts[2] == "approve" and cards.draft_preview(draft) is None:
+        elif parts[2] in {"approve", "personal"} and cards.draft_preview(draft) is None:
             return
-        elif parts[2] == "approve" and not can_perform(ctx, draft):
+        elif parts[2] in {"approve", "personal"} and not can_perform(ctx, draft):
             if ctx.slack_client:
                 await ctx.slack_client.chat_postMessage(
                     channel=draft["slack_channel"],
@@ -137,7 +152,11 @@ async def handle(ctx, person, action):
                 )
             return
         else:
-            approved = parts[2] == "approve"
+            approved = parts[2] in {"approve", "personal"}
+            if approved and draft["kind"] == "connect_propose_mcp":
+                content = draft["content"]
+                content["arguments"]["scope"] = "personal" if parts[2] == "personal" else "team"
+                await conn.execute("UPDATE drafts SET content=%s WHERE id=%s", (Jsonb(content), draft_id))
             decided = await drafts.decide(
                 conn, draft_id, person_id=person["id"], approve=approved, in_dm=True
             )
@@ -146,6 +165,11 @@ async def handle(ctx, person, action):
     # Commit the decision before the external action. A second click or a restart cannot send again.
     if approved:
         try:
+            if draft["kind"] == "connect_propose_mcp" and draft["content"]["arguments"]["auth"] == "bearer":
+                from illo.connectors.chat import open_mcp_form
+
+                await open_mcp_form(ctx, person, draft, action.get("trigger_id", ""))
+                return
             await perform(ctx, draft)
         except Exception:
             async with ctx.pool.connection() as conn:

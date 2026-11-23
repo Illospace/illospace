@@ -28,6 +28,6 @@ async def test_rule_08_token_ask_card_names_token_and_person(app, http, slack_cl
     await service.tick(app.state.ctx)
     card = next(c for c in slack_client.calls if c.get("method") == "chat_postMessage")
     text = str(card["blocks"])
-    assert "From acme-laptop of Ben" in text
+    assert "Ben, through acme-laptop, needs a decision from you." in text
     assert "<https://evil.example/login|evil.example>" in text
     assert "Open the invoice" not in text

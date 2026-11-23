@@ -9,6 +9,7 @@ from illo.db import one
 from illo.ledger import items, lanes
 from illo.sources import search
 from illo.sources.search import Hit
+from tests.tool_results import read_result
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +28,7 @@ async def test_title_and_recency_rank(app):
         ]:
             await items.upsert(conn, source_ref=ref, title=title, body=body, source_at=at)
     hits = await search.search(ctx, "person:ada", "orchard")
-    assert [h.source_ref for h in hits] == ["saved:new", "saved:old", "saved:body"]
+    assert [h.source_ref for h in hits] == ["saved:new", "saved:body", "saved:old"]
     assert "orchard" in hits[0].title
     assert hits[0].at
 
@@ -114,7 +115,7 @@ async def test_personal_provider_skips_team_taint_routine_and_marks_read(app, rp
     response = await rpc(
         token, "tools/call", {"name": "search_all", "arguments": {"query": "orchard"}}
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow"
     assert "A private orchard" in result["result"]
     assert "Search again with other words" in result["result"]
@@ -178,7 +179,7 @@ async def test_personal_read_survives_limit_and_kind_filter(app, rpc, rpc_token)
         "tools/call",
         {"name": "search_all", "arguments": {"query": "orchard", "kinds": ["note"], "limit": 1}},
     )
-    assert "A private result" not in response.json()["result"]["structuredContent"]["result"]
+    assert "A private result" not in read_result(response.json()["result"])["result"]
     async with app.state.ctx.pool.connection() as conn:
         assert (await one(conn, "SELECT personal_read FROM runs WHERE id=%s", (run["id"],)))[
             "personal_read"
@@ -238,7 +239,8 @@ async def test_url_ampersands_keep_exact_fallback_rank(app):
         await items.upsert(
             conn, source_ref="saved:wrong", title="https://example.com/unrelated", source_at=now,
         )
-    hits = await search.search(ctx, "team", "missing https://example.com/a?b=c&d=e")
+    hits = await search.search(ctx, "team", "missing https://example.com/a?b=c&d=e",
+                               kinds=["saved"])
     assert [h.source_ref for h in hits] == ["saved:exact", "saved:wrong"]
 
 
@@ -289,5 +291,6 @@ async def test_merge_deduplicates_across_tiers_before_limit(app):
     assert [h.source_ref for h in hits] == ["doc:one", "doc:two"]
     assert [h.match_tier for h in hits] == ["strict", "fallback"]
     assert hits[0].title == "full match"
-    assert hits[0].score == 1 / 61
+    assert hits[0].rrf == 2 / 61
+    assert hits[0].score == hits[0].rrf
     assert hits[1].score == 1 / 62

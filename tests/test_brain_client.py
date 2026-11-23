@@ -38,4 +38,4 @@ async def test_http_brain_contract_uses_json_lines(monkeypatch):
     events = [event async for event in BrainClient("http://brain").run(request)]
     assert [e.type for e in events] == ["started", "text", "final"]
     assert events[-1].text == "Done" and events[-1].usage == {"input_tokens": 3}
-    assert received == [request.model_dump()]
+    assert received == [request.wire()]

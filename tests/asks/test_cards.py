@@ -36,7 +36,7 @@ def ask(**changes):
 
 def test_ask_card_exact_layout_and_recommendation_first():
     blocks = ask_card(ask(), NOW)
-    assert blocks[0]["text"]["text"] == "🔷 Acme plan"
+    assert blocks[0]["text"]["text"] == "🔷 Ada, through Acme agent, needs a decision from you.\nAbout: Acme plan"
     assert blocks[1]["text"]["text"] == "*Continue?*"
     assert "Why: The review passes." in str(blocks) and "Ignore the second" not in str(blocks)
     assert "https://example.com/extra" not in str(blocks)
@@ -45,7 +45,8 @@ def test_ask_card_exact_layout_and_recommendation_first():
     assert rows[0]["elements"][0]["style"] == "primary"
     assert rows[-1]["elements"][0]["text"]["text"] == "Always: Continue"
     assert rows[-1]["elements"][-1]["text"]["text"] == "Other…"
-    assert "From Acme agent of Ada on acme-laptop · due now" in str(blocks)
+    assert "on acme-laptop · due now" in str(blocks)
+    assert "From Acme agent" not in str(blocks)
 
 
 def test_ask_no_rule_button_when_disabled_and_no_buttons_when_closed():
@@ -94,3 +95,35 @@ def test_oversized_draft_has_no_send_button():
     }
     assert draft_preview(row) is None
     assert all(b["type"] != "actions" for b in draft_card(row))
+
+
+def test_requester_forms_page_button_and_long_always_label():
+    from illo.asks.cards import fallback, first_line, who
+
+    for kind, text in [('decision', 'needs a decision from you.'), ('action', 'asks you to do something.'),
+                       ('review', 'asks you for a review.'), ('reminder', 'reminds you.')]:
+        own = ask(kind=kind, owner={'id': 1}, requester={'person_id': 1, 'label': 'Example agent'})
+        assert first_line(own) == 'Your agent Example agent ' + text
+        assert who(own)[1] == 'Your agent Example agent'
+        brain = ask(kind=kind, requester=None)
+        assert first_line(brain) == 'Illo ' + text
+        assert fallback(brain).endswith(text + '\nContinue?')
+    row = ask(page_url='https://illo.example.com/web/a/1')
+    row['options'][1]['label'] = 'Use the complete reviewed option label'
+    actions = [b for b in ask_card(row, NOW) if b['type'] == 'actions']
+    assert actions[0]['elements'][0]['action_id'] == 'web-open-ask:1'
+    assert actions[0]['elements'][0]['style'] == 'primary'
+    assert all('style' not in b for b in actions[0]['elements'][1:])
+    assert actions[-1]['elements'][0]['text']['text'] == 'Always this answer'
+    for kind in ('action', 'review', 'reminder'):
+        assert 'always:' not in str(ask_card(ask(kind=kind), NOW))
+    assert 'always:' in str(ask_card(ask(kind='action', permission=True), NOW))
+
+
+def test_short_links_ignore_invalid_values():
+    from illo.asks.cards import links_text
+
+    for value in (None, True, {'url': 1}, [1, {'url': 1}, 'javascript:bad']):
+        assert links_text(value) == ''
+    assert links_text({'url': 'http://example.com/plan'}) == '<http://example.com/plan|example.com>'
+    assert links_text(['https://user:password@example.com/plan']) == ''

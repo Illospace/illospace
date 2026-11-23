@@ -4,7 +4,7 @@ import logging
 
 from illo.channels.email.parser import parse_message
 from illo.channels.email.transport import MailboxClient, password, send_email
-from illo.gateway.replies import RUN_ERROR
+from illo.gateway.replies import error_text
 from illo.ledger import people, sensors
 from illo.slackapi import dm_person
 
@@ -48,8 +48,8 @@ class EmailAdapter:
         if failures:
             raise RuntimeError("The reply could not reach all destinations")
 
-    async def deliver_error(self, event):
-        await self.deliver_final(event, RUN_ERROR)
+    async def deliver_error(self, event, *, category="internal"):
+        await self.deliver_final(event, error_text(category))
 
 
 async def unknown_sender(ctx, event, authority):
@@ -60,8 +60,7 @@ async def unknown_sender(ctx, event, authority):
         await dm_person(
             ctx,
             ctx.workspace.config.default_owner,
-            "An email from an unknown or unverified sender waits in the mailbox. "
-            "Illo did not reply. Subject: " + event.payload.get("subject", ""),
+            'An email from an unknown or unverified sender waits in the mailbox. I did not reply. Subject: ' + event.payload.get("subject", ""),
         )
     return ""
 

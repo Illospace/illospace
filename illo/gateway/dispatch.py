@@ -10,6 +10,7 @@ from illo.brain.run_manager import RunManager
 from illo.db import one
 from illo.gateway.events import ChannelAdapter, InboundEvent
 from illo.gateway.principal import resolve
+from illo.gateway.replies import error_text, failure_category
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,11 @@ class Gateway:
         self.claims = []
         self.preparers = []
         self.payload_filters = []
+        self.finalizers = []
+
+    def register_finalizer(self, fn) -> None:
+        """Run a code notice after the channel delivers the answer."""
+        self.finalizers.append(fn)
 
     def register(self, channel: str, adapter: ChannelAdapter) -> None:
         """A channel's setup hook registers its delivery adapter."""
@@ -85,6 +91,11 @@ class Gateway:
             if not authority:
                 await conn.execute("UPDATE events SET status='ignored' WHERE id=%s", (row["id"],))
                 return {"decision": "ignore", "event_id": row["id"]}
+            if event.channel == "slack" and authority.profile == "team_channel":
+                actor = await one(conn, "SELECT key FROM people WHERE slack_id=%s AND active", (event.sender,))
+                if actor:
+                    await conn.execute("UPDATE events SET payload=payload || %s WHERE id=%s",
+                                       (Jsonb({"task_actor": actor["key"]}), row["id"]))
             await conn.execute(
                 "UPDATE events SET principal=%s,person_id=%s,tainted=%s WHERE id=%s",
                 (authority.principal, authority.person_id, authority.tainted, row["id"]),
@@ -112,8 +123,11 @@ class Gateway:
                     (Jsonb(prepared_payload["text"]), row["id"]),
                 )
             claimed = None
+            claim_event = event
+            if event.channel == "slack" and "slack_typed_text" in event.payload:
+                claim_event = event.model_copy(update={"text": event.payload["slack_typed_text"]})
             for claim in self.claims:
-                claimed = await claim(ctx, event, authority)
+                claimed = await claim(ctx, claim_event, authority)
                 if claimed is not None:
                     break
             if claimed is not None:
@@ -146,6 +160,12 @@ class Gateway:
 
                 text = await self.run_manager.execute(event, authority, row["id"], relay)
             await adapter.deliver_final(event, text)
+            for finalize in self.finalizers:
+                try:
+                    await finalize(ctx, event, row["id"])
+                except Exception:
+                    # The answer is delivered. A notice that fails has its own retry.
+                    log.exception("A finalizer failed after the answer")
             async with ctx.pool.connection() as conn:
                 await conn.execute(
                     """
@@ -155,14 +175,17 @@ class Gateway:
                 )
             return {"decision": decision, "event_id": row["id"], "text": text}
         except (Exception, asyncio.CancelledError) as exc:
+            category = failure_category(exc)
             async with ctx.pool.connection() as conn:
                 await conn.execute("UPDATE events SET status='failed' WHERE id=%s", (row["id"],))
             if adapter:
                 try:
-                    await adapter.deliver_error(event)
+                    await adapter.deliver_error(event, category=category)
                 except Exception:
                     log.error("The channel could not deliver the error")
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            log.error("The gateway could not finish event %s", row["id"])
-            return {"decision": decision, "event_id": row["id"], "error": "The request failed"}
+            log.error("The gateway could not finish event %s: category=%s exception_type=%s",
+                      row["id"], category, type(exc).__name__)
+            return {"decision": decision, "event_id": row["id"],
+                    "error": error_text(category), "category": category}

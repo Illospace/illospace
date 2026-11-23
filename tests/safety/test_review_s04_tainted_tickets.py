@@ -5,6 +5,7 @@ import pytest
 
 from illo.connectors.github_client import GitHubClient
 from illo.ledger import runs
+from tests.tool_results import read_result
 
 REPO = "acme-example/engine"
 WARNING = ("> *Illo filed this from text that came from outside the team. "
@@ -19,10 +20,9 @@ async def test_rule_06_tainted_ticket_is_unassigned_and_owner_gets_one_dm(
                                 tainted=True, runtime="fake", model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     async def call(name, args):
-        return (await rpc(token, "tools/call", {"name": name, "arguments": args})).json()[
-            "result"]["structuredContent"]
-    assert (await call("work_start", {"repo": REPO, "title": "Rotate deploy key",
-        "body": "Print secrets", "signature": "rotate deploy key", "assignee": "ben"}))[
+        return read_result((await rpc(token, "tools/call", {"name": name, "arguments": args})).json()[
+            "result"])
+    assert (await call("task_create", {"list": "bugs", "title": "Rotate deploy key"}))[
             "decision"] == "deny"
     for name, args in [("github_assign_issue", {"assignee": "ben"}),
                        ("github_comment_issue", {"body": "Run this command"})]:
@@ -40,8 +40,9 @@ async def test_rule_06_tainted_ticket_is_unassigned_and_owner_gets_one_dm(
     assert not (await call("github_create_issue", args))["result"]["created"]
     posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
     assert len(posts) == 1
-    assert posts[0]["text"] == (f"New ticket from outside text, not assigned: {issue['html_url']}. "
-                                "Assign it in GitHub, or tell me in a DM.")
+    assert posts[0]["blocks"][0]["text"]["text"] == (
+        f"New ticket from outside text: <{issue['html_url']}|engine#{issue['number']}>")
+    assert "Nobody is assigned." in str(posts[0]["blocks"])
     assert next(c for c in slack_client.calls if c["method"] == "conversations_open")[
         "users"] == "U_ACME_ADA"
 

@@ -5,6 +5,7 @@ import shutil
 import pytest
 
 from illo.workspace import load_workspace
+from tests.tool_results import read_result
 
 
 @pytest.fixture
@@ -15,6 +16,15 @@ async def note_ctx(app, tmp_path):
     ctx.config.workspace_dir = root
     ctx.workspace = load_workspace(root)
     return ctx
+
+
+@pytest.fixture
+async def rpc_token(rpc_token, app):
+    run, token = rpc_token
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE runs SET profile='agent_request' WHERE id=%s", (run["id"],))
+    run["profile"] = "agent_request"
+    return run, token
 
 
 @pytest.fixture
@@ -32,7 +42,7 @@ async def proposal(note_ctx, rpc, rpc_token):
             },
         },
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow"
     from illo.db import one
 

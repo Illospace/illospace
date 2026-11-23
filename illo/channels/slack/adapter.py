@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from illo.brain.client import BrainEvent
 from illo.gateway import InboundEvent
+from illo.gateway.replies import RUN_ERROR, error_text
 
 if TYPE_CHECKING:
     from illo.app import AppContext
@@ -14,7 +15,7 @@ from illo.channels.slack.formatting import chunks
 from illo.db import one
 from illo.ledger import kv
 
-ERROR = "I could not finish this. The error is logged. Please try again."
+ERROR = RUN_ERROR
 
 
 class SlackAdapter:
@@ -42,7 +43,8 @@ class SlackAdapter:
         root = event.reply_to or response["ts"]
         # Persist the thread marker so a restart does not lose a conversation.
         async with self.ctx.pool.connection() as conn:
-            await kv.set(conn, f"slack:thread:{event.payload['channel_id']}:{root}", True)
+            if not await kv.get(conn, f"slack:team-brief:{event.payload['channel_id']}:{root}"):
+                await kv.set(conn, f"slack:thread:{event.payload['channel_id']}:{root}", True)
         if prepare and self.prepare:
             await self.prepare(event)
 
@@ -79,6 +81,12 @@ class SlackAdapter:
                     conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
                 )
         parts = chunks(text)
+        def delivery_id(index):
+            if not event.payload.get("delivery_key"):
+                return {}
+            from illo.asks.service import message_id
+
+            return {"client_msg_id": message_id("deep", f"{event.payload['delivery_key']}:{index}")}
         try:
             if ts:
                 await client.chat_update(channel=channel, ts=ts, text=parts[0])
@@ -86,6 +94,7 @@ class SlackAdapter:
                 sent = await client.chat_postMessage(
                     channel=channel,
                     text=parts[0],
+                    **delivery_id(0),
                     thread_ts=event.reply_to,
                     unfurl_links=False,
                     unfurl_media=False,
@@ -96,10 +105,11 @@ class SlackAdapter:
                         await kv.set(
                             conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
                         )
-            for part in parts[1:]:
+            for index, part in enumerate(parts[1:], 1):
                 await client.chat_postMessage(
                     channel=channel,
                     text=part,
+                    **delivery_id(index),
                     thread_ts=event.reply_to or ts,
                     unfurl_links=False,
                     unfurl_media=False,
@@ -108,5 +118,5 @@ class SlackAdapter:
             self.working.pop(event.external_id, None)
             self.progress_at.pop(event.external_id, None)
 
-    async def deliver_error(self, event: InboundEvent) -> None:
-        await self.deliver_final(event, ERROR)
+    async def deliver_error(self, event: InboundEvent, *, category="internal") -> None:
+        await self.deliver_final(event, error_text(category))

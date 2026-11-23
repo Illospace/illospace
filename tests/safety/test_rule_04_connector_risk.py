@@ -1,6 +1,7 @@
 """Rule 4: configured connector writes keep their risk at the registry boundary."""
 
 from illo.connectors.config import Connector
+from tests.tool_results import read_result
 
 
 async def test_rule_04_connector_outside_write_is_a_draft(app, rpc, rpc_token):
@@ -31,7 +32,7 @@ async def test_rule_04_connector_outside_write_is_a_draft(app, rpc, rpc_token):
             },
         },
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "draft"
     async with ctx.pool.connection() as conn:
         draft = await (

@@ -1,6 +1,13 @@
 # Illo
 
-Illo is one assistant for a whole team. It lives in Slack, it follows the work of your coding agents, and it answers from facts.
+Illo is one list of tasks for people and their agents. It gives each task to a holder and keeps the record. People and outside agents do the work.
+
+The morning briefs read tasks. They show what needs a person, with the reason and the action.
+Lanes are run evidence from collectors.
+Each task can have a [page](docs/pages.md) with the work, proof, and review buttons.
+
+Read [Lists and tasks](docs/tasks.md) for the task model, workspace files, tools, proof, and Slack cards.
+Read [Team memory](docs/memory.md) to teach Illo your team's work through chat.
 
 ## What it does
 
@@ -8,7 +15,7 @@ Illo is one assistant for a whole team. It lives in Slack, it follows the work o
 
 > **Ada:** where are we on the billing export?
 >
-> **Illo:** Blocked on one decision from you. 2 of 3 lanes move. The CSV format waits for you: UTC or local time?
+> **Illo:** Task #12 waits for your CSV format choice: UTC or local time? The build agent needs your answer.
 
 **A blocker becomes one card. One tap answers it.**
 
@@ -34,30 +41,35 @@ Illo is one assistant for a whole team. It lives in Slack, it follows the work o
 >
 > **Illo:** One outage on 3 Nov, fixed the same day: a config change filled the worker queue (engine#198). Ben added a queue alert (engine#201).
 
-**An alert becomes a ticket. A person assigns it.**
+**An alert becomes a ticket. Code decides the owner.**
 
 > **Monitor** (a bot in #alerts): The preview API returns HTTP 503.
 >
 > **Illo:** Filed engine#250. Nobody is assigned.
 >
-> **Illo** (DM to the default owner): New ticket from outside text, not assigned: engine#250. Assign it in GitHub, or tell me in a DM.
+> **Illo** (DM to the default owner): New ticket from outside text: engine#250. Nobody is assigned. [Assign to Ada] [Leave it]
 
 ## Why it is different
 
 - **One assistant for the team.** Not one for each person. It sees the work of each person, and it carries requests between people.
 - **It follows your coding agents on every machine.** A small collector reports each stream of work. Illo needs no access to the machine.
-- **Your team hosts the ledger.** One Postgres on your server. It stores the lanes, the asks, the saved items, and the messages of the public Slack channels that you configure. It also keeps each message to Illo and its answer. Illo searches the other sources where they live.
+- **Your team hosts the ledger.** One Postgres on your server. It stores tasks, run evidence, asks, and saved items. It stores messages from team-visible Slack channels that Illo joins. It also keeps each message to Illo and its answer. Illo searches the other sources where they live.
 - **You choose the model provider.** That provider receives the prompts and the tool results of each run. Only a local model keeps everything on your server.
-- **Any model.** The brain is a standard agent runtime behind one interface. Use the Claude Agent SDK with an Anthropic API key. An experimental runtime speaks the OpenAI-compatible API, for other providers and local models.
+- **Any model.** Use the Claude Agent SDK, OpenAI through the Responses API, or the ChatGPT subscription of each team member. OpenAI-compatible Chat Completions supports other providers and local servers. Claude Agent SDK has earlier live checks. OpenAI Responses with an API key is tested live with `gpt-6.1-sol` and `gpt-6.1-terra` at effort `low`. ChatGPT subscriptions and Chat Completions have offline tests only. See [the brain guide](brain/README.md) for measured results.
 - **Safety rules in code.** The tool server checks each action. The prompt holds no authority.
 
 ## Install in 30 minutes
 
 1. On a Linux host with Docker, run `git clone --branch next https://github.com/Illospace/illospace.git`. Then run `ILLO_DEPLOY_BRANCH=next deploy/install.sh` in the checkout. Use `next` until the rebuild merges into `main`.
 2. Create the Slack app from `deploy/slack/manifest.yaml`. Give its two tokens to the install script.
+   Add Illo to a channel in Slack, then mention it. A channel needs no workspace entry.
 3. Write your team in `people.yaml` and `illo.yaml` in the workspace folder.
-4. Give the brain a model: an Anthropic API key, or an OpenAI-compatible endpoint.
+4. Give the brain a model: each member's ChatGPT sign-in, an API key, or an OpenAI-compatible endpoint.
 5. Connect your first agent machine with `illo token create --person <key> --label <machine> --scope collector` and a collector.
+
+Talk to Illo to connect your tools.
+The owner writes `connect Google` one time. Each person writes `connect my Google`.
+Ask "What tools are connected?" or give Illo an MCP server address.
 
 The full steps are in [docs/install.md](docs/install.md).
 
@@ -75,7 +87,7 @@ Channels ──► Gateway ──► Ledger (Postgres)
 
 - **Channels** receive and send: Slack, email, the MCP endpoint for agents, and the signal intake.
 - **Gateway** finds who a message is from, decides who the run acts for, and delivers the answer.
-- **Ledger** is one Postgres. It holds the people, the lanes, the asks, the rules, the drafts, and the audit.
+- **Ledger** is one Postgres. It holds the tasks, people, run evidence, asks, rules, drafts, and audit.
 - **Brain** is one agent run for each event. It sees only the Illo tools, through a token that ends with the run.
 - **Tool server** checks each call for scope, destination, and risk, and writes one audit row.
 

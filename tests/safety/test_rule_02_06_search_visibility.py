@@ -90,3 +90,32 @@ async def test_rule_03_private_get_sets_personal_read(app, rpc, rpc_token):
         assert (await one(conn, "SELECT personal_read FROM runs WHERE id=%s", (run["id"],)))[
             "personal_read"
         ]
+
+
+@pytest.mark.parametrize("principal", ["person:ben", "team"])
+async def test_rule_02_recent_perfect_match_stays_private_in_ranked_search(app, monkeypatch, principal):
+    from datetime import UTC, datetime, timedelta
+
+    ctx = app.state.ctx
+    now = datetime(2026, 8, 20, tzinfo=UTC)
+    monkeypatch.setattr(search, "utc_now", lambda: now)
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        await items.upsert(conn, source_ref="saved:private-perfect", kind="decision",
+                           title="Cobalt pricing mira.orbit@example.com", body="Cobalt pricing",
+                           visibility="private", owner_person_id=ada["id"], source_at=now)
+        await items.upsert(conn, source_ref="archive:visible-old", kind="archive",
+                           title="Cobalt pricing mira.orbit@example.com",
+                           source_at=now-timedelta(days=200))
+        lane = await lanes.upsert(conn, source="manual", external_id="private-perfect",
+                                  title="Cobalt pricing mira.orbit@example.com",
+                                  visibility="private", owner_person_id=ada["id"])
+    for query in ("Cobalt pricing", "Cobalt pricing today", "mira", "orbit"):
+        hits = await search.search(ctx, principal, query, limit=1)
+        assert [h.source_ref for h in hits] == ["archive:visible-old"]
+        assert hits[0].lexical > 0 and hits[0].recency >= 0.2
+        assert not hits.personal_read
+    owner_hits = await search.search(ctx, "person:ada", "Cobalt pricing", limit=50)
+    assert "saved:private-perfect" in {h.source_ref for h in owner_hits}
+    assert f"lane:{lane['id']}" in {h.source_ref for h in owner_hits}
+    assert owner_hits.personal_read

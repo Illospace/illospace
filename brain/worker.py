@@ -8,9 +8,14 @@ from pathlib import Path
 import httpx
 
 from brain.models import RunError, RunRequest, event
-from brain.runtimes import claude, echo, openai_compat
+from brain.runtimes import claude, echo, openai_compat, openai_responses
 
-RUNTIMES = {"claude": claude, "openai_compat": openai_compat, "echo": echo}
+RUNTIMES = {
+    "claude": claude,
+    "openai_compat": openai_compat,
+    "openai_responses": openai_responses,
+    "echo": echo,
+}
 
 
 def error_category(error: BaseException) -> str:
@@ -18,10 +23,21 @@ def error_category(error: BaseException) -> str:
         return error.category
     if isinstance(error, BaseExceptionGroup):
         categories = [error_category(child) for child in error.exceptions]
-        return "auth" if "auth" in categories else "runtime"
+        return next((c for c in ("auth", "timeout", "limit", "runtime") if c in categories), "internal")
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
         return "auth"
-    return "runtime"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    return "internal"
+
+
+def failure_event(error: BaseException) -> dict:
+    if isinstance(error, RunError):
+        return event("error", category=error.category, message=str(error), **error.details)
+    if isinstance(error, BaseExceptionGroup):
+        failures = [failure_event(child) for child in error.exceptions]
+        return next((item for item in failures if item.get("code") is not None), failures[0])
+    return event("error", category=error_category(error), message="The brain runtime failed")
 
 
 async def main() -> None:
@@ -38,20 +54,13 @@ async def main() -> None:
             print(
                 json.dumps(
                     event(
-                        "error", category="runtime", message="The runtime stopped without an answer"
+                        "error", category="internal", message="The runtime stopped without an answer"
                     )
                 ),
                 flush=True,
             )
-    except RunError as error:
-        print(json.dumps(event("error", category=error.category, message=str(error))), flush=True)
     except Exception as error:
-        print(
-            json.dumps(
-                event("error", category=error_category(error), message="The brain runtime failed")
-            ),
-            flush=True,
-        )
+        print(json.dumps(failure_event(error)), flush=True)
 
 
 if __name__ == "__main__":

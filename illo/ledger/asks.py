@@ -15,6 +15,7 @@ async def create(
     options: list[dict] | None = None,
     recommended_option: str | None = None,
     proof: dict | None = None,
+    blocks: list[dict] | None = None,
     lane_id: int | None = None,
     requester_token_id: int | None = None,
     requester_person_id: int | None = None,
@@ -40,16 +41,16 @@ async def create(
     ):
         raise ValueError("Use unique option IDs and a valid recommended option")
     if requester_token_id is not None:
-        # Both direct MCP calls and model tools must hold the same token lock.
-        await conn.execute("SELECT id FROM tokens WHERE id=%s FOR UPDATE", (requester_token_id,))
+        # Direct MCP calls and model tools share the same ask limit lock.
+        await mcp.lock_token(conn, requester_token_id, "asks")
         await mcp.check_open_ask_limit(conn, requester_token_id, owner_person_id)
     return await one(
         conn,
         """
         INSERT INTO asks (owner_person_id,question,kind,options,recommended_option,proof,lane_id,
                           requester_token_id,requester_person_id,due_at,expires_at,source_ref,
-                          area,allow_rule,permission)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
+                          area,allow_rule,permission,proof_order,blocks)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
     """,
         (
             owner_person_id,
@@ -67,6 +68,8 @@ async def create(
             area,
             allow_rule,
             permission,
+            Jsonb(list(proof or {})),
+            Jsonb(blocks or []),
         ),
     )
 
@@ -76,8 +79,10 @@ async def get(conn: Connection, ask_id: int, *, principal: str = "team") -> dict
     return await one(
         conn,
         """
-        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility,
+          p.key AS owner,l.title AS lane_title,l.links AS lane_links
         FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
         LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
         WHERE a.id=%s AND (l.visibility='team' OR l.owner_person_id=me.id
           OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
@@ -93,8 +98,10 @@ async def list_open(
     return await all_rows(
         conn,
         """
-        SELECT a.*,COALESCE(l.visibility,'private') AS visibility
+        SELECT a.*,COALESCE(l.visibility,'private') AS visibility,
+          p.key AS owner,l.title AS lane_title,l.links AS lane_links
         FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
         LEFT JOIN people me ON 'person:' || me.key=%s AND me.active
         WHERE a.state='open'
           AND (%s::bigint IS NULL OR a.owner_person_id=%s)
@@ -184,7 +191,7 @@ async def cancel(conn: Connection, ask_id: int) -> bool:
     return bool(
         await one(
             conn,
-            "UPDATE asks SET state='cancelled' WHERE id=%s AND state='open' RETURNING id",
+            "UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s AND state='open' RETURNING id",
             (ask_id,),
         )
     )
@@ -230,3 +237,20 @@ async def ack(conn: Connection, ask_id: int, token_id: int) -> bool:
             (ask_id, token_id),
         )
     )
+
+
+async def compact_list(conn, *, principal, owner=None, limit=15):
+    """Limit ask rows in SQL and preserve the private-read signal."""
+    return await all_rows(conn, """
+        SELECT a.id,a.kind,left(a.question,160) AS question,a.due_at,p.key AS owner,
+          l.title AS lane_title,l.links AS lane_links,
+          COALESCE(l.visibility,'private') AS visibility,count(*) OVER () AS total,
+          bool_or(COALESCE(l.visibility,'private')='private') OVER () AS _private
+        FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
+        LEFT JOIN people me ON 'person:'||me.key=%s AND me.active
+        WHERE a.state='open' AND (%s::text IS NULL OR p.key=%s)
+          AND (l.visibility='team' OR l.owner_person_id=me.id
+            OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
+        ORDER BY a.due_at NULLS LAST,a.id LIMIT %s
+    """, (principal, owner, owner, max(1,min(limit,40))))

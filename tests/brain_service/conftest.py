@@ -73,6 +73,7 @@ class FakeMCP:
         self.calls = []
         self.call_times = []
         self.tool_error = False
+        self.result_override = None
         self.tokens = []
         self.page = False
         self.app.add_api_route("/mcp", self.handle, methods=["POST", "GET", "DELETE"])
@@ -106,7 +107,7 @@ class FakeMCP:
         elif method == "tools/call":
             self.calls.append(body["params"])
             self.call_times.append(time.perf_counter())
-            result = {
+            result = self.result_override or {
                 "content": [{"type": "text", "text": "Acme release is ready"}],
                 "isError": self.tool_error,
             }

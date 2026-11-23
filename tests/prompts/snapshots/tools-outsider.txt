@@ -1,0 +1,1 @@
+web_read_public_page: Read one public web page whose URL is in the run message, or the root page of that host. In a run from outside text, only the first URL of the message, once. Refused after this run read personal data.

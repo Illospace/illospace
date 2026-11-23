@@ -8,7 +8,7 @@ from tests.github.test_tools import CREATE, call
 
 
 @pytest.mark.parametrize(
-    "name", ["github_create_issue", "work_start", "github_comment_issue", "github_assign_issue"]
+    "name", ["github_create_issue", "github_comment_issue", "github_assign_issue"]
 )
 async def test_rule_03_github_after_personal_read(
     app, rpc, rpc_token, github_client, slack_client, name
@@ -25,7 +25,7 @@ async def test_rule_03_github_after_personal_read(
     assert (await call(rpc, token, "mail_search", {}))["decision"] == "allow"
     args = (
         CREATE
-        if name in {"github_create_issue", "work_start"}
+        if name in {"github_create_issue"}
         else {
             "repo": CREATE["repo"],
             "number": 1,
@@ -80,6 +80,6 @@ async def test_rule_03_private_lane_read_makes_github_write_a_draft(
             visibility="private",
         )
     read = await call(rpc, token, "lanes_get", {"id": lane["id"]})
-    assert read["result"]["visibility"] == "private"
+    assert "Private work" in read["result"]
     assert (await call(rpc, token, "github_create_issue", CREATE))["decision"] == "draft"
     assert not github_client.issues

@@ -6,8 +6,8 @@ import pytest
 
 from illo.db import all_rows, one
 from illo.ledger import claims
-from illo.sources.github import perform_draft, poll
-from illo.tools.work import refresh_statuses
+from illo.sources.github import perform_draft
+from tests.tool_results import read_result
 
 REPO = "acme-example/engine"
 CREATE = {
@@ -19,9 +19,7 @@ CREATE = {
 
 
 async def call(rpc, token, name, args):
-    return (await rpc(token, "tools/call", {"name": name, "arguments": args})).json()["result"][
-        "structuredContent"
-    ]
+    return read_result((await rpc(token, "tools/call", {"name": name, "arguments": args})).json()["result"])
 
 
 async def test_duplicate_checks_open_and_closed_and_force(rpc, rpc_token, github_client):
@@ -57,7 +55,6 @@ async def test_duplicate_checks_open_and_closed_and_force(rpc, rpc_token, github
         ("github_search_issues", {"repo": "other/repo", "query": "Example"}),
         ("github_search_issues", {"query": "repo:other/repo Example"}),
         ("github_assign_issue", {"repo": REPO, "number": 1, "assignee": "outsider"}),
-        ("work_start", {**CREATE, "assignee": "outsider"}),
     ],
 )
 async def test_scope_is_checked_in_code(rpc, rpc_token, github_client, name, args):
@@ -96,44 +93,6 @@ async def test_claim_concurrency(app, rpc_token):
     assert sum(await asyncio.gather(*(take() for _ in range(12)))) == 1
 
 
-async def test_work_one_message_then_edit(app, rpc, rpc_token, github_client, slack_client):
-    _, token = rpc_token
-    ctx = app.state.ctx
-    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
-    result = await call(rpc, token, "work_start", {**CREATE, "assignee": "ada"})
-    assert result["decision"] == "draft"
-    async with ctx.pool.connection() as conn:
-        await conn.execute("UPDATE drafts SET state='approved'")
-        draft = await one(conn, "SELECT * FROM drafts")
-    result = {"result": await perform_draft(ctx, draft)}
-    assert result["result"]["lane_id"]
-    assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 1
-    await refresh_statuses(ctx)
-    assert not [c for c in slack_client.calls if c["method"] == "chat_update"]
-    github_client.issues[0]["labels"] = ["agent:working"]
-    await poll(ctx)
-    await refresh_statuses(ctx)
-    assert len([c for c in slack_client.calls if c["method"] == "chat_update"]) == 1
-    async with ctx.pool.connection() as conn:
-        lane = await one(conn, "SELECT * FROM lanes")
-        assert lane["slack_channel"] == "C_ACME_TEAM" and lane["slack_ts"]
-        assert (
-            lane["owner_person_id"]
-            == (await one(conn, "SELECT id FROM people WHERE key='ada'"))["id"]
-        )
-    assert [c for c in slack_client.calls if c["method"] == "chat_update"][0]["text"].startswith(
-        "Working · Stable failure"
-    )
-
-
-async def test_work_falls_back_to_requester_dm(app, rpc, rpc_token, slack_client):
-    _, token = rpc_token
-    app.state.ctx.workspace.config.github.work_channel = None
-    assert (await call(rpc, token, "work_start", CREATE))["decision"] == "allow"
-    posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
-    assert len(posts) == 1 and posts[0]["channel"] == "D_EXAMPLE"
-
-
 async def test_public_draft_performer_checks_approval(app, rpc, rpc_token, github_client):
     _, token = rpc_token
     ctx = app.state.ctx
@@ -168,29 +127,68 @@ async def test_signature_blocks_duplicates_before_search_index_catches_up(
     assert "Signature: Stable failure" in github_client.issues[0]["body"]
 
 
-async def test_work_recovers_status_after_slack_failure(
-    app, rpc, rpc_token, slack_client, monkeypatch
-):
-    from illo.ledger import kv
-
+async def test_refused_signature_gives_the_reason(rpc, rpc_token, github_client, caplog):
     _, token = rpc_token
-    ctx = app.state.ctx
-    ctx.workspace.config.github.work_channel = "C_ACME_TEAM"
-    original = slack_client.chat_postMessage
+    refused = await call(
+        rpc, token, "github_create_issue", {**CREATE, "signature": "generation: unreadable image"}
+    )
+    assert refused["decision"] == "deny"
+    assert "no colon" in refused["reason"]
+    assert not [c for c in github_client.calls if c["method"] == "create_issue"]
+    assert "Tool github_create_issue failed" in caplog.text
 
-    async def fail(**kwargs):
-        raise RuntimeError("Slack unavailable")
 
-    monkeypatch.setattr(slack_client, "chat_postMessage", fail)
-    result = await call(rpc, token, "work_start", CREATE)
-    assert result["decision"] == "allow"
-    lane_id = result["result"]["lane_id"]
-    async with ctx.pool.connection() as conn:
-        assert await kv.get(conn, f"github:pending-status:{lane_id}")
-    monkeypatch.setattr(slack_client, "chat_postMessage", original)
-    await refresh_statuses(ctx)
-    await refresh_statuses(ctx)
-    assert len([c for c in slack_client.calls if c["method"] == "chat_postMessage"]) == 1
-    async with ctx.pool.connection() as conn:
-        assert not await kv.get(conn, f"github:pending-status:{lane_id}")
-        assert (await one(conn, "SELECT slack_ts FROM lanes WHERE id=%s", (lane_id,)))["slack_ts"]
+async def test_unexpected_failure_hides_the_cause(
+    rpc, rpc_token, github_client, monkeypatch, caplog
+):
+    _, token = rpc_token
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("Illegal header value b'Bearer synthetic-secret-token'")
+
+    monkeypatch.setattr(github_client, "search_issues", broken)
+    failed = await call(rpc, token, "github_create_issue", CREATE)
+    assert failed["decision"] == "deny"
+    assert failed["reason"] == "The tool failed"
+    # The server log names the tool and the error type. It never has the error text.
+    assert "Tool github_create_issue failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "synthetic-secret-token" not in caplog.text
+
+
+@pytest.mark.parametrize("signature", ["generation : unreadable", ": generation", "a:b"])
+async def test_each_colon_in_a_signature_is_refused(rpc, rpc_token, github_client, signature):
+    _, token = rpc_token
+    refused = await call(rpc, token, "github_create_issue", {**CREATE, "signature": signature})
+    assert refused["decision"] == "deny"
+    assert "no colon" in refused["reason"]
+
+
+@pytest.mark.parametrize("name,args", [
+    ("github_search_issues", {"repo": "wrong/engine", "query": "release"}),
+    ("github_create_issue", {**CREATE, "repo": "wrong/engine"}),
+])
+async def test_g3_wrong_repository_has_a_safe_hint_in_handler_and_preflight(
+    rpc, rpc_token, github_client, name, args
+):
+    _, token = rpc_token
+    result = await call(rpc, token, name, args)
+    assert result["decision"] == "deny"
+    assert "Allowed repositories: acme-example/engine" in result["reason"]
+    assert not github_client.calls
+
+
+async def test_g3_repository_hint_has_a_bound(app, rpc, rpc_token):
+    _, token = rpc_token
+    app.state.ctx.workspace.config.github.repositories = [f"acme/project-{n}" for n in range(500)]
+    result = await call(rpc, token, "github_search_issues", {"repo": "wrong/engine", "query": "release"})
+    assert "acme/project-0" in result["reason"]
+    assert len(result["reason"]) < 1200
+
+
+async def test_a_header_from_the_model_is_not_written_twice(rpc, rpc_token, github_client):
+    _, token = rpc_token
+    header = "> *This was generated by AI during triage.*"
+    result = await call(rpc, token, "github_create_issue", {**CREATE, "body": f"{header}\n\n## What happened\nIt failed."})
+    body = result["result"]["issue"]["body"]
+    assert body.count(header) == 1 and "## What happened" in body

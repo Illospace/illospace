@@ -2,13 +2,14 @@
 
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 class InboundEvent(BaseModel):
     """The external ID must be stable across channel retries."""
 
     model_config = ConfigDict(extra="forbid")
+    _slack_context_messages: list[dict] = PrivateAttr(default_factory=list)
     channel: str
     external_id: str
     kind: str
@@ -23,4 +24,4 @@ class ChannelAdapter(Protocol):
 
     async def show_working(self, event: InboundEvent) -> None: ...
     async def deliver_final(self, event: InboundEvent, text: str) -> None: ...
-    async def deliver_error(self, event: InboundEvent) -> None: ...
+    async def deliver_error(self, event: InboundEvent, *, category="internal") -> None: ...

@@ -1,3 +1,4 @@
+
 import asyncio
 from dataclasses import replace
 
@@ -7,6 +8,7 @@ from illo.db import one
 from illo.tools.registry import Arguments
 from tests.mcp.client import AgentClient
 from tests.mcp.test_asks import ASK
+from tests.tool_results import read_result
 
 
 async def test_rule_01_open_ask_cap_is_atomic_per_owner_and_token(app, http):
@@ -68,7 +70,6 @@ async def test_rule_01_hourly_caps_keep_retries_saves_and_other_tokens(app, http
         ("slack_send_dm", 3),
         ("github_create_issue", 3),
         ("github_comment_issue", 5),
-        ("work_start", 1),
     ],
 )
 async def test_rule_01_run_caps_count_audit_before_side_effect(app, rpc_token, rpc, name, limit):
@@ -92,7 +93,7 @@ async def test_rule_01_run_caps_count_audit_before_side_effect(app, rpc_token, r
         response = await rpc(raw, "tools/call", {"name": name, "arguments": {}})
         assert response.json()["result"]["structuredContent"]["decision"] == expected
     response = await rpc(raw, "tools/call", {"name": name, "arguments": {}})
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "deny"
     assert "limit" in result["reason"]
     assert len(called) == (0 if expected == "draft" else limit)

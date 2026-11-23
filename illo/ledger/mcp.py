@@ -5,8 +5,14 @@ from psycopg.types.json import Jsonb
 from illo.db import all_rows, one
 
 
+async def lock_token(conn, token_id: int, scope: str) -> None:
+    """Serialize each write family without a token row lock or a read lock."""
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                       (f"mcp-token:{scope}:{token_id}",))
+
+
 async def check_open_ask_limit(conn, token_id: int, owner_id: int) -> None:
-    """The ask ledger holds the token row lock through this check and insert."""
+    """The ask ledger holds the ask lock through this check and insert."""
     row = await one(
         conn,
         """SELECT count(*) FILTER (WHERE state='open') AS n,
@@ -22,6 +28,7 @@ async def check_open_ask_limit(conn, token_id: int, owner_id: int) -> None:
 
 async def check_hourly_limit(conn, token_id: int, *, submission: bool = False) -> None:
     """Count the new row too. A refusal rolls it back with the tool transaction."""
+    await lock_token(conn, token_id, "submissions" if submission else "signals")
     query = (
         """SELECT count(*) AS n FROM submissions WHERE token_id=%s
         AND desired_outcome <> 'preserve_knowledge' AND created_at > now()-interval '1 hour'"""
@@ -87,7 +94,7 @@ async def save_item(conn, *, title, body, person_id, visibility, meta) -> dict:
 async def submission_run(conn, event_id) -> dict | None:
     return await one(
         conn,
-        """SELECT r.id,r.status,r.ended_at,r.error FROM runs r JOIN events e ON e.id=r.event_id
+        """SELECT r.id,r.status,r.ended_at,r.error,r.usage FROM runs r JOIN events e ON e.id=r.event_id
         WHERE e.channel='mcp' AND e.external_id=%s ORDER BY r.id DESC LIMIT 1""",
         (event_id,),
     )
@@ -257,6 +264,29 @@ async def cancel_ask(conn, token, ask_id, source_ref) -> dict | None:
         (token["person_id"], ask_id, ask_id, source_ref, source_ref, token["id"]),
     )
     if row and row["state"] == "open":
-        await conn.execute("UPDATE asks SET state='cancelled' WHERE id=%s", (row["id"],))
+        await conn.execute("UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s", (row["id"],))
         row["state"] = "cancelled"
     return row
+
+
+async def take_ask_card(conn, ask):
+    """Reuse one recently cancelled card. Locks follow id order, as card workers do."""
+    old = await one(conn, """SELECT id FROM asks WHERE requester_token_id=%s
+        AND owner_person_id=%s AND state='cancelled' AND slack_ts IS NOT NULL
+        AND cancelled_at>clock_timestamp()-interval '10 minutes'
+        ORDER BY cancelled_at DESC,id DESC LIMIT 1""",
+        (ask['requester_token_id'], ask['owner_person_id']))
+    if not old:
+        return
+    locked = await all_rows(conn, 'SELECT * FROM asks WHERE id=ANY(%s) ORDER BY id FOR UPDATE',
+                            ([old['id'], ask['id']],))
+    previous = next(row for row in locked if row['id'] == old['id'])
+    current = next(row for row in locked if row['id'] == ask['id'])
+    eligible = await one(conn, """SELECT id FROM asks WHERE id=%s AND state='cancelled'
+        AND cancelled_at>clock_timestamp()-interval '10 minutes' AND slack_ts IS NOT NULL""", (previous['id'],))
+    if not eligible or current['slack_ts']:
+        return
+    await conn.execute('UPDATE asks SET slack_channel=NULL,slack_ts=NULL WHERE id=%s', (previous['id'],))
+    await conn.execute("""UPDATE asks SET slack_channel=%s,slack_ts=%s,card_digest=NULL,
+        awaiting_text=%s WHERE id=%s""", (previous['slack_channel'], previous['slack_ts'],
+                                         previous['awaiting_text'], current['id']))

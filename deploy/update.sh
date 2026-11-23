@@ -2,6 +2,8 @@
 set -euo pipefail
 # shellcheck source=deploy/common.sh
 source "$(dirname -- "$0")/common.sh"
+self=$(cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
+args=("$@")
 load_config
 need git
 need docker
@@ -33,7 +35,7 @@ rollback() {
 }
 
 update_once() {
-    local old target stage
+    local old target stage before
     old=$(cat "$ILLO_STATE_DIR/last-good")
     if [ -n "$(git status --porcelain)" ]; then
         record 'failed: the checkout has local changes'
@@ -47,14 +49,21 @@ update_once() {
     fi
     target=$(git rev-parse "refs/remotes/origin/$branch")
     [ "$target" != "$old" ] || return 0
+    before=$(git rev-parse HEAD)
     if ! git merge-base --is-ancestor HEAD "$target" || ! git merge --ff-only "$target"; then
         record "failed $target: fast-forward"
         return 1
     fi
+    # The fast-forward can change this script and its list of images. A running shell keeps the old text.
+    # Start the new script one time for this target. The checkout is then at the target.
+    if [ "$before" != "$target" ] && [ "${ILLO_UPDATE_RESTARTED_FOR:-}" != "$target" ]; then
+        export ILLO_UPDATE_RESTARTED_FOR=$target
+        exec "$self" ${args[@]+"${args[@]}"}
+    fi
     export ILLO_REVISION=$target
     export ILLO_MIGRATE_ON_START=0
     stage=build
-    if compose build illo brain; then
+    if compose build illo brain sandbox; then
         stage=database
         if compose up -d --no-build --wait postgres; then
             stage=migration

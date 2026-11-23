@@ -24,15 +24,19 @@ async def resolve(conn, event, workspace) -> Authority | None:
             if not person or event.payload.get("bot") or event.payload.get("webhook"):
                 return None
             return Authority(f"person:{person['key']}", "person_dm", person["id"])
-        channel = next(
-            (c for c in workspace.config.slack.channels if c.id == event.payload.get("channel_id")),
-            None,
-        )
-        if not channel or channel.mode == "off":
+        if not event.payload.get("channel_id"):
+            return None
+        channel = workspace.config.slack.channel(event.payload["channel_id"])
+        if channel.mode == "off":
             return None
         if channel.mode == "listen" and not event.payload.get("mentioned"):
             return None
         tainted = any(event.payload.get(key) for key in ("bot", "bot_id", "webhook", "form"))
+        if event.payload.get("channel_class") == "members" and (
+                tainted or not person or not event.payload.get("mentioned")):
+            return None
+        if not channel.listed and (tainted or not person):
+            return None
         if not tainted and not person:
             return None
         return Authority("team", "tainted" if tainted else "team_channel", tainted=tainted)
@@ -47,6 +51,10 @@ async def resolve(conn, event, workspace) -> Authority | None:
             person["id"] if person else None,
             tainted,
         )
+    if event.channel == "team_digest":
+        return Authority("team", "routine") if workspace.config.digest.team else None
+    if event.channel == "digest":
+        return await person_authority(conn, event.payload.get("principal", ""))
     if event.channel == "routine":
         routine = next(
             (r for r in workspace.routines if r.name == event.payload.get("routine") and r.enabled),
@@ -56,8 +64,7 @@ async def resolve(conn, event, workspace) -> Authority | None:
             return None
         if routine.principal == "team":
             return Authority("team", "routine")
-        person = await people.get(conn, routine.principal[7:])
-        return Authority(routine.principal, "person_dm", person["id"]) if person else None
+        return await person_authority(conn, routine.principal)
     if event.channel == "mcp":
         # The agent channel passes the raw bearer only in sender, never in stored payload.
         token = await tokens.verify(conn, event.sender)
@@ -67,3 +74,11 @@ async def resolve(conn, event, workspace) -> Authority | None:
     if event.channel == "signals":
         return Authority("team", "tainted", tainted=True)
     return None
+
+
+async def person_authority(conn, principal):
+    """Person routines and briefs keep the person's authority."""
+    if not principal.startswith("person:"):
+        return None
+    person = await people.get(conn, principal[7:])
+    return Authority(principal, "person_dm", person["id"]) if person else None

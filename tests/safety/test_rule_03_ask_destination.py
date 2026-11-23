@@ -3,11 +3,12 @@
 from illo.asks import drafts, service
 from illo.db import one
 from illo.ledger import people
+from tests.tool_results import read_result
 
 
 async def call(rpc, token, name, arguments):
     result = await rpc(token, "tools/call", {"name": name, "arguments": arguments})
-    return result.json()["result"]["structuredContent"]
+    return read_result(result.json()["result"])
 
 
 async def test_rule_03_personal_data_to_other_person_is_draft_until_approval(app, rpc, rpc_token):

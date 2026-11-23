@@ -1,5 +1,108 @@
 # Connect an agent
 
+## Connect an app with its Connect button
+
+1. Add `https://illo.example.com/mcp` in the app's MCP or connector settings.
+   Replace the host with your team's Illo address. `/api/mcp` also works.
+2. Click **Connect**. Illo shows the app name and the return host.
+   The app supplies its name. Illo does not verify that name.
+3. Click **Sign in with Slack**. Use your account in the team's Slack workspace.
+4. Check your name, the app, and the return host. Click **Allow** only if you started this sign-in.
+5. Illo sends you back to the app. It also sends a DM about the connection.
+
+Ask Illo: say `connect my Claude` in a DM. Use `connect my Codex` or `connect my agent` for other guides.
+You can also ask in your own words, for yourself or another person.
+Illo calls `connect_guide` for the current address and sign-in steps.
+In a DM, you can ask Illo to send those steps to another person.
+
+To use a code, open **Use a code in Slack** on the page.
+Copy the `connect XXXX-XXXX` message. Send it to Illo in your own Slack direct message.
+An app that posts for you in Slack can send the message. Some apps add a signature with words such as "Sent using" and the app name. Illo accepts this signature, and the card says that an app sent the code. No other text can follow the code.
+Check the app and the return host on the card. Click **Approve** only if you started this sign-in.
+Return to the browser. It sends you back to the app.
+If the operator has not set up Slack sign-in, the page shows only this code method.
+
+Each team member connects with their own Slack identity. You must be active in `people.yaml`.
+The app can read and write Illo memory, tasks and lanes as you.
+Click **Cancel** on the page, or **Deny** on the Slack card, to refuse the connection. A request expires after 10 minutes.
+To end a connection, ask the operator to list and revoke it:
+
+```sh
+illo token list
+illo token revoke 42
+```
+
+Use the connection ID from the list. Revocation ends all access and refresh tokens for that connection.
+
+For Codex CLI, add the address, then sign in:
+
+```sh
+codex mcp add illo --url https://illo.example.com/mcp
+codex mcp login illo
+```
+
+In Claude, choose **Register automatically** under **OAuth client** during connector setup.
+For a Team or Enterprise plan, an owner adds the connector first.
+
+Claude Code also supports HTTP MCP sign-in. Add the address without a static bearer header.
+Use its MCP sign-in control to start the same Slack flow.
+
+### Operator setup for app sign-in
+
+Set `connect.public_url` or `ILLO_PUBLIC_URL` to your public HTTPS origin, such as `https://illo.example.com`.
+Agent sign-in needs an origin with no path, query, or credentials.
+With no HTTPS origin, Illo keeps static-token access. The new OAuth routes answer 404.
+
+Set up the Slack app's sign-in client with the operator's vault:
+
+```sh
+illo secret set slack-client-id
+illo secret set slack-client-secret
+```
+
+Each command asks for the value with hidden input.
+Copy **Client ID** and **Client Secret** from **Basic Information** on the Slack app page.
+Add `https://illo.example.com/oauth/agent/slack/callback` under **OAuth & Permissions → Redirect URLs**.
+Replace the example host with your public origin. The app needs the `openid` user scope.
+Keep sign-in scopes separate from bot scopes in each OAuth request.
+See [Install](install.md#sign-in-with-slack) for the manifest and container commands.
+Illo reads the workspace team ID from its Slack connection. That connection must succeed first.
+Without both client values, the page keeps the code method. No new boot variable is needed.
+
+Hosted Claude calls from Anthropic's servers. It needs these paths on the public internet through port 443:
+
+- `/mcp` and `/api/mcp`
+- `/.well-known/`
+- `/oauth/`
+
+Keep the `WWW-Authenticate` header on HTTP 401 responses through your proxy.
+Do not log OAuth query strings, cookies, request bodies, or token response bodies.
+The app filters its OAuth access logs. Your proxy needs its own log rules.
+
+Illo uses Dynamic Client Registration for public clients. It does not fetch client metadata URLs.
+It accepts the exact Claude callbacks at `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback`.
+It also accepts HTTP loopback redirects on `localhost`, `127.0.0.1`, and `[::1]`.
+Loopback ports can change. The host, path, and query must match the registration.
+Add other exact HTTPS callbacks to `connect.agent_redirects`. Its default is an empty list.
+The browser and Slack card show an extra warning for loopback redirects.
+
+Access tokens last one hour. Each refresh rotates the refresh token and starts a new 90-day idle life.
+A second use of a refresh token in the first 60 seconds gets the same new pair again. Sessions of one app can refresh at the same time.
+A later reuse of a refresh token, or a reuse of an authorization code, revokes the whole connection.
+Illo has one scope, `agent`. It grants that scope for each scope name that an app sends.
+An app can leave out the `resource` parameter. Illo then uses the `/mcp` address.
+Authorization codes last two minutes and work once. Pairing requests last 10 minutes.
+Illo stores only hashes of the secrets. Each connection keeps one stable ID in `illo token list`.
+
+The limits are 60 registrations per hour, 1,000 stored clients, and 200 pending requests.
+Each client can have 10 pending requests. Each person can try 10 pairing codes per hour.
+The token endpoint has no failure counter. Limit its request rate in your proxy if you need a limit.
+Client records with no approved connection expire after 24 hours. Cleanup runs hourly and at registration.
+
+Static tokens remain available for machines with no browser.
+
+## Create a static token
+
 An agent connects to `https://illo.example.com/mcp`. Replace the host with your team's Illo address.
 `/api/mcp` is an alias. Both addresses use stateless Streamable HTTP with JSON responses.
 
@@ -29,6 +132,41 @@ illo mcp check --url https://illo.example.com --token-file ~/.config/illo/token
 ```
 
 The command checks initialization, the tool list, and a lane read. It does not start a model run.
+
+## Work on a task
+
+An `agent` token can also use the direct task tools. These tools start no model run.
+Name the agent with `--agent build` when you create its token.
+The key must exist in `agents.yaml`. Its owner must be the token's person.
+`illo token list` shows the agent key. Without a key, the token acts as an unnamed agent of that person.
+
+1. Read `task_mine`. It shows state, `waits_for`, and `new_for_you`.
+2. Call `task_get` first. The task is the brief. Read the list instructions with `task_lists`.
+3. Write the result below the brief with `task_write`. Give `result` with its `result_version`, or give `append`.
+4. Include a `message` that says what changed and what you need. A missing message refuses the call.
+5. Ask one question with `task_post` when blocked. Optional `to` names a person.
+6. Set `returned: true` on the last write. Never say Done.
+
+### Choices
+
+Illo and each agent make the small choices inside the agreed work themselves.
+A small choice is easy to change and makes no promise: a title, the words of a task, an order, a format.
+They list each one under the line "Choices I made for you", and the person can change one in a reply.
+An agent puts that list in its result or on the task page.
+A brief and an answer to an outsider have no such list.
+
+A question to a person is for a decision that belongs to that person. Examples:
+money, a team rule, the scope of the work, a date that binds another person, a step that nobody can undo,
+and, for an agent, a text that people outside the team see. Illo's own outside texts are drafts that a person approves.
+Use `ask_create` or `task_post` for the question, with the choice that you recommend.
+The list, the holder, and the process of a type of work are not small choices. Do not invent a missing process.
+A team rule or the instructions of a list can add choices that need a question. They cannot remove one.
+
+Only the holder can write an active task. After a hand-over, change nothing and end the run.
+An agent cannot mark Done, clear its holder, or hand an existing task to another holder.
+`task_create` captures stated work. An agent can give an allowed holder a piece under its own task.
+Task changes have a cap of 60 per token per hour. Reads do not count.
+See [Lists and tasks](tasks.md) for the full rules and the result format.
 
 ## Claude Code
 
@@ -123,6 +261,14 @@ A token writes only the lanes of its own person. A report on a lane of another p
 Only the GitHub poller writes lanes with the source `github`.
 A report updates the same lane. Omitted fields keep their stored values.
 Use `state: "done"` or `state: "failed"` with `end_summary` to save a searchable lane summary.
+When a lane leaves these states, Illo clears its closing time and end summary. It deletes the saved summary item.
+Set `is_step: true` for a lane that is one agent step of other work.
+Set `parent_ref` to the parent thread ID when the source supplies it. A step can have no known parent.
+Both fields are optional. Old reports keep their stored values. New lanes default to `is_step: false`.
+These fields describe the source run. Briefs count tasks instead of lanes or steps.
+For T3, `review` means the source run stops after its turn. It is not proof that a task is done.
+The task's holder, `waits_for`, checks, and record decide its next move.
+See [T3 state rules](collectors.md#reports-and-asks) for settlement evidence and step fields.
 Set `visibility: "private"` for a lane that only its owner may read. A private lane must belong to the calling person.
 
 Collectors can report a batch and their health:
@@ -143,7 +289,31 @@ Collectors can report a batch and their health:
 {"lane":{"source":"t3","external_id":"acme-thread-1"},"question":"Which test target should I use?","options":[{"id":"preview","label":"Preview"},{"id":"local","label":"Local"}],"recommended":"preview","proof":{"text":"The preview has the new schema."},"source_ref":"acme-thread-1:test-target"}
 ```
 
-Use one short sentence and two to five options. If you give a recommendation, it must name an option id.
+Use one short sentence of 240 characters at most, and two to five options.
+If you give a recommendation, it must name an option id.
+Put the words to send in a `preview` block. Put a picture in an `image` block.
+Use `text`, `preview`, `image`, `checks`, or `bars`, as in `task_page`. Give at most 12 blocks.
+The page shows the blocks in order, before the proof. A check with a result gets a check time.
+Put other material in `proof.text` or `proof.body`. Other named entries also appear on the request page.
+
+```json
+{"question":"Can you approve this reply?","options":[{"id":"yes","label":"Send"},{"id":"no","label":"Wait"}],"recommended":"yes","blocks":[{"kind":"preview","name":"acme-example","text":"We can send the pictures tomorrow."},{"kind":"image","image":{"url":"https://example.com/reply.png"},"caption":"The proposed picture."}]}
+```
+
+`pages.outside_images` controls pictures from addresses. See [Task pages](pages.md) for the limits.
+When the setting is off, each picture shows as a link. The result includes a `notes` list.
+When pages are off, a call with blocks fails before it writes an ask.
+The page shows nested lists and named values. Picture addresses appear as links. `proof.links` shows all links.
+The `area` entry selects an owner and stays hidden.
+The proof has at most 40 values, 20,000 bytes as compact JSON, and three levels. The proof object is level one.
+A string value `saved:<number>` anywhere in the proof shows that saved item's title and text.
+Both the requester and the person who must answer must have access to that item.
+The page checks access each time. It shows no item text after access ends.
+`ask_create` returns `page_url` and `card_text`, the card's first line and question.
+When pages are on, `page_url` points to `/web/a/{id}`. Only the two participants can open it.
+The owner answers on the page or in Slack. Both paths save one answer.
+When pages are off, `page_url` is null and the agent's Slack card shows the complete proof.
+A card can have at most 45 blocks and 30,000 characters. A larger request is refused before the ask is written.
 The asks service sends the card. This call only writes the ledger.
 The same token and `source_ref` return the same ask.
 A token can have 20 open asks for each owner.
@@ -178,6 +348,10 @@ A token of the same person can acknowledge a delivered answer.
 
 You can also pass `ask_id`. Only an open ask becomes cancelled.
 Source references belong to the calling token. Ask ids also permit a new token of the same person.
+Illo records when an ask is cancelled. An answered ask cannot be cancelled.
+One message serves one request: a new ask can reuse the card of a recently cancelled ask.
+The token and owner must match, and the cancel must be less than 10 minutes old.
+Illo updates that card. Old buttons stop working, and thread answers go to the new ask.
 
 ### `signal_submit`
 
@@ -187,5 +361,91 @@ Source references belong to the calling token. Ask ids also permit a new token o
 
 The same source and dedupe key return the first signal id with `duplicate: true`.
 Illo treats the signal as outside data. The run has the team principal and the tainted profile.
-It can read issues, file an unassigned ticket, and read the first URL of the signal text. It gets no personal connector. A signal has no reply destination.
+It can read issues, file a ticket, and read the first URL of the signal text. Code decides the owner under the [outside-text triage rules](github.md#triage-of-outside-text). It gets no personal connector. A signal has no reply destination.
 A token can send 60 new signals in one hour. A duplicate does not count.
+
+## Wake notices
+
+Core wake types are `none`, `poll`, and `webhook`.
+`none` leaves the start to a person. `poll` means the agent reads `task_mine` on its own clock.
+A webhook config uses `type`, an HTTPS `url`, and `secret`, the name of a vault secret.
+Store the bearer token with `illo secret set <name>`. Do not put the token in the workspace.
+
+```yaml
+wake:
+  type: webhook
+  url: https://agents.example.com/wake
+  secret: build-wake-token
+```
+
+Illo sends a JSON POST with this shape:
+
+```json
+{"event":"task.handed","task":42,"event_id":"123","text":"Read task 42."}
+```
+
+The event is `task.handed`, `task.message`, `task.reopened`, or `task.released`.
+The bearer token comes from the vault. Each request has a 10-second timeout and one retry.
+A non-2xx answer fails the wake. The durable outbox also retries failed wakes three times.
+Use `event_id` to ignore duplicate notices. Read the task through the agent door to get the work.
+Illo never logs the token or the complete URL query.
+
+`lane_report` accepts an optional `task` ID, including on each lane in a batch.
+A working lane refreshes that task's liveness. Matching ticket and change links also work.
+The token can affect only tasks of its person or that person's agents.
+A stopped lane with an open ticket starts a wait of `tasks.stop_grace_minutes`.
+A working report during this wait clears the pending stop without a history event.
+After the wait, Illo confirms the stop and can restart the holder in the same check.
+Illo ignores lanes that closed before the task's latest hand-over, send-back, or successful wake.
+Repeated stopped reports keep the first pending time and cause at most one stop event per work period.
+
+The task list supplies the work facts for both morning briefs. Lanes supply raw run evidence.
+The T3 collector includes linked pull request URLs from the thread JSON.
+For SQLite, it also reads the optional `projection_thread_pull_requests` table.
+It also includes an issue URL when the first user message contains exactly one GitHub issue URL.
+It never copies that user message into the lane. Use fixture databases to test this read path.
+A pull request link can match a task ticket through its GitHub closing or reference link in the same repository.
+A reference supplies a `change` link. It never closes an issue by itself.
+
+
+## Write a task page
+
+When `pages.enabled` is on, the agent tool list includes `task_page`.
+It takes `task` (the task ID) and `blocks` (up to 12 typed blocks).
+It replaces the page of a task you hold, under the same holder rule as `task_write`.
+It returns the page URL, blocks, and result versions. It does not start a model run.
+The tool shares the limit of 60 task changes per token per hour.
+A page shows work as its reader sees it, then the checks and their sources. Do not repeat the brief.
+See [Task pages](pages.md) for the five block kinds and image rules.
+
+```json
+{
+  "name": "task_page",
+  "arguments": {
+    "task": 12,
+    "blocks": [
+      {"kind": "preview", "name": "Example Co", "label": "Draft message", "text": "The new release is ready."},
+      {"kind": "checks", "items": [{"claim": "The release passed", "state": "yes", "source_url": "https://example.com/checks"}]}
+    ]
+  }
+}
+```
+
+## Report task progress
+
+A lane report can include `progress` for a task. Any agent token can report progress for its own lane.
+The field is optional. An omitted field keeps the stored value. Send `null` to clear it.
+Illo keeps only the present value and its change time. A progress change adds no lane event.
+
+```json
+{"source":"codex","external_id":"example-run","task":12,"state":"working","progress":{"steps":[{"text":"Read the code","state":"done"},{"text":"Run the tests","state":"now"}],"steps_total":2,"steps_done":1,"now":"tests","files_changed":3}}
+```
+
+Send at most 12 steps. Each text has at most 120 characters.
+The step states are `done`, `now`, and `todo`.
+The counts are integers from 0 to 100,000. Extra keys fail validation.
+The `now` keys are `reads`, `tests`, `saves`, `pull`, `command`, `changes`, `thinks`,
+`writes`, `searches`, `tool`, `helper`, and `waits`.
+The task page shows these facts as data. It does not ask an agent to report them.
+`task_get` and `task_mine` include computed progress for visible tasks.
+With pages on, `task_create` also returns `page_url`.

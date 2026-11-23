@@ -33,9 +33,27 @@ def google_config(ctx, scope: str = "personal") -> Connector | None:
     )
 
 
+async def google_ready(conn, app, scope, person_id) -> bool:
+    """Check the configured connector and its current grant without a remote call."""
+    config = google_config(app, scope)
+    if not config or (scope == "personal" and person_id is None):
+        return False
+    if config.auth and config.auth.type == "service_account":
+        return True
+    grant = await one(
+        conn,
+        "SELECT id FROM connector_grants WHERE connector_key=%s "
+        "AND person_id IS NOT DISTINCT FROM %s AND revoked_at IS NULL",
+        (config.key, person_id if scope == "personal" else None),
+    )
+    return grant is not None
+
+
 async def credentials(ctx, conn) -> tuple[str, str]:
     client_id = os.environ.get("ILLO_GOOGLE_CLIENT_ID", "")
     secret = os.environ.get("ILLO_GOOGLE_CLIENT_SECRET")
+    if not client_id:
+        client_id = await store.vault(ctx).get(conn, "google-client-id")
     if not secret:
         secret = await store.vault(ctx).get(conn, "google-client-secret")
     if not client_id or not secret:
@@ -308,15 +326,8 @@ async def _search_provider(ctx, principal, query, kinds, limit, *, shared=False,
             if not person:
                 return []
             person_id = person["id"]
-        if not (config.auth and config.auth.type == "service_account"):
-            grant = await one(
-                conn,
-                "SELECT id FROM connector_grants WHERE connector_key=%s "
-                "AND person_id IS NOT DISTINCT FROM %s AND revoked_at IS NULL",
-                (config.key, person_id),
-            )
-            if not grant:
-                return []
+        if not await google_ready(conn, ctx, "team" if shared else "personal", person_id):
+            return []
         args = {"query": query}
         if mail:
             args["limit"] = max(1, min(limit, 50))
@@ -352,8 +363,7 @@ async def shared_provider(ctx, principal, query, kinds, limit):
     return await _search_provider(ctx, principal, query, kinds, limit, shared=True)
 
 
-async def setup(ctx) -> None:
-    ctx.google_client = GoogleClient()
+def register_search(ctx) -> None:
     from illo.sources import search
 
     register = getattr(search, "register_provider", None)
@@ -367,3 +377,8 @@ async def setup(ctx) -> None:
             # Several app instances can share this module. Providers take their app as an argument.
             if getattr(search, "_providers", {}).get(name) != (fn, personal, False):
                 register(name, fn, personal=personal, tainted=False)
+
+
+async def setup(ctx) -> None:
+    ctx.google_client = GoogleClient()
+    register_search(ctx)

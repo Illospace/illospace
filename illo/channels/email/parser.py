@@ -7,7 +7,8 @@ from email.parser import BytesParser
 from email.utils import getaddresses
 
 from illo.gateway import InboundEvent
-from illo.tools.web import PageText, outside_data
+from illo.tools._format import data_text
+from illo.tools.web import PageText
 
 QUOTE_START = re.compile(
     r"(?im)^(?:\s*>|\s*On .{1,500}wrote:\s*$|\s*-{2,}\s*(?:Original|Forwarded) message\s*-*|\s*Begin forwarded message:|From:\s+.+)"
@@ -180,7 +181,7 @@ def parse_message(
         text = (
             text[: quote.start()].strip()
             + "\n\n"
-            + outside_data(text[quote.start() :], "forwarded-message")
+            + data_text("forwarded-message", text[quote.start() :])
         )
     attachments = []
     for attachment in message.iter_attachments():
@@ -191,8 +192,8 @@ def parse_message(
             }
         )
     if attachments:
-        text += "\n\n" + outside_data(
-            "\n".join(f"{a['name']} ({a['size']} bytes)" for a in attachments), "attachments"
+        text += "\n\n" + data_text(
+            "attachments", "\n".join(f"{a['name']} ({a['size']} bytes)" for a in attachments)
         )
     message_id = str(message.get("Message-ID", "")).strip()
     if not re.fullmatch(r"<[^<>\s]{1,900}>", message_id):

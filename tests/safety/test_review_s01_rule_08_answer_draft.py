@@ -10,6 +10,7 @@ from illo.db import one
 from illo.ledger import asks, people
 from tests.collectors.test_t3 import APIs
 from tests.mcp.client import AgentClient
+from tests.tool_results import read_result
 
 
 @pytest.mark.parametrize("personal_read", [False, True])
@@ -44,7 +45,7 @@ async def test_rule_08_model_answer_waits_for_owner_approval(
             },
         },
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "draft"
     assert (await agent.call("ask_pull"))["answers"] == []
     async with ctx.pool.connection() as conn:

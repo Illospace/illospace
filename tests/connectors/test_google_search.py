@@ -6,6 +6,7 @@ from illo.connectors import google, store
 from illo.ledger import people, runs
 from illo.sources import search
 from tests.fakes import FakeGoogleClient
+from tests.tool_results import read_result
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ async def test_search_personal_provider_marks_run_and_shared_write_drafts(
         "tools/call",
         {"name": "search_all", "arguments": {"query": "invoice", "kinds": ["mail"]}},
     )
-    result = response.json()["result"]["structuredContent"]
+    result = read_result(response.json()["result"])
     assert result["decision"] == "allow"
     assert "google:google:mail:mail-1" in result["result"]
     response = await rpc(

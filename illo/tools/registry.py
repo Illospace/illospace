@@ -1,24 +1,94 @@
 """Discover tool families and execute each call through the authority checks."""
 
+import functools
 import importlib
+import logging
 import pkgutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from illo.db import Connection, one
 from illo.ledger import audit, drafts
+from illo.tools._format import Compact, json_text
 from illo.tools.checks import PROFILE_NAMES, Decision, check, scope
+
+MAX_RESULT_CHARS = 12_000
+
+log = logging.getLogger(__name__)
+
+
+class Refusal(ValueError):
+    """A tool refuses a call. The model may read the reason, so the text must be fixed."""
+
 
 RUN_LIMITS = {
     "asks_create": 3,
     "slack_send_dm": 3,
     "github_create_issue": 3,
     "github_comment_issue": 5,
-    "work_start": 1,
 }
+
+
+SCHEMA_REASON = "The tool arguments do not match its schema"
+MAX_REASON_CHARS = 600
+# The messages of these error types come from the schema only. Other types can repeat the caller's value.
+SAFE_ERRORS = frozenset({
+    "missing", "extra_forbidden", "string_type", "int_type", "float_type", "bool_type", "list_type",
+    "dict_type", "model_type", "literal_error", "enum", "is_instance_of", "none_required", "finite_number",
+    "string_too_long", "string_too_short", "string_pattern_mismatch", "too_long", "too_short",
+    "greater_than", "greater_than_equal", "less_than", "less_than_equal", "union_tag_not_found",
+})
+
+
+@functools.cache
+def _schema_words(model) -> frozenset[str]:
+    """The field names and the union tags that the schema of a tool declares."""
+    words = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            words.update(node.get("properties", {}))
+            words.update(node.get("discriminator", {}).get("mapping", {}))
+            if isinstance(node.get("const"), str):
+                words.add(node["const"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(model.model_json_schema())
+    return frozenset(words)
+
+
+def schema_reason(exc: ValidationError, model, limit: int = 5) -> str:
+    """Name the fields that failed, so that a model can correct its call.
+
+    The audit record keeps this reason, and it keeps no argument values. So the text holds only
+    list positions, words from the schema of the tool, and messages that come from the schema.
+    A key that the caller invented shows as `?`.
+    """
+    words = _schema_words(model)
+    parts = []
+    errors = exc.errors(include_url=False, include_context=True, include_input=False)
+    for error in errors[:limit]:
+        where = ".".join(str(part) if isinstance(part, int) or part in words else "?"
+                         for part in error["loc"]) or "arguments"
+        if error["type"] == "union_tag_invalid":
+            message = "Use one of the kinds in the schema"
+        elif isinstance(error.get("ctx", {}).get("error"), Refusal):
+            message = str(error["ctx"]["error"])
+        elif error["type"] in SAFE_ERRORS:
+            message = error["msg"]
+        else:
+            message = "The value is not valid"
+        parts.append(f"{where}: {message}")
+    more = f" (and {len(errors) - limit} more)" if len(errors) > limit else ""
+    return (SCHEMA_REASON + ": " + "; ".join(parts) + more)[:MAX_REASON_CHARS]
 
 
 class Arguments(BaseModel):
@@ -64,6 +134,12 @@ class Tool:
     # Resolve a configured remote tool before any authority check or draft.
     resolve: Callable[[ToolContext, dict], "Tool"] | None = None
     on_error: Callable[[ToolContext, dict], Awaitable[None]] | None = None
+    available: Callable[[ToolContext], Awaitable[bool]] | None = None
+    # Patch tools need to distinguish an omitted field from an explicit null.
+    customer_data: bool = False
+    exclude_unset: bool = False
+    # Some team writes use an existing confirmation flow after a private read.
+    draft_handler: Callable[[ToolContext, dict], Awaitable[Any]] | None = None
 
     @property
     def json_schema(self) -> dict:
@@ -77,6 +153,8 @@ class Tool:
 
 def _has_private_data(value) -> bool:
     """A private ledger read has the same destination limit as a personal connector."""
+    if isinstance(value, Compact):
+        return value.private
     if isinstance(value, dict):
         return value.get("visibility") == "private" or any(
             _has_private_data(v) for v in value.values()
@@ -127,8 +205,21 @@ class Registry:
         return [
             tool.declaration()
             for _, tool in sorted(self.tools.items())
-            if scope(run, tool).outcome == "allow"
+            if tool.name not in {"asks_digest"}
+            and not (tool.name in {"page_read", "page_write"} and not run.get("pages_enabled"))
+            and not (tool.risk == "send_outside" and run.get("person_id") is None)
+            and scope(run, tool).outcome == "allow"
         ]
+
+    async def list_tools_for(self, ctx: ToolContext) -> list[dict]:
+        """Hide tools whose connector or grant is absent. Call checks still apply."""
+        result = []
+        ctx.run["pages_enabled"] = ctx.app.workspace.config.pages.enabled
+        for declaration in self.list_tools(ctx.run):
+            tool = self.tools[declaration["name"]]
+            if tool.available is None or await tool.available(ctx):
+                result.append(declaration)
+        return result
 
     async def call(self, ctx: ToolContext, name: str, args: dict) -> dict:
         """Call under the run row lock. The HTTP layer owns the transaction."""
@@ -145,9 +236,9 @@ class Registry:
                 reason = f"The run has reached the {name} call limit of {RUN_LIMITS[name]}"
         if tool:
             try:
-                validated = tool.arguments.model_validate(args).model_dump()
-            except ValidationError:
-                reason = "The tool arguments do not match its schema"
+                validated = tool.arguments.model_validate(args).model_dump(exclude_unset=tool.exclude_unset)
+            except ValidationError as exc:
+                reason = schema_reason(exc, tool.arguments)
             else:
                 try:
                     if tool.resolve:
@@ -157,11 +248,21 @@ class Registry:
                         extra = await tool.preflight(ctx, validated)
                         if extra.outcome == "deny" or verdict.outcome == "allow":
                             verdict = extra
+                except Refusal as exc:
+                    verdict = Decision("deny", f"The tool refused the call: {exc}")
                 except Exception:
                     verdict = Decision("deny", "The tool declaration is invalid")
                 decision, reason = verdict.outcome, verdict.reason
                 if decision == "draft":
-                    if ctx.run["person_id"] is None:
+                    if tool.draft_handler:
+                        try:
+                            async with ctx.conn.transaction():
+                                result = await tool.draft_handler(ctx, validated)
+                        except Refusal as exc:
+                            decision, reason = "deny", f"The tool refused the call: {exc}"
+                        except Exception:
+                            decision, reason = "deny", "The tool failed"
+                    elif ctx.run["person_id"] is None:
                         decision, reason = "deny", "A draft needs a person to approve it"
                     else:
                         row = await drafts.create(
@@ -174,6 +275,12 @@ class Registry:
                         )
                         result = {"draft_id": row["id"], "state": "pending"}
                 elif decision == "allow":
+                    # Keep the flag even if the remote call fails after it receives data.
+                    if tool.customer_data:
+                        await ctx.conn.execute(
+                            "UPDATE runs SET customer_read=true WHERE id=%s", (ctx.run["id"],)
+                        )
+                        ctx.run["customer_read"] = True
                     if tool.personal:
                         await ctx.conn.execute(
                             "UPDATE runs SET personal_read=true WHERE id=%s", (ctx.run["id"],)
@@ -182,15 +289,25 @@ class Registry:
                     try:
                         async with ctx.conn.transaction():
                             result = await tool.handler(ctx, validated)
+                            if tool.risk == "read" and '<outside_data source=' in json_text(result):
+                                await ctx.conn.execute("UPDATE runs SET outside_read=true WHERE id=%s", (ctx.run["id"],))
+                                ctx.run["outside_read"] = True
                             if tool.risk == "read" and _has_private_data(result):
                                 await ctx.conn.execute(
                                     "UPDATE runs SET personal_read=true WHERE id=%s",
                                     (ctx.run["id"],),
                                 )
                                 ctx.run["personal_read"] = True
-                    except Exception:
+                    except Exception as exc:
                         # Keep secrets out of errors and keep the audit row after a rollback.
                         decision, reason = "deny", "The tool failed"
+                        detail = type(exc).__name__
+                        if isinstance(exc, Refusal):
+                            # A fixed text from the tool. The model can correct the call.
+                            reason = f"The tool refused the call: {exc}"
+                            detail = f"Refusal: {exc}"
+                        # An exception text can hold a credential. Log only its type.
+                        log.warning("Tool %s failed in run %s (%s)", name, ctx.run["id"], detail)
                         if tool.on_error:
                             await tool.on_error(ctx, validated)
         await audit.write(
@@ -201,5 +318,39 @@ class Registry:
             args=args,
             decision=decision,
             reason=reason,
+            target=(f"draft {result['draft_id']}" if isinstance(result, dict) and result.get("draft_id")
+                    else f"memory:{result['change_id']}" if tool and tool.family == "memory"
+                    and isinstance(result, dict) and isinstance(result.get("change_id"), int)
+                    else f"task {result['id']}" if tool and tool.family == "tasks"
+                    and isinstance(result, dict) and isinstance(result.get("id"), int) else None),
         )
+        if name == "shell" and isinstance(args.get("command"), str):
+            await ctx.conn.execute("UPDATE audit SET args=jsonb_set(args,'{command}',%s) WHERE id=(SELECT max(id) FROM audit WHERE run_id=%s AND tool='shell')",
+                                   (Jsonb(args["command"][:300]), ctx.run["id"]))
+        if isinstance(result, Compact):
+            result = result.text
+        # Apply the cap after privacy checks, including rows beyond the cut.
+        text = result if isinstance(result, str) else json_text(result)
+        envelope = {"decision": decision, "reason": reason, "result": result}
+        # Personal snapshots keep complete JSON across all attention aliases.
+        if (
+            name not in {"digest_snapshot", "team_snapshot", "asks_digest", "web_fetch", "aws_read", "page_read"}
+            and len(json_text(envelope)) > MAX_RESULT_CHARS
+        ):
+            note = f"\nResult cut at {MAX_RESULT_CHARS} characters. Ask for less, or for one item."
+            def closed_prefix(length):
+                prefix = text[:length]
+                count = prefix.count("<outside_data source=") - prefix.count("</outside_data>")
+                return prefix + "\n</outside_data>" * max(0, count)
+
+            # Count JSON escapes too. The model receives this encoded content.
+            low, high = 0, min(len(text), MAX_RESULT_CHARS)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = {**envelope, "result": closed_prefix(middle) + note}
+                if len(json_text(candidate)) <= MAX_RESULT_CHARS:
+                    low = middle
+                else:
+                    high = middle - 1
+            result = closed_prefix(low) + note
         return {"decision": decision, "reason": reason, "result": result}

@@ -28,7 +28,6 @@ TICKET_TOOLS = frozenset(
         "github_assign_issue",
         "github_comment_issue",
         "claims_take",
-        "work_start",
     }
 )
 PERSONAL_TOOLS = frozenset(
@@ -43,14 +42,17 @@ INTERNAL_TOOLS = frozenset(
         "slack_post_channel",
         "slack_read_thread",
         "notes_propose",
+        "note_save",
+        "list_save",
+        "note_forget",
         "connectors_list",
         "connectors_call",
         "email_draft",
     }
 )
 GRANT_PROFILES = {
-    "person_dm": READ_TOOLS | TICKET_TOOLS | PERSONAL_TOOLS | INTERNAL_TOOLS,
-    "team_channel": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_read_thread"},
+    "person_dm": (READ_TOOLS | TICKET_TOOLS | PERSONAL_TOOLS | INTERNAL_TOOLS) - {"notes_propose"},
+    "team_channel": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_read_thread", "note_save", "list_save", "note_forget"},
     "tainted": frozenset({
         "github_search_issues", "github_get_issue", "github_create_issue", "claims_take",
         "web_read_public_page", "connectors_list", "connectors_call", "skills_get",
@@ -90,9 +92,30 @@ def in_grant(run: dict, tool) -> bool:
 
     A tool family states `profiles` on its own tools, so two builders never edit one list.
     """
+    if run.get("deep_kind"):
+        if tool.name == "page_write" and run["deep_kind"] == "check":
+            return True
+        if tool.name == "wait_result":
+            return run["deep_kind"] == "check"
+        if tool.name == "deep_start":
+            return False
+        if tool.name in {"shell", "web_fetch", "findings_list", "finding_add"}:
+            if tool.name == "web_fetch":
+                return run["deep_kind"] != "brief"
+            return tool.name not in {"findings_list", "finding_add"} or run["deep_kind"] == "scout"
+        if tool.name in {"connectors_list", "connectors_call", "aws_read"} and tool.risk == "read":
+            return True
+        if tool.name in {"web_read_public_page", "brief_settings"} or tool.family in {"connect", "connectors", "memory"}:
+            return False
+        if tool.risk != "read":
+            return tool.family == "tasks" and run["deep_kind"] == "request"
     # Outside text has one closed grant, including tools with explicit profiles.
     if effective_profile(run) == "tainted" and tool.name not in GRANT_PROFILES["tainted"]:
         return False
+    if not run.get("deep_kind") and run.get("event_channel") in {"digest", "team_digest"}:
+        allowed = "team_snapshot" if run["principal"] == "team" else "digest_snapshot"
+        if tool.name != allowed:
+            return False
     profiles = getattr(tool, "profiles", None)
     if profiles is not None:
         return effective_profile(run) in profiles
@@ -101,6 +124,25 @@ def in_grant(run: dict, tool) -> bool:
 
 def scope(run: dict, tool) -> Decision:
     """Check 1: a registered tool must be in the run grant."""
+    deep = run.get("deep_kind")
+    if tool.name in {"web_fetch", "web_read_public_page"} and run.get("customer_read"):
+        return Decision("deny", "This run read customer data. The web is closed for this run.")
+    if tool.name == "deep_start" and not run.get("customer_read") and (run.get("outside_read") or run.get("web_read")):
+        return Decision("deny", "Deep work needs a team request that has not read outside text.")
+    if deep and (run["tainted"] or run["principal"] == "outsider"):
+        return Decision("deny", "A deep run needs team authority.")
+    # These results propose a card for a person, a reminder, or one bounded restart.
+    # Like a finding, a wait result can use facts from an outside read.
+    if deep and tool.risk != "read" and tool.name not in {"finding_add", "wait_result"} and not (tool.name == "page_write" and deep == "check"):
+        if not (tool.family == "tasks" and deep == "request"):
+            return Decision("deny", "A deep run only reads. Put the proposal in your answer.")
+        if run.get("web_read"):
+            return Decision("deny", "This run read the web. Code refuses task writes after that. Put the proposal in your answer.")
+    if deep and tool.name in {"web_fetch", "web_read_public_page"}:
+        if deep == "brief":
+            return Decision("deny", "A brief does not read the web.")
+        if run.get("personal_read"):
+            return Decision("deny", "This run read private data. Code refuses the web after that.")
     if not in_grant(run, tool):
         return Decision("deny", "The run grant does not include this tool")
     if tool.personal and (
@@ -115,8 +157,14 @@ def scope(run: dict, tool) -> Decision:
 def destination(run: dict, tool, args: dict) -> Decision:
     """Check 2: personal data cannot leave its owner's destination without a draft."""
     target = tool.destination(args)
-    if run["personal_read"] and tool.family == "connectors" and target.startswith("outside:"):
+    if run["personal_read"] and tool.family == "connectors" and target.startswith("outside:") and not tool.personal:
         return Decision("deny", "This run read personal data, so it cannot call a connector.")
+    if run.get("customer_read") and tool.family == "connectors" and target.startswith("outside:") and not tool.customer_data:
+        return Decision("draft", "Customer data needs approval for this connector")
+    if tool.personal and tool.family == "connectors":
+        if tool.risk != "read":
+            return Decision("draft", "Each personal connector write needs your approval")
+        return Decision("allow", "The connector uses this person's own sign-in")
     if tool.risk == "read" and not target.startswith("outside:"):
         return Decision("allow", "The tool does not write")
     if not target or not (

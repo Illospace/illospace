@@ -35,7 +35,7 @@ async def save(conn, ctx, key: str, person_id: int | None, token: dict, scopes: 
         """INSERT INTO connector_grants (connector_key,person_id,secret,scopes,expires_at)
         VALUES (%s,%s,%s,%s,%s) ON CONFLICT (connector_key,person_id) DO UPDATE
         SET secret=EXCLUDED.secret,scopes=EXCLUDED.scopes,expires_at=EXCLUDED.expires_at,
-        revoked_at=NULL""",
+        revoked_at=NULL,broken_at=NULL,notified_at=NULL""",
         (key, person_id, vault(ctx).encrypt(json.dumps(token)), list(scopes), expires_at),
     )
 
@@ -44,6 +44,6 @@ async def status(conn) -> list[dict]:
     return await all_rows(
         conn,
         """SELECT g.connector_key,p.key AS person,g.expires_at,
-        g.revoked_at FROM connector_grants g LEFT JOIN people p ON p.id=g.person_id
+        g.revoked_at,g.broken_at FROM connector_grants g LEFT JOIN people p ON p.id=g.person_id
         ORDER BY g.connector_key,p.key""",
     )

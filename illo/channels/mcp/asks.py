@@ -2,7 +2,12 @@
 
 from datetime import datetime
 
-from illo.ledger import asks, lanes, mcp
+from illo.asks import cards, proof
+from illo.ledger import ask_workflow as workflow
+from illo.ledger import asks, items, lanes, mcp
+from illo.tasks import pages
+from illo.tasks.pages import outside
+from illo.tools.registry import Refusal
 
 from .lanes import check_visible, owner
 
@@ -38,8 +43,21 @@ def timestamp(value):
 async def create(ctx, args: dict) -> dict:
     existing = await mcp.existing_ask(ctx.conn, ctx.token["id"], args["source_ref"])
     if existing:
-        return answer(existing)
+        return await created_result(ctx, existing)
+    if args['blocks'] and not pages.enabled(ctx.app):
+        raise Refusal('This team has no pages. Put the text in proof.text and the addresses in proof.links.')
     person = await owner(ctx, args["owner"])
+    saved = await proof.saved_items(ctx.conn, args['proof'], ctx.principal)
+    for ref, item in saved.items():
+        if not item:
+            raise ValueError(f"You cannot see {ref}.")
+        if not await items.get(ctx.conn, ref, principal='person:' + person['key']):
+            raise ValueError(f"The person who must answer cannot see {ref}.")
+    files = await outside.prepare(ctx.app, args['blocks'], store_refs=True)
+    await mcp.lock_token(ctx.conn, ctx.token["id"], "asks")
+    existing = await mcp.existing_ask(ctx.conn, ctx.token["id"], args["source_ref"])
+    if existing:
+        return await created_result(ctx, existing)
     lane = None
     if args["lane"]:
         ref = args["lane"]
@@ -59,6 +77,16 @@ async def create(ctx, args: dict) -> dict:
             )
     if lane and lane["visibility"] == "private" and lane["owner_person_id"] != person["id"]:
         raise ValueError("The lane is not visible to the owner")
+    if not pages.enabled(ctx.app) and ctx.token['scopes'] == ['agent']:
+        # The surrounding transaction also rolls back a lane when the card is too large.
+        data = await workflow.card_data(ctx.conn, {
+            **args, 'id': 1, 'state': 'open', 'recommended_option': args['recommended'],
+            'owner_person_id': person['id'], 'requester_token_id': ctx.token['id'],
+            'lane_id': lane['id'] if lane else None, 'rule_id': None,
+            'due_at': timestamp(args['due_at']), 'full_proof': True, 'saved_items': saved})
+        blocks = cards.ask_card(data)
+        if len(blocks) > 45 or sum(len(b.get('text', {}).get('text', '')) for b in blocks) > 30000:
+            raise ValueError(proof.CARD_LIMIT)
     row = await asks.create(
         ctx.conn,
         owner_person_id=person["id"],
@@ -70,11 +98,22 @@ async def create(ctx, args: dict) -> dict:
         options=args["options"],
         recommended_option=args["recommended"],
         proof=args["proof"],
+        blocks=args["blocks"],
         due_at=timestamp(args["due_at"]),
         expires_at=timestamp(args["expires_at"]),
         source_ref=args["source_ref"],
     )
-    return answer(row)
+    await outside.replace(ctx.conn, files, ask_id=row["id"])
+    await mcp.take_ask_card(ctx.conn, row)
+    return await created_result(ctx, row)
+
+
+async def created_result(ctx, row):
+    data = await workflow.card_data(ctx.conn, row)
+    page_url = pages.base_url(ctx.app) + f"/web/a/{row['id']}" if pages.enabled(ctx.app) else None
+    notes = outside.notes(row.get('blocks', []))
+    return {**answer(row), 'page_url': page_url, 'card_text': cards.fallback(data),
+            **({'notes': notes} if notes else {})}
 
 
 async def pull(ctx, args: dict) -> dict:

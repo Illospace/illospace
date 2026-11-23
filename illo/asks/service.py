@@ -4,9 +4,11 @@ import logging
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
-from illo.asks import cards
+from illo.asks import cards, proof
+from illo.db import one
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, rules, sensors
+from illo.tasks import pages
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,7 @@ async def sync_card(ctx, conn, ask, *, force=False):
     if not data["owner"]:
         await sensors.error(conn, "asks:owner", "An ask owner is missing or inactive.")
         return
+    await prepare_card(ctx, conn, data)
     blocks = cards.ask_card(data)
     digest = cards.digest(blocks)
     sent = {"channel": ask["slack_channel"], "ts": ask["slack_ts"]}
@@ -56,11 +59,11 @@ async def sync_card(ctx, conn, ask, *, force=False):
             await ctx.slack_client.chat_update(
                 channel=ask["slack_channel"],
                 ts=ask["slack_ts"],
-                text=ask["question"],
+                text=cards.fallback(data),
                 blocks=blocks,
             )
     elif ask["state"] == "open":
-        sent = await post_dm(ctx, data["owner"], ask["question"], blocks, "ask", ask["id"])
+        sent = await post_dm(ctx, data["owner"], cards.fallback(data), blocks, "ask", ask["id"])
     else:
         return
     if sent:
@@ -128,3 +131,26 @@ async def is_live(conn, ask):
             await asks.cancel(conn, ask["id"])
             return False
     return True
+
+
+async def prepare_card(ctx, conn, data):
+    data['page_url'] = pages.base_url(ctx) + f"/web/a/{data['id']}" if pages.enabled(ctx) else None
+    requester = data.get('requester') or {}
+    data['full_proof'] = not pages.enabled(ctx) and requester.get('scopes') == ['agent']
+    if data['full_proof'] and data.get('owner'):
+        data['saved_items'] = await proof.saved_items(conn, data['proof'], 'person:' + data['owner']['key'])
+    return data
+
+
+async def answer(conn, ask_id, person_id, *, option=None, text=None):
+    """All direct person answers lock the ask and write the same decision."""
+    ask = await ledger.lock_ask(conn, ask_id)
+    owner = await one(conn, 'SELECT id FROM people WHERE id=%s AND active FOR SHARE', (person_id,))
+    if not ask or not owner or ask['owner_person_id'] != person_id or not await is_live(conn, ask):
+        return None
+    if option is None and not (text and text.strip()):
+        return None
+    answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
+    if answered:
+        await ledger.decision(conn, answered)
+    return answered

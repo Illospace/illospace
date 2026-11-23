@@ -9,7 +9,7 @@ from croniter import croniter
 
 from illo.db import all_rows, one
 from illo.gateway.events import InboundEvent
-from illo.ledger import audit, claims, drafts, kv, sensors
+from illo.ledger import audit, claims, drafts, kv, people, sensors
 from illo.slackapi import dm_person
 
 log = logging.getLogger(__name__)
@@ -19,25 +19,32 @@ class Scheduler:
     def __init__(self, ctx):
         self.ctx = ctx
         self.tasks: list[asyncio.Task] = []
+        self.names: set[str] = set()
 
     async def setup(self) -> None:
         """Keep the scheduler compatible with the module setup contract."""
 
-    async def _call(self, fn):
+    async def forget_removed_jobs(self) -> None:
+        """Delete the sensors of jobs that this release no longer has. A silent old sensor is a false fault."""
+        async with self.ctx.pool.connection() as conn:
+            await conn.execute("DELETE FROM sensors WHERE key LIKE 'job:%%' AND NOT key=ANY(%s)", (sorted(self.names),))
+
+    async def _call(self, fn, seconds=None):
         name = f"job:{fn.__module__}.{fn.__name__}"
         try:
             await fn()
-        except Exception:
-            log.error("Scheduled job failed: %s", name)
+        except Exception as exc:
+            # The type name helps a repair. The message can hold private text, so it stays out.
+            log.error("Scheduled job failed: %s (%s)", name, type(exc).__name__)
             try:
                 async with self.ctx.pool.connection() as conn:
-                    await sensors.error(conn, name, "The scheduled job failed")
+                    await sensors.error(conn, name, "The scheduled job failed", expected_every_s=seconds)
             except Exception:
                 log.error("Could not record the failed job sensor: %s", name)
         else:
             try:
                 async with self.ctx.pool.connection() as conn:
-                    await sensors.ok(conn, name)
+                    await sensors.ok(conn, name, expected_every_s=seconds)
             except Exception:
                 log.error("Could not record the job sensor: %s", name)
 
@@ -45,11 +52,12 @@ class Scheduler:
         """Run after each interval. Slow jobs never overlap with themselves."""
         if seconds <= 0:
             raise ValueError("The interval must be positive")
+        self.names.add(f"job:{fn.__module__}.{fn.__name__}")
 
         async def loop():
             while True:
                 await asyncio.sleep(seconds)
-                await self._call(fn)
+                await self._call(fn, seconds)
 
         task = asyncio.create_task(loop())
         self.tasks.append(task)
@@ -59,13 +67,14 @@ class Scheduler:
         """Use the team's IANA time zone for five-field cron schedules."""
         if len(expr.split()) != 5 or not croniter.is_valid(expr):
             raise ValueError("Use a five-field cron schedule")
+        self.names.add(f"job:{fn.__module__}.{fn.__name__}")
 
         async def loop():
             while True:
                 now = datetime.now(ZoneInfo(self.ctx.workspace.config.timezone))
                 next_time = croniter(expr, now).get_next(datetime)
                 await asyncio.sleep(max(0, next_time.timestamp() - now.timestamp()))
-                await self._call(fn)
+                await self._call(fn, (croniter(expr, next_time).get_next(datetime) - next_time).total_seconds())
 
         task = asyncio.create_task(loop())
         self.tasks.append(task)
@@ -80,6 +89,10 @@ class Scheduler:
 
 async def setup(ctx) -> None:
     """Register persisted routines and run the startup catch-up once."""
+    from illo.tasks import release, wake
+
+    await wake.setup(ctx)
+    await release.setup(ctx)
     ctx.gateway.register("routine", RoutineAdapter(ctx))
     ctx.draft_performers["routine_delivery"] = perform_delivery
 
@@ -138,17 +151,36 @@ class RoutineAdapter:
                 return
         await deliver_routine(self.ctx, destination, text)
 
-    async def deliver_error(self, event):
+    async def deliver_error(self, event, *, category="internal"):
         # Do not post an error to a shared destination from a personal run.
         log.error("Routine failed: %s", event.payload["routine"])
 
 
-async def deliver_routine(ctx, destination: str, text: str):
+async def deliver_routine(ctx, destination: str, text: str, *, delivery_key=None, conn=None):
     if destination.startswith("person:"):
         if not await dm_person(ctx, destination[7:], text):
             raise RuntimeError("The routine DM could not be sent")
     elif destination.startswith("channel:") and ctx.slack_client:
-        await ctx.slack_client.chat_postMessage(channel=destination[8:], text=text)
+        from illo.asks.service import message_id
+        from illo.channels.slack.access import channel_private
+        from illo.channels.slack.channels import resolve_channel
+        from illo.channels.slack.formatting import chunks
+
+        channel = await resolve_channel(ctx, destination[8:], conn=conn)
+        if channel.mode == "off" or await channel_private(ctx, channel.id, conn=conn):
+            raise ValueError("The routine needs a channel that the team can read.")
+        destination = "channel:" + channel.id
+        root = None
+        for index, part in enumerate(chunks(text)):
+            options = {"thread_ts": root} if root else {}
+            if delivery_key:
+                options["client_msg_id"] = message_id("routine", f"{delivery_key}:{index}")
+            sent = await ctx.slack_client.chat_postMessage(
+                channel=destination[8:], text=part, unfurl_links=False, unfurl_media=False, **options
+            )
+            if root is None:
+                root = sent["ts"]
+        return {"channel": destination[8:], "ts": root}
     else:
         raise RuntimeError("The routine destination is unavailable")
 
@@ -165,16 +197,30 @@ def routine_destination(ctx, value: str) -> str:
     if value.startswith("channel:"):
         for channel in ctx.workspace.config.slack.channels:
             if value[8:] in {channel.name, channel.id}:
-                return "channel:" + channel.id
+                return "channel:" + ctx.workspace.config.slack.channel(channel.id).id
     return value
 
 
 async def tick_routines(ctx, now: datetime | None = None):
     """Commit each scheduled claim before the gateway starts its run."""
     now = (now or datetime.now(UTC)).astimezone(UTC)
-    timezone = ctx.workspace.config.timezone
+    from illo.routines.digest import is_digest
+
     for routine in list(ctx.workspace.routines):
-        identity = f"{routine.schedule}|{timezone}|{routine.enabled}"
+        if is_digest(routine):
+            continue
+        destination = routine_destination(ctx, routine.destination)
+        timezone = ctx.workspace.config.timezone
+        # A channel keeps the team time zone, even with a person principal.
+        target = destination if destination.startswith("person:") else routine.principal
+        personal = not destination.startswith("channel:") and target.startswith("person:")
+        if personal:
+            async with ctx.pool.connection() as conn:
+                person = await people.get(conn, target[7:])
+            if not person:
+                continue
+            timezone = person["timezone"]
+        identity = f"{routine.schedule}|{timezone}|{routine.enabled}|{routine.principal}|{destination}"
         async with ctx.pool.connection() as conn:
             await conn.execute(
                 """
@@ -187,6 +233,10 @@ async def tick_routines(ctx, now: datetime | None = None):
             )
             previous = await kv.get(conn, "routine-config:" + routine.name)
             scheduled = state["next_run_at"]
+            zone_changed = previous is not None and previous.split("|")[1] != timezone
+            if personal and zone_changed and state["last_run_at"]:
+                await kv.set(conn, "routine-zone-day:" + routine.name,
+                             state["last_run_at"].astimezone(ZoneInfo(timezone)).date().isoformat())
             if previous != identity or scheduled is None:
                 scheduled = next_due(
                     routine.schedule,
@@ -208,7 +258,11 @@ async def tick_routines(ctx, now: datetime | None = None):
                 continue
             next_time = next_due(routine.schedule, now, timezone)
             key = f"routine:{routine.name}:{scheduled.isoformat()}"
-            claimed = await claims.take(conn, key, None, "Scheduled routine")
+            same_day = bool(
+                personal and await kv.get(conn, "routine-zone-day:" + routine.name)
+                == scheduled.astimezone(ZoneInfo(timezone)).date().isoformat()
+            )
+            claimed = not same_day and await claims.take(conn, key, None, "Scheduled routine")
             late = now - scheduled >= timedelta(hours=6)
             await conn.execute(
                 """
@@ -216,7 +270,7 @@ async def tick_routines(ctx, now: datetime | None = None):
             """,
                 (
                     next_time,
-                    scheduled,
+                    scheduled if claimed else state["last_run_at"],
                     ("skipped" if late else "running") if claimed else state["last_status"],
                     routine.name,
                 ),

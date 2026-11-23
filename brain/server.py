@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 from contextlib import aclosing
@@ -10,9 +11,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from brain.models import RunRequest, event
+from brain.models import ChatGPTAuth, RunRequest, event
 from brain.process import run_worker
 from brain.runtimes.claude import has_auth
+from brain.runtimes.provider_errors import identifier
 
 
 def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
@@ -34,6 +36,11 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                     "usable": bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL")),
                     "experimental": True,
                 },
+                "openai_responses": {
+                    "usable": bool(os.getenv("OPENAI_API_KEY")),
+                    "api_key": bool(os.getenv("OPENAI_API_KEY")),
+                    "per_run_chatgpt": True,
+                },
                 "echo": {"usable": True},
             },
         }
@@ -51,21 +58,42 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
             yield json.dumps(event("started", run_id=body.run_id)) + "\n"
             async with slots:
                 try:
-                    limit = min(body.timeout_s, float(os.getenv("ILLO_BRAIN_TIMEOUT_S", "120")))
+                    cap = ("ILLO_BRAIN_DEEP_TIMEOUT_S", "1800") if body.deep else ("ILLO_BRAIN_TIMEOUT_S", "300")
+                    limit = min(body.timeout_s, float(os.getenv(*cap)))
                     async with asyncio.timeout(limit), aclosing(runner(body)) as stream:
                         async for item in stream:
                             item["run_id"] = body.run_id
                             # Do not let a provider echo a credential into the stream.
                             line = json.dumps(item)
                             for value in (
+                                *(image.data.get_secret_value() for image in body.images),
                                 body.mcp_token.get_secret_value(),
                                 secret,
                                 os.getenv("ANTHROPIC_API_KEY"),
                                 os.getenv("ANTHROPIC_AUTH_TOKEN"),
                                 os.getenv("OPENAI_API_KEY"),
+                                body.provider_auth.access_token.get_secret_value()
+                                if isinstance(body.provider_auth, ChatGPTAuth)
+                                else None,
+                                body.provider_auth.account_id.get_secret_value()
+                                if isinstance(body.provider_auth, ChatGPTAuth)
+                                else None,
                             ):
                                 if value:
                                     line = line.replace(json.dumps(value)[1:-1], "[redacted]")
+                            if item["type"] == "error":
+                                safe = json.loads(line)
+                                logging.getLogger(__name__).warning(
+                                    "Brain error: category=%s http_status=%s code=%s type=%s reason=%s",
+                                    identifier(safe.get("category")),
+                                    safe.get("http_status")
+                                    if isinstance(safe.get("http_status"), int)
+                                    else None,
+                                    identifier(safe.get("code")),
+                                    identifier(safe.get("provider_type")),
+                                    # A fixed text of this service, after the redaction above.
+                                    str(safe.get("message") or "")[:120],
+                                )
                             yield line + "\n"
                             if item["type"] in ("final", "error"):
                                 return
@@ -87,7 +115,7 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                             event(
                                 "error",
                                 run_id=body.run_id,
-                                category="runtime",
+                                category="internal",
                                 message="The brain run failed",
                             )
                         )

@@ -11,7 +11,11 @@ features:
     display_name: Illo
     always_online: true
 oauth_config:
+  redirect_urls:
+    - https://illo.example.com/oauth/agent/slack/callback
   scopes:
+    user:
+      - openid
     bot:
       - app_mentions:read
       - channels:history
@@ -34,6 +38,7 @@ settings:
   event_subscriptions:
     bot_events:
       - app_mention
+      - member_joined_channel
       - message.im
       - message.channels
       - message.groups

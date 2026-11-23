@@ -38,7 +38,7 @@ def register(registry) -> None:
             personal=False,
             handler=draft_only,
             arguments=EmailArguments,
-            description="Draft an email. The requester must approve it in a Slack DM.",
+            description='Draft an email to `to`, with `subject` and `body`. The result is always a draft card in the DM of the person you act for; the mail goes out only when they tap Send.',
             profiles=frozenset({"person_dm", "agent_request"}),
         )
     )

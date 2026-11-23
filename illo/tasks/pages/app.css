@@ -1,0 +1,145 @@
+/* The look follows the Illo mark: ink on paper, round shapes, no colour. A state shows as a shape or as weight. */
+:root{
+  color-scheme:light dark;
+  --bg:#f6f7f5; --card:#ffffff; --ink:#0b0b0b; --soft:#666762; --line:#e1e2de; --dot:#d6d7d2;
+  --radius:20px; --inner:14px;
+  font:1rem/1.5 ui-rounded,"SF Pro Rounded","Nunito","Segoe UI",system-ui,-apple-system,sans-serif;
+  background:var(--bg); color:var(--ink);
+}
+/* Dark is the same system with paper and ink exchanged. */
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0b0b0b; --card:#161615; --ink:#f6f7f5; --soft:#a3a49f; --line:#2e2e2c; --dot:#262624;
+}}
+*{box-sizing:border-box}
+body{margin:0; overflow-wrap:anywhere; min-height:100vh;
+  background-image:radial-gradient(circle,var(--dot) 1px,transparent 1.2px); background-size:22px 22px}
+a{color:inherit; text-decoration-color:var(--soft); text-underline-offset:.15em}
+a:hover{text-decoration-color:currentColor}
+:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
+.top{display:flex; gap:.6rem; align-items:center; padding:.5rem 1rem; border-bottom:1px solid var(--line); font-size:.85rem; color:var(--soft); background:var(--bg)}
+.top .mark{width:1.5rem; height:1.5rem; flex:none; color:var(--ink)}
+.top b{color:var(--ink); font-weight:600}
+.top .grow{flex:1}
+.top form{margin:0} .top button{all:unset; cursor:pointer; text-decoration:underline; text-decoration-color:var(--soft); text-underline-offset:.15em}
+.top button:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
+/* the page is one frame on the paper, as a frame on the board */
+main{max-width:46rem; margin:1.2rem auto 7rem; padding:1.1rem 1.2rem 1.2rem; background:var(--card); border:1px solid var(--line); border-radius:var(--radius)}
+@media (max-width:48rem){main{margin:.6rem .6rem 7rem; padding:.9rem .9rem 1rem}}
+.chips{display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 .6rem; padding:0; list-style:none; font-size:.8rem}
+.chips li{border:1px solid var(--line); border-radius:99px; padding:.05rem .65rem; color:var(--soft)}
+.chips .wait{background:var(--ink); color:var(--bg); border-color:transparent; font-weight:600}
+h1{font-size:1.5rem; line-height:1.22; letter-spacing:-.015em; margin:.2rem 0 .35rem}
+main>h2{font-size:1rem; margin:1.2rem 0 .3rem}
+.ask{font-size:1.05rem; color:var(--soft); margin:0 0 1.1rem}
+.notice{border:1px solid var(--line); border-left:4px solid var(--ink); border-radius:var(--inner); padding:.6rem .8rem; margin:0 0 1rem; background:var(--bg)}
+.notice.bad{border-color:var(--ink); border-left-width:4px; font-weight:600}
+.block{background:var(--card); border:1px solid var(--line); border-radius:var(--inner); margin:0 0 .9rem; overflow:hidden}
+.block>h2{font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; color:var(--soft); font-weight:600; margin:0; padding:.75rem .95rem 0}
+.block .body{padding:.55rem .95rem .85rem}
+.block .body>:first-child{margin-top:0} .block .body>:last-child{margin-bottom:0}
+.prose p,.prose ul,.prose ol,.prose blockquote,.prose pre,.prose .table{margin:.5rem 0}
+.prose h3{font-size:1.05rem; line-height:1.3; letter-spacing:-.01em; margin:1.1rem 0 .3rem}
+.prose h4{font-size:.95rem; margin:.9rem 0 .2rem}
+.prose ul,.prose ol{padding-left:1.25rem} .prose li{margin:.2rem 0} .prose li>ul,.prose li>ol{margin:.2rem 0}
+.prose hr{border:0; border-top:1px solid var(--line); margin:1rem 0}
+.prose code{font:.88em ui-monospace,"SF Mono",Menlo,monospace; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:0 .3em}
+.prose pre{overflow:auto; padding:.7rem; background:var(--bg); border:1px solid var(--line); border-radius:10px}
+.prose pre code{border:0; padding:0; background:none}
+.prose blockquote{border-left:3px solid var(--ink); padding-left:.7rem; color:var(--soft)}
+.prose .table{overflow:auto}
+.prose table{border-collapse:collapse; font-size:.9rem}
+.prose th,.prose td{text-align:left; vertical-align:top; padding:.3rem .8rem .3rem 0; border-bottom:1px solid var(--line)}
+.prose th{font-weight:600}
+/* a long text: the first part shows, and this opens the rest */
+.block details.more{border:0; padding:0; margin:.7rem 0 .2rem}
+.block details.more>summary{display:inline-block; list-style:none; font:inherit; font-size:.85rem; font-weight:600; border:1px solid var(--line); border-radius:99px; padding:.25rem .85rem; background:var(--bg)}
+.block details.more>summary::-webkit-details-marker{display:none}
+.block details.more>summary::before{content:"+ "}
+.block details.more[open]>summary::before{content:"\2212  "}
+.block details.more[open]>summary{margin-bottom:.6rem}
+/* facts: short values of a request, one line each */
+.facts{display:grid; grid-template-columns:minmax(5rem,max-content) 1fr; gap:.35rem 1.1rem; margin:0; padding:.75rem .95rem}
+.facts dt{color:var(--soft); font-size:.85rem; padding-top:.1rem} .facts dd{margin:0}
+/* preview: a thing as its reader will see it (a post, a mail, a message) */
+.preview .as{display:flex; gap:.6rem; align-items:center; padding:.75rem .95rem .2rem}
+.preview .badge{width:2.1rem; height:2.1rem; border-radius:50%; background:var(--ink); color:var(--bg); display:grid; place-items:center; font-weight:700}
+.preview .as b{display:block; line-height:1.2} .preview .as small{color:var(--soft)}
+.preview .text{padding:.3rem .95rem .8rem; white-space:pre-line}
+.preview img,.image img{display:block; width:100%; height:auto; background:var(--bg)}
+.image figcaption{padding:.5rem .95rem; font-size:.85rem; color:var(--soft)}
+.image{margin:0 0 .9rem}
+.missing{padding:1.2rem .95rem; color:var(--soft); font-size:.9rem; border-top:1px dashed var(--line)}
+/* checks: a full dot is a yes, a ring with "!" is a no, a broken ring is open */
+:is(.checks,.steps){list-style:none; margin:0; padding:.3rem .95rem .6rem}
+:is(.checks,.steps) li{display:grid; grid-template-columns:1.3rem 1fr; gap:.5rem; padding:.4rem 0; border-top:1px solid var(--line)}
+:is(.checks,.steps) li:first-child{border-top:0}
+:is(.checks,.steps) .dot{width:1.15rem; height:1.15rem; border-radius:50%; margin-top:.18rem; display:grid; place-items:center; font-size:.7rem; font-weight:700; border:1.5px solid var(--ink); color:var(--ink)}
+:is(.checks .yes,.steps .done) .dot{background:var(--ink); color:var(--card)}
+:is(.checks,.steps) .no{font-weight:600}
+:is(.checks .open,.steps .todo) .dot{border-style:dashed; border-color:var(--soft); color:var(--soft)}
+:is(.checks,.steps) small{display:block; color:var(--soft); font-weight:400}
+/* bars: one progress element for each value, so no style attribute is needed */
+.bar{display:grid; grid-template-columns:minmax(4rem,9rem) 1fr auto; gap:.6rem; align-items:center; font-size:.9rem; margin:.35rem 0}
+.bar progress{width:100%; height:.7rem; border:0; background:transparent; appearance:none; -webkit-appearance:none}
+.bar progress::-webkit-progress-bar{background:transparent}
+.bar progress::-webkit-progress-value{background:var(--ink); border-radius:99px}
+.bar progress::-moz-progress-bar{background:var(--ink); border-radius:99px}
+.by{font-size:.8rem; color:var(--soft); margin:-.3rem 0 1.2rem}
+.block .by{margin:.8rem 0 0}
+details{border-top:1px solid var(--line); padding:.6rem 0}
+details>summary{cursor:pointer; font-weight:600}
+.links{list-style:none; padding:0; margin:.5rem 0; display:flex; flex-wrap:wrap; gap:.4rem 1rem}
+.block>.links{padding:0 .95rem .4rem}
+.trail{list-style:none; padding:0; margin:.6rem 0 0}
+.trail li{border-left:2px solid var(--line); padding:0 0 .7rem .7rem; font-size:.9rem}
+.trail time,.trail .actor{color:var(--soft); font-size:.8rem}
+/* the decision bar stays at the bottom of the window */
+.decide{position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:.6rem 1rem calc(.6rem + env(safe-area-inset-bottom))}
+.decide .in{max-width:46rem; margin:auto; display:flex; flex-wrap:wrap; gap:.5rem; align-items:flex-start}
+.decide form{margin:0}
+.btn{font:inherit; font-weight:600; font-size:.95rem; border-radius:99px; padding:.45rem 1.05rem; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.go{background:var(--ink); color:var(--bg); border-color:transparent}
+.decide details{border:0; padding:0; flex:0 1 auto}
+.decide details[open]{flex:1 1 100%}
+.decide details>summary{list-style:none; display:inline-block}
+.decide details>summary::-webkit-details-marker{display:none}
+.decide textarea{display:block; width:100%; min-height:4.5rem; margin:.5rem 0; font:inherit; padding:.6rem .8rem; border-radius:var(--inner); border:1px solid var(--line); background:var(--bg); color:var(--ink)}
+.decide .said{flex:1 1 100%; margin:0; color:var(--soft); font-size:.9rem}
+/* sign-in */
+main.signin{max-width:26rem; margin:12vh auto; padding:1.5rem 1.2rem; text-align:center}
+.signin .code{font:600 1.6rem ui-monospace,monospace; letter-spacing:.04em; padding:.7rem; border:1px dashed var(--line); border-radius:var(--inner); margin:1rem 0; user-select:all}
+.signin form{margin:1rem 0 0}
+@media (max-width:28rem){main.signin{margin:6vh .6rem}}
+
+/* The frame reads progress again without a change to the task form. */
+:root:has(body.frame){background:transparent}
+body.frame{background:transparent; margin:0; min-height:0}
+.progress{display:block; width:100%; border:0; margin:0 0 .9rem}
+.stages{display:flex; list-style:none; margin:.7rem 0 1rem; padding:0; font-size:.75rem}
+.stages li{flex:1; position:relative; padding:1.45rem .25rem 0 0; color:var(--soft)}
+.stages li::before{content:""; position:absolute; top:0; left:0; width:.8rem; height:.8rem; border:1.5px solid var(--ink); border-radius:50%; background:var(--card); z-index:1}
+.stages li:not(:last-child)::after{content:""; position:absolute; top:.35rem; left:.8rem; right:0; border-top:1px solid var(--line)}
+.stages .done::before{background:var(--ink)}
+.stages .here{font-weight:700; color:var(--ink)}
+.stages .here::before{box-shadow:0 0 0 .25rem var(--line)}
+.now-line{display:flex; justify-content:space-between; gap:1rem}
+.now-line>:last-child{color:var(--soft); flex-shrink:0; font-size:.8rem}
+.steps .now{font-weight:700}
+.steps .todo{color:var(--soft)}
+/* one height for each count of steps: the page can use no style attribute */
+.progress.s0{height:12rem}
+.progress.s1{height:19.1rem}
+.progress.s2{height:21.7rem}
+.progress.s3{height:24.3rem}
+.progress.s4{height:26.9rem}
+.progress.s5{height:29.5rem}
+.progress.s6{height:32.1rem}
+.progress.s7{height:34.7rem}
+.progress.s8{height:37.3rem}
+.progress.s9{height:39.9rem}
+.progress.s10{height:42.5rem}
+.progress.s11{height:45.1rem}
+.progress.s12{height:47.7rem}
+/* a step text takes more lines on a phone */
+@media (max-width:30rem){.progress.s1{height:22rem} .progress.s2{height:26rem} .progress.s3{height:30rem} .progress.s4{height:34rem} .progress.s5{height:38rem} .progress.s6{height:42rem} .progress.s7{height:46rem} .progress.s8{height:50rem} .progress.s9{height:54rem} .progress.s10{height:58rem} .progress.s11{height:62rem} .progress.s12{height:66rem}}

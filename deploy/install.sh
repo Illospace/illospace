@@ -31,7 +31,7 @@ if [ ! -f "$ILLO_STATE_DIR/last-good" ]; then
     [ -f "$ILLO_ROOT/brain/Dockerfile" ] || fail 'The checkout needs brain/Dockerfile. Use the branch with the complete rebuild.'
     ILLO_REVISION=$(git -C "$ILLO_ROOT" rev-parse HEAD)
     export ILLO_REVISION
-    compose build illo brain
+    compose build illo brain sandbox
     compose up -d
     wait_health || fail 'Illo did not become healthy. Check docker compose logs with the same environment file.'
     compose exec -T illo illo doctor

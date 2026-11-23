@@ -1,4 +1,4 @@
-"""Team MCP connectors. A remote server cannot add its own authority."""
+"""MCP connectors. A remote server cannot add its own authority."""
 
 import asyncio
 import json
@@ -9,9 +9,12 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from illo.connectors import store
-from illo.connectors.http import BoundedHTTP, marked
+from illo.connectors import discovery, store
+from illo.connectors.addresses import PublicTransport, public_address
+from illo.connectors.http import BoundedHTTP, HTTPFailure, marked, private_http_logs
+from illo.db import one
 from illo.ledger import runs, sensors
+from illo.tools.registry import Refusal
 
 
 class LimitedStream(httpx.AsyncByteStream):
@@ -44,14 +47,40 @@ class LimitedTransport(httpx.AsyncBaseTransport):
         await self.inner.aclose()
 
 
+class SignInEnded(Refusal):
+    def __init__(self, text, row):
+        super().__init__(text)
+        self.row = row
+
+
+async def record_ended(ctx, conn, config, failure):
+    row = await one(
+        conn,
+        """UPDATE connector_grants SET broken_at=COALESCE(broken_at,clock_timestamp())
+        WHERE id=%s AND secret=%s RETURNING id""",
+        (failure.row["id"], failure.row["secret"]),
+    )
+    if row:
+        await sensors.error(conn, "connector:" + config.key, "The connector sign-in ended")
+
+
 class MCPClient:
     def __init__(self, session_factory=None, http=None, transport=None):
         self.schemas = {}
         self.transport = transport
         self.session_factory = session_factory or self.session
-        self.http = http or BoundedHTTP()
+        self.http = http or BoundedHTTP(public=True)
 
-    async def bearer(self, ctx, conn, config) -> str | None:
+    @staticmethod
+    def grant_person(config, person_id):
+        if config.scope == "personal":
+            if person_id is None:
+                raise ValueError("A personal connector needs its person's sign-in")
+            return person_id
+        return None
+
+    async def bearer(self, ctx, conn, config, *, person_id=None) -> str | None:
+        person_id = self.grant_person(config, person_id)
         auth = config.auth
         if not auth:
             return None
@@ -63,8 +92,10 @@ class MCPClient:
         if auth.type != "oauth":
             raise ValueError("The MCP auth type is invalid")
         try:
-            row, token = await store.load(conn, ctx, config.key, None, lock=True)
+            row, token = await store.load(conn, ctx, config.key, person_id, lock=True)
         except ValueError:
+            if config.scope == "personal":
+                raise ValueError(f'Not signed in. Write "connect my {config.key}" in a DM to Illo.') from None
             if auth.secret:
                 raw = await store.vault(ctx).get(conn, auth.secret)
                 if not raw:
@@ -75,48 +106,122 @@ class MCPClient:
             else:
                 raise ValueError("Run illo connector login for this connector") from None
             row = {"expires_at": None, "scopes": auth.scopes}
+
+        async def ended():
+            person = await one(
+                conn, "SELECT name FROM people WHERE id=%s", (token.get("signed_in_by"),)
+            )
+            name = person["name"] if person else "The owner"
+            text = (
+                f'Your sign-in to {config.key} ended. Write "connect my {config.key}" in a DM to Illo.'
+                if config.scope == "personal"
+                else f"The sign-in to {config.key} ended. {name} must sign in again."
+            )
+            failure = SignInEnded(text, row)
+            await record_ended(ctx, conn, config, failure)
+            raise failure
+
+        if row.get("broken_at"):
+            await ended()
         expires = row["expires_at"]
         if token.get("access_token") and (
-            not expires or (expires - datetime.now(UTC)).total_seconds() > 60
+            not expires
+            or (expires - datetime.now(UTC)).total_seconds()
+            > (60 if token.get("refresh_token") else 0)
         ):
             return token["access_token"]
+        if token.get("access_token") and not token.get("refresh_token"):
+            await ended()
         endpoint = auth.token_url or token.get("token_url")
         if not endpoint:
             raise ValueError("The MCP token endpoint is missing")
-        from illo.connectors.config import validate_url
-
-        validate_url(endpoint)
-        data = {"client_id": auth.client_id or token.get("client_id"), "resource": config.url}
+        public_address(endpoint)
+        data = {
+            "client_id": auth.client_id or token.get("client_id"),
+            "resource": token.get("resource", config.url),
+        }
         if token.get("refresh_token"):
             data.update(grant_type="refresh_token", refresh_token=token["refresh_token"])
         else:
             data.update(grant_type="client_credentials", scope=" ".join(auth.scopes))
-        if auth.client_secret:
-            data["client_secret"] = await store.vault(ctx).get(conn, auth.client_secret)
-        fresh = await self.http.request("POST", endpoint, data=data)
+        client_secret = (
+            await store.vault(ctx).get(conn, auth.client_secret)
+            if auth.client_secret
+            else token.get("client_secret")
+        )
+        try:
+            fresh = await discovery.token_request(
+                self.http,
+                {
+                    "token_endpoint": endpoint,
+                    "token_endpoint_auth_method": token.get(
+                        "token_auth_method", "client_secret_post" if client_secret else "none"
+                    ),
+                },
+                data,
+                client_secret,
+            )
+        except HTTPFailure as exc:
+            if exc.error == "invalid_grant" and row.get("id"):
+                await ended()
+            raise
+        if not isinstance(fresh, dict) or not fresh.get("access_token"):
+            raise ValueError("The server did not provide an access token")
+        if fresh.get("scope") and not set(fresh["scope"].split()) <= set(row["scopes"]):
+            raise ValueError("The server returned a scope that Illo does not allow")
         token.update(fresh)
-        await store.save(conn, ctx, config.key, None, token, row["scopes"])
+        await store.save(conn, ctx, config.key, person_id, token, row["scopes"])
         return token["access_token"]
 
     @asynccontextmanager
     async def session(self, config, bearer):
+        public_address(config.url)
         headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
         # Bound the wire response too, before the SDK parses JSON or SSE.
         async with httpx.AsyncClient(
             headers=headers,
-            transport=LimitedTransport(config.max_bytes, self.transport),
+            transport=LimitedTransport(config.max_bytes, PublicTransport(self.transport)),
             timeout=config.timeout_s,
             trust_env=False,
             follow_redirects=False,
         ) as client:
-            async with streamable_http_client(config.url, http_client=client) as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    yield session
+            with private_http_logs():
+                async with streamable_http_client(config.url, http_client=client) as streams:
+                    async with ClientSession(streams[0], streams[1]) as session:
+                        await session.initialize()
+                        yield session
 
-    async def _schemas(self, session, config) -> dict:
+    async def private_values(self, ctx, conn, config, bearer, *, person_id=None):
+        values = [bearer]
+        if config.auth and config.auth.type == "oauth":
+            try:
+                _, token = await store.load(conn, ctx, config.key, self.grant_person(config, person_id))
+            except ValueError:
+                token = {}
+            values.extend(
+                token.get(key)
+                for key in ("access_token", "refresh_token", "id_token", "client_secret")
+            )
+            if config.auth.client_secret:
+                values.append(await store.vault(ctx).get(conn, config.auth.client_secret))
+        return [value for value in values if isinstance(value, str) and value]
+
+    @staticmethod
+    def check_private(data, private):
+        if isinstance(data, str):
+            if any(value in data for value in private):
+                raise ValueError("The server returned a private value")
+        elif isinstance(data, dict):
+            for key, value in data.items():
+                MCPClient.check_private(key, private)
+                MCPClient.check_private(value, private)
+        elif isinstance(data, (list, tuple)):
+            for value in data:
+                MCPClient.check_private(value, private)
+
+    async def _schemas(self, session, config, private=()) -> dict:
         key = config.model_dump_json()
-        if key not in self.schemas:
+        if config.scope == "personal" or key not in self.schemas:
             allowed = {tool.name for tool in config.tools}
             schemas, cursor, seen = {}, None, set()
             for _ in range(100):
@@ -128,10 +233,13 @@ class MCPClient:
                 schemas.update(
                     {tool.name: tool.inputSchema for tool in listing.tools if tool.name in allowed}
                 )
+                self.check_private(schemas, private)
                 if len(json.dumps(schemas).encode()) > config.max_bytes:
                     raise ValueError("The connector schemas are too large")
                 cursor = listing.nextCursor
                 if not cursor:
+                    if config.scope == "personal":
+                        return schemas
                     self.schemas[key] = schemas
                     break
                 if cursor in seen:
@@ -141,31 +249,69 @@ class MCPClient:
                 raise ValueError("The connector has too many tool pages")
         return self.schemas[key]
 
-    async def catalog(self, ctx, conn, config) -> dict:
+    async def catalog(self, ctx, conn, config, *, person_id=None) -> dict:
         key = config.model_dump_json()
-        if key in self.schemas:
-            return self.schemas[key]
         async with asyncio.timeout(config.timeout_s):
-            bearer = await self.bearer(ctx, conn, config)
+            bearer = await self.bearer(ctx, conn, config, person_id=person_id)
+            private = await self.private_values(ctx, conn, config, bearer, person_id=person_id)
+            if config.scope != "personal" and key in self.schemas:
+                self.check_private(self.schemas[key], private)
+                return self.schemas[key]
             async with self.session_factory(config, bearer) as session:
-                return await self._schemas(session, config)
+                return await self._schemas(session, config, private)
 
-    async def call(self, ctx, conn, config, name: str, arguments: dict) -> dict:
+    async def discover(self, ctx, conn, config, *, bearer=None, person_id=None) -> dict[str, str]:
+        """Read the bounded tool list without granting a tool."""
+        async with asyncio.timeout(config.timeout_s):
+            if bearer is None:
+                bearer = await self.bearer(ctx, conn, config, person_id=person_id)
+            async with self.session_factory(config, bearer) as session:
+                tools, cursor, seen = {}, None, set()
+                for _ in range(100):
+                    page = (
+                        await session.list_tools(cursor=cursor)
+                        if cursor
+                        else await session.list_tools()
+                    )
+                    for tool in page.tools:
+                        if (
+                            not tool.name
+                            or len(tool.name) > 200
+                            or any(c.isspace() or ord(c) < 32 for c in tool.name)
+                        ):
+                            raise ValueError("The server lists an invalid tool name")
+                        tools[tool.name] = tool.description or ""
+                    if len(json.dumps(tools).encode()) > config.max_bytes:
+                        raise ValueError("The tool list is too large")
+                    cursor = page.nextCursor
+                    if not cursor:
+                        return tools
+                    if cursor in seen:
+                        raise ValueError("The connector repeats a tool page")
+                    seen.add(cursor)
+                raise ValueError("The connector has too many tool pages")
+
+    async def call(self, ctx, conn, config, name: str, arguments: dict, *, person_id=None) -> dict:
         if name not in {tool.name for tool in config.tools}:
             raise ValueError("The connector file does not list this tool")
         try:
             async with asyncio.timeout(config.timeout_s):
-                bearer = await self.bearer(ctx, conn, config)
+                bearer = await self.bearer(ctx, conn, config, person_id=person_id)
                 async with self.session_factory(config, bearer) as session:
-                    schemas = await self._schemas(session, config)
+                    private = await self.private_values(ctx, conn, config, bearer, person_id=person_id)
+                    schemas = await self._schemas(session, config, private)
+                    self.check_private(schemas, private)
                     if name not in schemas:
                         raise ValueError("The remote server does not list this tool")
                     result = await session.call_tool(name, arguments)
                     data = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    self.check_private(data, private)
                     if len(json.dumps(data).encode()) > config.max_bytes:
                         raise ValueError("The MCP result is too large")
             await sensors.ok(conn, f"connector:{config.key}")
             return marked(f"connector:{config.key}", data)
+        except SignInEnded:
+            raise
         except Exception:
             raise ValueError("The connector call failed") from None
 
@@ -187,7 +333,7 @@ async def perform_draft(ctx, draft: dict) -> dict:
         tc = ToolContext(conn, run, ctx)
         if resolve(tc, args).destination(args) != draft["destination"]:
             raise ValueError("The draft destination does not match the stored action")
-        return await call_connector(tc, args)
+        return await call_connector(tc, args, approved=True)
 
 
 async def setup(ctx) -> None:

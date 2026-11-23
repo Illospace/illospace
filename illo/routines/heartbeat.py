@@ -20,7 +20,8 @@ async def publish(ctx, *, loop_healthy: bool = True) -> bool:
         if (
             ctx.config.slack_app_token or ctx.config.slack_bot_token
         ) and not await ledger.slack_healthy(conn, max_age=300):
-            await sensors.error(conn, "heartbeat", "The Slack connection is not healthy")
+            await sensors.error(conn, "heartbeat", "The Slack connection is not healthy",
+                                expected_every_s=config.seconds)
             return False
         last = await ledger.latest_run(conn)
         payload = {
@@ -30,7 +31,7 @@ async def publish(ctx, *, loop_healthy: bool = True) -> bool:
         }
     await ctx.github_client.write_file(repo, branch, "heartbeat.json", json.dumps(payload) + "\n")
     async with ctx.pool.connection() as conn:
-        await sensors.ok(conn, "heartbeat")
+        await sensors.ok(conn, "heartbeat", expected_every_s=config.seconds)
     return True
 
 

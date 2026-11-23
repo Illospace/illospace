@@ -6,6 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from illo.asks import proof
+from illo.tasks.pages.schema import Block
+from illo.tools.registry import Refusal
+
 Source = Literal["t3", "claude-code", "codex", "github", "manual", "email"]
 State = Literal[
     "open", "working", "waiting_person", "blocked", "review", "done", "failed", "unknown"
@@ -71,7 +75,23 @@ class GetKnowledge(Arguments):
     id: str | int | None = None
 
 
+class ProgressStep(Arguments):
+    text: str = Field(max_length=120)
+    state: Literal["done", "now", "todo"]
+
+
+class Progress(Arguments):
+    steps: list[ProgressStep] | None = Field(default=None, max_length=12)
+    steps_total: int | None = Field(default=None, ge=0, le=100000)
+    steps_done: int | None = Field(default=None, ge=0, le=100000)
+    now: Literal["reads", "tests", "saves", "pull", "command", "changes", "thinks",
+                 "writes", "searches", "tool", "helper", "waits"] | None = None
+    files_changed: int | None = Field(default=None, ge=0, le=100000)
+
+
 class Lane(Arguments):
+    progress: Progress | None = None
+    task: int | None = Field(default=None, ge=1)
     source: Source
     external_id: str = Field(min_length=1)
     title: str | None = None
@@ -83,10 +103,13 @@ class Lane(Arguments):
     owner: str | None = None
     event: str | None = None
     end_summary: str | None = None
+    is_step: bool = False
+    parent_ref: str | None = None
     visibility: Literal["team", "private"] = "team"
 
 
 class Collector(Arguments):
+    expected_every_s: float = Field(default=300, gt=0)
     label: str = Field(min_length=1, max_length=200)
     version: str = ""
     threads_seen: int = Field(default=0, ge=0)
@@ -128,7 +151,7 @@ class Option(Arguments):
 def check_ask_text(value: str) -> None:
     """Refuse hidden format controls before an ask can reach a card."""
     if any(unicodedata.category(char) == "Cf" for char in value):
-        raise ValueError("Ask text cannot contain a format control")
+        raise Refusal("Ask text cannot contain a format control")
 
 
 class AskCreate(Arguments):
@@ -138,17 +161,25 @@ class AskCreate(Arguments):
     options: list[Option] = Field(min_length=2, max_length=5)
     recommended: str | None = None
     proof: dict[str, Any] = Field(default_factory=dict)
+    blocks: list[Block] = Field(default_factory=list, max_length=12)
     owner: str | None = None
     due_at: str | None = None
     expires_at: str | None = None
     source_ref: str | None = Field(default=None, min_length=1)
 
-    @field_validator("question")
+    @field_validator("question", mode="before")
     @classmethod
     def one_sentence(cls, value):
-        if "\n" in value or len(re.findall(r"[.!?](?:\s+|$)", value)) > 1:
-            raise ValueError("The question must be one short sentence")
+        if not isinstance(value, str):
+            return value
+        if not value.strip() or len(value.strip()) > 240 or "\n" in value.strip() or len(re.findall(r"[.!?](?:\s+|$)", value.strip())) > 1:
+            raise Refusal("The question is one short sentence, 240 characters at most. Put the rest in proof.text.")
         return value
+
+    @field_validator("proof")
+    @classmethod
+    def proof_limits(cls, value):
+        return proof.check(value)
 
     @model_validator(mode="after")
     def check_options(self):
@@ -157,7 +188,7 @@ class AskCreate(Arguments):
         if len(set(ids)) != len(ids) or (
             self.recommended is not None and self.recommended not in ids
         ):
-            raise ValueError("Use unique option IDs and a valid recommended option")
+            raise Refusal("Use unique option IDs and a valid recommended option")
         return self
 
 

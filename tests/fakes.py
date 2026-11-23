@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass, field
 
-from illo.gateway.replies import RUN_ERROR
+from illo.connectors.github_client import GitHubError
+from illo.gateway.replies import error_text
 
 
 @dataclass
@@ -18,6 +19,9 @@ class FakeSlackClient:
             "channel": kwargs.get("channel", "D_EXAMPLE"),
             "ts": str(len(self.calls)),
         }
+
+    async def views_open(self, **kwargs):
+        return await self._record("views_open", **kwargs)
 
     async def chat_postMessage(self, **kwargs):
         result = await self._record("chat_postMessage", **kwargs)
@@ -63,12 +67,19 @@ class FakeSlackClient:
     async def conversations_info(self, **kwargs):
         await self._record("conversations_info", **kwargs)
         return {"ok": True, "channel": {
-            "id": kwargs["channel"], "name": "example", "is_private": False,
+            "id": kwargs["channel"], "name": "example", "is_private": False, "is_member": True,
         }}
 
     async def conversations_members(self, **kwargs):
         await self._record("conversations_members", **kwargs)
         return {"ok": True, "members": ["U_ACME_ADA", "U_ACME_BEN"]}
+
+    async def users_conversations(self, **kwargs):
+        await self._record("users_conversations", **kwargs)
+        return {"ok": True, "channels": [
+            {"id": "C_ACME_TEAM", "name": "team", "is_member": True},
+            {"id": "C_ACME_ALERTS", "name": "alerts", "is_member": True},
+        ]}
 
     async def users_list(self, **kwargs):
         await self._record("users_list", **kwargs)
@@ -86,6 +97,8 @@ class FakeGitHubClient:
     pulls: list[dict] = field(default_factory=list)
     repositories: dict[str, dict] = field(default_factory=dict)
     files: dict[tuple, dict] = field(default_factory=dict)
+    commits: dict[tuple, dict] = field(default_factory=dict)
+    assignment_error: GitHubError | None = None
 
     def _items(self, repo, items):
         return [i for i in items if i.get("repo", repo).lower() == repo.lower()]
@@ -131,6 +144,8 @@ class FakeGitHubClient:
             "state": "open",
             "assignees": [],
             "comments_data": [],
+            # The app account creates the ticket. It is not a person of the workspace.
+            "user": {"login": "example-app[bot]"},
         }
         issue["html_url"] = f"https://github.com/{repo}/issues/{number}"
         self.calls.append({"method": "create_issue", **issue})
@@ -141,10 +156,38 @@ class FakeGitHubClient:
         self.calls.append(
             {"method": "assign_issue", "repo": repo, "number": number, "assignees": assignees}
         )
+        if self.assignment_error:
+            # A server error can arrive after GitHub did the assignment.
+            if self.assignment_error.status >= 500:
+                for issue in self._items(repo, self.issues):
+                    if issue["number"] == number:
+                        issue["assignees"] = [{"login": login} for login in assignees]
+            raise self.assignment_error
         for issue in self._items(repo, self.issues):
             if issue["number"] == number:
                 issue["assignees"] = [{"login": login} for login in assignees]
         return {"number": number, "assignees": assignees}
+
+    async def unassign_issue(self, repo, number, assignees):
+        self.calls.append({"method": "unassign_issue", "repo": repo, "number": number, "assignees": assignees})
+        for item in self._items(repo, self.issues):
+            if item["number"] == number:
+                item["assignees"] = [a for a in item["assignees"] if a["login"] not in assignees]
+        return {}
+
+    async def remove_label(self, repo, number, label):
+        self.calls.append({"method": "remove_label", "repo": repo, "number": number, "label": label})
+        for item in self._items(repo, self.issues):
+            if item["number"] == number:
+                item["labels"] = [v for v in item["labels"] if (v.get("name") if isinstance(v, dict) else v) != label]
+        return {}
+
+    async def reopen_issue(self, repo, number):
+        self.calls.append({"method": "reopen_issue", "repo": repo, "number": number})
+        for item in self._items(repo, self.issues):
+            if item["number"] == number:
+                item["state"] = "open"
+        return {}
 
     async def add_labels(self, repo, number, labels):
         self.calls.append(
@@ -164,6 +207,12 @@ class FakeGitHubClient:
             if issue["number"] == number:
                 issue.setdefault("comments_data", []).append({"body": body})
         return {"id": len(self.calls), "body": body}
+
+    async def get_commit(self, repo: str, ref: str):
+        self.calls.append({"method": "get_commit", "repo": repo, "ref": ref})
+        if (repo, ref) not in self.commits:
+            raise GitHubError(404)
+        return dict(self.commits[(repo, ref)])
 
     async def get_pull(self, repo: str, number: int):
         self.calls.append({"method": "get_pull", "repo": repo, "number": number})
@@ -212,8 +261,8 @@ class FakeChannelAdapter:
     async def deliver_final(self, event, text):
         self.final.append((event, text))
 
-    async def deliver_error(self, event):
-        self.errors.append((event, RUN_ERROR))
+    async def deliver_error(self, event, *, category="internal"):
+        self.errors.append((event, error_text(category)))
 
 
 @dataclass

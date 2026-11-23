@@ -70,9 +70,9 @@ async def search(
     return await all_rows(
         conn,
         """
-        WITH q AS (SELECT websearch_to_tsquery('simple',%s) || websearch_to_tsquery('english',%s) AS query)
-        SELECT i.id,i.kind,i.source_ref,i.title,i.summary,i.links,i.source_at,ts_rank(i.tsv,q.query) AS score
-        FROM items i,q WHERE i.tsv @@ q.query
+        WITH q AS MATERIALIZED (SELECT illo_search_query('simple',%s) || illo_search_query('english',%s) AS query)
+        SELECT i.id,i.kind,i.source_ref,i.title,i.summary,i.links,i.source_at,ts_rank(s.vector,q.query) AS score
+        FROM items i JOIN item_search s ON s.item_id=i.id CROSS JOIN q WHERE s.vector @@ (SELECT query FROM q)
           AND (visibility='team' OR owner_person_id=(SELECT id FROM people WHERE 'person:' || key=%s AND active))
           AND (%s::text[] IS NULL OR kind=ANY(%s)) ORDER BY score DESC,i.id DESC LIMIT %s
     """,
