@@ -20,8 +20,8 @@ from pydantic import (
 from illo.connectors.config import Connector
 from illo.db import Connection
 
-Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request", "digest", "team_digest"]
-RunKind = Literal["person_dm", "team_channel", "tainted", "routine", "digest", "agent_request", "deep"]
+Profile = Literal["board_coordinator", "person_dm", "team_channel", "tainted", "routine", "agent_request", "digest", "team_digest"]
+RunKind = Literal["board_coordinator", "person_dm", "team_channel", "tainted", "routine", "digest", "agent_request", "deep"]
 ProviderName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")]
 Risk = Literal["read", "write_internal", "send_outside"]
 
@@ -384,6 +384,26 @@ class MemoryConfig(Model):
     list_changes: Literal["owners", "everyone"] = "owners"
 
 
+class BoardCoordinatorConfig(Model):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    tick_seconds: int = Field(default=30, ge=10, le=300)
+    send_tick_seconds: int = Field(default=10, ge=5, le=120)
+    settle_seconds: int = Field(default=120, ge=0, le=3600)
+    presence_minutes: int = Field(default=15, ge=1, le=240)
+    max_headstart_minutes: int = Field(default=60, ge=5, le=240)
+    max_runs_per_hour: int = Field(default=20, ge=1, le=500)
+    max_runs_per_thread_per_day: int = Field(default=6, ge=1, le=50)
+    max_attempts_per_episode: int = Field(default=4, ge=1, le=10)
+    max_escalations_per_person_per_day: int = Field(default=8, ge=1, le=100)
+    thread_cooldown_minutes: int = Field(default=240, ge=0, le=10080)
+    escalation_timeout_hours: int = Field(default=24, ge=1, le=168)
+    stall_fallback_minutes: int = Field(default=30, ge=5, le=1440)
+    quiet_hours: bool = True
+    slack_summaries: bool = False
+
+
 class BoardConfig(Model):
     model_config = ConfigDict(extra="allow")
 
@@ -391,6 +411,8 @@ class BoardConfig(Model):
     max_consecutive_agent_posts: int = Field(default=20, ge=1, le=100)
     wake_github: bool = True
     wake_webhooks: bool = True
+    coordinator: BoardCoordinatorConfig = Field(default_factory=BoardCoordinatorConfig)
+    shareable_image_repos: list[str] = Field(default_factory=list)
 
 
 class SandboxConfig(Model):
@@ -716,6 +738,8 @@ def load_workspace(root: Path | str) -> Workspace:
     github_tasks.register()
 
     agents, lists, warnings = load_task_files(root, keys, config)
+    for section, model in (("board", config.board), ("board.coordinator", config.board.coordinator)):
+        warnings.extend(f"illo.yaml: unknown key {section}.{key}" for key in sorted(model.model_extra or {}))
     if config.github.task_list and config.github.task_list not in {entry.key for entry in lists}:
         raise WorkspaceError(f"{root / 'illo.yaml'}: github.task_list: unknown list")
     if config.github.task_list and next(entry for entry in lists if entry.key == config.github.task_list).owner:

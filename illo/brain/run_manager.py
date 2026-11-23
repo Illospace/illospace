@@ -90,14 +90,22 @@ class RunManager:
         route = resolve_route(ctx.workspace, run_kind(event, authority, deep=deep is not None))
         notify = sends_refresh_notice(route.kind)
         async with ctx.pool.connection() as conn:
+            if event.channel == "board":
+                from illo.board.coordinator import authorized_packet
+
+                if not await authorized_packet(conn, ctx, event, authority):
+                    raise RunFailure("internal")
             row = await runs.create(
                 conn, principal=authority.principal, person_id=authority.person_id,
                 profile=authority.profile, tainted=authority.tainted, event_id=event_id,
                 route=route.kind, provider=route.provider, model=route.model, tool_limit=route.max_tool_calls,
                 deep_run_id=deep.deep_run_id if deep else None, deep_kind=deep.kind if deep else None,
-                customer_read=bool(deep and deep.customer_read), personal_read=bool(deep and deep.personal_read),
+                customer_read=bool(deep and deep.customer_read), personal_read=authority.personal_read or bool(deep and deep.personal_read),
             )
             run_id = row["id"]
+            if event.channel == "board":
+                await conn.execute("UPDATE board_coordinator_runs SET event_id=%s,run_id=%s WHERE id=%s",
+                                   (event_id, run_id, event.payload["coordinator_run_id"]))
             if deep:
                 await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (run_id, deep.deep_run_id))
         status, error, usage, final = "failed", None, {}, None
@@ -197,7 +205,7 @@ class RunManager:
                                 await on_event(item)
                             if item.type == "error":
                                 failure = item.category if item.category in FAILURE_TEXTS else "provider"
-                                error = item.failure_reason()
+                                error = "The board model run failed." if event.channel == "board" else item.failure_reason()
                                 # Keep the token counts of a failed run.
                                 usage = {**usage, **item.usage}
                                 if auth.kind == "chatgpt" and item.code == "usage_limit_reached":

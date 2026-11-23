@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from illo.asks import cards, proof
+from illo.connectors.http import private_http_logs
 from illo.db import one
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, board, rules, sensors
@@ -17,19 +18,37 @@ def message_id(kind, row_id):
     return str(uuid5(NAMESPACE_URL, f"illo:{kind}:{row_id}"))
 
 
-async def post_dm(ctx, person, text, blocks, kind, row_id):
+async def post_dm(ctx, person, text, blocks, kind, row_id, *, metadata=None, channel=None):
     """Use a stable message ID across a retry after an uncertain Slack response."""
     if not ctx.slack_client or not person or not person["slack_id"]:
         return None
-    opened = await ctx.slack_client.conversations_open(users=person["slack_id"])
-    channel = opened["channel"]["id"]
+    if channel is None:
+        opened = await ctx.slack_client.conversations_open(users=person["slack_id"])
+        channel = opened["channel"]["id"]
+    fields = {"blocks": blocks} if blocks else {}
+    if metadata:
+        if not channel.startswith("D"):
+            return None
+        fields.update(metadata=metadata, unfurl_links=False, unfurl_media=False)
     sent = await ctx.slack_client.chat_postMessage(
-        channel=channel, text=text, blocks=blocks, client_msg_id=message_id(kind, row_id)
+        channel=channel, text=text, client_msg_id=message_id(kind, row_id), **fields
     )
     return {"channel": channel, "ts": sent["ts"]}
 
 
 async def sync_card(ctx, conn, ask, *, force=False):
+    if await asks.is_board_ask(conn, ask):
+        from illo.board import acl
+
+        thread = await acl.thread_access(conn, await board.ask_thread_id(conn, ask["id"]))
+        owner = await one(conn, "SELECT * FROM people WHERE id=%s", (ask["owner_person_id"],))
+        if not thread or not await acl.recipient_ok(conn, thread, owner):
+            return
+        if board.is_coordinator_ask(ask):
+            escalation = await one(conn, "SELECT recipient_slack_user FROM board_escalations WHERE ask_id=%s",
+                                   (ask["id"],))
+            if not ask["slack_ts"] or not escalation or escalation["recipient_slack_user"] != owner["slack_id"]:
+                return
     if not ctx.slack_client:
         await sensors.error(
             conn, "asks:slack", "Slack is not connected. Ask cards wait in the ledger."
@@ -56,12 +75,13 @@ async def sync_card(ctx, conn, ask, *, force=False):
     sent = {"channel": ask["slack_channel"], "ts": ask["slack_ts"]}
     if ask["slack_ts"]:
         if force or ask["card_digest"] != digest:
-            await ctx.slack_client.chat_update(
-                channel=ask["slack_channel"],
-                ts=ask["slack_ts"],
-                text=cards.fallback(data),
-                blocks=blocks,
-            )
+            with private_http_logs():
+                await ctx.slack_client.chat_update(
+                    channel=ask["slack_channel"],
+                    ts=ask["slack_ts"],
+                    text=cards.fallback(data),
+                    blocks=blocks,
+                )
     elif ask["state"] == "open":
         sent = await post_dm(ctx, data["owner"], cards.fallback(data), blocks, "ask", ask["id"])
     else:
@@ -139,6 +159,12 @@ async def prepare_card(ctx, conn, data):
         destination = (await pages.person_path(conn, ctx.workspace, data['owner'], data['id'], ask=True)
                        if data.get('owner') else f"/web/a/{data['id']}")
         data['page_url'] = pages.base_url(ctx) + destination
+    if board.is_coordinator_ask(data):
+        from illo.board.policy import board_pages_ready
+
+        thread_id = await board.ask_thread_id(conn, data["id"])
+        data["page_url"] = pages.base_url(ctx) + f"/web/board/t/{thread_id}" if board_pages_ready(ctx) else None
+        data["page_action"] = f"web-open-board:{thread_id}"
     requester = data.get('requester') or {}
     data['full_proof'] = not pages.enabled(ctx) and requester.get('scopes') == ['agent']
     if data['full_proof'] and data.get('owner'):
@@ -148,14 +174,20 @@ async def prepare_card(ctx, conn, data):
 
 async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=None):
     """All direct person answers lock the ask and write the same decision."""
-    ask = await ledger.lock_ask(conn, ask_id)
+    from illo.board.asks import can_answer, on_answer
+
+    ask = await board.lock_for_ask(conn, ask_id)
     owner = await one(conn, 'SELECT id FROM people WHERE id=%s AND active FOR SHARE', (person_id,))
     if not ask or not owner or ask['owner_person_id'] != person_id or not await is_live(conn, ask):
         return None
+    if not await can_answer(conn, ask, person_id):
+        return None
     if option is None and not (text and text.strip()):
         return None
-    answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
-    if answered:
-        await board.record_decision(conn, answered, workspace=workspace)
-        await ledger.decision(conn, answered)
-    return answered
+    async with conn.transaction():
+        answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
+        if answered:
+            await board.record_decision(conn, answered, workspace=workspace)
+            await ledger.decision(conn, answered)
+            await on_answer(conn, answered, workspace=workspace)
+        return answered

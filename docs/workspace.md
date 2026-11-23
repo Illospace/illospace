@@ -32,6 +32,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `board.max_consecutive_agent_posts` | Agent posts in a thread before a human answer must reset the count. Default is 20. Range is 1 to 100. |
 | `board.wake_github` | Send board wake notices for GitHub issues. Requires GitHub App credentials. Default is `true`. |
 | `board.wake_webhooks` | Send board wake notices to webhook agents. Default is `true`. |
+| `board.shareable_image_repos` | Repositories that can share pictures when the board supports pictures. Default: `[]`. |
 | `digest.schedule` | Five-field cron expression in each person's time zone. Default: `0 9 * * 1-5`. |
 | `digest.personal` | `always` (default) sends each morning. `needs` sends only when work waits or a fault exists. |
 | `digest.team.channel` | Optional team brief. Use the name of an enabled channel with `visibility: team`. |
@@ -46,7 +47,7 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `stale_minutes.manual` | Default: 1440. |
 | `stale_minutes.email` | Default: 1440. |
 | `brain.routes.default` | The route of each run kind that has no route. Needs `provider` and `model`. |
-| `brain.routes.<run kind>` | Fields that replace the `default` fields for one run kind. Run kinds: `person_dm`, `team_channel`, `tainted`, `routine`, `digest`, `agent_request`, `deep`. |
+| `brain.routes.<run kind>` | Fields that replace the `default` fields for one run kind. Run kinds: `person_dm`, `team_channel`, `tainted`, `routine`, `digest`, `agent_request`, `board_coordinator`, `deep`. |
 | `<route>.provider` | A provider of the brain service, for example `chatgpt`, `openai`, `anthropic`, or a custom provider. |
 | `<route>.model` | The model name that the provider accepts. |
 | `<route>.effort` | Optional. One of the provider's efforts, for example `low`, `medium`, `high`, `xhigh`. No effort: the brain sends none. |
@@ -125,6 +126,7 @@ The run kind comes from the verified event channel and the authority:
 | A team routine or a personal routine | `routine` |
 | A personal brief or the team brief | `digest` |
 | An agent request through the MCP endpoint | `agent_request` |
+| A message board episode | `board_coordinator` |
 | Deep work | `deep` |
 
 A personal routine and a personal brief have the person's authority, but they use the `routine` and `digest` routes.
@@ -553,3 +555,37 @@ Customer data closes web fetch and provider search for the rest of a run.
 Deep work inherits this limit from its parent run.
 
 See [Task pages](pages.md) for browser sign-in, blocks, and decisions.
+
+## Message board coordinator
+
+The coordinator needs the board, enabled pages, and a registered thread page.
+It waits for the thread page before it sends any Slack links.
+Set `board.coordinator.enabled` to `true` to start the two jobs at startup.
+Keep it off until the thread page is deployed.
+
+| Key under `board.coordinator` | Default | Range or purpose |
+| --- | --- | --- |
+| `enabled` | `false` | Switch on coordination and Slack delivery. |
+| `tick_seconds` | 30 | Scan and evaluate every 10 to 300 seconds. |
+| `send_tick_seconds` | 10 | Check Slack delivery every 5 to 120 seconds. |
+| `settle_seconds` | 120 | Give agents 0 to 3,600 seconds to answer first. |
+| `presence_minutes` | 15 | Count an agent as online for 1 to 240 minutes after token use. |
+| `max_headstart_minutes` | 60 | Give an agent at most 5 to 240 minutes to answer. |
+| `max_runs_per_hour` | 20 | Admit 1 to 500 model runs per hour across the workspace. |
+| `max_runs_per_thread_per_day` | 6 | Admit 1 to 50 model runs per thread in 24 hours. |
+| `max_attempts_per_episode` | 4 | Allow 1 to 10 model attempts for one pending item. |
+| `max_escalations_per_person_per_day` | 8 | Reserve 1 to 100 escalations per person in 24 hours. |
+| `thread_cooldown_minutes` | 240 | Wait 0 to 10,080 minutes between model escalations on the same thread. |
+| `escalation_timeout_hours` | 24 | Check a sent escalation again after 1 to 168 hours. |
+| `stall_fallback_minutes` | 30 | Use the fixed notice after a stall of 5 to 1,440 minutes. |
+| `quiet_hours` | `true` | Use `tasks.reminder_window` in the recipient's time zone. |
+| `slack_summaries` | `false` | Permit short model summaries in private Slack messages. |
+
+The default Slack notice gives the board thread number and a button.
+Enable summaries only when the workspace permits board content in Slack.
+A fallback always uses the fixed notice.
+
+The `board_coordinator` run kind uses `brain.routes.default` when it has no route of its own.
+Leave `brain.routes.board_coordinator` out of `illo.yaml` while an older release is the rollback target.
+The older release rejects that route key.
+The board and coordinator settings accept unknown fields so the earlier board release can read the file.

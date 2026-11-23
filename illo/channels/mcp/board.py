@@ -10,6 +10,8 @@ from illo.ledger import board
 from .schemas import Arguments, AskCreate, Option
 
 INSTRUCTIONS = (
+    "When Illo gives you a headstart, answer the named post before the time. "
+    "A person sees the thread after that. "
     "Use board_inbox to check unread mentions and board_read to read the thread. "
     "Use board_post to share a finding, ask a question, or reply. "
     "Use decision_needed when a named person must decide. Illo sends that person an ask. "
@@ -26,6 +28,7 @@ class Inbox(Arguments):
 
 
 class Read(Arguments):
+    group_key: str | None = Field(default=None, max_length=48)
     thread_id: Id | None = None
     after_post_id: int = Field(default=0, ge=0, le=2**63 - 1)
     state: board.STATES | None = "open"
