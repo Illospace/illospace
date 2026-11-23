@@ -35,8 +35,10 @@ rollback() {
 }
 
 update_once() {
-    local old target stage before
+    local old target stage before replaced preflight_timeout
     old=$(cat "$ILLO_STATE_DIR/last-good")
+    replaced=0
+    preflight_timeout=${ILLO_PREFLIGHT_TIMEOUT:-60}
     if [ -n "$(git status --porcelain)" ]; then
         record 'failed: the checkout has local changes'
         return 1
@@ -69,10 +71,10 @@ update_once() {
     fi
     stage=build
     if compose build illo brain sandbox; then
-        # The new images check the workspace and its routes before any change. An old
-        # illo.yaml stops the update here, and the old services keep running.
-        if ! compose run --rm --no-deps -T brain python -m brain.providers \
-                | compose run --rm --no-deps -T illo check-routes; then
+        # The new images check the brain settings, workspace, and routes before any change.
+        # An old illo.yaml or bad brain setting stops the update here, and the old services keep running.
+        if ! compose_timeout "$preflight_timeout" run --rm --no-deps -T brain python -m brain.providers \
+                | compose_timeout "$preflight_timeout" run --rm --no-deps -T illo check-routes; then
             record "failed $target: workspace or routes; nothing changed; last good $old"
             printf 'The new revision refuses the workspace or its routes. Nothing changed.\n' >&2
             return 1
@@ -82,6 +84,7 @@ update_once() {
             stage=migration
             if compose run --rm --no-deps -T illo migrate; then
                 stage=start
+                replaced=1
                 if compose up -d --no-build --remove-orphans; then
                     stage=health
                     if wait_health && save_good; then
@@ -94,7 +97,10 @@ update_once() {
         fi
     fi
     record "failed $target: $stage; last good $old"
-    rollback "$old"
+    # Keep the healthy old stack untouched when failure happens before service replacement.
+    if [ "$replaced" -eq 1 ]; then
+        rollback "$old"
+    fi
     return 1
 }
 

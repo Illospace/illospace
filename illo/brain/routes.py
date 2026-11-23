@@ -137,7 +137,7 @@ def check_policy(brain, people: set[str]) -> None:
     if policy.team_credential is not None and policy.team_credential not in people:
         raise ValueError("brain.chatgpt.team_credential: unknown or inactive person")
     if policy.tainted_credential == "api_key" and policy.fallback == "none":
-        raise ValueError("brain.chatgpt.tainted_credential: api_key needs brain.chatgpt.fallback")
+        raise ValueError("brain.chatgpt.tainted_credential: api_key needs brain.chatgpt.fallback; to use an API key for tainted runs only, set brain.routes.tainted.provider")
 
 
 def check_routes(workspace, providers: dict[str, dict]) -> None:

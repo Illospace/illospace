@@ -200,10 +200,10 @@ async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status,
         row = await one(conn, "SELECT * FROM runs")
     assert row["status"] == status and row["usage"]["auth_kind"] == expected
     assert row["usage"].get("credential_person") == ("ada" if expected == "chatgpt" else None)
-    # The payer columns follow the payer event, also when the run ends in a timeout.
-    assert (row["provider"], row["payer"]) == (
-        ("openai", "api_key") if expected == "api_key" else ("chatgpt", "chatgpt"))
-    assert (row["payer_person_id"] is None) == (expected == "api_key")
+    # Per S5, runs.payer and runs.payer_person_id keep the first payer; legacy usage records the
+    # final payer (including on timeout) so S5 marks fallback rows unsplit.
+    assert (row["provider"], row["payer"]) == ("chatgpt", "chatgpt")
+    assert row["payer_person_id"] is not None
     counts = [e.usage.get("input_tokens") for e in events if e.usage.get("input_tokens")]
     if counts:
         assert row["usage"]["input_tokens"] == counts[0]

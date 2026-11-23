@@ -2,25 +2,36 @@
 """Read literal environment values. Never execute an environment file."""
 
 import os
+import re
 import sys
 from pathlib import Path
 
 
+def parse_value(raw: str) -> str:
+    value = raw.strip()
+    if value.startswith(("'", '"')):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end < 0:
+            raise ValueError("Use one line for each environment value")
+        trailing = value[end + 1 :].strip()
+        if trailing and not trailing.startswith("#"):
+            raise ValueError("Use one line for each environment value")
+        return value[1:end]
+    # Docker Compose strips inline comments preceded by whitespace in unquoted values.
+    return re.split(r"\s+#", value, maxsplit=1)[0].strip()
+
+
 def read(path: Path) -> dict[str, str]:
     values = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         key, sep, value = line.partition("=")
         if not sep:
             raise ValueError("Use KEY=value in the environment file")
-        value = value.strip()
-        if value.startswith(("'", '"')):
-            if len(value) < 2 or value[-1] != value[0]:
-                raise ValueError("Use one line for each environment value")
-            value = value[1:-1]
-        values[key.strip()] = value
+        values[key.strip()] = parse_value(value)
     return values
 
 

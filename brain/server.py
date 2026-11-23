@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 from contextlib import aclosing
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -44,10 +45,10 @@ def create_app(*, concurrency: int | None = None, runner=run_worker, table=None,
                transport=None) -> FastAPI:
     """`table` and `transport` (for transcription requests) are for tests."""
     app = FastAPI(title="Illo Brain", docs_url=None, redoc_url=None, openapi_url=None)
-    slots = asyncio.Semaphore(concurrency or int(os.getenv("ILLO_BRAIN_CONCURRENCY", "4")))
+    default_concurrency, cap = providers.boot_settings()
+    slots = asyncio.Semaphore(concurrency or default_concurrency)
     table = providers.load() if table is None else table
     keys = [provider.api_key for provider in table.values() if provider.api_key]
-    cap = float(os.getenv("ILLO_BRAIN_MAX_TIMEOUT_S", "1800"))
 
     def authorize(request: Request) -> str:
         secret = os.getenv("ILLO_BRAIN_SECRET")
@@ -76,7 +77,9 @@ def create_app(*, concurrency: int | None = None, runner=run_worker, table=None,
     async def transcribe(request: Request, provider: str, model: str, extension: str):
         authorize(request)
         item = table.get(provider)
-        usable = item is not None and item.transcription
+        https = item is not None and (item.wire == "fake" or (
+            item.base_url is not None and urlsplit(item.base_url).scheme == "https"))
+        usable = item is not None and item.transcription and https
         if not usable or not re.fullmatch(r"[a-z0-9]{1,8}", extension) or not 0 < len(model) <= 128:
             return JSONResponse(status_code=422, content={"category": "config"})
         audio = await request.body()
@@ -87,14 +90,21 @@ def create_app(*, concurrency: int | None = None, runner=run_worker, table=None,
         try:
             async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False,
                                          transport=transport) as client:
-                result = await client.post(
+                async with client.stream(
+                    "POST",
                     item.base_url + "/audio/transcriptions",
                     headers={"Authorization": "Bearer " + item.api_key},
                     data={"model": model, "response_format": "json"},
                     files={"file": (f"clip.{extension}", audio, "application/octet-stream")},
-                )
-            ok = result.status_code == 200 and len(result.content) <= 262144
-            reply = result.json() if ok else {}
+                ) as result:
+                    if result.status_code != 200:
+                        return JSONResponse(status_code=502, content={"category": "runtime"})
+                    raw = bytearray()
+                    async for chunk in result.aiter_bytes(chunk_size=65536):
+                        raw.extend(chunk)
+                        if len(raw) > 262144:
+                            return JSONResponse(status_code=502, content={"category": "runtime"})
+            reply = json.loads(raw)
             # The transcript goes into the inbound message. It never holds the provider key.
             check_echo(reply, item.api_key)
             text = reply.get("text")

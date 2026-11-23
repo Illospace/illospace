@@ -8,19 +8,26 @@ import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
 
 from brain.models import BrainEvent, RunRequest, event
 from brain.providers import Provider
 
 # The worker gets its provider and the fallback on standard input. Its environment holds only
 # these names, so no key of the brain file reaches it, whatever the name of the variable.
+PROXY_VARIABLES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"})
 WORKER_ENVIRONMENT = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "PYTHONPATH",
-                      "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-                      "http_proxy", "https_proxy", "no_proxy")
+                      "SSL_CERT_FILE", "SSL_CERT_DIR", "NO_PROXY", "no_proxy", *PROXY_VARIABLES)
+
+
+def safe_proxy(value: str) -> bool:
+    parts = urlsplit(value if "://" in value else "http://" + value)
+    return not (parts.username or parts.password or "@" in parts.netloc)
 
 
 def worker_environment() -> dict:
-    return {name: os.environ[name] for name in WORKER_ENVIRONMENT if name in os.environ}
+    return {name: value for name in WORKER_ENVIRONMENT if (value := os.environ.get(name)) is not None
+            and (name not in PROXY_VARIABLES or safe_proxy(value))}
 
 
 async def run_worker(

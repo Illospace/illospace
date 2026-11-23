@@ -422,3 +422,105 @@ def test_unknown_worker_exception_keeps_only_the_internal_category():
     result = failure_event(ValueError("fake-credential-in-an-error"))
     assert result["category"] == "internal"
     assert "fake-credential" not in json.dumps(result)
+
+
+async def test_transcribe_streams_limit_and_skips_error_body():
+    from brain.providers import Provider
+
+    chunks_read = 0
+
+    class HugeStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal chunks_read
+            for _ in range(20):
+                chunks_read += 1
+                yield b"a" * 65536
+
+    table = {"plain": Provider("plain", "chat", "https://models.example/v1", "fake-plain-key",
+                               transcription=True)}
+
+    def respond_large(request):
+        return httpx.Response(200, stream=HugeStream())
+
+    app = create_app(table=table, transport=httpx.MockTransport(respond_large))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://brain") as http:
+        res = await http.post("/transcribe", params={"provider": "plain", "model": "m", "extension": "m4a"},
+                              content=b"audio", headers={"X-Illo-Brain-Secret": "service-test-secret"})
+    assert res.status_code == 502 and chunks_read < 10
+
+    error_chunks_read = 0
+
+    class ErrorStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal error_chunks_read
+            error_chunks_read += 1
+            yield b"huge error"
+
+    app2 = create_app(table=table, transport=httpx.MockTransport(
+        lambda request: httpx.Response(500, stream=ErrorStream())))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2), base_url="http://brain") as http:
+        res2 = await http.post("/transcribe", params={"provider": "plain", "model": "m", "extension": "m4a"},
+                               content=b"audio", headers={"X-Illo-Brain-Secret": "service-test-secret"})
+    assert res2.status_code == 502 and error_chunks_read == 0
+
+
+async def test_transcribe_requires_https():
+    from brain import providers
+    from brain.providers import Provider
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        providers.load({
+            "ILLO_PROVIDER_LOCAL_WIRE": "chat",
+            "ILLO_PROVIDER_LOCAL_BASE_URL": "http://models.example/v1",
+            "ILLO_PROVIDER_LOCAL_API_KEY": "fake-key",
+            "ILLO_PROVIDER_LOCAL_CAPABILITIES": "transcription",
+        })
+
+    table = providers.load({
+        "ILLO_PROVIDER_OPENAI_API_KEY": "fake-key",
+        "ILLO_PROVIDER_OPENAI_BASE_URL": "http://127.0.0.1:9999/v1",
+    })
+    assert table["openai"].transcription is False
+
+    called = False
+
+    def fail_if_called(request):
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"text": "nope"})
+
+    direct = {"plain": Provider("plain", "chat", "http://models.example/v1", "fake-plain-key",
+                                transcription=True)}
+    app = create_app(table=direct, transport=httpx.MockTransport(fail_if_called))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://brain") as http:
+        res = await http.post("/transcribe", params={"provider": "plain", "model": "m", "extension": "m4a"},
+                              content=b"audio", headers={"X-Illo-Brain-Secret": "service-test-secret"})
+    assert res.status_code == 422 and res.json() == {"category": "config"} and not called
+
+
+@pytest.mark.parametrize("var,val", [
+    ("ILLO_BRAIN_CONCURRENCY", "0"),
+    ("ILLO_BRAIN_CONCURRENCY", "nope"),
+    ("ILLO_BRAIN_MAX_TIMEOUT_S", "0"),
+    ("ILLO_BRAIN_MAX_TIMEOUT_S", "nan"),
+    ("ILLO_BRAIN_MAX_TIMEOUT_S", "nope"),
+])
+def test_boot_settings_reject_invalid_values(var, val):
+    from brain import providers
+
+    with pytest.raises(ValueError, match=var):
+        providers.boot_settings({var: val})
+
+
+def test_worker_environment_strips_proxy_credentials(monkeypatch):
+    from brain.process import worker_environment
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:fake-proxy-secret@proxy.example:8080")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("http_proxy", "user:secret@proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    env = worker_environment()
+    assert "HTTPS_PROXY" not in env
+    assert "http_proxy" not in env
+    assert env["HTTP_PROXY"] == "http://proxy.example:3128"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1"

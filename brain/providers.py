@@ -7,6 +7,7 @@ table, except `chatgpt`: its tokens come with each run. `fake` needs `ILLO_PROVI
 """
 
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass, field
@@ -109,14 +110,19 @@ def load(environ=os.environ) -> dict[str, Provider]:
             raise ValueError(f"{PREFIX}CHATGPT_API_KEY: ChatGPT tokens come with each run")
         url = base_url(name, values["BASE_URL"]) if "BASE_URL" in values else None
         if built_in:
+            # Voice transcription sends Slack audio and the provider key; require HTTPS.
+            https = url is None or urlsplit(url).scheme == "https"
             provider = Provider(**{**built_in.wire_dict(), "api_key": values.get("API_KEY"),
+                                   "transcription": built_in.transcription and https,
                                    **({"base_url": url} if url else {})})
         elif values.get("WIRE") not in ("responses", "chat") or not url:
             raise ValueError(f"{PREFIX}{name.upper()}: a custom provider needs _WIRE "
                              "(responses or chat) and _BASE_URL")
         else:
-            provider = Provider(name, values["WIRE"], url, values.get("API_KEY"),
-                                **capabilities(name, values["WIRE"], values.get("CAPABILITIES", "")))
+            caps = capabilities(name, values["WIRE"], values.get("CAPABILITIES", ""))
+            if caps["transcription"] and urlsplit(url).scheme != "https":
+                raise ValueError(f"{PREFIX}{name.upper()}_CAPABILITIES: transcription needs an HTTPS address")
+            provider = Provider(name, values["WIRE"], url, values.get("API_KEY"), **caps)
         if provider.api_key or name == "chatgpt":
             table[name] = provider
     return table
@@ -155,5 +161,23 @@ def problem(request, table: dict[str, Provider]) -> str | None:
     return unsupported(request, provider)
 
 
+def boot_settings(environ=os.environ) -> tuple[int, float]:
+    """Check the service runtime variables once, at preflight and at startup."""
+    try:
+        concurrency = int(environ.get("ILLO_BRAIN_CONCURRENCY", "4"))
+    except ValueError as error:
+        raise ValueError("ILLO_BRAIN_CONCURRENCY: use a positive integer") from error
+    if concurrency < 1:
+        raise ValueError("ILLO_BRAIN_CONCURRENCY: use a positive integer")
+    try:
+        cap = float(environ.get("ILLO_BRAIN_MAX_TIMEOUT_S", "1800"))
+    except ValueError as error:
+        raise ValueError("ILLO_BRAIN_MAX_TIMEOUT_S: use a positive number") from error
+    if not math.isfinite(cap) or cap <= 0:
+        raise ValueError("ILLO_BRAIN_MAX_TIMEOUT_S: use a positive number")
+    return concurrency, cap
+
+
 if __name__ == "__main__":
+    boot_settings()
     print(json.dumps(description(load())))

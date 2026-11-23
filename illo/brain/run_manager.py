@@ -105,6 +105,7 @@ class RunManager:
 
         images, image_context = await for_run(ctx, event, authority, capabilities["images"])
         auth = payer.auth
+        usage_payer = payer
         request = RunRequest(
             images=images,
             run_id=row["id"],
@@ -139,8 +140,9 @@ class RunManager:
                                 async with ctx.pool.connection() as conn:
                                     await conn.execute("UPDATE runs SET web_read=true,outside_read=true,usage=jsonb_set(usage,'{web_search_calls}',to_jsonb(COALESCE((usage->>'web_search_calls')::int,0)+1)) WHERE id=%s", (row["id"],))
                             if item.type == "payer" and payer.fallback:
-                                # The brain changed to the fallback during the run.
-                                payer = Payer("api_key", payer.fallback)
+                                # Keep the first payer in runs.payer/payer_person_id (S5); legacy
+                                # usage tracks the final payer so S5 marks fallback rows unsplit.
+                                usage_payer = Payer("api_key", payer.fallback)
                                 continue
                             if item.type == "tool_call":
                                 turns += 1
@@ -160,7 +162,8 @@ class RunManager:
                                     notify=not background,
                                 )
                                 if fresh is not None:
-                                    payer, auth = fresh, fresh.auth
+                                    payer = usage_payer = fresh
+                                    auth = fresh.auth
                                     request = request.model_copy(update=payer.request())
                                     retry = True
                                     break
@@ -223,7 +226,7 @@ class RunManager:
             if status != "completed":
                 usage = {**usage, "failure_category": failure}
             if provider["wire"] == "responses":
-                usage = {k: v for k, v in usage.items() if k != "credential_person"} | payer.usage()
+                usage = {k: v for k, v in usage.items() if k != "credential_person"} | usage_payer.usage()
             async with ctx.pool.connection() as conn:
                 if (payer.provider, payer.kind, payer.person_id) != (
                         row["provider"], row["payer"], row["payer_person_id"]):
