@@ -150,7 +150,7 @@ async def verify_account(ctx, conn, person_id, data):
         raise ValueError(FAILED)
     allowed = (
         person["emails"] if person else []
-    ) + ctx.workspace.config.brain.chatgpt_allowed_accounts
+    ) + ctx.workspace.config.brain.chatgpt.allowed_accounts
     if email.casefold() not in {address.casefold() for address in allowed}:
         await ctx.chatgpt_client.revoke(data)
         if person:
@@ -344,8 +344,8 @@ async def claim(ctx, event, authority):
             )
         if command in {"connect my chatgpt", "connect my chatgpt with a link"}:
             if (
-                ctx.workspace.config.brain.person_credential == "team"
-                and authority.principal != "person:" + ctx.workspace.config.brain.team_credential
+                ctx.workspace.config.brain.chatgpt.person_credential == "team"
+                and authority.principal != "person:" + ctx.workspace.config.brain.chatgpt.team_credential
             ):
                 return chatgpt.team_signin(ctx.workspace) + " You do not need to connect your ChatGPT."
             state = await issue(ctx, authority.person_id, event)
@@ -362,8 +362,8 @@ async def claim(ctx, event, authority):
             )
         if command == "disconnect my chatgpt":
             await chatgpt.disconnect(ctx, authority.person_id)
-            if ctx.workspace.config.brain.person_credential == "team":
-                if authority.principal == "person:" + ctx.workspace.config.brain.team_credential:
+            if ctx.workspace.config.brain.chatgpt.person_credential == "team":
+                if authority.principal == "person:" + ctx.workspace.config.brain.chatgpt.team_credential:
                     return "ChatGPT is disconnected from Illo. Illo now has no model sign-in for all members."
                 return "Your ChatGPT sign-in is disconnected from Illo. " + chatgpt.team_signin(ctx.workspace)
             return "ChatGPT is disconnected from Illo."
@@ -384,10 +384,10 @@ def status_text(row):
 
 
 async def signin_status(conn, workspace, person_id):
-    if workspace.config.brain.person_credential == "team":
+    if workspace.config.brain.chatgpt.person_credential == "team":
         person = await one(
             conn, "SELECT id FROM people WHERE key=%s AND active",
-            (workspace.config.brain.team_credential,),
+            (workspace.config.brain.chatgpt.team_credential,),
         )
         rows = await grants.status(conn, person["id"])
         return chatgpt.team_signin(workspace) + " " + status_text(rows[0]).replace("Your ", "The ")

@@ -4,10 +4,9 @@
 difference that exists today, and fails on any other difference.
 """
 
-import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
 
 type BrainEvent = dict[str, Any]
 
@@ -34,6 +33,7 @@ class RunImage(BaseModel):
 
 
 class RunRequest(BaseModel):
+    # The app resolves the route. `brain/providers.py` checks it against the provider table.
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, validate_assignment=True)
 
     run_id: str | int
@@ -42,31 +42,17 @@ class RunRequest(BaseModel):
     user_message: str = Field(max_length=100_000)
     mcp_url: HttpUrl
     mcp_token: SecretStr
-    runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] = "claude"
-    model: str = Field(default_factory=lambda: os.getenv("ILLO_BRAIN_MODEL", "claude-opus-5-5"),
-                       min_length=1, max_length=128)
-    max_turns: int = Field(default=8, ge=1, le=200)
+    provider: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    model: str = Field(min_length=1, max_length=128)
+    effort: str | None = Field(default=None, pattern=r"^[a-z]{1,16}$")
+    max_tool_calls: int = Field(default=8, ge=1, le=200)
     timeout_s: float = Field(default=300, gt=0, le=3600)
-    provider_auth: ApiKeyAuth | ChatGPTAuth = Field(default_factory=ApiKeyAuth, discriminator="kind",
-                                                    repr=False)
-    effort: Literal["low", "medium", "high", "xhigh"] = "low"
-    deep: bool = False
     max_output_tokens: int | None = Field(default=None, ge=1)
     web_search: bool = False
-    api_key_fallback: bool = False
+    provider_auth: ApiKeyAuth | ChatGPTAuth = Field(default_factory=ApiKeyAuth, discriminator="kind",
+                                                    repr=False)
+    fallback_provider: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,31}$")
     smoke: bool = False
-
-    @model_validator(mode="after")
-    def auth_runtime(self):
-        if self.smoke and self.runtime != "openai_responses":
-            raise ValueError("The smoke check needs openai_responses")
-        if self.provider_auth.kind == "chatgpt" and self.runtime != "openai_responses":
-            raise ValueError("ChatGPT sign-in needs the openai_responses runtime")
-        if self.images and self.runtime != "openai_responses":
-            object.__setattr__(self, "user_message", self.user_message +
-                               "\n\nThe images could not be shown. This runtime accepts text only.")
-            object.__setattr__(self, "images", [])
-        return self
 
     def wire(self) -> dict:
         data = self.model_dump(mode="json")

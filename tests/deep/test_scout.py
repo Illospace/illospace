@@ -116,7 +116,10 @@ async def test_buttons(app, fake_brain, slack_client, choice):
         assert event["payload"]["text"].startswith(
             "Make a task from this finding: Check the API version."
         )
-        assert fake_brain.requests[-1].deep is False
+        async with app.state.ctx.pool.connection() as conn:
+            run = await one(conn, "SELECT route FROM runs WHERE id=%s",
+                            (fake_brain.requests[-1].run_id,))
+        assert run["route"] == "person_dm"
     updates = [c for c in slack_client.calls if c["method"] == "chat_update"]
     assert updates[0]["blocks"] and len(updates[0]["blocks"]) == 1
 

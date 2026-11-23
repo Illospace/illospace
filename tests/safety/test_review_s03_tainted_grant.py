@@ -14,7 +14,7 @@ async def test_rule_06_tainted_grant_is_exact(app, rpc):
     app.state.ctx.workspace.connectors[0].tools[0].tainted = True
     async with app.state.ctx.pool.connection() as conn:
         run = await runs.create(conn, principal="team", person_id=None, profile="tainted", tainted=True,
-                                runtime="fake", model="fake")
+                                provider="fake", tool_limit=12, model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}
     assert names == SAFE

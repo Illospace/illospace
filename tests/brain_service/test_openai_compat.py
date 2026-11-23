@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from brain import loop
 from brain.wire.chat import Chat
-from tests.brain_service.conftest import serve
+from tests.brain_service.conftest import chat, serve
 
 
 class FakeProvider:
@@ -86,9 +86,8 @@ async def test_stream_tool_result_and_usage(
     fake_mcp.page = True
     provider = FakeProvider(malformed=malformed)
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        events = [item async for item in loop.run(Chat, run_request, tmp_path)]
+        events = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), tmp_path)]
     assert events[0]["catalog"] == ["asks_list", "lanes_search", "slack_post_status"]
     assert [item["name"] for item in events if item["type"] == "tool_call"] == ["lanes_search"]
     assert events[-1] == {
@@ -118,9 +117,8 @@ async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp
     }
     provider = FakeProvider()
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        events = [item async for item in loop.run(Chat, run_request, None)]
+        events = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), None)]
     assert events[-1]["type"] == "final"
     assert provider.requests[1]["messages"][-1]["content"] == "Acme release is ready"
     assert "duplicate payload" not in json.dumps(provider.requests)
@@ -129,10 +127,9 @@ async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp
 async def test_turn_limit(run_request, fake_mcp, monkeypatch, tmp_path):
     provider = FakeProvider(loop=True)
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        run_request.max_turns = 2
-        events = [item async for item in loop.run(Chat, run_request, tmp_path)]
+        run_request.max_tool_calls = 2
+        events = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), tmp_path)]
     assert len(provider.requests) == 4
     assert len(fake_mcp.calls) == 2
     assert events[-1]["type"] == "final"
@@ -144,10 +141,9 @@ async def test_turn_limit(run_request, fake_mcp, monkeypatch, tmp_path):
 async def test_unknown_tool_cannot_execute(run_request, fake_mcp, monkeypatch, tmp_path):
     provider = FakeProvider(unknown=True)
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
         with pytest.raises(ExceptionGroup):
-            _ = [item async for item in loop.run(Chat, run_request, tmp_path)]
+            _ = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), tmp_path)]
     assert fake_mcp.calls == []
 
 
@@ -163,31 +159,19 @@ async def test_provider_auth_error_survives_mcp_task_group(run_request, fake_mcp
         return JSONResponse({"error": "private provider detail"}, status_code=401)
 
     async with serve(provider) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
         with pytest.raises(ExceptionGroup) as error:
-            _ = [item async for item in loop.run(Chat, run_request, None)]
+            _ = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), None)]
     assert error_category(error.value) == "auth"
-
-
-def test_empty_base_url_means_the_default(run_request, monkeypatch):
-    """Compose passes OPENAI_BASE_URL as an empty string when the operator sets none."""
-    monkeypatch.setenv("OPENAI_BASE_URL", "")
-    url = Chat(run_request, []).url(run_request)
-    assert url == "https://api.openai.com/v1/chat/completions"
 
 
 @pytest.mark.parametrize("effort", [None, "none"])
 async def test_optional_reasoning_effort(run_request, fake_mcp, monkeypatch, effort):
-    if effort is None:
-        monkeypatch.delenv("ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT", raising=False)
-    else:
-        monkeypatch.setenv("ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT", effort)
+    run_request.effort = effort
     provider = FakeProvider()
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        _ = [item async for item in loop.run(Chat, run_request, None)]
+        _ = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), None)]
     assert all(r.get("reasoning_effort") == effort for r in provider.requests)
     if effort is None:
         assert all("reasoning_effort" not in r for r in provider.requests)
@@ -215,10 +199,13 @@ async def test_safe_bad_request_event_and_log(run_request, fake_mcp, monkeypatch
         )
 
     async with serve(provider) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
+        monkeypatch.setenv("ILLO_PROVIDER_LOCAL_API_KEY", "fake-key")
+        monkeypatch.setenv("ILLO_PROVIDER_LOCAL_WIRE", "chat")
+        monkeypatch.setenv("ILLO_PROVIDER_LOCAL_BASE_URL", base + "/v1")
         monkeypatch.setenv("ILLO_BRAIN_SECRET", "service-test-secret")
         run_request.mcp_url = fake_mcp.url
-        run_request.runtime = "openai_compat"
+        run_request.provider = "local"
+        run_request.effort = None
         events = lines(await post(create_app(), run_request))
     assert events[-1]["code"] == "unsupported_parameter"
     assert events[-1]["provider_type"] == "invalid_request_error"

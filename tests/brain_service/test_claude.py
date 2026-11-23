@@ -4,6 +4,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 
 from brain.errors import RunError
+from brain.providers import BUILT_IN, Provider
 from brain.wire.agent_sdk import translate
 
 
@@ -14,6 +15,9 @@ class ScriptedClient:
     async def receive_response(self):
         for message in self.messages:
             yield message
+
+
+ANTHROPIC = Provider(**{**BUILT_IN["anthropic"].wire_dict(), "api_key": "fake-key"})
 
 
 async def test_catalog_rejects_a_builtin():
@@ -69,7 +73,6 @@ async def test_tool_limit_uses_one_separate_client_without_tools(run_request, tm
 
     from brain.wire import agent_sdk as claude
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
     clients = []
     scripts = [
         [AssistantMessage(model="fake", content=[ToolUseBlock(
@@ -100,8 +103,8 @@ async def test_tool_limit_uses_one_separate_client_without_tools(run_request, tm
             self.queries.append(text)
 
     monkeypatch.setattr(claude, "ClaudeSDKClient", Client)
-    run_request.max_turns = 1
-    events = [e async for e in claude.run(run_request, tmp_path)]
+    run_request.max_tool_calls = 1
+    events = [e async for e in claude.run(run_request, ANTHROPIC, tmp_path)]
     assert len(clients) == 2
     normal, final = clients
     assert normal.options.max_turns == 2
@@ -123,7 +126,6 @@ async def test_closed_run_closes_the_sdk_client_at_once(run_request, tmp_path, m
 
     from brain.wire import agent_sdk as claude
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
     opened, closed = [], []
     scripts = [
         [AssistantMessage(model="fake", content=[TextBlock(text="Reading the lanes.")]),
@@ -149,8 +151,8 @@ async def test_closed_run_closes_the_sdk_client_at_once(run_request, tmp_path, m
             pass
 
     monkeypatch.setattr(claude, "ClaudeSDKClient", Client)
-    run_request.max_turns = 1
-    events = claude.run(run_request, tmp_path)
+    run_request.max_tool_calls = 1
+    events = claude.run(run_request, ANTHROPIC, tmp_path)
     async with aclosing(events):
         await anext(events)
         while stage == "last request" and len(opened) < 2:

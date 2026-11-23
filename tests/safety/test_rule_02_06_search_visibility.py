@@ -55,7 +55,7 @@ async def test_rule_02_06_lane_events_visibility(app, rpc):
             principal="person:ada",
             person_id=ada["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
             tainted=True,
         )

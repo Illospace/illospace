@@ -4,6 +4,8 @@ set -euo pipefail
 source "$(dirname -- "$0")/common.sh"
 load_config
 lock_deploy
+# Use the saved layout of the running revision so a refused update cannot break backups.
+use_saved_layout
 backup_dir=$(config_get ILLO_BACKUP_DIR)
 [ -n "$backup_dir" ] && [[ "$backup_dir" = /* ]] || fail 'Set an absolute ILLO_BACKUP_DIR outside the checkout.'
 outside_checkout "$backup_dir"

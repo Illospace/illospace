@@ -17,9 +17,17 @@ if ! docker compose version >/dev/null 2>&1; then
     esac
 fi
 outside_checkout "$ILLO_ENV_FILE"
-python3 "$DEPLOY_DIR/init-env.py" "$ILLO_ENV_FILE" "$DEPLOY_DIR/env.example"
-chmod 600 "$ILLO_ENV_FILE"
+brain_env=${ILLO_BRAIN_ENV_FILE:-}
+if [ -z "$brain_env" ] && [ -f "$ILLO_ENV_FILE" ]; then
+    brain_env=$(config_get ILLO_BRAIN_ENV_FILE)
+fi
+brain_env=${brain_env:-${ILLO_ENV_FILE%/*}/brain.env}
+outside_checkout "$brain_env"
+python3 "$DEPLOY_DIR/init-env.py" "$ILLO_ENV_FILE" "$DEPLOY_DIR/env.example" \
+    "$brain_env" "$DEPLOY_DIR/brain.env.example"
+chmod 600 "$ILLO_ENV_FILE" "$brain_env"
 load_config
+check_env_files || fail 'Fix the environment files, then run this command again.'
 lock_deploy
 workspace=$(config_get ILLO_WORKSPACE_DIR)
 [ -n "$workspace" ] && [[ "$workspace" = /* ]] || fail 'Set an absolute ILLO_WORKSPACE_DIR.'
@@ -38,16 +46,20 @@ if [ ! -f "$ILLO_STATE_DIR/last-good" ]; then
     save_good
     record "installed $ILLO_REVISION"
 else
+    # Recreate each container whose environment file changed. The brain reads its keys at start.
+    compose up -d --no-build
     wait_health || fail 'The existing install is not healthy. Run deploy/status.sh.'
     compose exec -T illo illo doctor
 fi
 printf 'Illo is ready. The environment file is %s.\n' "$ILLO_ENV_FILE"
+printf 'The brain environment file is %s.\n' "$ILLO_BRAIN_ENV_FILE"
 printf 'The workspace folder is %s.\n' "$workspace"
 cat <<'TEXT'
 Next steps:
 1. Create a Slack app from deploy/slack/manifest.yaml. Add its tokens to the environment file.
 2. Set the team members in people.yaml in the workspace folder.
-3. Add ANTHROPIC_API_KEY for Claude, or select openai_compat and add its API key and base URL.
-4. Recreate the services after an environment change. See docs/install.md.
+3. Connect ChatGPT for the example routes, or add a provider key to the brain environment file
+   and change brain.routes in illo.yaml. See docs/workspace.md.
+4. Run deploy/install.sh again after an environment change. It recreates the changed services.
 5. Create a token for the first agent. See docs/install.md.
 TEXT

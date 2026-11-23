@@ -59,22 +59,22 @@ Channels ──► Gateway ──► Ledger (Postgres)
 | **Brain** | One agent run for each event. A standard agent runtime in a container with no host mount, no shell tool, no file tool, and no web tool. It sees only the Illo tool server, through a token that is valid for that run. | `illo/brain/` (client and run manager), `brain/` (the sandbox service) |
 | **Tool server** | An MCP server for the brain. Each call passes three checks: scope, destination, risk. Each call writes one audit row. | `illo/tools/` |
 
-The `openai_responses` runtime supports each person's ChatGPT subscription and API keys.
-The main app keeps each ChatGPT grant encrypted in `connector_grants`, and refreshes it under a row lock.
+**Providers and routes.** The brain service owns the providers: the address, the wire format, the API key and the capabilities (`brain/providers.py`). It reads them once at start from its own environment file. `GET /providers` describes them to the app: the name, the wire and the capabilities, never a key or an address. The workspace owns the routes (`brain.routes` in `illo.yaml`): each run kind has a provider, a model, an effort and limits. The app checks the routes against `GET /providers` at start and at each reload. A route that can fall back to `brain.chatgpt.fallback` needs a fallback that accepts the same requests: the route's effort, images and web search. The voice provider needs the `transcription` capability. Before a migration, `deploy/update.sh` runs the same check with the new images (`python -m brain.providers` piped into `illo check-routes`), so an update that the new code would refuse changes nothing.
+
+The `chatgpt` provider uses each person's ChatGPT subscription. The main app keeps each ChatGPT grant encrypted in `connector_grants`, and refreshes it under a row lock.
 It sends only the access token and account ID to the brain for one run.
-Person requests use that person's grant by default (`brain.person_credential: own`).
-The workspace owner can choose `person_credential: team` to use `brain.team_credential` for all untainted person runs.
+`brain.chatgpt` is the payer policy of that provider. Person requests use that person's grant by default (`person_credential: own`).
+The workspace owner can choose `person_credential: team` to use `team_credential` for all untainted person runs.
 This changes only who pays for the model. The run keeps the requester's authority and personal data scope.
 The requester's messages then pass through the selected person's ChatGPT account.
-Runs with no person use only an explicit `brain.team_credential`.
-The brain keeps the same Illo tool boundary in both modes. It stores no sign-in files.
-`brain.auth` defaults to `api_key`. Subscription mode requires an explicit choice.
-Check that the provider's terms allow this use. An API key is the alternative.
+Runs with no person use only an explicit `team_credential`.
+The brain keeps the same Illo tool boundary for each provider. It stores no sign-in files.
+A route on the `chatgpt` provider is an explicit choice. Check that the provider's terms allow this use. An API key is the alternative.
 
 Processes (Docker Compose, `deploy/compose.yaml`):
 - `postgres`: Postgres 16. It joins only the internal `db` network.
-- `illo`: one Python process (asyncio): the HTTP server, the Slack connection, the timers, the gateway, the tool server. It joins `db`, the internal `brainnet` network, and the default network for outbound traffic.
-- `brain`: the sandbox service. HTTP `POST /run` streams the events of one run. It has no volume from the host and no Docker socket. It joins `brainnet` and the default network. It never joins `db`. The install does not limit its outbound destinations; an egress proxy is an optional step in `docs/install.md`.
+- `illo`: one Python process (asyncio): the HTTP server, the Slack connection, the timers, the gateway, the tool server. It joins `db`, the internal `brainnet` network, and the default network for outbound traffic. It loads the app environment file, which holds no provider key.
+- `brain`: the sandbox service. HTTP `POST /run` streams the events of one run. `GET /providers` describes its providers. `POST /transcribe` turns a voice clip into text. It loads only the brain environment file, with the provider keys. It has no volume from the host and no Docker socket. It joins `brainnet` and the default network. It never joins `db`. The install does not limit its outbound destinations; an egress proxy is an optional step in `docs/install.md`.
 
 A collector is a small separate program that runs on a machine where agents work. It reports lanes to Illo and it pulls answers. It uses an MCP token with the scope `collector`.
 
@@ -148,10 +148,10 @@ Risks of note: `asks_answer`, `email_draft`, `github_assign_issue`, and `github_
 
 ### Limits in one run
 
-`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`. All tool calls of one run stop at `brain.max_turns`. At the limit, a normal model request can still answer.
+`RUN_LIMITS` in `illo/tools/registry.py` counts the `audit` rows of the run: at most 3 `asks_create`, 3 `slack_send_dm`, 3 `github_create_issue`, 5 `github_comment_issue`. All tool calls of one run stop at the `max_tool_calls` of its route, which the run stores in `runs.tool_limit`. At the limit, a normal model request can still answer.
 If the model asks for more tools, the runtime makes one final request with tools disabled.
 The answer has `usage.limited = true`. Claude uses a separate client with no tools and the results from the run.
-The run stops at `brain.timeout_s`.
+The run stops at the `timeout_s` of its route.
 
 Each Slack channel starts at most 30 tainted runs per hour. Owner notices have a cap of one per run and six per hour; remaining links wait for an hourly digest.
 
@@ -170,7 +170,7 @@ The main tables (each has `id bigint generated always as identity`, `created_at 
 - `agent_oauth_limits`: persistent counters for registration and pairing attempts. The database clock sets their windows.
 
 - `events`: the gateway inbox. `channel`, `external_id`, unique (`channel`, `external_id`), `kind`, `principal`, `person_id`, `tainted`, `payload jsonb`, `status` (`received`, `ignored`, `handled`, `failed`).
-- `runs`: `event_id`, `principal`, `person_id`, `profile`, `tainted`, `personal_read`, `status` (`running`, `completed`, `failed`, `timeout`), `runtime`, `model`, `usage jsonb`, `error`, `started_at`, `ended_at`, `token_hash` (the per-run token), `token_expires_at`.
+- `runs`: `event_id`, `principal`, `person_id`, `profile`, `tainted`, `personal_read`, `status` (`running`, `completed`, `failed`, `timeout`), `route` (the run kind), `provider`, `model`, `payer` (`api_key` or `chatgpt`), `payer_person_id`, `tool_limit`, `usage jsonb`, `error`, `started_at`, `ended_at`, `token_hash` (the per-run token), `token_expires_at`.
 - `audit`: `run_id` (nullable), `token_id` (nullable), `principal`, `tool`, `args_digest`, `args jsonb` (redacted), `decision`, `reason`, `at`.
 - `lane_search`: one row per lane, with primary key `lane_id` and an indexed `vector tsvector`. It has no `id` or `created_at` column. Triggers refresh the vector after lane text or event changes. The vector uses the title, summary, and last 20 events in descending time and ID order. Event writers lock the lane first. Migration `0405_search_lanes.sql` backfills existing lanes.
 - `lanes`: `source` (`t3`, `claude-code`, `codex`, `github`, `manual`, `email`), `external_id`, unique (`source`, `external_id`), `title`, `owner_person_id`, `state` (`open`, `working`, `waiting_person`, `blocked`, `review`, `done`, `failed`, `unknown`), `summary`, `links jsonb`, `repo`, `machine`, `visibility` (`team`, `private`), `last_signal_at`, `updated_at`, `closed_at`, `end_summary`, `slack_channel`, `slack_ts`. A lane with state `working` and no signal for longer than the limit of its source shows as `stale`. `stale` is computed on read. It is never stored. `open` means backlog: the lane exists and is not closed, and nobody reported work on it. Default lane lists omit `open` unless a text query matches it or a state filter requests it. Active lanes appear first. The briefs read tasks instead. Source states do not decide who must act on a task.
@@ -251,44 +251,51 @@ Access to the database: `psycopg` 3 (async, with a pool). Each ledger area is on
 4. Preparers run (`register_preparer`). They change verified input before any claim: Slack reads the transcript of a clip, and the Google sign-in code removes a callback address.
 5. Claims run (`register_claim`). A claim takes an event that continues a flow of its area: a thread reply to an ask, a corrected note, a pasted sign-in address. A claimed event gets no brain run.
 6. The gateway shows the first sign of work itself, in code, in less than one second: in Slack it posts a short placeholder message, and later it edits that message with the answer. The model is not in this path. In Slack this step also adds the thread history. If that history has a bot or an unknown user, the gateway makes the run `tainted` (`Gateway.context_authority`).
-7. The run manager inserts a `runs` row, makes a per-run token (random, stored as a hash, valid until the run ends), and calls the brain service: `POST /run` with the system prompt, the message, the URL of the tool server, and the token.
+7. The run manager classifies the run kind, resolves its route, and selects the payer (`illo/brain/routes.py`). It inserts a `runs` row with the route, the provider, the model, the payer and the tool limit. It makes a per-run token (random, stored as a hash, valid until the run ends), and calls the brain service: `POST /run` with the system prompt, the message, the URL of the tool server, the token and the route values.
 8. The brain service streams events: `started`, `text`, `tool_call`, `final`, `error`. The run manager can show a tool call as a status line.
 9. The gateway gives the final text to the channel that the event came from. Each other write goes through a tool and its checks.
 10. The run ends. The token stops to work. `runs` gets the status, the usage, and the end time.
 
-A run has a time limit and a turn limit from the config. A failed run gives the person a short honest message.
+A run has a time limit and a tool-call limit from its route. A failed run gives the person a short honest message.
 
-The brain interface (`illo/brain/client.py`): `async def run(request: RunRequest) -> AsyncIterator[BrainEvent]`. `RunRequest`: `run_id`, `system_prompt`, `user_message`, `mcp_url`, `mcp_token`, `runtime`, `model`, `max_turns`, `timeout_s`. A `fake` runtime in `illo/brain/fake.py` plays a script of tool calls. Each test uses it. The real runtimes live in the `brain/` service. `openai_responses` uses stateless OpenAI Responses; `openai_compat` keeps Chat Completions for other providers and local servers.
+**Run kinds, routes and payers.** Each concept has one function in `illo/brain/routes.py`:
+
+- `run_kind(event, authority, *, deep)` classifies the run from the verified event channel and the authority: `deep` for a deep run; `tainted` for a tainted authority; `slack` or `email` with profile `person_dm` or `team_channel` gives that kind; `routine` gives `routine`; `digest` and `team_digest` give `digest`; `mcp` gives `agent_request`; `signals` gives `tainted`. Any other pair is an error. The profile alone is not enough: a personal routine and a personal digest have the `person_dm` profile, but they are `routine` and `digest` runs.
+- `resolve_route(workspace, kind)` gives the `default` route with the kind's route on top.
+- `select_payer(ctx, route, authority)` gives who pays: the API key of the route's provider, or the ChatGPT grant of one person. It reads the authority and never changes it. It keeps every rule of `brain.chatgpt`: own or team grants, the explicit team grant for tainted runs, the allowed accounts, and the fallback before the run.
+- `check_routes(workspace, providers)` checks each route against `GET /providers`. At start, a failure stops the app; while the brain is not reachable, the app waits. At reload, a failure keeps the last valid workspace and logs the reason.
+
+The brain interface (`illo/brain/client.py`): `run(request)`, `providers()` and `transcribe(...)`. `RunRequest`: `run_id`, `system_prompt`, `images`, `user_message`, `mcp_url`, `mcp_token`, `provider`, `model`, `effort`, `max_tool_calls`, `timeout_s`, `max_output_tokens`, `web_search`, `provider_auth` (ChatGPT only), `fallback_provider`, `smoke`. The brain answers an unknown provider or a missing capability with the `config` category. The brain caps each run at `min(timeout_s, ILLO_BRAIN_MAX_TIMEOUT_S)`. The brain events are `started`, `text`, `tool_call`, `web_search`, `payer`, `final` and `error`. `payer` says that the brain changed to the fallback provider during the run; the app records the new payer at once. A fake brain in `illo/brain/fake.py` plays a script of tool calls. Each test uses it, with the provider description of the brain's built-in providers. The real wire adapters live in the `brain/` service.
 
 ### The brain loop
 
 The brain service has one agent loop, `brain/loop.py`. Each wire format has one small adapter in `brain/wire/`:
 
-- `responses.py`: the Responses wire, for the ChatGPT backend and the OpenAI API (`openai_responses`).
-- `chat.py`: the Chat Completions wire (`openai_compat`).
-- `agent_sdk.py`: the Claude Agent SDK (`claude`). It is the self-looping exception below.
-- `fake.py`: lists the tools of the run and makes no model request (`echo`).
+- `responses.py`: the Responses wire, for the `chatgpt` and `openai` providers.
+- `chat.py`: the Chat Completions wire, for a custom provider.
+- `agent_sdk.py`: the Claude Agent SDK, for the `anthropic` provider. It is the self-looping exception below.
+- `fake.py`: lists the tools of the run and makes no model request (the `fake` provider).
 
-An adapter knows only the provider format. It builds one request from the history, the tools and the options. It reads the provider stream and gives back text, tool calls, the raw usage and a stop reason. It maps a provider error to an error category. An adapter does not call a tool, does not count, and does not send a request again. An adapter never imports another adapter. `brain/worker.py` selects the adapter for the runtime of the request.
+An adapter knows only the provider format. It builds one request from the history, the tools and the options. It reads the provider stream and gives back text, tool calls, the raw usage and a stop reason. It maps a provider error to an error category. An adapter does not call a tool, does not count, and does not send a request again. An adapter never imports another adapter. The server gives the worker its provider (with its key) on standard input. The worker has no other provider key in its environment. `brain/worker.py` selects the adapter for the wire of the provider.
 
 The loop owns the rules of a run:
 
-- **The counting rule.** The limit (`max_turns`) counts tool calls, not model turns. Each call of a batch counts. The loop does not run a call after the limit. That call gets the result "The tool limit is reached. This tool did not run."
+- **The counting rule.** The limit (`max_tool_calls`) counts tool calls, not model turns. Each call of a batch counts. The loop does not run a call after the limit. That call gets the result "The tool limit is reached. This tool did not run."
 - **The last request.** After a call over the limit, the loop sends one last request with no tools. It tells the model to answer now. The usage of the run then has `limited: true`. When the run reaches the limit exactly, the next request is a normal request.
 - **The usage sum.** The loop adds the raw usage of each response (`brain/usage.py`). It keeps each numeric field and each detail object.
-- **The subscription fallback.** When the ChatGPT limit stops a request and the request allows `api_key_fallback`, the loop sends that request once again with the API key. It keeps the tool results of the run and does not run a tool again. The usage adds both parts.
+- **The subscription fallback.** When the ChatGPT limit stops a request and the request names a `fallback_provider` (from `brain.chatgpt.fallback`), the loop sends a `payer` event, then sends that request once again to that provider with its API key. It keeps the tool results of the run and does not run a tool again. The usage adds both parts. The brain refuses a request that the fallback cannot serve (`brain/providers.py` `unsupported`, the same rule as for the first provider).
 - **The sign-in refresh.** When the provider rejects the sign-in, the brain sends an `auth` error. The brain cannot refresh the grant. The app run manager refreshes it once, if no tool call happened, and starts the run again.
 - **The image retry.** When the provider refuses the images, the loop sends the request once again as text. The text tells the model that it could not see the images.
 
 Other owners:
 
 - `brain/tools.py` is the Illo MCP boundary. It parses the tool arguments, maps an MCP failure to a tool result, and makes the result text. On the Responses wire, it refuses a provider chunk that echoes a credential or private image data. The Chat Completions wire has no such check today; the service redaction removes the credential from its events. On the Responses wire, it reads the run flags: a customer read, a personal read, or a result with no flag metadata closes web search for the rest of the run. The Chat Completions wire reads no run flags today, because it never sends web search. The app makes the run flags (`illo/brain/server.py`).
-- `brain/errors.py` has the error categories: `auth`, `timeout`, `runtime`, `limit`, `internal`. A provider message never enters an event or a log.
+- `brain/errors.py` has the error categories: `auth`, `timeout`, `runtime`, `limit`, `internal`. The server adds `config` for a request that the provider table cannot serve. The app maps it to `RunFailure("config")` and the reply "Illo is not set up for this kind of request. An operator must fix the settings." A provider message never enters an event or a log.
 - `brain/server.py` (`redact`) removes credentials from each event line before the line leaves the service.
 
-**The self-looping exception.** The Agent SDK runs the tools itself, so the Claude adapter cannot use the loop. The SDK starts the Claude Code CLI as a subprocess with its built-in tools off. It sees only the Illo MCP server (`tools.SDK_SERVER`), and `tests/safety/test_rule_10_brain_tools.py` checks this. The SDK counts its own turns, so the adapter gives it `max_turns + 1`. The adapter gives its events and one provider operation to `self_looping` in the loop: a function that sends one request with no tools (a new SDK client with no MCP server and `max_turns=1`). `self_looping` decides when the last request starts (at the SDK `limit` error), writes its prompt (the transcript as outside data and the instruction of the last request), adds its usage, marks the usage `limited` and chooses the answer (`last_answer`). The adapter maps its errors with `errors.py`.
+**The self-looping exception.** The Agent SDK runs the tools itself, so the Claude adapter cannot use the loop. The SDK starts the Claude Code CLI as a subprocess with its built-in tools off. It sees only the Illo MCP server (`tools.SDK_SERVER`), and `tests/safety/test_rule_10_brain_tools.py` checks this. The SDK counts its own turns, so the adapter gives it `max_tool_calls + 1` (the SDK parameter is `max_turns`). The adapter gives its events and one provider operation to `self_looping` in the loop: a function that sends one request with no tools (a new SDK client with no MCP server and `max_turns=1`). `self_looping` decides when the last request starts (at the SDK `limit` error), writes its prompt (the transcript as outside data and the instruction of the last request), adds its usage, marks the usage `limited` and chooses the answer (`last_answer`). The adapter maps its errors with `errors.py`.
 
-**One wire contract in two copies.** `brain/models.py` and `illo/brain/client.py` have the same request models. The brain image has only the `brain/` folder, so the two packages cannot share one module. `tests/brain_service/test_client_contract.py` compares the JSON schema of the two copies, field by field: the names, the types, the defaults, the required fields, the literal values, the bounds and the formats. It also compares the defaults that each model makes, with and without `ILLO_BRAIN_MODEL`. The copies differ today in ten named fields, for example the sign-in models and the bounds that only the service checks. The test pins the exact schema of each side for these fields and gives the reason. Any other difference fails. `tests/brain_service/test_wire_inputs.py` pins the payloads that each copy accepts.
+**One wire contract in two copies.** `brain/models.py` and `illo/brain/client.py` have the same request models. The brain image has only the `brain/` folder, so the two packages cannot share one module. `tests/brain_service/test_client_contract.py` compares the JSON schema of the two copies, field by field: the names, the types, the defaults, the required fields, the literal values, the bounds and the formats. It also compares the defaults that each model makes. The copies differ today in twelve named fields, for example the sign-in models and the bounds that only the service checks. The test pins the exact schema of each side for these fields and gives the reason. Any other difference fails. `tests/brain_service/test_wire_inputs.py` pins the payloads that each copy accepts.
 
 `tests/brain_service/test_golden.py` records the events, the provider requests and the `runs.usage` value of each wire for a fixed set of runs.
 
@@ -394,15 +401,16 @@ illo/
   migrations/
   ledger/        people lanes asks rules items audit drafts signals tokens runs
   gateway/       events principal dispatch replies
-  brain/         client run_manager prompts fake
+  brain/         client routes run_manager prompts fake
   tools/         registry checks + one file for each family
   channels/      slack/ email/ mcp/ signals/
   sources/       search github slack_index drive archive
   connectors/    mcp_client google oauth github_client
   routines/      scheduler digest reminders stale heartbeat
-brain/           the sandbox service: server, loop, wire adapters, Dockerfile
+brain/           the sandbox service: server, providers, loop, wire adapters, Dockerfile
 collectors/      t3/  hooks/ (Claude Code and Codex)
-deploy/          compose.yaml  Dockerfile  install.sh  update.sh  slack/manifest.yaml  env.example
+deploy/          compose.yaml  Dockerfile  install.sh  update.sh  slack/manifest.yaml
+                 env.example (the app file)  brain.env.example (the brain file, with provider keys)
 workspace.example/
 ops/external_deadman/   the outside alarm
 tests/           conftest.py  safety/  contracts/  one folder for each area
@@ -437,7 +445,8 @@ it writes the new state. A failed write can cause a duplicate notice.
 `ping`, `tools/list`, `tools/call`, and initialization notices. It uses
 stateless JSON responses. Each request checks the per-run bearer token, so
 each tool list belongs to one authenticated run. The server counts the tool
-calls of each run and stops at `brain.max_turns`. The brain service also
+calls of each run and stops at `runs.tool_limit`, the limit of the run's
+route. A run with no stored limit gets no tool call. The brain service also
 limits the model turns. Rule 10 tests check the server tool list and the tool
 list of each real runtime.
 

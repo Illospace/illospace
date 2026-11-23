@@ -52,7 +52,7 @@ async def test_lane_defaults_counts_and_explicit_filters(app):
         await seed(conn)
         ada = await people.get(conn, "ada")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         text = await call(ctx, conn, run, "lanes_search")
         assert "open 765" in text and "done 390" in text
         assert "Showing 15 of" in text
@@ -77,7 +77,7 @@ async def test_lane_get_last_five_events_and_links(app):
         for n in range(8):
             await lanes.add_event(conn, value["id"], "update", f"signal-{n} " + "a"*900)
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         text = await call(ctx,conn,run,"lanes_get", {"id": value["id"]})
         assert "Events: showing 5 of 8" in text
         assert "signal-2" not in text and "signal-7" in text
@@ -93,7 +93,7 @@ async def test_search_defaults_and_detail_pages(app):
         await items.upsert(conn, source_ref="saved:long", title="Long record", body="a"*6000+"b"*6000+"c")
         ada = await people.get(conn, "ada")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         text = await call(ctx,conn,run,"search_all", {"query": "mobile app"})
         assert "Showing 8 of" in text
         assert "tsv" not in text and "metadata" not in text
@@ -111,7 +111,7 @@ async def test_github_details_keep_evidence_and_bound_comments(app):
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn,"ada")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         for name in ("github_get_issue", "github_get_pull"):
             text = await call(ctx,conn,run,name,TYPICAL_ARGS[name])
             assert "Comments: showing 5 of 20" in text and "characters omitted" in text
@@ -131,7 +131,7 @@ async def test_registry_caps_future_tools_including_json_escapes(app, text):
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn,"ada")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn,run,ctx),"huge",{})
         envelope = tool_result(result, brain=True)
         assert len(envelope["content"][0]["text"]) <= MAX_RESULT_CHARS
@@ -157,7 +157,7 @@ async def test_mail_offset_fetches_rows_before_the_page(app):
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await call(ctx, conn, run, "mail_search",
                             {"query": "catalog", "offset": 10, "limit": 10})
         assert "Showing 10 of 20" in result

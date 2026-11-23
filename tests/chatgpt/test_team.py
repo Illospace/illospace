@@ -46,7 +46,7 @@ async def test_team_grant_pays_for_each_run(
         assert len(posts(slack_client)) == 1
     else:
         if source == "tainted":
-            ctx.workspace.config.brain.tainted_credential = "team"
+            ctx.workspace.config.brain.chatgpt.tainted_credential = "team"
         await replay(kind="channel", payload={
             "channel_id": "C_ACME_TEAM", "mentioned": True, "bot": source == "tainted",
         })
@@ -77,7 +77,7 @@ async def test_team_missing_names_payer_and_caps_owner_notice(
         return result
 
     monkeypatch.setattr(slack_client, "conversations_open", open_dm)
-    ctx.workspace.config.brain.api_key_fallback = fallback
+    ctx.workspace.config.brain.chatgpt.fallback = "openai" if fallback else "none"
     # The notice recipient is the workspace owner, who can differ from the payer.
     ctx.workspace.config.default_owner = "ben"
     if mode == "broken":
@@ -168,7 +168,7 @@ async def test_team_refresh_after_rejected_token(team_chatgpt_app, replay, mode)
     ada = await save_grant(ctx, access="ada-rejected-token")
     await save_grant(ctx, "ben", access="ben-unused-token")
     backend.broken = mode != "fresh"
-    ctx.workspace.config.brain.api_key_fallback = mode == "fallback"
+    ctx.workspace.config.brain.chatgpt.fallback = "openai" if mode == "fallback" else "none"
     requests = []
 
     class RejectOnce:
@@ -219,7 +219,7 @@ async def test_team_status_tool_reads_payers_grant(team_chatgpt_app, replay, fak
 async def test_team_mode_does_not_allow_tainted_runs_by_itself(team_chatgpt_app, replay, fake_brain):
     ctx = team_chatgpt_app[0].state.ctx
     await save_grant(ctx)
-    ctx.workspace.config.brain.api_key_fallback = True
+    ctx.workspace.config.brain.chatgpt.fallback = "openai"
     await replay(kind="channel", payload={"channel_id": "C_ACME_TEAM", "mentioned": True, "bot": True})
     assert not fake_brain.requests
 
@@ -239,9 +239,7 @@ async def test_cli_prints_team_mode(team_chatgpt_app, tmp_path, capsys):
     shutil.copytree(ROOT / "workspace.example", target)
     path = target / "illo.yaml"
     data = yaml.safe_load(path.read_text())
-    data["brain"].update(
-        auth="chatgpt", runtime="openai_responses", person_credential="team", team_credential="ada",
-    )
+    data["brain"]["chatgpt"] = {"person_credential": "team", "team_credential": "ada"}
     path.write_text(yaml.safe_dump(data))
     ctx.config.workspace_dir = target
     async with ctx.pool.connection() as conn:

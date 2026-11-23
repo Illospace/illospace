@@ -1,5 +1,6 @@
 """Verify schema creation, restart safety, and per-file rollback."""
 
+import uuid
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,64 @@ async def test_slack_signin_migration_retries_and_keeps_pairing(conn, ada):
     grant = await oauth.exchange(conn, {"client_id": client["id"], "code": params["code"], "code_verifier": "v" * 43})
     assert callback == "http://localhost/callback"
     assert (await tokens.verify(conn, grant["access_token"]))["person_id"] == ada["id"]
+
+
+async def test_brain_routes_expand_keeps_the_old_runs_create_and_fills_old_rows(conn, ada):
+    """Step 1 of 2. The old code still writes runs after 0601. A later migration drops runtime."""
+    path = Path(__file__).parents[1] / "illo/migrations/0601_brain_routes.sql"
+    text = path.read_text()
+    assert text.startswith("SET LOCAL lock_timeout = '1s';")
+
+    async def event(channel):
+        return (await one(conn, "INSERT INTO events (channel,external_id,kind) VALUES (%s,%s,'x') "
+                                "RETURNING id", (channel, uuid.uuid4().hex)))["id"]
+
+    async def old_create(runtime, profile="person_dm", channel="slack", tainted=False, usage="{}"):
+        # The SQL of runs.create() before this change, unchanged.
+        row = await one(conn, """
+            INSERT INTO runs (principal,person_id,profile,runtime,model,event_id,tainted)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *
+        """, ("person:ada", ada["id"], profile, runtime, "old-model", await event(channel), tainted))
+        await conn.execute("UPDATE runs SET usage=%s::jsonb WHERE id=%s", (usage, row["id"]))
+        return row["id"]
+
+    rows = {
+        "claude": await old_create("claude"),
+        "subscription": await old_create("openai_responses", usage='{"auth_kind": "chatgpt"}'),
+        "api_key": await old_create("openai_responses", usage='{"auth_kind": "api_key"}'),
+        "compat": await old_create("openai_compat", profile="routine", channel="routine"),
+        "echo": await old_create("echo", channel="mcp", profile="agent_request"),
+        "tainted": await old_create("claude", tainted=True),
+        "digest": await old_create("claude", channel="digest"),
+        "deep": await old_create("claude", channel="deep"),
+        "unknown": await old_create("claude", channel="chat"),
+    }
+    await conn.commit()
+    for _ in range(2):
+        async with conn.transaction():
+            await conn.execute(text)
+    got = {name: await one(conn, "SELECT runtime,route,provider,payer,payer_person_id,tool_limit "
+                                 "FROM runs WHERE id=%s", (run_id,)) for name, run_id in rows.items()}
+    assert {name: (row["provider"], row["route"]) for name, row in got.items()} == {
+        "claude": ("anthropic", "person_dm"),
+        "subscription": ("chatgpt", "person_dm"),
+        # An old API-key row can have used a custom base URL. It does not prove openai.
+        "api_key": ("unknown", "person_dm"),
+        "compat": ("unknown", "routine"),
+        "echo": ("fake", "agent_request"),
+        "tainted": ("anthropic", "tainted"),
+        "digest": ("anthropic", "digest"),
+        "deep": ("anthropic", "deep"),
+        "unknown": ("anthropic", None),
+    }
+    assert all(row["payer"] is None and row["tool_limit"] is None for row in got.values())
+    # The new code writes no runtime. The column stays until the contract step drops it.
+    from illo.ledger import runs
+
+    new = await runs.create(conn, principal="team", person_id=None, profile="routine",
+                            route="routine", provider="openai", model="m", payer="api_key",
+                            tool_limit=12)
+    assert new["runtime"] is None and new["provider"] == "openai" and new["payer"] == "api_key"
+    with pytest.raises(CheckViolation):
+        async with conn.transaction():
+            await conn.execute("UPDATE runs SET payer='card' WHERE id=%s", (new["id"],))

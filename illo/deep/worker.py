@@ -5,6 +5,7 @@ from contextlib import suppress
 
 from psycopg.types.json import Jsonb
 
+from illo.brain.routes import resolve_route
 from illo.brain.run_manager import RunOptions
 from illo.db import one
 from illo.deep.delivery import send
@@ -47,17 +48,16 @@ async def claim(ctx, conn, only_id=None):
         conn,
         """UPDATE deep_runs SET state='running',started_at=now(),
         lease_until=clock_timestamp()+%s * interval '1 second' WHERE id=%s RETURNING *""",
-        (ctx.workspace.config.brain.deep.timeout_s, row["id"]),
+        (resolve_route(ctx.workspace, "deep").timeout_s, row["id"]),
     )
 
 
 async def execute(ctx, row):
-    config = ctx.workspace.config.brain
-    settings = config.deep
+    route = resolve_route(ctx.workspace, "deep")
     state, text, error = "failed", None, None
     inbound = None
     try:
-        async with asyncio.timeout(settings.timeout_s):
+        async with asyncio.timeout(route.timeout_s):
             context = {
                 **row["context"],
                 "deep_run_id": row["id"],
@@ -110,11 +110,6 @@ async def execute(ctx, row):
             options = RunOptions(
                 row["id"],
                 row["kind"],
-                settings.model or ctx.config.brain_model or config.model,
-                settings.effort,
-                settings.max_turns,
-                settings.timeout_s,
-                settings.max_output_tokens,
                 ctx.workspace.config.web.search == "provider"
                 and row["kind"] != "brief"
                 and row["profile"] != "person_dm",
@@ -122,7 +117,7 @@ async def execute(ctx, row):
                 personal_read=bool(row["context"].get("personal_read")),
             )
             text = await ctx.gateway.run_manager.execute(
-                event, authority, inbound["id"], overrides=options
+                event, authority, inbound["id"], deep=options
             )
             state = "done"
     except asyncio.CancelledError:
@@ -144,13 +139,15 @@ async def execute(ctx, row):
                     principal=row["principal"],
                     person_id=authority.person_id,
                     profile=row["profile"],
-                    runtime=ctx.config.brain_runtime or config.runtime,
-                    model=settings.model or ctx.config.brain_model or config.model,
+                    route=route.kind,
+                    provider=route.provider,
+                    model=route.model,
+                    tool_limit=route.max_tool_calls,
                     event_id=inbound["id"],
                 )
                 await conn.execute(
-                    "UPDATE runs SET deep_run_id=%s,deep_kind=%s,tool_limit=%s WHERE id=%s",
-                    (row["id"], row["kind"], settings.max_turns, failed["id"]),
+                    "UPDATE runs SET deep_run_id=%s,deep_kind=%s WHERE id=%s",
+                    (row["id"], row["kind"], failed["id"]),
                 )
                 await runs.finish(conn, failed["id"], "failed", error=error)
                 await conn.execute(
@@ -246,7 +243,7 @@ async def tick(ctx, only_id=None):
 
 async def result(ctx, deep_id):
     """Brief schedules retain their existing delivery lock and fallback path."""
-    async with asyncio.timeout(ctx.workspace.config.brain.deep.timeout_s):
+    async with asyncio.timeout(resolve_route(ctx.workspace, "deep").timeout_s):
         while True:
             await tick(ctx, deep_id)
             async with ctx.pool.connection() as conn:

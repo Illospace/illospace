@@ -7,86 +7,24 @@ from dataclasses import dataclass
 
 import httpx
 
-from illo.brain.client import BrainEvent, ProviderAuth, RunRequest
+from illo.brain.client import BrainEvent, RunRequest
 from illo.brain.prompts import build_for_run
+from illo.brain.routes import Payer, resolve_route, run_kind, select_payer
 from illo.connectors import chatgpt
-from illo.db import one
-from illo.gateway.replies import RunFailure, failure_category
+from illo.gateway.replies import FAILURE_TEXTS, RunFailure, failure_category
 from illo.ledger import runs, sensors
 from illo.tools._format import data_text
 
 
 @dataclass(frozen=True)
 class RunOptions:
+    """The deep context of a run. S3 moves deep runs onto the normal lifecycle."""
+
     deep_run_id: int
     kind: str
-    model: str
-    effort: str
-    max_turns: int
-    timeout_s: float
-    max_output_tokens: int
     web_search: bool = False
     customer_read: bool = False
     personal_read: bool = False
-
-
-def credential_person(authority, workspace):
-    """Select the model payer without a change to the run's authority."""
-    if (
-        workspace.config.brain.person_credential == "own"
-        and not authority.tainted
-        and authority.profile in {"person_dm", "agent_request"}
-        and authority.person_id is not None
-        and authority.principal.startswith("person:")
-    ):
-        return authority.principal[7:]
-    return workspace.config.brain.team_credential
-
-
-async def provider_auth(
-    ctx, authority, runtime, *, force=False, rejected_token=None, auth_kind=None, notify=True
-):
-    config = ctx.workspace.config.brain
-    if (auth_kind or config.auth) == "api_key":
-        return ProviderAuth()
-    if runtime != "openai_responses":
-        raise ValueError("ChatGPT sign-in needs the openai_responses runtime")
-    if authority.tainted or authority.profile in {"tainted", "outsider"}:
-        if config.tainted_credential == "none":
-            await chatgpt.notify_team_missing(ctx, tainted=True)
-            return None
-        if config.tainted_credential == "api_key":
-            return ProviderAuth()
-    key = credential_person(authority, ctx.workspace)
-    personal = not authority.tainted and authority.profile in {"person_dm", "agent_request"}
-    async with ctx.pool.connection() as conn:
-        person = await one(conn, "SELECT id,key FROM people WHERE key=%s AND active", (key,))
-    # In own mode, a mismatched authority cannot borrow the team grant, even with API fallback.
-    if personal and config.person_credential == "own" and (
-        not person or person["id"] != authority.person_id or authority.principal != "person:" + key
-    ):
-        return None
-    auth = (
-        await chatgpt.access(ctx, person, force=force, rejected_token=rejected_token, notify=notify)
-        if person
-        else None
-    )
-    if auth is not None:
-        return auth
-    if config.api_key_fallback:
-        return ProviderAuth()
-    if person:
-        async with ctx.pool.connection() as conn:
-            pending = await one(
-                conn,
-                "SELECT 1 FROM connector_grants WHERE connector_key='chatgpt' AND person_id=%s AND broken_at IS NULL AND next_refresh_at>clock_timestamp()",
-                (person["id"],),
-            )
-        if pending:
-            raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
-    if not personal or config.person_credential == "team":
-        await chatgpt.notify_team_missing(ctx)
-    return None
 
 
 def safe_event(item, auth, images=()):
@@ -106,7 +44,8 @@ class RunManager:
         self.capacity = asyncio.Condition()
         self.active = 0
 
-    async def execute(self, event, authority, event_id: int, on_event=None, *, overrides: RunOptions | None = None) -> str:
+    async def execute(self, event, authority, event_id: int, on_event=None, *,
+                      deep: RunOptions | None = None) -> str:
         """The channel can relay progress. Only final text leaves through the gateway."""
         async with self.capacity:
             await self.capacity.wait_for(
@@ -114,65 +53,59 @@ class RunManager:
             )
             self.active += 1
         try:
-            return await self._execute(event, authority, event_id, on_event, overrides)
+            return await self._execute(event, authority, event_id, on_event, deep)
         finally:
             async with self.capacity:
                 self.active -= 1
                 self.capacity.notify_all()
 
-    async def _execute(self, event, authority, event_id, on_event, overrides):
+    async def _execute(self, event, authority, event_id, on_event, deep):
         ctx = self.ctx
-        config = ctx.workspace.config.brain
-        limits = overrides or config
-        runtime = ctx.config.brain_runtime or config.runtime
-        model = overrides.model if overrides else (ctx.config.brain_model or config.model)
+        policy = ctx.workspace.config.brain.chatgpt
+        background = event.channel in {"digest", "team_digest", "deep"}
+        route = resolve_route(ctx.workspace, run_kind(event, authority, deep=deep is not None))
+        fields = {"principal": authority.principal, "person_id": authority.person_id,
+                  "profile": authority.profile, "event_id": event_id, "route": route.kind,
+                  "model": route.model, "tool_limit": route.max_tool_calls}
         try:
-            auth = await provider_auth(ctx, authority, runtime, notify=event.channel not in {"digest", "team_digest", "deep"})
+            payer = await select_payer(ctx, route, authority, notify=not background)
         except chatgpt.TemporaryRefresh:
-            if event.channel in {"digest", "team_digest", "deep"}:
+            if background:
                 raise RunFailure("provider") from None
             return chatgpt.TEMPORARY
-        if auth is None:
-            if event.channel in {"digest", "team_digest", "deep"}:
+        if payer is None:
+            if background:
                 raise RunFailure("provider")
             if authority.tainted or authority.profile == "tainted":
                 async with ctx.pool.connection() as conn:
-                    row = await runs.create(
-                        conn, principal=authority.principal, person_id=authority.person_id,
-                        profile=authority.profile, tainted=True, event_id=event_id,
-                        runtime=runtime, model=model,
-                    )
+                    row = await runs.create(conn, **fields, tainted=True, provider=route.provider)
                     await runs.finish(
                         conn, row["id"], usage={"skipped": "no_model_credential"}
                     )
                 return (
                     'I did not answer this message. No model sign-in is allowed for messages from outside the team.'
                 )
-            if config.person_credential == "team":
+            if policy.person_credential == "team":
                 return chatgpt.team_missing(ctx.workspace)
             return chatgpt.MISSING if authority.person_id is not None else (
                 'I did not answer this message. I have no model sign-in for it.'
             )
+        provider = ctx.providers[payer.provider]
+        capabilities = provider["capabilities"]
         async with ctx.pool.connection() as conn:
-            row = await runs.create(
-                conn,
-                principal=authority.principal,
-                person_id=authority.person_id,
-                profile=authority.profile,
-                tainted=authority.tainted,
-                event_id=event_id,
-                runtime=runtime,
-                model=model,
-            )
-            if overrides:
-                await conn.execute("UPDATE runs SET deep_run_id=%s,deep_kind=%s,tool_limit=%s,customer_read=%s,personal_read=%s WHERE id=%s",
-                                   (overrides.deep_run_id, overrides.kind, overrides.max_turns, overrides.customer_read, overrides.personal_read, row["id"]))
-                await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (row["id"], overrides.deep_run_id))
-            token = await runs.mint_token(conn, row["id"], limits.timeout_s)
+            row = await runs.create(conn, **fields, tainted=authority.tainted, provider=payer.provider,
+                                    payer=payer.kind, payer_person_id=payer.person_id)
+            if deep:
+                await conn.execute("UPDATE runs SET deep_run_id=%s,deep_kind=%s,customer_read=%s,personal_read=%s WHERE id=%s",
+                                   (deep.deep_run_id, deep.kind, deep.customer_read, deep.personal_read, row["id"]))
+                await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (row["id"], deep.deep_run_id))
+            token = await runs.mint_token(conn, row["id"], route.timeout_s)
             system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
         from illo.channels.slack.images import for_run
 
-        images, image_context = await for_run(ctx, event, authority, runtime)
+        images, image_context = await for_run(ctx, event, authority, capabilities["images"])
+        auth = payer.auth
+        usage_payer = payer
         request = RunRequest(
             images=images,
             run_id=row["id"],
@@ -182,30 +115,21 @@ class RunManager:
                           or authority.principal == "outsider" else event.text),
             mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
             mcp_token=token,
-            runtime=runtime,
-            model=model,
-            max_turns=limits.max_turns,
-            timeout_s=limits.timeout_s,
-            effort=overrides.effort if overrides else config.effort_for(authority.profile),
-            deep=overrides is not None,
-            max_output_tokens=overrides.max_output_tokens if overrides else None,
-            web_search=(overrides.web_search and not overrides.customer_read and not overrides.personal_read) if overrides else False,
-            provider_auth=auth,
-            api_key_fallback=config.api_key_fallback,
+            **payer.request(),
+            model=route.model,
+            effort=route.effort,
+            max_tool_calls=route.max_tool_calls,
+            timeout_s=route.timeout_s,
+            max_output_tokens=route.max_output_tokens,
+            web_search=bool(deep and deep.web_search and not deep.customer_read
+                            and not deep.personal_read and capabilities["web_search"]),
         )
         if image_context:
             request.user_message += "\n\n" + image_context
         status, error, usage, final = "failed", None, {}, None
-        if runtime == "openai_responses":
-            # The ledger shows which sign-in the run used, also for a failed run. The brain
-            # reports "api_key" after a fallback. A run that reaches its time limit during
-            # a fallback keeps the first value.
-            usage = {"auth_kind": auth.kind}
-            if auth.kind == "chatgpt":
-                usage["credential_person"] = credential_person(authority, ctx.workspace)
         failure = "internal"
         try:
-            async with asyncio.timeout(limits.timeout_s):
+            async with asyncio.timeout(route.timeout_s):
                 turns = 0
                 for attempt in range(2):
                     retry = False
@@ -215,6 +139,11 @@ class RunManager:
                             if item.type == "web_search":
                                 async with ctx.pool.connection() as conn:
                                     await conn.execute("UPDATE runs SET web_read=true,outside_read=true,usage=jsonb_set(usage,'{web_search_calls}',to_jsonb(COALESCE((usage->>'web_search_calls')::int,0)+1)) WHERE id=%s", (row["id"],))
+                            if item.type == "payer" and payer.fallback:
+                                # Keep the first payer in runs.payer/payer_person_id (S5); legacy
+                                # usage tracks the final payer so S5 marks fallback rows unsplit.
+                                usage_payer = Payer("api_key", payer.fallback)
+                                continue
                             if item.type == "tool_call":
                                 turns += 1
                             if (
@@ -224,23 +153,21 @@ class RunManager:
                                 and turns == 0
                                 and attempt == 0
                             ):
-                                fresh = await provider_auth(
+                                fresh = await select_payer(
                                     ctx,
+                                    route,
                                     authority,
-                                    runtime,
                                     force=True,
                                     rejected_token=auth.access_token.get_secret_value(),
-                                    notify=event.channel not in {"digest", "team_digest", "deep"},
+                                    notify=not background,
                                 )
                                 if fresh is not None:
-                                    auth = fresh
-                                    usage["auth_kind"] = auth.kind
-                                    if auth.kind == "api_key":
-                                        usage.pop("credential_person", None)
-                                    request = request.model_copy(update={"provider_auth": auth})
+                                    payer = usage_payer = fresh
+                                    auth = fresh.auth
+                                    request = request.model_copy(update=payer.request())
                                     retry = True
                                     break
-                                if config.person_credential == "team" and not authority.tainted:
+                                if policy.person_credential == "team" and not authority.tainted:
                                     final = chatgpt.team_missing(ctx.workspace)
                                     error = "The team model sign-in is unavailable"
                                     failure = "provider"
@@ -248,16 +175,10 @@ class RunManager:
                             if on_event:
                                 await on_event(item)
                             if item.type == "error":
-                                failure = {"limit": "limit", "timeout": "timeout", "internal": "internal"}.get(
-                                    item.category, "provider"
-                                )
+                                failure = item.category if item.category in FAILURE_TEXTS else "provider"
                                 error = item.failure_reason()
                                 # Keep the token counts of a failed run.
                                 usage = {**usage, **item.usage}
-                                if item.api_key_fallback_failed:
-                                    usage["auth_kind"] = "api_key"
-                                if usage.get("auth_kind") == "api_key":
-                                    usage.pop("credential_person", None)
                                 if auth.kind == "chatgpt" and item.code == "usage_limit_reached":
                                     from datetime import UTC, datetime
 
@@ -270,30 +191,26 @@ class RunManager:
                                             )
                                             + "."
                                         )
-                                    if item.api_key_fallback_failed:
+                                    if item.fallback_failed:
                                         final += " The API fallback failed."
                                     break
                                 if item.category == "timeout":
                                     status = "timeout"
                                 raise RunFailure(failure)
                             if item.type == "final":
-                                if turns > limits.max_turns and item.usage.get("limited") is not True:
+                                if turns > route.max_tool_calls and item.usage.get("limited") is not True:
                                     raise RunFailure("limit")
                                 final, usage, status = item.text, {**usage, **item.usage}, "completed"
-                                if usage.get("auth_kind") == "api_key":
-                                    usage.pop("credential_person", None)
                                 break
                     if not retry:
                         break
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
         except chatgpt.TemporaryRefresh:
-            if event.channel in {"digest", "team_digest", "deep"}:
-                error = "The model sign-in service is unavailable"
-                failure = "provider"
+            failure, error = "provider", "The model sign-in service is unavailable"
+            if background:
                 raise RunFailure("provider") from None
-            failure = "provider"
-            final, error = chatgpt.TEMPORARY, "The model sign-in service is unavailable"
+            final = chatgpt.TEMPORARY
         except (TimeoutError, httpx.TimeoutException):
             failure = "timeout"
             status, error = "timeout", "The run reached its time limit"
@@ -308,13 +225,20 @@ class RunManager:
         finally:
             if status != "completed":
                 usage = {**usage, "failure_category": failure}
+            if provider["wire"] == "responses":
+                usage = {k: v for k, v in usage.items() if k != "credential_person"} | usage_payer.usage()
             async with ctx.pool.connection() as conn:
+                if (payer.provider, payer.kind, payer.person_id) != (
+                        row["provider"], row["payer"], row["payer_person_id"]):
+                    await conn.execute(
+                        "UPDATE runs SET provider=%s,payer=%s,payer_person_id=%s WHERE id=%s",
+                        (payer.provider, payer.kind, payer.person_id, row["id"]))
                 await runs.finish(conn, row["id"], status, usage=usage, error=error)
                 if status == "completed":
                     await sensors.ok(conn, "brain")
                 else:
                     await sensors.error(conn, "brain", error or "The brain run failed")
-        if event.channel in {"digest", "team_digest", "deep"} and status != "completed":
+        if background and status != "completed":
             raise RunFailure(failure)
         if event.channel in {"slack", "email", "routine", "digest", "team_digest", "deep"}:
             from illo.brain.final_text import guard

@@ -97,7 +97,7 @@ async def owner_draft(ctx, conn, run, issue, repo, event):
     # A separate, tokenless run keeps every existing requester/approver check intact.
     owner_run = await runs.create(conn, principal=f"person:{person['key']}",
                                   person_id=person["id"], profile="person_dm",
-                                  runtime="code", model="code", event_id=run.get("event_id"))
+                                  provider="code", model="code", event_id=run.get("event_id"))
     await runs.finish(conn, owner_run["id"])
     draft = await drafts.create(
         conn, run_id=owner_run["id"], approver_person_id=person["id"],

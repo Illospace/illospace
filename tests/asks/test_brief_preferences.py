@@ -28,7 +28,7 @@ async def settings_token(
             person_id=person["id"] if principal.startswith("person:") else None,
             tainted=tainted,
             event_id=event["id"],
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         return row, await runs.mint_token(conn, row["id"], 60)
@@ -193,7 +193,7 @@ async def test_first_brief_notice_only_once(app, fake_brain, slack_client, monke
         async def no_auth(*args, **kwargs):
             return None
 
-        monkeypatch.setattr(run_manager, "provider_auth", no_auth)
+        monkeypatch.setattr(run_manager, "select_payer", no_auth)
     await send_due(ctx, NOW)
     await send_due(ctx, NOW + timedelta(days=1))
     assert len(posts(slack_client)) == 2

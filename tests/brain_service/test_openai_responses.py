@@ -6,9 +6,9 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from brain import loop
+from brain import loop, providers
 from brain.wire.responses import Responses
-from tests.brain_service.conftest import serve
+from tests.brain_service.conftest import openai, serve
 from tests.brain_service.test_service import lines, post
 
 
@@ -112,12 +112,12 @@ class FakeResponses:
 async def collect(provider, request, fake_mcp, monkeypatch):
     from brain.server import create_app
 
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-openai-key")
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "service-test-secret")
-    request.runtime = "openai_responses"
+    request.provider = "openai"
     request.mcp_url = fake_mcp.url
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
+        monkeypatch.setenv("ILLO_PROVIDER_OPENAI_BASE_URL", base + "/v1")
         response = await post(create_app(), request)
     return lines(response)
 
@@ -136,7 +136,6 @@ async def test_function_loop(run_request, fake_mcp, monkeypatch, names, tool_err
         "run_id": run_request.run_id,
         "text": "Release ready.",
         "usage": {
-            "auth_kind": "api_key",
             "input_tokens": 20,
             "output_tokens": 10,
             "total_tokens": 30,
@@ -182,7 +181,7 @@ async def test_unknown_and_builtin_refused(run_request, fake_mcp, monkeypatch, n
 
 
 async def test_turn_limit(run_request, fake_mcp, monkeypatch):
-    run_request.max_turns = 2
+    run_request.max_tool_calls = 2
     provider = FakeResponses(loop=True)
     events = await collect(provider, run_request, fake_mcp, monkeypatch)
     assert events[-1]["type"] == "final" and events[-1]["usage"]["limited"] is True
@@ -208,13 +207,13 @@ async def test_effort_retry_and_process_cache(run_request, fake_mcp, monkeypatch
     from brain.errors import failure_event
 
     provider = FakeResponses(retry=True)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     run_request.mcp_url = fake_mcp.url
+    run_request.provider = "openai"
     async with serve(provider.app) as base:
-        monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         for _ in range(2):
             try:
-                events = [e async for e in loop.run(Responses, run_request, tmp_path)]
+                events = [e async for e in loop.run(
+                    Responses, run_request, openai(base + "/v1", "fake-key"), tmp_path)]
             except Exception as error:
                 pytest.fail(str(failure_event(error)))
             assert events[-1]["type"] == "final"
@@ -279,12 +278,11 @@ async def test_truncated_stream_fails(run_request, fake_mcp, monkeypatch):
 async def test_default_base_and_effort(run_request, monkeypatch, base):
     import httpx
 
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-key")
     if base is None:
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("ILLO_PROVIDER_OPENAI_BASE_URL", raising=False)
     else:
-        monkeypatch.setenv("OPENAI_BASE_URL", base)
-    monkeypatch.setenv("ILLO_BRAIN_EFFORT", "")
+        monkeypatch.setenv("ILLO_PROVIDER_OPENAI_BASE_URL", base)
     received = []
 
     def respond(request):
@@ -302,7 +300,8 @@ async def test_default_base_and_effort(run_request, monkeypatch, base):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         events = [
-            item async for item in loop.conversation(Responses, run_request, None, [], client)
+            item async for item in loop.conversation(
+                Responses, run_request, providers.load()["openai"], None, [], client)
         ]
     assert events[-1]["text"] == "Ready."
     assert str(received[0].url) == "https://api.openai.com/v1/responses"

@@ -13,7 +13,7 @@ async def _token(app, profile, principal="person:ada", tainted=False):
             person_id=ada["id"] if principal.startswith("person:") else None,
             profile=profile,
             tainted=tainted,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         return await runs.mint_token(conn, run["id"], 60)

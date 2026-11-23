@@ -102,14 +102,40 @@ async def test_cli_migrate_token_and_secret(pool, monkeypatch, capsys):
     await execute(parser().parse_args(["secret", "delete", "example"]), config)
 
 
-async def test_n3_doctor_checks_the_runtime_override(app, monkeypatch, capsys):
+async def test_n3_doctor_checks_the_routes_against_the_brain(app, monkeypatch, capsys):
     from illo.cli import doctor
 
     ctx = app.state.ctx
-    ctx.workspace.config.brain.auth = "chatgpt"
-    ctx.workspace.config.brain.runtime = "openai_responses"
-    ctx.config.brain_runtime = "claude"
+    ctx.workspace.config.brain.routes["default"].provider = "gemini"
     ctx.config.database_url = ctx.pool.conninfo
     monkeypatch.setattr("illo.cli.load_workspace", lambda _: ctx.workspace)
+    monkeypatch.setattr("illo.brain.client.BrainClient", lambda url: ctx.brain_client)
     assert await doctor(ctx.config) == 1
-    assert "openai_responses" in capsys.readouterr().out
+    assert "The routes need a fix: brain.routes.person_dm: the brain has no provider gemini" in (
+        capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("old_key", [False, True])
+async def test_check_routes_reads_the_new_brain_description_without_a_database(
+        tmp_path, monkeypatch, capsys, old_key):
+    """deploy/update.sh pipes the provider description of the new brain image into this check.
+    An old illo.yaml stops the update before the migration, with no change to the services."""
+    import io
+    import json
+
+    from brain.providers import BUILT_IN, description
+
+    root = tmp_path / "workspace"
+    shutil.copytree(ROOT / "workspace.example", root)
+    if old_key:
+        path = root / "illo.yaml"
+        path.write_text(path.read_text().replace("brain:\n", "brain:\n  runtime: claude\n", 1))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(description(BUILT_IN))))
+    # No database runs at this address. The check never connects.
+    config = Config(workspace_dir=root, database_url="postgresql://illo@127.0.0.1:9/none")
+    if old_key:
+        with pytest.raises(ValueError, match="brain.routes.default.provider"):
+            await execute(parser().parse_args(["check-routes"]), config)
+    else:
+        assert await execute(parser().parse_args(["check-routes"]), config) == 0
+        assert "The workspace and its routes are valid." in capsys.readouterr().out

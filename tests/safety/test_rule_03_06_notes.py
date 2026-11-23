@@ -47,7 +47,7 @@ async def test_rule_06_notes_propose_denied(app, rpc, principal, profile, tainte
             principal=principal,
             person_id=ada["id"] if principal.startswith("person:") else None,
             profile=profile,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
             tainted=tainted,
         )

@@ -17,6 +17,7 @@ from brain.server import create_app
 from brain.wire.responses import Responses
 from illo.brain.client import RunImage as ClientImage
 from illo.brain.client import RunRequest as ClientRequest
+from tests.brain_service.conftest import CHATGPT, openai
 from tests.brain_service.test_openai_responses import FakeResponses
 from tests.brain_service.test_service import lines, post
 from tests.fakes import FakeMCPSession
@@ -28,17 +29,17 @@ DATA = base64.b64encode(b"\x89PNG\r\n\x1a\nAcme image test bytes").decode()
 async def test_responses_body_includes_image_for_both_sign_ins(
     run_request, monkeypatch, subscription
 ):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
-    run_request.runtime = "openai_responses"
+    run_request.provider, selected = "openai", openai(api_key="test-api-key")
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     if subscription:
+        run_request.provider, selected = "chatgpt", CHATGPT
         run_request.provider_auth = ChatGPTAuth(
             access_token="test-token", account_id="acme-account"
         )
     provider = FakeResponses()
     provider.app.post("/backend-api/codex/responses")(provider.respond)
 
-    async def respond(request):
+    async def respond(request, *_):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=provider.app)) as client:
             return await client.send(request)
 
@@ -48,6 +49,7 @@ async def test_responses_body_includes_image_for_both_sign_ins(
             async for e in loop.conversation(
                 Responses,
                 run_request,
+                selected,
                 FakeMCPSession(),
                 [Tool(name="lanes_search", inputSchema={"type": "object"})],
                 client,
@@ -75,9 +77,9 @@ def test_images_cross_both_wire_boundaries_but_not_normal_dumps(run_request):
         user_message="Read this image",
         mcp_url="http://test/brain/mcp",
         mcp_token="test",
-        runtime="openai_responses",
+        provider="openai",
         model="test",
-        max_turns=1,
+        max_tool_calls=1,
         timeout_s=5,
         images=[ClientImage(mime="image/png", data=DATA)],
     )
@@ -88,31 +90,42 @@ def test_images_cross_both_wire_boundaries_but_not_normal_dumps(run_request):
         assert DATA not in repr(value)
         assert DATA not in value.model_dump_json()
     with pytest.raises(ValidationError) as failure:
-        ServiceRequest.model_validate({**request.wire(), "runtime": "bad"})
+        ServiceRequest.model_validate({**request.wire(), "provider": "Not A Name"})
     assert DATA not in str(failure.value)
 
 
-@pytest.mark.parametrize("runtime", ["claude", "openai_compat", "echo"])
-def test_text_runtime_drops_images_with_a_notice(run_request, runtime):
+async def test_a_provider_without_images_is_a_config_error(run_request, monkeypatch):
     from brain.models import RunRequest
 
+    monkeypatch.setenv("ILLO_BRAIN_SECRET", "service-test-secret")
+    from brain.providers import BUILT_IN
+
+    called = []
+
+    async def runner(request, *_):
+        called.append(request)
+        yield {"type": "final", "text": "no", "usage": {}}
+
     request = RunRequest.model_validate(
-        {**run_request.wire(), "runtime": runtime, "images": [{"mime": "image/png", "data": DATA}]}
+        {**run_request.wire(), "provider": "anthropic", "effort": None,
+         "images": [{"mime": "image/png", "data": DATA}]}
     )
-    assert request.images == []
-    assert "The images could not be shown." in request.user_message
+    table = {"anthropic": BUILT_IN["anthropic"]}
+    response = await post(create_app(runner=runner, table=table), request)
+    assert lines(response)[-1]["category"] == "config" and not called
+    assert DATA not in response.text
 
 
 async def test_provider_image_echo_never_enters_service_logs(run_request, monkeypatch, caplog):
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "service-test-secret")
-    run_request.runtime = "openai_responses"
+    run_request.provider = "openai"
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     caplog.set_level(logging.DEBUG)
 
-    async def echo(request):
+    async def echo(request, *_):
         yield {"type": "error", "message": DATA, "category": "runtime"}
 
-    response = await post(create_app(runner=echo), run_request)
+    response = await post(create_app(runner=echo, table={"openai": openai()}), run_request)
     assert DATA not in response.text
     assert DATA not in caplog.text
     assert lines(response)[-1]["message"] == "[redacted]"
@@ -124,8 +137,7 @@ async def test_image_data_in_tool_arguments_never_reaches_mcp(run_request, monke
 
     from brain.errors import RunError
 
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
-    run_request.runtime = "openai_responses"
+    run_request.provider, selected = "openai", openai(api_key="test-api-key")
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     provider = FakeResponses(arguments=json.dumps({"query": DATA}))
     session = FakeMCPSession()
@@ -136,6 +148,7 @@ async def test_image_data_in_tool_arguments_never_reaches_mcp(run_request, monke
                 async for e in loop.conversation(
                     Responses,
                     run_request,
+                    selected,
                     session,
                     [Tool(name="lanes_search", inputSchema={"type": "object"})],
                     client,
@@ -145,8 +158,7 @@ async def test_image_data_in_tool_arguments_never_reaches_mcp(run_request, monke
 
 
 async def test_provider_refusal_of_images_retries_with_text_only(run_request, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
-    run_request.runtime = "openai_responses"
+    run_request.provider, selected = "openai", openai(api_key="test-api-key")
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     provider = FakeResponses()
     answer = provider.respond
@@ -169,6 +181,7 @@ async def test_provider_refusal_of_images_retries_with_text_only(run_request, mo
             async for e in loop.conversation(
                 Responses,
                 run_request,
+                selected,
                 FakeMCPSession(),
                 [Tool(name="lanes_search", inputSchema={"type": "object"})],
                 client,

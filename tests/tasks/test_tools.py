@@ -23,7 +23,7 @@ async def operator(app, name, **args):
     ctx = app.state.ctx
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
-        run = await runs.create(conn, principal="person:ada", person_id=ada["id"], profile="person_dm", runtime="fake", model="fake")
+        run = await runs.create(conn, principal="person:ada", person_id=ada["id"], profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn, run, ctx), name, args)
     assert result["decision"] == "allow", result
     return result["result"]
@@ -150,7 +150,7 @@ async def test_piece_batch_rolls_back_on_bad_holder(app):
     ctx = app.state.ctx
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
-        run = await runs.create(conn, principal="person:ada", person_id=ada["id"], profile="person_dm", runtime="fake", model="fake")
+        run = await runs.create(conn, principal="person:ada", person_id=ada["id"], profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "task_create", {
             "list": "launches", "title": "The whole", "pieces": [{"title": "Good"}, {"title": "Bad", "holder": "agent:missing"}]})
         assert result["decision"] == "deny"
@@ -302,7 +302,7 @@ async def test_person_returns_with_proof_and_holder_check(app):
         ben = await people.get(conn, "ben")
         for person, expected in ((ada, "deny"), (ben, "allow")):
             run = await runs.create(conn, principal="person:" + person["key"], person_id=person["id"],
-                                    profile="person_dm", runtime="fake", model="fake")
+                                    profile="person_dm", provider="fake", tool_limit=12, model="fake")
             result = await ctx.registry.call(ToolContext(conn, run, ctx), "task_return",
                 {"id": row["id"], "message": "The report is live: https://example.com/report"})
             assert result["decision"] == expected, result

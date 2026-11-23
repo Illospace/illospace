@@ -8,12 +8,36 @@ import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
 
 from brain.models import BrainEvent, RunRequest, event
+from brain.providers import Provider
+
+# The worker gets its provider and the fallback on standard input. Its environment holds only
+# these names, so no key of the brain file reaches it, whatever the name of the variable.
+PROXY_VARIABLES = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"})
+WORKER_ENVIRONMENT = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "PYTHONPATH",
+                      "SSL_CERT_FILE", "SSL_CERT_DIR", "NO_PROXY", "no_proxy", *PROXY_VARIABLES)
+
+
+def safe_proxy(value: str) -> bool:
+    if "@" in value:
+        return False
+    try:
+        parts = urlsplit(value if "://" in value or value.startswith("//") else "http://" + value)
+    except ValueError:
+        return False
+    return not (parts.username or parts.password)
+
+
+def worker_environment() -> dict:
+    return {name: value for name in WORKER_ENVIRONMENT if (value := os.environ.get(name)) is not None
+            and (name not in PROXY_VARIABLES or safe_proxy(value))}
 
 
 async def run_worker(
-    request: RunRequest, command: list[str] | None = None
+    request: RunRequest, provider: Provider, fallback: Provider | None = None,
+    command: list[str] | None = None,
 ) -> AsyncIterator[BrainEvent]:
     process = None
     with TemporaryDirectory(prefix="illo-brain-", dir=os.getenv("ILLO_BRAIN_TMPDIR")) as temporary:
@@ -28,9 +52,13 @@ async def run_worker(
                 stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,
                 cwd=directory,
+                env=worker_environment(),
                 limit=4 * 1024 * 1024,
             )
-            process.stdin.write(json.dumps(request.wire()).encode() + b"\n")
+            providers = {"provider": provider.wire_dict(),
+                         "fallback": fallback.wire_dict() if fallback else None}
+            process.stdin.write(json.dumps(request.wire()).encode() + b"\n"
+                                + json.dumps(providers).encode() + b"\n")
             await process.stdin.drain()
             process.stdin.close()
             terminal = False

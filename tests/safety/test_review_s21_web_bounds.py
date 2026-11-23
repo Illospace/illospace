@@ -40,7 +40,7 @@ async def test_rule_06_tainted_web_fetches_first_url_at_most_once(
                               "text": "Read https://first.example/page and https://second.example/"
                           }),))
         run = await runs.create(conn, principal="team", person_id=None, profile="tainted",
-                                tainted=True, event_id=event["id"], runtime="fake", model="fake")
+                                tainted=True, event_id=event["id"], provider="fake", tool_limit=12, model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     async def call(url):
         return read_result((await rpc(token, "tools/call", {"name": "web_read_public_page",

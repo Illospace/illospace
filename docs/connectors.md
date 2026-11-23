@@ -158,9 +158,9 @@ Read the web before AWS when a question needs both sources.
 
 ## The model sign-in
 
-Each member can use their own ChatGPT subscription with `brain.auth: chatgpt` and `brain.runtime: openai_responses`.
-This is the default `brain.person_credential: own` mode.
-The workspace owner can choose `brain.person_credential: team` to use the sign-in of `brain.team_credential` for untainted person runs.
+Each member can use their own ChatGPT subscription when a route uses the `chatgpt` provider.
+This is the default `brain.chatgpt.person_credential: own` mode.
+The workspace owner can choose `brain.chatgpt.person_credential: team` to use the sign-in of `brain.chatgpt.team_credential` for untainted person runs.
 That key must name an active person. Only that person needs to connect ChatGPT.
 This changes only who pays for the model. Personal tools keep the requester's grants and data.
 The requester's messages then pass through the selected person's ChatGPT account.
@@ -191,7 +191,7 @@ A temporary provider error keeps the sign-in pending and increases the poll inte
 The account email must match an address of the person in `people.yaml`, ignoring letter case.
 Illo reads the ID token from the fixed HTTPS token endpoint only for this comparison.
 It refuses missing email claims and revokes rejected tokens at the published revocation endpoint.
-For a shared account, explicitly list its email in `brain.chatgpt_allowed_accounts` in `illo.yaml`.
+For a shared account, explicitly list its email in `brain.chatgpt.allowed_accounts` in `illo.yaml`.
 This team list defaults to empty.
 Enable device sign-in in your ChatGPT security settings, or ask your workspace administrator to enable it.
 Only enter a device code if you asked Illo to connect your own account.

@@ -11,7 +11,6 @@ from illo.workspace import VoiceConfig
 
 @pytest.fixture
 def voice_guard(app, monkeypatch, slack_client):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
     ctx = app.state.ctx
     ctx.config.slack_bot_token = SecretStr("test-bot-token")
     intake = SlackIntake(ctx, "U_ACME_ILLO")
@@ -21,7 +20,12 @@ def voice_guard(app, monkeypatch, slack_client):
         calls.append(request)
         raise AssertionError("No audio may leave Slack")
 
+    async def fail_transcribe(*args, **kwargs):
+        calls.append("transcribe")
+        raise AssertionError("No audio may reach the brain")
+
     intake.voice_transport = httpx.MockTransport(fail_http)
+    monkeypatch.setattr(ctx.brain_client, "transcribe", fail_transcribe)
     return ctx, intake, calls
 
 
@@ -73,7 +77,7 @@ async def test_rule_06_07_tainted_event_never_downloads_or_transcribes(
     voice_guard, slack_client, flag
 ):
     ctx, intake, calls = voice_guard
-    ctx.workspace.config.voice = VoiceConfig(transcription="openai")
+    ctx.workspace.config.voice = VoiceConfig(transcription="brain")
     await ctx.gateway.receive(event(**{flag: True}))
     assert not calls
     assert not [c for c in slack_client.calls if c["method"] == "files_info"]
@@ -81,7 +85,7 @@ async def test_rule_06_07_tainted_event_never_downloads_or_transcribes(
 
 async def test_rule_07_unknown_person_never_downloads(voice_guard, slack_client):
     ctx, intake, calls = voice_guard
-    ctx.workspace.config.voice = VoiceConfig(transcription="openai")
+    ctx.workspace.config.voice = VoiceConfig(transcription="brain")
     inbound = event().model_copy(update={"sender": "U_UNKNOWN"})
     assert (await ctx.gateway.receive(inbound))["decision"] == "ignore"
     assert not calls and not slack_client.calls
@@ -89,7 +93,7 @@ async def test_rule_07_unknown_person_never_downloads(voice_guard, slack_client)
 
 async def test_rule_06_bot_channel_never_downloads(voice_guard, slack_client):
     ctx, intake, calls = voice_guard
-    ctx.workspace.config.voice = VoiceConfig(transcription="openai")
+    ctx.workspace.config.voice = VoiceConfig(transcription="brain")
     inbound = event(bot=True, bot_id="B_ACME", mentioned=True, channel_id="C_ACME_TEAM")
     inbound = inbound.model_copy(update={"kind": "message"})
     assert (await ctx.gateway.receive(inbound))["text"] == CLIP_ERROR

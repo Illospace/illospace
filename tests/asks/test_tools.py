@@ -54,7 +54,7 @@ async def test_digest_and_rule_removal_are_dm_only(app, rpc, profile):
             person_id=person["id"] if profile != "team_channel" else None,
             profile=profile,
             tainted=profile == "tainted",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

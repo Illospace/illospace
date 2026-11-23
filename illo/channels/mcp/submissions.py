@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi.encoders import jsonable_encoder
 
 from illo.gateway import InboundEvent
-from illo.gateway.replies import error_text
+from illo.gateway.replies import FAILURE_TEXTS, error_text
 from illo.ledger import mcp as ledger
 
 
@@ -170,7 +170,7 @@ async def get_result(ctx, args: dict) -> dict:
     failure = result.get("failure")
     if status == "failed" and not failure:
         category = (run.get("usage") or {}).get("failure_category") if run else None
-        if category not in {"limit", "timeout", "provider", "internal"}:
+        if category not in FAILURE_TEXTS:
             category = "timeout" if run_status == "timeout" else "internal"
         failure = {"category": category, "message": error_text(category)}
     return {

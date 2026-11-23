@@ -62,7 +62,7 @@ async def test_queue_runs_ledger_shell_and_cleanup(app, fake_brain):
     row = await tick(ctx)
     assert row["id"] == deep_id and row["state"] == "done"
     request = fake_brain.requests[0]
-    assert request.deep and request.effort == "high" and request.max_turns == 80
+    assert request.effort == "high" and request.max_tool_calls == 80
     assert request.timeout_s == 1200 and request.max_output_tokens == 16000
     assert not request.web_search
     assert "## This run: deep work" in request.system_prompt

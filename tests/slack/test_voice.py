@@ -1,4 +1,8 @@
-"""Exercise voice input with recorded Slack data and a fake HTTP transport."""
+"""Exercise voice input with recorded Slack data and a fake HTTP transport.
+
+The app downloads the clip. The real brain service sends it to the provider through the
+same fake transport, so each test sees both requests.
+"""
 
 import asyncio
 import logging
@@ -10,28 +14,50 @@ import pytest
 import yaml
 from pydantic import SecretStr, ValidationError
 
+from brain.providers import BUILT_IN, Provider
+from brain.server import create_app as create_brain
 from illo.app import create_app
+from illo.brain.client import BrainClient
 from illo.channels.slack.clips import read_clips
 from illo.channels.slack.intake import CLIP_ERROR, SlackIntake
-from illo.channels.slack.voice import OpenAITranscriber
+from illo.channels.slack.voice import Transcriber
 from illo.config import Config
 from illo.db import all_rows, one
 from illo.gateway import InboundEvent
 from illo.gateway.principal import Authority
 from illo.ledger import asks, people
-from illo.workspace import VoiceConfig, WorkspaceError, load_workspace
+from illo.workspace import TranscriptionConfig, VoiceConfig, WorkspaceError, load_workspace
 from tests.conftest import ROOT
 
 VOICE_TEXT = "Please show the open tasks."
 
 
+class Current(httpx.AsyncBaseTransport):
+    """The brain sends its provider request through the test's current transport."""
+
+    def __init__(self, intake):
+        self.intake = intake
+
+    async def handle_async_request(self, request):
+        return await self.intake.voice_transport.handle_async_request(request)
+
+
+def brain_transcriber(intake, fake_brain, monkeypatch, base_url="https://api.openai.com/v1"):
+    openai = Provider(**{**BUILT_IN["openai"].wire_dict(), "api_key": "test-api-key",
+                         "base_url": base_url})
+    service = create_brain(table={"openai": openai}, transport=Current(intake))
+    monkeypatch.setenv("ILLO_BRAIN_SECRET", "voice-test-secret")
+    client = BrainClient("http://brain", "voice-test-secret",
+                         transport=httpx.ASGITransport(app=service))
+    monkeypatch.setattr(fake_brain, "transcribe", client.transcribe)
+
+
 @pytest.fixture
-def voice(intake, app, monkeypatch, slack_client):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "")
+def voice(intake, app, monkeypatch, slack_client, fake_brain):
+    brain_transcriber(intake, fake_brain, monkeypatch)
     ctx = app.state.ctx
     ctx.config.slack_bot_token = SecretStr("test-bot-token")
-    ctx.workspace.config.voice = VoiceConfig(transcription="openai")
+    ctx.workspace.config.voice = VoiceConfig(transcription="brain")
     state = {
         "file": {
             "id": "F_ACME_VOICE",
@@ -313,7 +339,7 @@ async def test_tainted_authority_cannot_download(app, voice):
     event = InboundEvent(
         channel="slack", external_id="tainted", kind="message", sender="U_ACME_ADA", payload={}
     )
-    service = OpenAITranscriber(
+    service = Transcriber(
         app.state.ctx, event, Authority("team", "tainted", tainted=True), "U_ACME_ILLO", None
     )
     assert await service("F_ACME_VOICE") is None
@@ -356,7 +382,8 @@ def voice_workspace(tmp_path):
     shutil.copytree(ROOT / "workspace.example", path)
     config = path / "illo.yaml"
     data = yaml.safe_load(config.read_text())
-    data["voice"] = {"transcription": "openai"}
+    data["voice"] = {"transcription": "brain"}
+    data["brain"]["transcription"] = {"provider": "custom", "model": "custom-model"}
     config.write_text(yaml.safe_dump(data))
     return path
 
@@ -364,12 +391,13 @@ def voice_workspace(tmp_path):
 def test_config_defaults():
     assert VoiceConfig().model_dump() == {
         "transcription": "slack",
-        "model": "gpt-4o-mini-transcribe",
         "max_duration_s": 120,
         "max_bytes": 10485760,
         "timeout_s": 30,
         "max_per_person_per_hour": 20,
     }
+    assert TranscriptionConfig().model_dump() == {
+        "provider": "openai", "model": "gpt-4o-mini-transcribe"}
 
 
 @pytest.mark.parametrize(
@@ -380,38 +408,41 @@ def test_config_defaults():
         {"max_duration_s": 0},
         {"timeout_s": 0},
         {"max_per_person_per_hour": 0},
-        {"model": ""},
     ],
 )
 def test_bad_voice_config(change):
     with pytest.raises(ValidationError):
         VoiceConfig(**change)
+    with pytest.raises(ValidationError):
+        TranscriptionConfig(model="")
 
 
-def test_openai_workspace_needs_key(voice_workspace, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", " ")
-    with pytest.raises(WorkspaceError, match="voice.transcription: openai needs OPENAI_API_KEY"):
+@pytest.mark.parametrize("old,new", [({"transcription": "openai"}, "Use brain"),
+                                     ({"model": "custom-model"}, "brain.transcription.model")])
+def test_old_voice_keys_name_the_new_key(voice_workspace, old, new):
+    config = voice_workspace / "illo.yaml"
+    data = yaml.safe_load(config.read_text())
+    data["voice"] = old
+    config.write_text(yaml.safe_dump(data))
+    with pytest.raises(WorkspaceError, match=new):
         load_workspace(voice_workspace)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
-    assert load_workspace(voice_workspace).config.voice.transcription == "openai"
 
 
-async def test_bad_reload_keeps_workspace(app, voice_workspace, monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+async def test_bad_reload_keeps_workspace(app, voice_workspace, caplog):
     ctx = app.state.ctx
     previous = ctx.workspace
     ctx.config.workspace_dir = voice_workspace
-    with pytest.raises(WorkspaceError, match="OPENAI_API_KEY"):
+    with pytest.raises(ValueError, match="brain.transcription: the brain has no provider custom"):
         await ctx.reload()
     assert ctx.workspace is previous
+    assert "keeps the last valid workspace" in caplog.text
 
 
-async def test_startup_rejects_openai_without_key(pool, fake_brain, voice_workspace, monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+async def test_startup_rejects_a_missing_transcription_provider(pool, fake_brain, voice_workspace):
     application = create_app(
         Config(workspace_dir=Path(voice_workspace)), pool=pool, brain_client=fake_brain
     )
-    with pytest.raises(WorkspaceError, match="OPENAI_API_KEY"):
+    with pytest.raises(ValueError, match="brain.transcription: the brain has no provider custom"):
         async with application.router.lifespan_context(application):
             pytest.fail("Startup must reject the workspace")
 
@@ -443,9 +474,9 @@ async def test_pending_metadata_waits_for_slack(
     assert not voice["requests"]
 
 
-async def test_custom_model_and_base_url(intake, message, voice, monkeypatch, app):
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://transcription.example/v1/")
-    app.state.ctx.workspace.config.voice.model = "custom-transcription-model"
+async def test_custom_model_and_base_url(intake, message, voice, monkeypatch, app, fake_brain):
+    brain_transcriber(intake, fake_brain, monkeypatch, "https://transcription.example/v1")
+    app.state.ctx.workspace.config.brain.transcription.model = "custom-transcription-model"
     requests = []
 
     def handler(request):
@@ -461,29 +492,6 @@ async def test_custom_model_and_base_url(intake, message, voice, monkeypatch, ap
     intake.voice_transport = httpx.MockTransport(handler)
     assert (await intake.receive(clip_message(message)))["decision"] == "run"
     assert len(requests) == 2
-
-
-async def test_temp_audio_closes_after_cancel(intake, message, voice, monkeypatch):
-    import tempfile
-
-    original = tempfile.TemporaryFile
-    opened = []
-
-    def temporary_file():
-        file = original()
-        opened.append(file)
-        return file
-
-    async def handler(request):
-        if request.method == "GET":
-            return httpx.Response(200, content=b"test")
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr("illo.channels.slack.voice.tempfile.TemporaryFile", temporary_file)
-    intake.voice_transport = httpx.MockTransport(handler)
-    with pytest.raises(asyncio.CancelledError):
-        await intake.receive(clip_message(message))
-    assert opened and all(file.closed for file in opened)
 
 
 async def test_multiple_clips_record_each_transcription(intake, message, voice, app):

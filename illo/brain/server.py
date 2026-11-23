@@ -96,7 +96,8 @@ async def endpoint(request: Request):
                         request_id, -32602, "A tool name and argument object are required"
                     )
                 count = run["usage"].get("tool_calls", 0)
-                if count >= (run.get("tool_limit") or ctx.workspace.config.brain.max_turns):
+                # Every brain run stores its route's limit. A run with none gets no tool call.
+                if count >= (run["tool_limit"] or 0):
                     # Count and audit denied calls without running a handler.
                     await audit.write(
                         conn,

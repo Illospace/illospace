@@ -360,7 +360,7 @@ async def test_ended_grant_refusal_sensor_one_dm_and_reconnect_preserves_allow(
             principal="person:ada",
             person_id=owner["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
     settings["refresh_error"] = "invalid_grant"

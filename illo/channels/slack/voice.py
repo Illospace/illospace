@@ -1,13 +1,9 @@
 """Bound the opt-in audio path before any request leaves Slack."""
 
 import asyncio
-import json
 import math
-import os
-import tempfile
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 import httpx
 from psycopg.types.json import Jsonb
@@ -24,7 +20,9 @@ if TYPE_CHECKING:
     from illo.gateway.principal import Authority
 
 
-class OpenAITranscriber:
+class Transcriber:
+    """Download a clip from Slack. The brain transcribes it with `brain.transcription`."""
+
     def __init__(
         self,
         ctx: "AppContext",
@@ -132,7 +130,7 @@ class OpenAITranscriber:
         return True
 
     async def __call__(self, file_id: str) -> str | None:
-        if self.config.transcription != "openai":
+        if self.config.transcription != "brain":
             return None
         try:
             async with asyncio.timeout(self.config.timeout_s):
@@ -191,22 +189,8 @@ class OpenAITranscriber:
         ):
             return None
         url = file.get("url_private_download", "")
-        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         bot_token = self.ctx.config.slack_bot_token
-        base = os.environ.get("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1"
-        endpoint = urlsplit(base)
-        if (
-            not api_key
-            or not bot_token
-            or endpoint.scheme != "https"
-            or not endpoint.hostname
-            or endpoint.username
-            or endpoint.password
-            or endpoint.query
-            or endpoint.fragment
-        ):
-            return None
-        if not await self.admit(person.key):
+        if not bot_token or not await self.admit(person.key):
             return None
         async with httpx.AsyncClient(
             transport=self.transport,
@@ -214,32 +198,17 @@ class OpenAITranscriber:
             trust_env=False,
             follow_redirects=False,
         ) as client:
-            # TemporaryFile has no persistent name and closes on every exit path.
-            with tempfile.TemporaryFile() as audio:
-                body = await download(client, url, bot_token, self.config.max_bytes)
-                if body is None:
-                    return None
-                audio.write(body)
-                audio.seek(0)
-                async with client.stream(
-                    "POST",
-                    base.rstrip("/") + "/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    data={"model": self.config.model, "response_format": "json"},
-                    files={"file": (f"clip.{extension}", audio, "application/octet-stream")},
-                ) as result:
-                    if result.status_code != 200:
-                        return None
-                    body = bytearray()
-                    async for chunk in result.aiter_bytes(chunk_size=65536):
-                        body.extend(chunk)
-                        if len(body) > 262144:
-                            return None
-                text = json.loads(body).get("text")
-                if not isinstance(text, str) or not text.strip():
-                    return None
+            body = await download(client, url, bot_token, self.config.max_bytes)
+        if body is None:
+            return None
+        settings = self.ctx.workspace.config.brain.transcription
+        text = await self.ctx.brain_client.transcribe(
+            settings.provider, settings.model, extension, bytes(body), self.config.timeout_s
+        )
+        if not text:
+            return None
         metadata = {
-            "clip_transcribed_by": "openai",
+            "clip_transcribed_by": settings.provider,
             "clip_duration_ms": self.event.payload.get("clip_duration_ms", 0) + duration,
             "clip_transcription_count": self.event.payload.get("clip_transcription_count", 0) + 1,
         }

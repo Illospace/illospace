@@ -16,7 +16,7 @@ async def test_actual_http_tool_list_has_no_runtime_escape(app, rpc, profile):
             person_id=person["id"],
             profile=profile,
             tainted=profile == "tainted",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

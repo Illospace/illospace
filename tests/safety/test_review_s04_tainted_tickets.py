@@ -17,7 +17,7 @@ async def test_rule_06_tainted_ticket_is_unassigned_and_owner_gets_one_dm(
 ):
     async with app.state.ctx.pool.connection() as conn:
         run = await runs.create(conn, principal="team", person_id=None, profile="tainted",
-                                tainted=True, runtime="fake", model="fake")
+                                tainted=True, provider="fake", tool_limit=12, model="fake")
         token = await runs.mint_token(conn, run["id"], 60)
     async def call(name, args):
         return read_result((await rpc(token, "tools/call", {"name": name, "arguments": args})).json()[

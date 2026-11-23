@@ -29,7 +29,7 @@ async def test_tainted_run_hides_personal_tools_and_private_lanes(app, rpc):
             person_id=ada["id"],
             profile="person_dm",
             tainted=True,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)
@@ -48,7 +48,7 @@ async def test_outsider_has_no_team_ledger_authority(app, rpc):
             person_id=None,
             profile="tainted",
             tainted=True,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

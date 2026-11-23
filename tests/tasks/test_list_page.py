@@ -213,7 +213,7 @@ async def test_list_tool_channel_sends_dm_and_revoke(page_ctx, replay, fake_brai
             principal="person:ada",
             person_id=ada["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "list_link", {})

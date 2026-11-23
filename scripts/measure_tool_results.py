@@ -197,7 +197,8 @@ async def measure(ctx):
             if tool.risk != "read":
                 continue
             run = await runs.create(conn, principal="person:ada", person_id=person["id"],
-                                    profile="person_dm", runtime="fake", model="fake", event_id=event["id"])
+                                    profile="person_dm", provider="fake", model="fake", tool_limit=12,
+                                    event_id=event["id"])
             tc = ToolContext(conn, run, ctx)
             if tool.available is not None and not await tool.available(tc):
                 continue

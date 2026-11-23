@@ -10,8 +10,10 @@ import pytest
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 from mcp.types import Tool
 
+from brain import providers
 from brain.models import RunRequest
 from brain.process import run_worker
+from brain.providers import BUILT_IN, Provider
 from brain.wire.agent_sdk import options
 from brain.wire.chat import function_tools
 from brain.wire.responses import build_request
@@ -26,15 +28,18 @@ def request(**overrides):
             "user_message": "List your tools",
             "mcp_url": "http://127.0.0.1:1/mcp",
             "mcp_token": "fake-run-token",
-            "runtime": "claude",
+            "provider": "anthropic",
+            "model": "claude-opus-5-5",
             **overrides,
         }
     )
 
 
-def test_rule_10_claude_exact_sdk_arguments(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-api-key")
-    opts = options(request(), tmp_path)
+def test_rule_10_claude_exact_sdk_arguments(tmp_path):
+    anthropic = Provider(**{**BUILT_IN["anthropic"].wire_dict(), "api_key": "fake-api-key"})
+    opts = options(request(), anthropic, tmp_path)
+    # The SDK child gets only this provider's key, from the provider table.
+    assert opts.env["ANTHROPIC_API_KEY"] == "fake-api-key" and "ANTHROPIC_BASE_URL" not in opts.env
     assert opts.tools == []
     assert opts.allowed_tools == ["mcp__illo__*"]
     assert set(opts.mcp_servers) == {"illo"}
@@ -84,7 +89,7 @@ def test_rule_10_openai_catalog_has_only_discovered_tools():
 def test_rule_10_responses_request_has_only_discovered_functions():
     tools = [Tool.model_validate(tool) for tool in TOOLS]
     tools.append(Tool(name="new_family_verb", inputSchema={"type": "object"}))
-    payload = build_request(request(runtime="openai_responses"), tools, [])
+    payload = build_request(request(provider="openai"), tools, [])
     assert {tool["name"] for tool in payload["tools"]} == {tool.name for tool in tools}
     assert all(tool["type"] == "function" for tool in payload["tools"])
     assert [tool["parameters"] for tool in payload["tools"]] == [t.inputSchema for t in tools]
@@ -108,7 +113,8 @@ async def test_rule_10_live_catalog_hostile_and_three_timed_runs():
             )
             events = []
             start = time.perf_counter()
-            async with asyncio.timeout(120), aclosing(run_worker(req)) as stream:
+            worker = run_worker(req, providers.load()["anthropic"])
+            async with asyncio.timeout(120), aclosing(worker) as stream:
                 async for item in stream:
                     item["elapsed_s"] = time.perf_counter() - start
                     events.append(item)

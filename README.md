@@ -125,7 +125,7 @@ Tested only with fakes, never against the live service:
 - GitHub writes.
 - The mailbox (IMAP and SMTP).
 - Google (mail, calendar, Drive).
-- The `openai_compat` runtime.
+- A custom provider on the Chat Completions wire.
 
 ## License and contributing
 

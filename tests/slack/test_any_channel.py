@@ -166,7 +166,7 @@ async def test_members_channel_runs_without_shared_text_or_personal_tools(
     async with ctx.pool.connection() as conn:
         ben = await people.get(conn, "ben")
         run = await runs.create(conn, principal="person:ben", person_id=ben["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         before = len([c for c in member_slack.calls if c["method"] == "conversations_replies"])
         read = await ctx.registry.call(ToolContext(conn, run, ctx), "slack_read_thread",
                                       {"channel": PRIVATE, "thread_ts": "1"})
@@ -233,7 +233,7 @@ async def test_connect_status_names_builtin_connections_without_private_name_lea
     async with ctx.pool.connection() as conn:
         person = await people.get(conn, viewer)
         run = await runs.create(conn, principal="person:" + viewer, person_id=person["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_status", {})
         assert result["decision"] == "allow"
         slack = next(c for c in result["result"] if c["kind"] == "slack")
@@ -425,7 +425,7 @@ async def test_connect_status_reports_disconnected_builtins(app):
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn, run, ctx), "connect_status", {})
         builtins = [c for c in result["result"] if c["kind"] in {"slack", "github"}]
         assert len(builtins) == 2 and all(c["connected"] == "no" for c in builtins)

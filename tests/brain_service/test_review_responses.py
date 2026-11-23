@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from brain.errors import RunError
+from tests.brain_service.conftest import openai
 from tests.brain_service.test_chatgpt import collect, subscription
 
 
@@ -35,8 +36,7 @@ def message(text="Ready."):
 
 async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeypatch):
     request = subscription(run_request)
-    request.api_key_fallback = True
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-api-key")
+    request.fallback_provider = "openai"
     bodies = []
 
     def respond(wire):
@@ -58,7 +58,7 @@ async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeyp
             {"type": "response.output_text.delta", "delta": "Ready."}, complete([message()])
         )
 
-    events, session = await collect(request, respond)
+    events, session = await collect(request, respond, fallback=openai(api_key="fake-api-key"))
     assert not any(i.get("type") == "reasoning" for i in bodies[-1]["input"])
     assert any(i.get("type") == "function_call_output" for i in bodies[-1]["input"])
     assert [e["text"] for e in events if e["type"] == "text"] == ["Ready."]
@@ -69,7 +69,7 @@ async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeyp
 
 async def test_u08_parallel_calls_stop_at_limit(run_request):
     run_request = subscription(run_request)
-    run_request.max_turns = 2
+    run_request.max_tool_calls = 2
     events, session = await collect(
         run_request, lambda wire: stream(complete(
             [message()] if json.loads(wire.content).get("tool_choice") == "none"
@@ -122,7 +122,7 @@ async def test_u12_done_items_work_without_completed_output(run_request):
 
 async def test_s2_exact_tool_limit_gets_a_normal_last_model_call(run_request):
     request = subscription(run_request)
-    request.max_turns = 1
+    request.max_tool_calls = 1
     bodies = []
 
     def respond(wire):

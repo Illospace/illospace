@@ -11,6 +11,7 @@ from brain.errors import RunError
 from brain.models import ChatGPTAuth
 from brain.server import create_app
 from brain.wire.responses import Responses
+from tests.brain_service.conftest import CHATGPT, openai
 from tests.brain_service.test_openai_responses import FakeResponses
 from tests.brain_service.test_service import lines, post
 from tests.fakes import FakeMCPSession
@@ -19,23 +20,23 @@ MARKER = "fake-chatgpt-token-marker"
 
 
 def subscription(request):
-    request.runtime = "openai_responses"
+    request.provider = "chatgpt"
     request.provider_auth = ChatGPTAuth(access_token=MARKER, account_id="acme-account")
     return request
 
 
-async def collect(request, handler, names=("lanes_search",)):
+async def collect(request, handler, names=("lanes_search",), fallback=None):
     tools = [Tool(name=n, inputSchema={"type": "object"}) for n in names]
     session = FakeMCPSession()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = [e async for e in loop.conversation(Responses, request, session, tools, client)]
+        provider = CHATGPT if request.provider_auth.kind == "chatgpt" else openai()
+        events = [e async for e in loop.conversation(
+            Responses, request, provider, session, tools, client, fallback)]
     return events, session
 
 
 async def test_chatgpt_request_and_function_round_trip(run_request, monkeypatch):
     request = subscription(run_request)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://wrong.example/v1")
     provider = FakeResponses()
     provider.app.post("/backend-api/codex/responses")(provider.respond)
     headers = []
@@ -48,7 +49,7 @@ async def test_chatgpt_request_and_function_round_trip(run_request, monkeypatch)
 
     events, session = await collect(request, respond)
     assert events[-1]["type"] == "final" and events[-1]["text"] == "Release ready."
-    assert events[-1]["usage"]["auth_kind"] == "chatgpt"
+    assert not [e for e in events if e["type"] == "payer"]
     assert len(session.calls) == 1
     for body, head in zip(provider.requests, headers, strict=True):
         assert head["authorization"] == "Bearer " + MARKER
@@ -71,9 +72,8 @@ async def test_limit_and_api_fallback_resume_tool_results(
     run_request, monkeypatch, fallback, stream
 ):
     request = subscription(run_request)
-    request.api_key_fallback = fallback
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-api-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.example/v1")
+    api = openai("https://api.example/v1", "fake-api-key") if fallback else None
+    request.fallback_provider = "openai" if fallback else None
     wires = []
 
     def respond(wire):
@@ -110,7 +110,7 @@ async def test_limit_and_api_fallback_resume_tool_results(
             + json.dumps(
                 {
                     "type": "response.completed",
-                    # A provider field with the same name cannot change the sign-in record.
+                    # A provider field cannot act as the payer. The payer event is the record.
                     "response": {
                         "status": "completed",
                         "output": output,
@@ -123,22 +123,23 @@ async def test_limit_and_api_fallback_resume_tool_results(
 
     if not fallback:
         with pytest.raises(RunError) as caught:
-            await collect(request, respond)
+            await collect(request, respond, fallback=api)
         assert str(caught.value) == "Your ChatGPT limit is reached. It resets 2030-01-01 00:00 UTC."
         assert caught.value.details["resets_at"] == 1893456000
         assert len(wires) == 2
     else:
-        events, session = await collect(request, respond)
+        events, session = await collect(request, respond, fallback=api)
         assert events[-1]["text"].endswith("I used the API key for this request.\n\nReady.")
-        # The ledger shows that the API key paid for the end of this run.
-        assert events[-1]["usage"]["auth_kind"] == "api_key"
+        # The brain tells the app at the switch that the API key pays for the rest of the run.
+        assert [e for e in events if e["type"] == "payer"] == [
+            {"type": "payer", "provider": "openai", "auth_kind": "api_key"}]
+        assert events[-1]["usage"]["input_tokens"] == 6
         assert len(session.calls) == 1 and len(wires) == 3
 
 
 async def test_api_retry_is_once_and_never_silent(run_request, monkeypatch):
     request = subscription(run_request)
-    request.api_key_fallback = True
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    request.fallback_provider = "openai"
     count = 0
 
     def respond(wire):
@@ -149,26 +150,23 @@ async def test_api_retry_is_once_and_never_silent(run_request, monkeypatch):
         )
 
     with pytest.raises(RunError, match="Your ChatGPT limit is reached. The API fallback failed."):
-        await collect(request, respond)
+        await collect(request, respond, fallback=openai(api_key="fake-key"))
     assert count == 2
 
 
-async def test_missing_api_key_still_reports_subscription_limit(run_request, monkeypatch):
+async def test_a_fallback_without_an_api_key_provider_is_a_config_error(run_request, monkeypatch):
+    """The brain has no openai provider without its key. It refuses the run before it starts."""
+    monkeypatch.setenv("ILLO_BRAIN_SECRET", "service-test-secret")
     request = subscription(run_request)
-    request.api_key_fallback = True
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    count = 0
+    request.fallback_provider = "openai"
+    called = []
 
-    def respond(wire):
-        nonlocal count
-        count += 1
-        return httpx.Response(429, json={"error": {"type": "usage_limit_reached"}})
+    async def runner(request, *_):
+        called.append(request)
+        yield {"type": "final", "text": "no", "usage": {}}
 
-    with pytest.raises(
-        RunError, match="Your ChatGPT limit is reached. The API fallback failed."
-    ) as caught:
-        await collect(request, respond)
-    assert count == 1 and caught.value.details["api_key_fallback_failed"]
+    events = lines(await post(create_app(runner=runner, table={"chatgpt": CHATGPT}), request))
+    assert events[-1]["category"] == "config" and not called
 
 
 async def test_unknown_chatgpt_tools_refused(run_request):
@@ -193,7 +191,7 @@ async def test_secret_wire_and_service_redaction(run_request, monkeypatch, caplo
     assert MARKER not in repr(request) + request.model_dump_json()
     assert request.wire()["provider_auth"]["access_token"] == MARKER
 
-    async def runner(request):
+    async def runner(request, *_):
         yield {
             "type": "error",
             "category": "runtime",
@@ -237,6 +235,7 @@ async def test_token_echo_in_tool_arguments_cannot_reach_mcp(run_request):
                 async for e in loop.conversation(
                     Responses,
                     request,
+                    CHATGPT,
                     session,
                     [Tool(name="lanes_search", inputSchema={"type": "object"})],
                     client,

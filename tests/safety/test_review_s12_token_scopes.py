@@ -86,7 +86,7 @@ async def test_rule_02_agent_request_cannot_read_personal_tools(app, rpc, name, 
             principal="person:ada",
             person_id=ada["id"],
             profile="agent_request",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         raw = await runs.mint_token(conn, run["id"], 60)
@@ -115,7 +115,7 @@ async def test_rule_02_agent_request_cannot_search_personal_providers(app, rpc, 
             principal="person:ada",
             person_id=ada["id"],
             profile="agent_request",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         raw = await runs.mint_token(conn, run["id"], 60)

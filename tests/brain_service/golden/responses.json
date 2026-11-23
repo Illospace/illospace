@@ -46,8 +46,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 1
       },
-      "total_tokens": 125,
-      "auth_kind": "chatgpt"
+      "total_tokens": 125
      }
     }
    ]
@@ -212,8 +211,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 3
       },
-      "total_tokens": 360,
-      "auth_kind": "api_key"
+      "total_tokens": 360
      }
     }
    ]
@@ -380,7 +378,7 @@
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
-    "api_key_fallback_failed": false,
+    "fallback_failed": false,
     "run_id": 1
    },
    {
@@ -390,7 +388,7 @@
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
-    "api_key_fallback_failed": false,
+    "fallback_failed": false,
     "catalog": [
      "asks_list",
      "lanes_search"
@@ -404,7 +402,7 @@
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
-    "api_key_fallback_failed": false,
+    "fallback_failed": false,
     "message": "The provider returned a credential",
     "run_id": 1
    }
@@ -522,8 +520,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 3
       },
-      "total_tokens": 360,
-      "auth_kind": "api_key"
+      "total_tokens": 360
      }
     }
    ]
@@ -707,8 +704,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 1
       },
-      "total_tokens": 125,
-      "auth_kind": "api_key"
+      "total_tokens": 125
      }
     }
    ]
@@ -882,8 +878,7 @@
        "reasoning_tokens": 3
       },
       "total_tokens": 360,
-      "limited": true,
-      "auth_kind": "api_key"
+      "limited": true
      }
     }
    ]
@@ -1171,8 +1166,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 3
       },
-      "total_tokens": 360,
-      "auth_kind": "api_key"
+      "total_tokens": 360
      }
     }
    ]
@@ -1456,8 +1450,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 1
       },
-      "total_tokens": 125,
-      "auth_kind": "api_key"
+      "total_tokens": 125
      }
     }
    ]
@@ -1714,6 +1707,11 @@
      "name": "lanes_search"
     },
     {
+     "type": "payer",
+     "provider": "openai",
+     "auth_kind": "api_key"
+    },
+    {
      "type": "text",
      "text": "Release"
     },
@@ -1733,8 +1731,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 4
       },
-      "total_tokens": 470,
-      "auth_kind": "api_key"
+      "total_tokens": 470
      }
     }
    ]
@@ -1961,6 +1958,11 @@
      "name": "lanes_search"
     },
     {
+     "type": "payer",
+     "provider": "openai",
+     "auth_kind": "api_key"
+    },
+    {
      "type": "text",
      "text": "Release"
     },
@@ -1981,8 +1983,7 @@
        "reasoning_tokens": 6
       },
       "total_tokens": 705,
-      "limited": true,
-      "auth_kind": "api_key"
+      "limited": true
      }
     }
    ]
@@ -2214,8 +2215,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 10
       },
-      "total_tokens": 1160,
-      "auth_kind": "api_key"
+      "total_tokens": 1160
      }
     }
    ]
@@ -2608,8 +2608,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 3
       },
-      "total_tokens": 360,
-      "auth_kind": "api_key"
+      "total_tokens": 360
      }
     }
    ]

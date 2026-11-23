@@ -54,7 +54,7 @@ People like a personal assistant that is fast, short, and quiet. Illo keeps that
 
 1. **The foundation.** The ledger, the gateway, the tool server, and the first safety tests. Done.
 2. **The areas.** The brain service, the collectors, Slack, the asks, the MCP endpoint, GitHub, search, the routines and email, the connectors, the install, and the voice. All are merged on `next`, with the fixes of two reviews.
-3. **A first team.** One team runs Illo from `next` and reports what fails. Slack, GitHub writes, the mailbox, Google, and the `openai_compat` runtime have run only against fakes so far.
+3. **A first team.** One team runs Illo from `next` and reports what fails. Slack, GitHub writes, the mailbox, Google, and the Chat Completions wire have run only against fakes so far.
 4. **The switch.** The branch `main` gets the new system when it can replace the old one.
 
 The README lists what is on `next` today.

@@ -26,7 +26,7 @@ An author who is not in `people.yaml` shows as `Outside user (<id>)`.
 A bot or an unknown author in the context makes the run `tainted`.
 A pending Slack transcript can wait for up to 15 seconds. A thread read can wait for up to 15 seconds.
 A missing transcript or `none` status fails at once by default.
-Illo sends audio to the transcription API only with `voice.transcription: openai`.
+Illo sends audio to the brain for transcription only with `voice.transcription: brain`.
 See [voice setup](../../../docs/workspace.md#voice-clips) for limits and privacy checks.
 Illo reads still images from known active people in safe DMs and team runs.
 It reads the run message first, then retained context, newest first.
@@ -36,7 +36,7 @@ Set `slack.images: off` to stop image downloads. You can lower the count and siz
 Illo records file IDs, types, sizes, person keys, and skip counts.
 It keeps no image bytes, private Slack URLs, or bot tokens in the ledger or logs.
 The model provider receives the images. A failed image read does not stop the answer.
-Only `openai_responses` shows images. Other runtimes get a text notice.
+Only a provider with the `images` capability gets the images. For another provider, Illo reads none and the run gets a note.
 See [image setup](../../../docs/workspace.md#slack-images) for settings and privacy checks.
 Private DMs never become search items.
 Messages of a configured public channel become team search items after the gateway handles them.

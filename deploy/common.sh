@@ -10,14 +10,16 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || fail "Install $1, then run this command again."; }
 config_get() { python3 "$DEPLOY_DIR/config.py" "$ILLO_ENV_FILE" "$1"; }
 
+# Give status 1 for a relative path, or for a path inside the checkout or another folder.
+# Callers in a condition must use `|| return 1`: errexit is off there.
 outside_checkout() {
-    [[ "$1" = /* ]] || fail 'Use an absolute path outside the checkout.'
-    python3 - "$ILLO_ROOT" "$1" <<'PY'
+    [[ "$1" = /* ]] || { printf 'Use an absolute path outside the checkout.\n' >&2; return 1; }
+    python3 - "$@" "$ILLO_ROOT" <<'PY'
 import sys
 from pathlib import Path
-root, path = (Path(p).resolve() for p in sys.argv[1:])
-if path.is_relative_to(root):
-    sys.exit("Keep secrets and backups outside the checkout.")
+path, *folders = (Path(p).resolve() for p in sys.argv[1:])
+if any(path.is_relative_to(folder) for folder in folders):
+    sys.exit("Keep secrets and backups outside the checkout and the workspace folder.")
 PY
 }
 
@@ -32,6 +34,9 @@ load_config() {
     export ILLO_PROJECT_NAME=${ILLO_PROJECT_NAME:-$(config_get ILLO_PROJECT_NAME)}
     ILLO_PROJECT_NAME=${ILLO_PROJECT_NAME:-illo}
     export ILLO_PROJECT_NAME
+    export ILLO_BRAIN_ENV_FILE=${ILLO_BRAIN_ENV_FILE:-$(config_get ILLO_BRAIN_ENV_FILE)}
+    ILLO_BRAIN_ENV_FILE=${ILLO_BRAIN_ENV_FILE:-${ILLO_ENV_FILE%/*}/brain.env}
+    export ILLO_BRAIN_ENV_FILE
     export ILLO_REVISION=${ILLO_REVISION:-$(config_get ILLO_REVISION)}
     if [ -z "$ILLO_REVISION" ] && [ -f "$ILLO_STATE_DIR/last-good" ]; then
         ILLO_REVISION=$(cat "$ILLO_STATE_DIR/last-good")
@@ -47,8 +52,78 @@ load_config() {
     export ILLO_HEALTH_INTERVAL=${ILLO_HEALTH_INTERVAL:-2}
 }
 
+# The app file holds no provider key. Only the brain container loads the brain file. The app
+# mounts the workspace folder, so the brain file stays outside it too.
+check_env_files() {
+    [ -f "$ILLO_BRAIN_ENV_FILE" ] || { printf 'Create the brain environment file %s from deploy/brain.env.example.\n' "$ILLO_BRAIN_ENV_FILE" >&2; return 1; }
+    local workspace resolved_workspace rc
+    workspace=$(config_get ILLO_WORKSPACE_DIR) || return 1
+    outside_checkout "$ILLO_BRAIN_ENV_FILE" ${workspace:+"$workspace"} || return 1
+    # Compose strips a UTF-8 BOM and reads `KEY=v`, `KEY = v`, `KEY: v`, `export KEY=v`, and a
+    # bare `KEY`. Refuse every provider prefix and reference in the file, then check Compose's
+    # resolved environment and mount source without printing any values.
+    if ! python3 - "$ILLO_ENV_FILE" <<'PY'
+import re, sys
+from pathlib import Path
+pattern = re.compile(r"(^\s*(?:export\s+)?|\$\{?)(ILLO_PROVIDER_|OPENAI_|ANTHROPIC_)", re.I)
+for line in Path(sys.argv[1]).read_text(encoding="utf-8-sig").splitlines():
+    stripped = line.lstrip()
+    if stripped.startswith("#"):
+        continue
+    if pattern.search(line):
+        sys.exit(1)
+PY
+    then
+        printf 'The app environment file %s holds a provider variable. Move each ILLO_PROVIDER_, OPENAI_, and ANTHROPIC_ variable to %s. See docs/install.md.\n' "$ILLO_ENV_FILE" "$ILLO_BRAIN_ENV_FILE" >&2
+        return 1
+    fi
+    rc=0
+    resolved_workspace=$(compose config --format json 2>/dev/null | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+illo = data.get("services", {}).get("illo", {})
+forbidden = ("ILLO_PROVIDER_", "OPENAI_", "ANTHROPIC_")
+env = illo.get("environment") or {}
+keys = env.keys() if isinstance(env, dict) else (e.split("=", 1)[0] for e in env)
+if any(k.upper().startswith(forbidden) for k in keys):
+    sys.exit(2)
+for volume in illo.get("volumes") or []:
+    if isinstance(volume, dict) and volume.get("target") == "/workspace" and volume.get("source"):
+        print(volume["source"])
+        break
+') || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 2 ]; then
+            printf 'The app environment file %s holds a provider variable. Move each ILLO_PROVIDER_, OPENAI_, and ANTHROPIC_ variable to %s. See docs/install.md.\n' "$ILLO_ENV_FILE" "$ILLO_BRAIN_ENV_FILE" >&2
+        else
+            printf 'Docker Compose could not resolve %s. Check the environment files.\n' "${compose_file:-$DEPLOY_DIR/compose.yaml}" >&2
+        fi
+        return 1
+    fi
+    if [ -n "$resolved_workspace" ]; then
+        outside_checkout "$ILLO_BRAIN_ENV_FILE" "$resolved_workspace" || return 1
+    fi
+}
+
+use_saved_layout() {
+    local good
+    if [ -f "$ILLO_STATE_DIR/last-good" ]; then
+        good=$(cat "$ILLO_STATE_DIR/last-good")
+        if [ -f "$ILLO_STATE_DIR/revisions/$good/deploy/compose.yaml" ]; then
+            compose_file="$ILLO_STATE_DIR/revisions/$good/deploy/compose.yaml"
+        fi
+    fi
+}
+
 compose() {
     docker compose --project-name "$ILLO_PROJECT_NAME" --env-file "$ILLO_ENV_FILE" \
+        -f "${compose_file:-$DEPLOY_DIR/compose.yaml}" "$@"
+}
+
+compose_timeout() {
+    local seconds=$1
+    shift
+    timeout --kill-after=5 "$seconds" docker compose --project-name "$ILLO_PROJECT_NAME" --env-file "$ILLO_ENV_FILE" \
         -f "${compose_file:-$DEPLOY_DIR/compose.yaml}" "$@"
 }
 

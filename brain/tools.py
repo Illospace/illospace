@@ -1,7 +1,6 @@
 """The Illo MCP boundary. The model sees only the run's tools, and only checked calls reach MCP."""
 
 import json
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -71,16 +70,19 @@ def check_sdk_tool(name: str) -> None:
         raise RunError("runtime", "The runtime exposed a tool outside Illo")
 
 
-def check_echo(request: RunRequest, chunk: dict, *, error: bool) -> None:
-    """Refuse a provider chunk that echoes a credential, before an argument can reach MCP.
+def check_echo(chunk: dict, key: str | None, request: RunRequest | None = None, *,
+               error: bool = False) -> None:
+    """Refuse a provider reply that echoes a credential, before an argument can reach MCP.
 
-    An error chunk can name the rejected credential. Its error mapping never copies text.
+    Runs and transcriptions use it. An error chunk can name the rejected credential. Its error
+    mapping never copies text.
     """
     encoded = json.dumps(chunk)
-    if any(image.data.get_secret_value() in encoded for image in request.images):
+    images = request.images if request else ()
+    if any(image.data.get_secret_value() in encoded for image in images):
         raise RunError("runtime", "The provider returned private image data")
-    values = [os.getenv("OPENAI_API_KEY")]
-    if isinstance(request.provider_auth, ChatGPTAuth):
+    values = [key]
+    if request and isinstance(request.provider_auth, ChatGPTAuth):
         values.append(request.provider_auth.access_token.get_secret_value())
     if not error and any(value and json.dumps(value)[1:-1] in encoded for value in values):
         raise RunError("runtime", "The provider returned a credential")

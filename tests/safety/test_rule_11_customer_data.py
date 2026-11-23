@@ -21,6 +21,7 @@ from illo.deep.worker import tick
 from illo.ledger import runs
 from illo.tools.checks import check, scope
 from illo.tools.registry import Refusal, ToolContext
+from tests.brain_service.conftest import CHATGPT, openai
 from tests.brain_service.test_deep import SEARCH, final, stream
 from tests.connectors.test_mcp import call, mcp_app  # noqa: F401
 from tests.tool_results import read_result
@@ -263,10 +264,11 @@ async def test_deep_start_inherits_customer_flag_from_parent(app, replay, fake_b
 @pytest.mark.parametrize("auth", ["api_key", "chatgpt"])
 @pytest.mark.parametrize("flag", ["customer_read", "personal_read"])
 async def test_next_provider_request_has_no_web_search(run_request, monkeypatch, auth, flag):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     run_request.web_search = True
-    run_request.runtime = "openai_responses"
+    run_request.provider = "openai"
+    provider = openai(api_key="fake-key")
     if auth == "chatgpt":
+        run_request.provider, provider = "chatgpt", CHATGPT
         run_request.provider_auth = ChatGPTAuth(
             kind="chatgpt", access_token="fake-token", account_id="fake-account"
         )
@@ -306,6 +308,7 @@ async def test_next_provider_request_has_no_web_search(run_request, monkeypatch,
             async for e in conversation(
                 Responses,
                 run_request,
+                provider,
                 session,
                 [Tool(name="aws_read", inputSchema={"type": "object"})],
                 client,
@@ -318,8 +321,9 @@ async def test_next_provider_request_has_no_web_search(run_request, monkeypatch,
 
 
 async def test_missing_run_flags_close_provider_search(run_request, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     run_request.web_search = True
+    run_request.provider = "openai"
+    provider = openai(api_key="fake-key")
     bodies = []
 
     def respond(request):
@@ -344,6 +348,7 @@ async def test_missing_run_flags_close_provider_search(run_request, monkeypatch)
             async for e in conversation(
                 Responses,
                 run_request,
+                provider,
                 session,
                 [Tool(name="aws_read", inputSchema={"type": "object"})],
                 client,

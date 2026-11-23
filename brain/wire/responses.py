@@ -1,17 +1,16 @@
 """The Responses adapter: the ChatGPT backend and the OpenAI API. It knows only the format."""
 
-import os
 from datetime import UTC, datetime
 
 from mcp.types import Tool
 
 from brain.errors import RunError, provider_error
-from brain.loop import Turn, run_effort
+from brain.loop import Turn
 from brain.models import RunRequest, event
+from brain.providers import Provider
 from brain.tools import Call
 from brain.usage import Usage
 
-CHATGPT_URL = "https://chatgpt.com/backend-api/codex"
 WEB_UNAVAILABLE = "\n\nWeb search is not available in this run. Use `web_fetch` on addresses that you know."
 
 # Workers have one run. This cache lasts only as long as the worker process.
@@ -68,12 +67,6 @@ def build_request(
     return payload
 
 
-def address(request: RunRequest) -> str:
-    if request.provider_auth.kind == "chatgpt":
-        return CHATGPT_URL
-    return (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-
-
 def check_item(item: dict, names: set[str], *, web_search=False) -> None:
     kind = item.get("type")
     if kind == "web_search_call" and web_search:
@@ -122,12 +115,12 @@ def arguments(call: dict):
 
 
 class Responses:
-    records_payer = True
     checks_echo = True
     reads_run_flags = True
     missing_id = "The model returned an invalid function call"
 
-    def __init__(self, request: RunRequest, tools: list[Tool]):
+    def __init__(self, request: RunRequest, tools: list[Tool], provider: Provider):
+        self.provider = provider
         self.tools = tools
         self.names = {tool.name for tool in tools}
         content = [{"type": "input_text", "text": request.user_message}] + [
@@ -136,29 +129,23 @@ class Responses:
         self.items = [{"role": "user", "content": content if request.images else request.user_message}]
         self.searches = set()
 
-    @staticmethod
-    def url(request) -> str:
-        return address(request) + "/responses"
+    def url(self, request) -> str:
+        return self.provider.base_url + "/responses"
 
-    @staticmethod
-    def headers(request) -> dict:
+    def headers(self, request) -> dict:
         auth = request.provider_auth
         if auth.kind == "chatgpt":
             return {"Authorization": "Bearer " + auth.access_token.get_secret_value(),
                     "chatgpt-account-id": auth.account_id.get_secret_value(),
                     "originator": "illo-brain"}
-        if not (key := os.getenv("OPENAI_API_KEY")):
-            raise RunError("auth", "Set OPENAI_API_KEY for the Responses runtime")
-        return {"Authorization": "Bearer " + key}
-
-    check = headers  # The headers need a credential.
+        return {"Authorization": "Bearer " + self.provider.api_key}
 
     def payload(self, request, *, tools_disabled):
         self.deltas, self.done, self.completed = [], {}, None
         self.retries = {"effort", "web_search"}
         payload = build_request(request, self.tools, self.items, tools_disabled=tools_disabled)
-        if (address(request), request.model) not in _without_effort:
-            payload["reasoning"] = {"effort": run_effort(request)}
+        if request.effort and (self.provider.base_url, request.model) not in _without_effort:
+            payload["reasoning"] = {"effort": request.effort}
         return payload
 
     def rejected(self, request, payload, status, error) -> bool:
@@ -168,7 +155,7 @@ class Responses:
         if (status == 400 and "effort" in self.retries and "reasoning" in payload
                 and effort_rejected(error)):
             self.retries.discard("effort")
-            _without_effort.add((address(request), request.model))
+            _without_effort.add((self.provider.base_url, request.model))
             del payload["reasoning"]
             return True
         if (400 <= status < 500 and "web_search" in self.retries and request.web_search
@@ -267,8 +254,9 @@ class Responses:
     def add_instruction(self, text: str) -> None:
         self.items.append({"role": "developer", "content": text})
 
-    def new_payer(self) -> None:
+    def new_payer(self, provider: Provider) -> None:
         """Another sign-in cannot read the encrypted reasoning or the item IDs of the first."""
+        self.provider = provider
         self.items = [
             {key: value for key, value in item.items()
              if key != "id" or item.get("type") == "web_search_call"}

@@ -1,6 +1,5 @@
 """Validate the workspace before it becomes active."""
 
-import os
 from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,6 +21,8 @@ from illo.connectors.config import Connector
 from illo.db import Connection
 
 Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request", "digest", "team_digest"]
+RunKind = Literal["person_dm", "team_channel", "tainted", "routine", "digest", "agent_request", "deep"]
+ProviderName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")]
 Risk = Literal["read", "write_internal", "send_outside"]
 
 
@@ -111,8 +112,7 @@ class SlackConfig(Model):
 
 
 class VoiceConfig(Model):
-    transcription: Literal["slack", "openai"] = "slack"
-    model: str = Field(default="gpt-4o-mini-transcribe", min_length=1, max_length=200)
+    transcription: Literal["slack", "brain"] = "slack"
     max_duration_s: float = Field(default=120, gt=0, le=3600, allow_inf_nan=False)
     max_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=25 * 1024 * 1024)
     timeout_s: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
@@ -173,14 +173,6 @@ class DigestConfig(Model):
         return value
 
 
-class DeepBrainConfig(Model):
-    model: str | None = None
-    effort: Literal["low", "medium", "high", "xhigh"] = "high"
-    max_turns: int = Field(default=80, ge=1, le=200)
-    timeout_s: float = Field(default=1200, gt=0, le=3600)
-    max_output_tokens: int = Field(default=16000, ge=1)
-
-
 class DeepConfig(Model):
     enabled: bool = True
     max_per_person_per_day: int = Field(default=20, ge=1)
@@ -208,29 +200,69 @@ class ScoutConfig(Model):
     _team = field_validator("team", mode="before")(WebConfig.yaml_switch.__func__)
 
 
-class BrainConfig(Model):
-    deep: DeepBrainConfig = Field(default_factory=DeepBrainConfig)
-    runtime: Literal["claude", "openai_responses", "openai_compat", "echo"] = "claude"
-    model: str = "default"
-    max_turns: int = Field(default=12, ge=1, le=50)
-    timeout_s: float = Field(default=300, gt=0, le=3600)
-    effort: dict[Profile | Literal["outsider"], Literal["low", "medium", "high", "xhigh"]] = Field(
-        default_factory=lambda: {"person_dm": "medium", "team_channel": "medium", "agent_request": "medium"}
-    )
-    auth: Literal["chatgpt", "api_key"] = "api_key"
+class RouteSettings(Model):
+    """The fields of one run kind. A field that a route omits comes from `default`."""
+
+    provider: ProviderName | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    effort: str | None = Field(default=None, pattern=r"^[a-z]{1,16}$")
+    max_tool_calls: int | None = Field(default=None, ge=1, le=200, strict=True)
+    timeout_s: float | None = Field(default=None, gt=0, le=3600, allow_inf_nan=False)
+    max_output_tokens: int | None = Field(default=None, ge=1, strict=True)
+
+
+class ChatGPTPolicy(Model):
+    """Who pays for a run on the chatgpt provider."""
+
     team_credential: str | None = None
     person_credential: Literal["own", "team"] = "own"
     tainted_credential: Literal["none", "team", "api_key"] = "none"
-    chatgpt_allowed_accounts: list[str] = Field(default_factory=list)
-    api_key_fallback: bool = False
+    allowed_accounts: list[str] = Field(default_factory=list)
+    fallback: Literal["none"] | ProviderName = "none"
 
-    def effort_for(self, profile):
-        default = "medium" if profile in {"person_dm", "team_channel", "agent_request"} else "low"
-        return self.effort.get(profile, default)
 
-    def check_runtime(self, override=None):
-        if self.auth == "chatgpt" and (override or self.runtime) != "openai_responses":
-            raise ValueError("ChatGPT needs openai_responses")
+class TranscriptionConfig(Model):
+    provider: ProviderName = "openai"
+    model: str = Field(default="gpt-4o-mini-transcribe", min_length=1, max_length=128)
+
+
+# Each removed key stops the load and names its new place.
+OLD_BRAIN_KEYS = {
+    "runtime": "brain.routes.default.provider",
+    "model": "brain.routes.default.model",
+    "max_turns": "brain.routes.default.max_tool_calls",
+    "timeout_s": "brain.routes.default.timeout_s",
+    "effort": "brain.routes.<run kind>.effort",
+    "deep": "brain.routes.deep",
+    "auth": "brain.routes.<run kind>.provider (chatgpt, or a provider with an API key)",
+    "team_credential": "brain.chatgpt.team_credential",
+    "person_credential": "brain.chatgpt.person_credential",
+    "tainted_credential": "brain.chatgpt.tainted_credential",
+    "chatgpt_allowed_accounts": "brain.chatgpt.allowed_accounts",
+    "api_key_fallback": "brain.chatgpt.fallback (none, or the API-key provider, e.g. openai)",
+}
+
+
+class BrainConfig(Model):
+    routes: dict[Literal["default"] | RunKind, RouteSettings]
+    chatgpt: ChatGPTPolicy = Field(default_factory=ChatGPTPolicy)
+    transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_old_keys(cls, data):
+        if isinstance(data, dict):
+            for key in data:
+                if key in OLD_BRAIN_KEYS:
+                    raise ValueError(f"brain.{key} was removed. Use {OLD_BRAIN_KEYS[key]}")
+        return data
+
+    @model_validator(mode="after")
+    def complete_default(self):
+        default = self.routes.get("default")
+        if default is None or default.provider is None or default.model is None:
+            raise ValueError("brain.routes.default needs a provider and a model")
+        return self
 
 
 class RunLimits(Model):
@@ -393,7 +425,7 @@ class TeamConfig(Model):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     digest: DigestConfig
     stale_minutes: StaleLimits = Field(default_factory=StaleLimits)
-    brain: BrainConfig = Field(default_factory=BrainConfig)
+    brain: BrainConfig
     deep: DeepConfig = Field(default_factory=DeepConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     scout: ScoutConfig = Field(default_factory=ScoutConfig)
@@ -406,6 +438,16 @@ class TeamConfig(Model):
     email: EmailConfig = Field(default_factory=EmailConfig)
 
     _timezone = field_validator("timezone")(Person.valid_timezone.__func__)
+
+    @field_validator("voice", mode="before")
+    @classmethod
+    def no_old_voice_keys(cls, value):
+        if isinstance(value, dict) and "model" in value:
+            raise ValueError("voice.model was removed. Use brain.transcription.model")
+        if isinstance(value, dict) and value.get("transcription") == "openai":
+            raise ValueError("voice.transcription: openai was removed. Use brain, "
+                             "with brain.transcription")
+        return value
 
 
 class RuleFile(Model):
@@ -640,10 +682,6 @@ def load_workspace(root: Path | str) -> Workspace:
     config = _model(
         TeamConfig, _yaml(root / "illo.yaml", _read(root / "illo.yaml")), root / "illo.yaml"
     )
-    if config.voice.transcription == "openai" and not os.environ.get("OPENAI_API_KEY", "").strip():
-        raise WorkspaceError(
-            f"{root / 'illo.yaml'}: voice.transcription: openai needs OPENAI_API_KEY"
-        )
     for field in ("key", "slack_id", "github_login", "emails"):
         seen = set()
         for person in people:
@@ -655,22 +693,12 @@ def load_workspace(root: Path | str) -> Workspace:
     keys = {p.key for p in people if p.active}
     if config.default_owner not in keys:
         raise WorkspaceError(f"{root / 'illo.yaml'}: default_owner: unknown or inactive person")
-    if config.brain.person_credential == "team" and config.brain.auth != "chatgpt":
-        raise WorkspaceError(
-            f"{root / 'illo.yaml'}: brain.person_credential: team needs auth: chatgpt"
-        )
-    if config.brain.auth == "chatgpt" and config.brain.team_credential is None:
-        raise WorkspaceError(
-            f"{root / 'illo.yaml'}: brain.team_credential: ChatGPT needs an explicit person"
-        )
-    if config.brain.team_credential is not None and config.brain.team_credential not in keys:
-        raise WorkspaceError(
-            f"{root / 'illo.yaml'}: brain.team_credential: unknown or inactive person"
-        )
+    from illo.brain.routes import check_policy
+
     try:
-        config.brain.check_runtime()
+        check_policy(config.brain, keys)
     except ValueError as error:
-        raise WorkspaceError(f"{root / 'illo.yaml'}: brain.auth: {error}") from None
+        raise WorkspaceError(f"{root / 'illo.yaml'}: {error}") from None
     from illo.connectors import github_tasks  # Register the installed connector before validation.
     from illo.tasks.lists import load_task_files
 

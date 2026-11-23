@@ -33,11 +33,23 @@ stale_minutes:
   manual: 1440
   email: 1440
 brain:
-  # person_credential: team  # Needs auth: chatgpt and an active team_credential.
-  runtime: claude
-  model: default
-  max_turns: 12
-  timeout_s: 120
+  # Each run kind has a route: person_dm, team_channel, tainted, routine, digest,
+  # agent_request, deep. A route takes each field that it omits from default.
+  # The brain service owns the providers and their keys. See deploy/brain.env.example.
+  routes:
+    default: {provider: chatgpt, model: gpt-6.2-sol, effort: low, max_tool_calls: 12, timeout_s: 120}
+    person_dm: {effort: medium}
+    team_channel: {effort: medium}
+    agent_request: {effort: medium}
+    deep: {effort: high, max_tool_calls: 80, timeout_s: 1200, max_output_tokens: 16000}
+  # Who pays for a run on the chatgpt provider.
+  chatgpt:
+    team_credential: ada  # The ChatGPT grant of this person pays for team runs.
+    # person_credential: own  # own: each person pays for their own requests. team: ada pays for all.
+    # tainted_credential: none  # none, team, or api_key (needs fallback).
+    # allowed_accounts: []  # Other ChatGPT account emails that a person can connect.
+    # fallback: none  # Or an API-key provider, for example openai.
+  # transcription: {provider: openai, model: gpt-4o-mini-transcribe}  # For voice.transcription: brain.
 run_limits:
   max_concurrent: 4
   max_message_chars: 20000

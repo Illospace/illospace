@@ -7,6 +7,8 @@ from brain.wire import responses
 from illo.brain.final_text import broken, guard
 from illo.db import one
 from illo.ledger import audit
+from illo.workspace import RouteSettings
+from tests.brain_service.conftest import openai
 
 
 @pytest.mark.parametrize("text", ["", "?!", "<@U123>", "Yes—<#| >}", "Yes <|bad>", "Yes < >"])
@@ -33,29 +35,23 @@ async def test_guard_uses_only_run_audit(conn, run):
     assert str(run["id"]) in row["detail"] and "PRIVATE" not in row["detail"]
 
 
-async def test_effort_reaches_person_dm_payload(app, replay, fake_brain, monkeypatch):
+async def test_effort_reaches_person_dm_payload(app, replay, fake_brain):
     ctx = app.state.ctx
     ctx.workspace = ctx.workspace.model_copy(deep=True)
-    ctx.workspace.config.brain.effort["person_dm"] = "high"
+    ctx.workspace.config.brain.routes["person_dm"] = RouteSettings(effort="high")
     await replay(text="Read my open tasks.")
     request = fake_brain.requests[-1]
     assert request.effort == "high"
     request = ServiceRequest.model_validate(request.wire())
 
     def effort(request):
-        payload = responses.Responses(request, []).payload(request, tools_disabled=False)
-        return payload["reasoning"]["effort"]
+        payload = responses.Responses(request, [], openai()).payload(request, tools_disabled=False)
+        return payload.get("reasoning", {}).get("effort")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "fake")
-    monkeypatch.delenv("ILLO_BRAIN_EFFORT", raising=False)
     responses._without_effort.clear()
     assert effort(request) == "high"
-    # The run's own effort wins. The environment is only the default for a request with no effort.
-    monkeypatch.setenv("ILLO_BRAIN_EFFORT", "low")
-    assert effort(request) == "high"
-    bare = request.model_copy()
-    bare.model_fields_set.discard("effort")
-    assert effort(bare) == "low"
+    # A route with no effort sends none. No environment variable gives a default.
+    assert effort(request.model_copy(update={"effort": None})) is None
 
 
 async def test_final_answer_guard_runs_before_delivery(app, replay, fake_brain):

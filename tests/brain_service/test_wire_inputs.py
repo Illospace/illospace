@@ -2,7 +2,8 @@
 
 These tests were recorded on the code before the loop refactor (#971). A change of an
 accepted payload, a failure place or a wire value is a behavior change. It belongs in a
-later slice, with a change of these tests.
+later slice, with a change of these tests. S2 (#972) replaced the runtime with a provider:
+an unknown provider name is a `config` event of the provider table, not a 422.
 """
 
 import httpx
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 
 from brain.server import create_app
 from illo.brain.client import BrainClient, ProviderAuth, RunRequest
+from tests.brain_service.conftest import CHATGPT, openai
 
 SECRET = "fake-wire-secret"
 FIELDS = {
@@ -19,9 +21,9 @@ FIELDS = {
     "user_message": "Find the release",
     "mcp_url": "http://illo.example/brain/mcp",
     "mcp_token": "fake-run-token",
-    "runtime": "openai_responses",
+    "provider": "openai",
     "model": "fake-model",
-    "max_turns": 3,
+    "max_tool_calls": 3,
     "timeout_s": 5,
 }
 
@@ -35,11 +37,11 @@ def recording_service():
     """A service whose runner records each request that reaches it."""
     started = []
 
-    async def runner(body):
+    async def runner(body, *_):
         started.append(body)
         yield {"type": "final", "text": "Done", "usage": {}}
 
-    return create_app(runner=runner), started
+    return create_app(runner=runner, table={"openai": openai(), "chatgpt": CHATGPT}), started
 
 
 async def post(app, payload):
@@ -81,7 +83,7 @@ async def test_service_gives_an_empty_chatgpt_token_to_the_runner():
     """The provider, not the service, rejects an empty token. That gives an `auth` event."""
     app, started = recording_service()
     auth = {"kind": "chatgpt", "access_token": "", "account_id": ""}
-    response = await post(app, {**FIELDS, "provider_auth": auth})
+    response = await post(app, {**FIELDS, "provider": "chatgpt", "provider_auth": auth})
     assert response.status_code == 200
     assert len(started) == 1
     assert started[0].provider_auth.kind == "chatgpt"
@@ -98,18 +100,21 @@ def test_client_sends_a_string_run_id_as_an_integer():
     assert wire["run_id"] == 42 and type(wire["run_id"]) is int
 
 
-@pytest.mark.parametrize("name", ["runtime", "model", "max_turns", "timeout_s"])
+@pytest.mark.parametrize("name", ["provider", "model", "max_tool_calls", "timeout_s"])
 def test_client_needs_each_run_setting(name):
     fields = {key: value for key, value in FIELDS.items() if key != name}
     with pytest.raises(ValidationError):
         RunRequest(**fields)
 
 
-async def test_unknown_runtime_fails_at_the_service_not_in_the_client():
-    request = RunRequest(**{**FIELDS, "runtime": "acme"})
-    assert request.wire()["runtime"] == "acme"
+async def test_unknown_provider_fails_at_the_service_not_in_the_client():
+    request = RunRequest(**{**FIELDS, "provider": "acme"})
+    assert request.wire()["provider"] == "acme"
     app, started = recording_service()
     client = BrainClient("http://brain", SECRET, transport=httpx.ASGITransport(app=app))
+    events = [item async for item in client.run(request)]
+    assert events[-1].type == "error" and events[-1].category == "config"
+    request = RunRequest(**{**FIELDS, "provider": "Not A Name"})
     with pytest.raises(httpx.HTTPStatusError) as error:
         _ = [item async for item in client.run(request)]
     assert error.value.response.status_code == 422

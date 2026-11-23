@@ -46,7 +46,7 @@ def call(memory_ctx):
                     "person:" + person if profile in {"person_dm", "agent_request"} else "team",
                     person_id=acting["id"] if profile in {"person_dm", "agent_request"} else None,
                     profile="tainted" if profile == "outsider" else profile, tainted=tainted,
-                    runtime="fake", model="fake", event_id=event["id"])
+                    provider="fake", tool_limit=12, model="fake", event_id=event["id"])
             if personal:
                 await conn.execute("UPDATE runs SET personal_read=true WHERE id=%s", (run["id"],))
                 run["personal_read"] = True

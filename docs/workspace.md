@@ -41,20 +41,21 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `stale_minutes.github` | Default: 1440. |
 | `stale_minutes.manual` | Default: 1440. |
 | `stale_minutes.email` | Default: 1440. |
-| `brain.runtime` | Runtime sent to the brain service. Default: `claude`. |
-| `brain.model` | Model sent to the brain service. Default: `default`. |
-| `brain.auth` | `api_key` (default) or `chatgpt`. ChatGPT needs `openai_responses`. |
-| `brain.team_credential` | Active person key for team runs and person runs in `team` mode. Required with `auth: chatgpt`. |
-| `brain.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs and needs `auth: chatgpt`. |
-| `brain.tainted_credential` | `none` (default), `team`, or `api_key`. Select the model credential for tainted and outsider runs. |
-| `brain.api_key_fallback` | Allow the brain's API key when the selected grant is missing, broken, or at its limit. Default: `false`. |
-| `brain.effort` | Optional profile-to-effort map: `low`, `medium`, `high`, or `xhigh`. Person DM, team channel, and agent request default to `medium`; others default to `low`. This setting wins over `ILLO_BRAIN_EFFORT`. |
-| `brain.max_turns` | Tool-call limit for each run. Default: 12. Range: 1–50. |
-| `brain.deep.model` | Deep model. Default: `brain.model`. |
-| `brain.deep.effort` | Deep effort. Default: `high`; also accepts `low`, `medium`, and `xhigh`. |
-| `brain.deep.max_turns` | Deep tool limit. Default: 80. Range: 1–200. |
-| `brain.deep.timeout_s` | Deep timeout. Default: 1200 seconds. Maximum: 3600. |
-| `brain.deep.max_output_tokens` | API-key Responses output cap. Default: 16000. |
+| `brain.routes.default` | The route of each run kind that has no route. Needs `provider` and `model`. |
+| `brain.routes.<run kind>` | Fields that replace the `default` fields for one run kind. Run kinds: `person_dm`, `team_channel`, `tainted`, `routine`, `digest`, `agent_request`, `deep`. |
+| `<route>.provider` | A provider of the brain service, for example `chatgpt`, `openai`, `anthropic`, or a custom provider. |
+| `<route>.model` | The model name that the provider accepts. |
+| `<route>.effort` | Optional. One of the provider's efforts, for example `low`, `medium`, `high`, `xhigh`. No effort: the brain sends none. |
+| `<route>.max_tool_calls` | Tool-call limit for each run. Default in `default`: 12. Range: 1–200. |
+| `<route>.timeout_s` | Run deadline in seconds. Default in `default`: 300. Maximum: 3600, and the brain's `ILLO_BRAIN_MAX_TIMEOUT_S`. |
+| `<route>.max_output_tokens` | Optional output cap for an API-key Responses provider. The ChatGPT backend ignores it. |
+| `brain.chatgpt.team_credential` | Active person key for team runs and person runs in `team` mode. Required when a route uses `chatgpt`. |
+| `brain.chatgpt.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs. |
+| `brain.chatgpt.tainted_credential` | `none` (default), `team`, or `api_key`. Select the payer for tainted and outsider runs. `api_key` needs `fallback`. |
+| `brain.chatgpt.allowed_accounts` | Other ChatGPT account emails that a person can connect. Default: none. |
+| `brain.chatgpt.fallback` | `none` (default) or an API-key provider on the Responses wire, for example `openai`. It pays when the grant is missing, broken, or at its limit. It must accept each effort of the `chatgpt` routes, images, and web search. |
+| `brain.transcription.provider` | The provider for voice clips with `voice.transcription: brain`. It needs the `transcription` capability. Default: `openai`. |
+| `brain.transcription.model` | Default: `gpt-4o-mini-transcribe`. |
 | `deep.enabled` | Allow deep work. Default: `true`. A sandbox is optional. |
 | `deep.max_per_person_per_day` | Daily limit for each person, in UTC. Default: 20. |
 | `deep.max_queue` | Maximum queued deep runs. Default: 10. |
@@ -66,7 +67,6 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `scout.max_findings` | Findings for each scout run. Default: 2. Range: 1–5. |
 | `scout.people` | Person keys for personal scouts. Default: `[]`. Each delivers only to that person's DM. |
 | `digest.deep` | Use deep work for both briefs. Default: `true`. `false` keeps the snapshot-only path. |
-| `brain.timeout_s` | Run timeout in seconds. Default: 300. Maximum: 3600. |
 | `workspace.git_push` | Commit and push confirmed notes. Push connector commits too. Default: false. |
 | `memory.list_changes` | `owners` (default) or `everyone`. Controls who creates lists and changes holders or Done rules. |
 | `pages.enabled` | Off by default. Enable signed-in task pages and page tools. |
@@ -87,22 +87,51 @@ A listed channel uses its own settings and rule files.
 A message from a person who is not in `people.yaml` starts no run.
 No Slack token is required to load these files or start the HTTP app.
 
-To use subscriptions, set these keys in `illo.yaml`:
+## Routes
+
+Each run has a run kind. The run kind selects a route in `brain.routes`.
+A route names the provider, the model, the effort, and the limits.
+A route takes each field that it omits from `default`.
+The brain service owns the providers and their keys. `illo.yaml` holds no key and no address.
 
 ```yaml
 brain:
-  runtime: openai_responses
-  model: gpt-6.1-sol
-  auth: chatgpt
-  team_credential: ada
-  person_credential: own
-  tainted_credential: none
-  api_key_fallback: false
+  routes:
+    default: {provider: chatgpt, model: gpt-6.2-sol, effort: low, max_tool_calls: 12, timeout_s: 120}
+    person_dm: {provider: openai, model: gpt-6.2-terra, effort: medium}
+    deep: {effort: high, max_tool_calls: 80, timeout_s: 1200, max_output_tokens: 16000}
+  chatgpt:
+    team_credential: ada
+    person_credential: own
+    tainted_credential: none
+    allowed_accounts: []
+    fallback: none
 ```
 
+The run kind comes from the verified event channel and the authority:
+
+| Run | Run kind |
+| --- | --- |
+| A Slack DM or an email from a team member | `person_dm` |
+| A mention in a team channel | `team_channel` |
+| A tainted message, an outside email, or a signal | `tainted` |
+| A team routine or a personal routine | `routine` |
+| A personal brief or the team brief | `digest` |
+| An agent request through the MCP endpoint | `agent_request` |
+| Deep work | `deep` |
+
+A personal routine and a personal brief have the person's authority, but they use the `routine` and `digest` routes.
+The app checks the routes against the brain's `GET /providers` at start and at each reload.
+Each provider must exist, and each effort must be one of its efforts.
+A failure stops the start. While the brain is not reachable, the app waits and tries again.
+A failed reload keeps the last valid workspace and logs the reason.
+An old key of the earlier `brain` section stops the load. The message names the new key.
+
+## ChatGPT subscriptions
+
+To use subscriptions, give a route the `chatgpt` provider and set `brain.chatgpt` as in the example above.
 Use an active person key from your own `people.yaml` for `team_credential`.
-If `ILLO_BRAIN_RUNTIME` is set, set it to `openai_responses` too. Environment overrides still take priority.
-The app refuses startup or reload if the effective runtime cannot use ChatGPT.
+`brain.chatgpt` needs a route on the `chatgpt` provider. The load refuses the section without one.
 With the default `person_credential: own`, each person sends `connect my ChatGPT` in their own Slack DM with Illo.
 The DM gives a device code. ChatGPT sign-in needs no public Illo address.
 Send `connect my ChatGPT with a link` to use the OpenAI link and paste the final local address.
@@ -116,28 +145,33 @@ Other members receive a reply that names the sign-in and says they do not need t
 `ChatGPT status` names the shared sign-in and shows its state to any member.
 If that person sends `disconnect my ChatGPT`, Illo warns that all members lose the model sign-in.
 Other members can still disconnect their own unused grant. This does not disconnect the team grant.
-Tainted runs, signals, and outsiders get no model run by default, even with API fallback.
+Tainted runs, signals, and outsiders get no model run by default, even with a fallback.
 Set `tainted_credential: team` to share the team credential and its limit.
-Set `tainted_credential: api_key` to use the API key for those runs.
+Set `tainted_credential: api_key` to use the `fallback` provider for those runs.
+To pay for all tainted runs with an API key instead, give the `tainted` route an API-key provider.
 The default owner gets at most one notice per hour when Illo skips tainted runs.
 A missing personal grant never selects another person's grant in the default `own` mode.
 In `team` mode, a missing or broken team grant gives a reply that names the person who must repair it.
 The main app refreshes a token when it expires within five minutes.
-No grant means no run, unless `api_key_fallback` is `true`.
+No grant means no run, unless `fallback` names a provider.
 A team run with no grant records a sensor error. The default owner gets at most one notice per hour.
 This notice also covers person runs in `team` mode. It goes to `default_owner`, even if the payer is another person.
 The notice is not sent when the API-key fallback supplies a credential.
-For a subscription limit, an allowed API retry resumes the current turn with its existing tool results.
+For a subscription limit, an allowed fallback resumes the current turn with its existing tool results.
 It does not repeat completed tool calls. The final answer says that the API key was used.
-The API key must exist in the brain's environment for this retry to work.
+The fallback provider must exist in the brain, with its key. The app checks this at start.
 Check that the provider's terms allow this use. An API key is the alternative.
 
 ## Check the ChatGPT connection
 
 `illo chatgpt status` prints the person credential mode and team person key on one line, then the grant states.
-For `openai_responses`, `runs.usage` records `auth_kind`, also when a run fails.
+Each run records its route, provider, model, payer, and tool limit in `runs`.
+`runs.payer` is `api_key` or `chatgpt`. `runs.payer_person_id` is the person whose grant paid.
+For a provider on the Responses wire, `runs.usage` also records `auth_kind`, also when a run fails.
 When the run uses a ChatGPT grant, it also records the payer's key as `credential_person`.
-An API-key fallback records `auth_kind: api_key` and has no `credential_person`.
+A fallback records `auth_kind: api_key`, the fallback provider, and no `credential_person`.
+The brain sends a `payer` event when it changes to the fallback during a run. The app records the
+new payer at once, so a later failure or timeout keeps it.
 
 After sign-in, run this command in the main app environment:
 
@@ -146,7 +180,9 @@ illo chatgpt smoke --person ada
 ```
 
 `--person` accepts an active person key or database ID.
-The command resolves that person's grant with the normal credential rules.
+`--route` selects the route of a run kind: `person_dm` (default), `routine`, or `digest`.
+The check uses the person's own authority, the authority of these run kinds for one person.
+The command resolves the payer with the normal rules. The route's provider must use the Responses wire.
 The main app refreshes it when needed. It sends `provider_auth` to the brain for this check.
 The brain offers only `smoke_ping`, a test function with no team data or side effects.
 The check makes one tool call, then sends its result back to the model.
@@ -154,7 +190,7 @@ It uses the configured model and can spend subscription usage or API credits.
 It prints the auth kind, model, tool result, token usage, and elapsed time.
 It never prints a token, account ID, prompt, or model answer.
 A failure prints the HTTP status when available and a short reason. It exits with status 1.
-With `brain.api_key_fallback: false`, a missing grant or subscription limit fails without an API retry.
+With `brain.chatgpt.fallback: none`, a missing grant or subscription limit fails without an API retry.
 The brain service must run the same version as the main app.
 
 Example output with a fake provider:
@@ -177,8 +213,7 @@ To let Illo transcribe a clip when Slack has no transcript, add this block to `i
 
 ```yaml
 voice:
-  transcription: openai
-  model: gpt-4o-mini-transcribe
+  transcription: brain
   max_duration_s: 120
   max_bytes: 10485760
   timeout_s: 30
@@ -187,18 +222,17 @@ voice:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `voice.transcription` | `slack` | `slack` keeps audio in Slack. `openai` allows the fallback. |
-| `voice.model` | `gpt-4o-mini-transcribe` | Model ID for the OpenAI transcription endpoint. |
+| `voice.transcription` | `slack` | `slack` keeps audio in Slack. `brain` allows the fallback through the brain service. |
 | `voice.max_duration_s` | `120` | Maximum duration in seconds. Must be positive; maximum 3600. |
 | `voice.max_bytes` | `10485760` | Maximum audio size in bytes (10 MiB). Maximum 25 MiB. |
 | `voice.timeout_s` | `30` | Total deadline for each fallback, including download and transcription. Maximum 300 seconds. |
 | `voice.max_per_person_per_hour` | `20` | Maximum fallback attempts for each person in one hour. Maximum 1000. |
 
-Set `OPENAI_API_KEY` in the main app's boot environment, outside the workspace.
-Startup and reload reject `openai` mode without the key. A failed reload keeps the last valid workspace.
-`OPENAI_BASE_URL` is optional. A blank value uses `https://api.openai.com/v1`.
-A custom base URL must use HTTPS. It selects the service that receives the audio and API key.
-Voice uses the API key even when the brain uses a ChatGPT subscription.
+The brain sends the clip to `brain.transcription.provider` with `brain.transcription.model`.
+Default: the `openai` provider and `gpt-4o-mini-transcribe`. The provider needs an API key in the brain.
+Startup and reload reject `brain` mode when the brain has no such provider. A failed reload keeps the last valid workspace.
+The provider's base URL selects the service that receives the audio. The main app holds no provider key.
+Voice uses an API key even when the brain uses a ChatGPT subscription.
 It does not use or change the person's ChatGPT grant.
 
 Slack's transcript always wins. The fallback accepts only audio from a verified, active team member.
@@ -207,7 +241,7 @@ Bot, webhook, outside workspace, and tainted events cannot use the fallback.
 Illo also checks thread authors before it sends audio out.
 Illo gets the download URL from `files.info` for that file ID.
 It accepts only `https://files.slack.com/` and refuses redirects.
-It checks the byte limit during download. It deletes its temporary audio file after each attempt.
+It checks the byte limit during download. It keeps the audio in memory and writes no file.
 The per-person limit survives restarts. Failed download or API attempts count toward the limit.
 The event records `clip_transcribed_by: openai`, `clip_transcription_count`, and total `clip_duration_ms` without audio content.
 An audit row records each admitted attempt. It contains no transcript or credentials.
@@ -464,9 +498,9 @@ Illo checks the file's first bytes. A failed read does not stop the answer.
 Illo names each image's author and place. It reports files that it cannot show, with the reason.
 Set `slack.images: off` to stop all image downloads.
 
-The `openai_responses` runtime sends images with API keys and ChatGPT sign-in.
-If the model provider refuses the images, the runtime sends the request again with text only. Illo then says that it could not see the images.
-Other runtimes receive text that says the images could not be shown.
+A provider with the `images` capability receives the images, for example `chatgpt` and `openai`.
+If the model provider refuses the images, the brain sends the request again with text only. Illo then says that it could not see the images.
+For a provider without that capability, Illo downloads no image and the run gets a note that it skipped them.
 Image bytes and private Slack URLs stay in memory for the run.
 The model provider receives the images. Illo does not store the bytes, URLs, or bot token in its ledger or logs.
 The event records each shown file's ID, type, size, and person key. It also records skip counts by reason.

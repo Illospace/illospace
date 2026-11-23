@@ -146,6 +146,7 @@ def test_every_profile_fits_real_brain_request(example, name):
         user_message="Hello",
         mcp_url="http://test/brain/mcp",
         mcp_token="invented",
+        provider="fake",
         model="test",
     )
     assert request.system_prompt == prompt

@@ -22,7 +22,7 @@ async def test_rule_03_compact_private_read_marks_run(app, name):
             await asks.create(conn, owner_person_id=owner["id"], lane_id=lane["id"],
                               question=owner["key"]+" private ask")
         run = await runs.create(conn, principal="person:ada", person_id=ada["id"],
-                                profile="person_dm", runtime="fake", model="fake")
+                                profile="person_dm", provider="fake", tool_limit=12, model="fake")
         result = await ctx.registry.call(ToolContext(conn,run,ctx),name,{})
         assert result["decision"] == "allow"
         assert "ada private" in str(result["result"]) and "ben private" not in str(result["result"])
@@ -47,7 +47,7 @@ async def test_rule_03_private_counts_beyond_page_mark_run(app):
         await asks.create(conn,owner_person_id=ada["id"],lane_id=lane["id"],question="Hidden private ask")
         for name in ("lanes_search", "asks_list"):
             run = await runs.create(conn,principal="person:ada",person_id=ada["id"],
-                                    profile="person_dm",runtime="fake",model="fake")
+                                    profile="person_dm",provider="fake", tool_limit=12,model="fake")
             result = await ctx.registry.call(ToolContext(conn,run,ctx),name,{})
             assert "Hidden" not in result["result"]
             assert (await one(conn,"SELECT personal_read FROM runs WHERE id=%s",(run["id"],)))["personal_read"]
@@ -64,7 +64,7 @@ async def test_rule_03_attention_person_routine_and_team_visibility(app):
             ("team","team_channel",None,"deny"), ("person:ada","agent_request",ada["id"],"deny"),
             ("team","routine",None,"deny"), ("person:ada","routine",ada["id"],"deny")):
             run = await runs.create(conn,principal=principal,person_id=person_id,profile=profile,
-                                    runtime="fake",model="fake")
+                                    provider="fake", tool_limit=12,model="fake")
             result = await ctx.registry.call(ToolContext(conn,run,ctx),"digest_snapshot",{})
             assert result["decision"] == expected
             assert "Private work" not in str(result)
@@ -82,7 +82,7 @@ async def test_rule_03_hidden_rows_do_not_change_compact_text_or_counts(app, pri
         ben = await people.get(conn, "ben")
         run = await runs.create(conn, principal=principal, profile=profile,
                                 person_id=ada["id"] if principal == "person:ada" else None,
-                                runtime="fake", model="fake")
+                                provider="fake", tool_limit=12, model="fake")
         before = await ctx.registry.call(ToolContext(conn, run, ctx), name, {})
         hidden = await lanes.upsert(conn, source="t3", external_id="hidden-owner",
             title="Hidden task", state="blocked", summary="Hidden summary",

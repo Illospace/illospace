@@ -211,7 +211,7 @@ async def aws_disconnect(ctx, conn, person):
         return f"{owner['name'] if owner else 'The owner'} must disconnect AWS."
     find_config(ctx, "aws")
     run = await runs.create(conn, principal="person:" + person["key"], person_id=person["id"],
-                            profile="person_dm", runtime="direct", model="none")
+                            profile="person_dm", provider="direct", model="none")
     from illo.tools.registry import ToolContext
 
     await propose(ToolContext(conn, run, ctx), {"key": "aws"}, "connect_remove")
@@ -606,7 +606,7 @@ async def data_policy_claim(ctx, event, authority):
             person = await active_person(conn, authority.person_id, owner=True)
             run = await runs.create(
                 conn, principal="person:" + person["key"], person_id=person["id"],
-                profile="person_dm", runtime="direct", model="none",
+                profile="person_dm", provider="direct", model="none",
             )
             from illo.tools.registry import ToolContext
 

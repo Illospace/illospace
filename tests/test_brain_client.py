@@ -30,9 +30,9 @@ async def test_http_brain_contract_uses_json_lines(monkeypatch):
         user_message="Status?",
         mcp_url="http://illo/brain/mcp",
         mcp_token="test-run-token",
-        runtime="fake",
+        provider="fake",
         model="fake",
-        max_turns=3,
+        max_tool_calls=3,
         timeout_s=5,
     )
     events = [event async for event in BrainClient("http://brain").run(request)]

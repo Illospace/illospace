@@ -10,4 +10,24 @@ def task_workspace(root):
     (root / "lists/tasks.md").unlink(missing_ok=True)
     config = root / "illo.yaml"
     config.write_text(config.read_text().replace("github:\n", "github:\n  task_list: bugs\n"))
+    return fake_provider(root)
+
+
+def fake_provider(root):
+    """Route every run kind to the fake provider. ChatGPT tests set their own route."""
+    import yaml
+
+    config = root / "illo.yaml"
+    data = yaml.safe_load(config.read_text())
+    data["brain"]["routes"]["default"].update(provider="fake", model="fake")
+    del data["brain"]["chatgpt"]
+    config.write_text(yaml.safe_dump(data, sort_keys=False))
     return root
+
+
+def provider_catalog() -> dict[str, dict]:
+    """The brain's own description of its built-in providers, for a fake brain."""
+    from brain.providers import BUILT_IN, description
+    from illo.brain.client import provider_table
+
+    return provider_table(description(BUILT_IN))

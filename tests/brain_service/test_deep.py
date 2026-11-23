@@ -11,6 +11,7 @@ from brain import loop
 from brain.models import ChatGPTAuth, event
 from brain.server import create_app
 from brain.wire.responses import WEB_UNAVAILABLE, Responses, build_request
+from tests.brain_service.conftest import CHATGPT, openai
 from tests.brain_service.test_service import lines, post
 
 SEARCH = {
@@ -68,15 +69,16 @@ class Session:
 
 @pytest.mark.parametrize("auth", ["api_key", "chatgpt"])
 async def test_search_body_and_stateless_replay(run_request, monkeypatch, auth):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     run_request.web_search = True
     run_request.effort = "xhigh"
     run_request.max_output_tokens = 16000
+    provider = openai(api_key="fake-key")
     if auth == "chatgpt":
-        run_request.runtime = "openai_responses"
+        run_request.provider, provider = "chatgpt", CHATGPT
         run_request.provider_auth = ChatGPTAuth(
             kind="chatgpt", access_token="token", account_id="account"
         )
+    fallback = None
     bodies = []
 
     def respond(request):
@@ -102,7 +104,7 @@ async def test_search_body_and_stateless_replay(run_request, monkeypatch, auth):
         return stream([final()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        events = [item async for item in loop.conversation(Responses, run_request, Session(), TOOLS, client)]
+        events = [item async for item in loop.conversation(Responses, run_request, provider, Session(), TOOLS, client, fallback)]
     assert SEARCH in bodies[1]["input"]
     assert final("Source") in bodies[1]["input"]
     assert len([item for item in events if item["type"] == "web_search"]) == 1
@@ -112,13 +114,14 @@ async def test_search_body_and_stateless_replay(run_request, monkeypatch, auth):
 
 @pytest.mark.parametrize("auth", ["api_key", "chatgpt"])
 async def test_provider_rejection_retries_once_without_search(run_request, monkeypatch, auth):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
     run_request.web_search = True
+    provider = openai(api_key="fake-key")
     if auth == "chatgpt":
-        run_request.runtime = "openai_responses"
+        run_request.provider, provider = "chatgpt", CHATGPT
         run_request.provider_auth = ChatGPTAuth(
             kind="chatgpt", access_token="token", account_id="account"
         )
+    fallback = None
     bodies = []
 
     def respond(request):
@@ -131,36 +134,40 @@ async def test_provider_rejection_retries_once_without_search(run_request, monke
         return stream([final()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        events = [item async for item in loop.conversation(Responses, run_request, Session(), TOOLS, client)]
+        events = [item async for item in loop.conversation(Responses, run_request, provider, Session(), TOOLS, client, fallback)]
     assert len(bodies) == 2
     assert {"type": "web_search"} not in bodies[1]["tools"]
     assert bodies[1]["input"][0]["content"].endswith(WEB_UNAVAILABLE)
     assert not run_request.web_search and events[-1]["type"] == "final"
 
 
-async def test_deep_timeout_uses_its_own_cap(run_request, monkeypatch):
+async def test_one_cap_bounds_each_route_timeout(run_request, monkeypatch):
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "service-test-secret")
-    monkeypatch.setenv("ILLO_BRAIN_TIMEOUT_S", "0.01")
-    monkeypatch.setenv("ILLO_BRAIN_DEEP_TIMEOUT_S", "0.2")
 
-    async def runner(request):
+    async def runner(request, *_):
         await asyncio.sleep(0.03)
         yield event("final", text="Ready")
 
+    monkeypatch.setenv("ILLO_BRAIN_MAX_TIMEOUT_S", "0.01")
     app = create_app(runner=runner)
+    run_request.timeout_s = 1200
     assert lines(await post(app, run_request))[-1]["category"] == "timeout"
-    assert lines(await post(app, run_request, deep=True, effort="xhigh"))[-1]["type"] == "final"
-    monkeypatch.setenv("ILLO_BRAIN_DEEP_TIMEOUT_S", "0.01")
-    assert lines(await post(app, run_request, deep=True))[-1]["category"] == "timeout"
+    monkeypatch.setenv("ILLO_BRAIN_MAX_TIMEOUT_S", "1800")
+    app = create_app(runner=runner)
+    assert lines(await post(app, run_request, effort="xhigh"))[-1]["type"] == "final"
+    assert lines(await post(app, run_request, timeout_s=0.01))[-1]["category"] == "timeout"
+    # The deep flag is gone. A deep run is a route with its own limits.
+    assert (await post(app, run_request, deep=True)).status_code == 422
 
 
 async def test_subscription_fallback_keeps_search_ids(run_request, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-api-key")
-    run_request.runtime = "openai_responses"
+    run_request.provider, provider = "chatgpt", CHATGPT
     run_request.provider_auth = ChatGPTAuth(
         kind="chatgpt", access_token="subscription-token", account_id="account"
     )
-    run_request.web_search = run_request.api_key_fallback = True
+    run_request.web_search = True
+    run_request.fallback_provider = "openai"
+    fallback = openai(api_key="fake-api-key")
     bodies = []
 
     def respond(request):
@@ -188,6 +195,6 @@ async def test_subscription_fallback_keeps_search_ids(run_request, monkeypatch):
         return stream([final()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        events = [item async for item in loop.conversation(Responses, run_request, Session(), TOOLS, client)]
+        events = [item async for item in loop.conversation(Responses, run_request, provider, Session(), TOOLS, client, fallback)]
     assert len(bodies) == 3
-    assert events[-1]["usage"]["auth_kind"] == "api_key"
+    assert {"type": "payer", "provider": "openai", "auth_kind": "api_key"} in events

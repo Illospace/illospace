@@ -1,32 +1,25 @@
 """The Claude Agent SDK adapter. It loops by itself, because the SDK runs the tools.
 
 The SDK starts the Claude Code CLI with its built-in tools off. It sees only the Illo MCP
-server. The SDK counts its own turns, so the adapter gives it `max_turns + 1`.
+server. The SDK counts its own turns, so the adapter gives it `max_tool_calls + 1`.
 """
 
 import json
-import os
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import asdict, replace
 from pathlib import Path
-from urllib.parse import urlparse
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from brain.errors import RunError
-from brain.loop import run_effort, self_looping
+from brain.loop import self_looping
 from brain.models import BrainEvent, RunRequest, event
+from brain.providers import Provider
 from brain.tools import SDK_PREFIX, SDK_SERVER, check_sdk_tool
 
 
-def has_auth() -> bool:
-    local = urlparse(os.getenv("ANTHROPIC_BASE_URL", "")).hostname in ("127.0.0.1", "localhost", "::1")
-    host = os.getenv("ILLO_BRAIN_USE_HOST_PROVIDER") == "1" and local
-    return bool(os.getenv("ANTHROPIC_API_KEY") or (host and os.getenv("ANTHROPIC_AUTH_TOKEN")))
-
-
-def options(request: RunRequest, directory: Path) -> ClaudeAgentOptions:
+def options(request: RunRequest, provider: Provider, directory: Path) -> ClaudeAgentOptions:
     work = directory / "work"
     state = directory / "state"
     cache = directory / "cache"
@@ -43,9 +36,9 @@ def options(request: RunRequest, directory: Path) -> ClaudeAgentOptions:
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         "DISABLE_AUTOUPDATER": "1",
+        "ANTHROPIC_API_KEY": provider.api_key,
+        **({"ANTHROPIC_BASE_URL": provider.base_url} if provider.base_url else {}),
     }
-    if not os.getenv("ANTHROPIC_API_KEY") and has_auth():
-        env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
     return ClaudeAgentOptions(
         cwd=str(work),
         system_prompt=request.system_prompt,
@@ -65,9 +58,9 @@ def options(request: RunRequest, directory: Path) -> ClaudeAgentOptions:
         setting_sources=[],
         plugins=[],
         skills=[],
-        max_turns=request.max_turns + 1,
+        max_turns=request.max_tool_calls + 1,
         model=request.model,
-        effort=run_effort(request),
+        effort=request.effort,
         include_partial_messages=True,
         enable_file_checkpointing=False,
         settings=json.dumps({"disableAllHooks": True, "enableAllProjectMcpServers": False,
@@ -143,20 +136,20 @@ async def translate(client: ClaudeSDKClient, transcript=None) -> AsyncIterator[B
             return
 
 
-async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]:
-    if not has_auth():
-        raise RunError("auth", "Set ANTHROPIC_API_KEY for the Claude runtime")
+async def run(request: RunRequest, provider: Provider, directory: Path, *,
+              fallback: Provider | None = None) -> AsyncIterator[BrainEvent]:
     transcript = []
 
     async def steps():
-        async with ClaudeSDKClient(options=options(request, directory)) as client:
+        async with ClaudeSDKClient(options=options(request, provider, directory)) as client:
             await client.query(request.user_message)
             async for item in translate(client, transcript):
                 yield item
 
     async def without_tools(prompt):
         # The SDK cannot remove MCP tools from an active client. Use one client with no tools.
-        final = replace(options(request, directory), mcp_servers={}, allowed_tools=[], max_turns=1)
+        final = replace(options(request, provider, directory), mcp_servers={}, allowed_tools=[],
+                        max_turns=1)
         async with ClaudeSDKClient(options=final) as client:
             await client.query(prompt)
             async for item in translate(client):

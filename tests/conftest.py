@@ -17,7 +17,7 @@ from illo.db import create_pool, migrate
 from illo.gateway import InboundEvent
 from illo.workspace import load_workspace
 from tests.fakes import FakeChannelAdapter, FakeGitHubClient, FakeSlackClient
-from tests.workspaces import task_workspace
+from tests.workspaces import provider_catalog, task_workspace
 
 ROOT = Path(__file__).parents[1]
 
@@ -94,7 +94,7 @@ async def run(conn, ada):
         principal="person:ada",
         person_id=ada["id"],
         profile="person_dm",
-        runtime="fake",
+        provider="fake", tool_limit=12,
         model="fake",
     )
 
@@ -111,7 +111,7 @@ def github_client():
 
 @pytest.fixture
 def fake_brain():
-    return FakeBrain(final_text="The lane is working.")
+    return FakeBrain(final_text="The lane is working.", catalog=provider_catalog())
 
 
 @pytest.fixture
@@ -172,7 +172,7 @@ async def rpc_token(app):
             principal="person:ada",
             person_id=ada["id"],
             profile="person_dm",
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

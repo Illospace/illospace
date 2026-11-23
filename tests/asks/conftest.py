@@ -21,7 +21,7 @@ async def seed(app):
                     principal="person:ada",
                     person_id=ada["id"],
                     profile="person_dm",
-                    runtime="fake",
+                    provider="fake", tool_limit=12,
                     model="fake",
                 )
                 return await drafts.create(

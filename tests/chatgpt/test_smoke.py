@@ -22,7 +22,12 @@ from tests.conftest import ROOT
 
 def test_smoke_parser():
     args = parser().parse_args(["chatgpt", "smoke", "--person", "ada"])
-    assert args.person == "ada" and args.action == "smoke"
+    assert args.person == "ada" and args.action == "smoke" and args.route == "person_dm"
+    # The smoke builds a person's own authority. Other run kinds have another authority, so
+    # the smoke cannot check their payer truthfully.
+    for kind in ("team_channel", "tainted", "agent_request", "deep"):
+        with pytest.raises(SystemExit):
+            parser().parse_args(["chatgpt", "smoke", "--person", "ada", "--route", kind])
 
 
 @pytest.mark.parametrize(
@@ -37,14 +42,16 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
     shutil.copytree(ROOT / "workspace.example", root)
     path = root / "illo.yaml"
     data = yaml.safe_load(path.read_text())
-    data["brain"].update(
-        auth="chatgpt" if mode in {"explicit_api", "team"} else "api_key",
-        runtime="openai_responses",
-        team_credential="ada",
-        model="test-model",
-        api_key_fallback=mode == "fallback",
-        person_credential="team" if mode == "team" else "own",
-    )
+    data["brain"]["routes"] = {
+        "default": {"provider": "chatgpt", "model": "test-model", "effort": "low"},
+        # The explicit API-key check uses a route on an API-key provider.
+        "routine": {"provider": "openai"},
+    }
+    data["brain"]["chatgpt"] = {
+        "team_credential": "ada",
+        "fallback": "openai" if mode == "fallback" else "none",
+        "person_credential": "team" if mode == "team" else "own",
+    }
     path.write_text(yaml.safe_dump(data))
     ctx.config.workspace_dir = root
     async with ctx.pool.connection() as conn:
@@ -52,7 +59,7 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
             **conn.info.get_parameters(), password=conn.info.password
         )
     monkeypatch.setattr(chatgpt_smoke, "ChatGPTClient", lambda: ctx.chatgpt_client)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-api-secret")
+    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-api-secret")
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "fake-brain-secret")
     requests = []
     brain_wires = []
@@ -98,13 +105,13 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
         }
         return httpx.Response(200, text="data: " + json.dumps(chunk) + "\n\n")
 
-    async def runner(request):
+    async def runner(request, selected, fallback):
         assert isinstance(request, ServiceRequest)
         brain_wires.append(request.wire())
         try:
             async for item in loop.run(
-                Responses,
-                request, tmp_path, transport=httpx.MockTransport(respond)
+                Responses, request, selected, tmp_path, fallback=fallback,
+                transport=httpx.MockTransport(respond),
             ):
                 yield item
         except Exception as error:
@@ -117,7 +124,7 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
     monkeypatch.setattr(chatgpt_smoke, "BrainClient", lambda url: client)
     args = ["chatgpt", "smoke", "--person", "ben" if mode == "team" else "ada"]
     if mode == "explicit_api":
-        args += ["--auth", "api_key"]
+        args += ["--route", "routine"]
     result = await execute(parser().parse_args(args), ctx.config)
     output = capsys.readouterr().out
     assert result == (0 if mode in {"success", "fallback", "explicit_api", "team"} else 1)

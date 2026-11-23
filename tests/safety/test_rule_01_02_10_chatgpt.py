@@ -7,20 +7,18 @@ from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
 from illo.brain.client import BrainEvent
-from illo.brain.run_manager import provider_auth
 from illo.connectors import chatgpt, chatgpt_oauth
 from illo.db import all_rows, one
 from illo.gateway.principal import Authority
 from illo.ledger import chatgpt as grants
-from tests.chatgpt.conftest import save_grant
+from tests.chatgpt.conftest import auth_for, save_grant
 
 
 @pytest.fixture
 async def subscription_app(app):
     ctx = app.state.ctx
     ctx.config.vault_key = SecretStr(Fernet.generate_key().decode())
-    ctx.workspace.config.brain.auth = "chatgpt"
-    ctx.workspace.config.brain.runtime = "openai_responses"
+    ctx.workspace.config.brain.routes["default"].provider = "chatgpt"
     return app
 
 
@@ -34,9 +32,7 @@ async def test_rule_01_02_person_b_cannot_use_person_a_grant(subscription_app, r
         ben = await one(conn, "SELECT id FROM people WHERE key='ben'")
     # Even an invalid authority tuple cannot select a different person's token.
     assert (
-        await provider_auth(
-            ctx, Authority("person:ada", "person_dm", ben["id"]), "openai_responses"
-        )
+        await auth_for(ctx, Authority("person:ada", "person_dm", ben["id"]))
         is None
     )
     await save_grant(ctx, "ben", access="ben-only-token")
@@ -48,11 +44,11 @@ async def test_rule_01_02_team_only_uses_configured_person(subscription_app):
     ctx = subscription_app.state.ctx
     await save_grant(ctx, "ada", access="ada-only-token")
     await save_grant(ctx, "ben", access="ben-only-token")
-    auth = await provider_auth(ctx, Authority("team", "routine"), "openai_responses")
+    auth = await auth_for(ctx, Authority("team", "routine"))
     assert auth is None
-    ctx.workspace.config.brain.team_credential = "ben"
-    ctx.workspace.config.brain.tainted_credential = "team"
-    auth = await provider_auth(ctx, Authority("team", "tainted", tainted=True), "openai_responses")
+    ctx.workspace.config.brain.chatgpt.team_credential = "ben"
+    ctx.workspace.config.brain.chatgpt.tainted_credential = "team"
+    auth = await auth_for(ctx, Authority("team", "tainted", tainted=True))
     assert auth.access_token.get_secret_value() == "ben-only-token"
 
 
@@ -69,8 +65,8 @@ async def test_rule_01_02_team_model_grant_keeps_bens_personal_data(
     from tests.tool_results import read_result
 
     ctx = subscription_app.state.ctx
-    ctx.workspace.config.brain.person_credential = "team"
-    ctx.workspace.config.brain.team_credential = "ada"
+    ctx.workspace.config.brain.chatgpt.person_credential = "team"
+    ctx.workspace.config.brain.chatgpt.team_credential = "ada"
     ctx.workspace.connectors = [Connector(key="google", kind="google", scope="personal")]
     await save_grant(ctx, "ada", access="ada-model-token")
     async with ctx.pool.connection() as conn:

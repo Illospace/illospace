@@ -7,7 +7,6 @@ import pytest
 
 from illo.brain.client import BrainEvent, ProviderAuth
 from illo.db import one
-from illo.gateway.principal import Authority
 from illo.ledger import lanes, people
 from illo.ledger.digest_snapshot import sensor_fault
 from illo.routines.digest import (
@@ -18,7 +17,7 @@ from illo.routines.digest import (
     send_due,
 )
 from illo.routines.scheduler import tick_routines
-from illo.workspace import Routine
+from illo.workspace import RouteSettings, Routine
 from tests.tool_results import snapshot_data
 
 NOW = datetime(2026, 11, 10, 9, tzinfo=UTC)
@@ -77,15 +76,13 @@ def posts(slack_client):
 async def test_one_model_brief_with_digest_file_and_person_credentials(
     app, fake_brain, slack_client, monkeypatch
 ):
-    from illo.brain import run_manager
     from illo.connectors import chatgpt
 
     ctx = app.state.ctx
     await only_ada(ctx, "America/New_York")
     ctx.workspace = ctx.workspace.model_copy(deep=True)
-    ctx.workspace.config.brain.auth = "chatgpt"
-    ctx.workspace.config.brain.runtime = "openai_responses"
-    ctx.workspace.config.brain.team_credential = "ben"
+    ctx.workspace.config.brain.routes["default"].provider = "chatgpt"
+    ctx.workspace.config.brain.chatgpt.team_credential = "ben"
     owners = []
 
     async def access(ctx, person, **kwargs):
@@ -95,13 +92,6 @@ async def test_one_model_brief_with_digest_file_and_person_credentials(
         )
 
     monkeypatch.setattr(chatgpt, "access", access)
-    assert (
-        run_manager.credential_person(
-            Authority("person:ada", "person_dm", 1),
-            ctx.workspace,
-        )
-        == "ada"
-    )
     fake_brain.script = [{"name": "digest_snapshot", "arguments": {}}]
     fake_brain.final_text = "Morning, Ada. Please [review the plan](https://example.com/plan)."
     ctx.workspace.routines.append(
@@ -153,7 +143,7 @@ async def test_fallback_on_model_failure_once(app, fake_brain, slack_client, mon
                 raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
             return None
 
-        monkeypatch.setattr(run_manager, "provider_auth", auth)
+        monkeypatch.setattr(run_manager, "select_payer", auth)
     else:
 
         async def broken(request):
@@ -173,7 +163,7 @@ async def test_brief_queue_timeout_uses_fallback(app, slack_client, monkeypatch)
     ctx = app.state.ctx
     await only_ada(ctx)
     ctx.workspace = ctx.workspace.model_copy(deep=True)
-    ctx.workspace.config.brain.deep.timeout_s = 0.01
+    ctx.workspace.config.brain.routes["deep"] = RouteSettings(timeout_s=0.01)
 
     async def wait(*args, **kwargs):
         await asyncio.Event().wait()
@@ -258,7 +248,7 @@ async def test_delivery_retry_keeps_key_text_and_snapshot(
         async def no_auth(*args, **kwargs):
             return None
 
-        monkeypatch.setattr(run_manager, "provider_auth", no_auth)
+        monkeypatch.setattr(run_manager, "select_payer", no_auth)
     send = digest.post_dm
     attempts = []
 
@@ -329,7 +319,7 @@ async def test_snapshot_personal_scope(app, rpc, profile, tainted):
             person_id=ada["id"],
             profile=profile,
             tainted=tainted,
-            runtime="fake",
+            provider="fake", tool_limit=12,
             model="fake",
         )
         token = await runs.mint_token(conn, run["id"], 60)

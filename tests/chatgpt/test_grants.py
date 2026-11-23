@@ -7,13 +7,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from illo.brain.client import BrainEvent
-from illo.brain.run_manager import credential_person, provider_auth
 from illo.connectors import chatgpt
 from illo.connectors.store import vault
 from illo.db import one
 from illo.gateway.principal import Authority
 from illo.ledger import chatgpt as grants
-from tests.chatgpt.conftest import save_grant
+from tests.chatgpt.conftest import auth_for, save_grant
 
 
 async def test_refresh_rotation_commits_before_run(chatgpt_app, replay, fake_brain):
@@ -57,24 +56,6 @@ async def test_refresh_failure_broken_and_one_dm(chatgpt_app, replay, fake_brain
         assert (await one(conn, "SELECT detail FROM sensors WHERE key='chatgpt:ada'"))["detail"]
 
 
-@pytest.mark.parametrize(
-    "profile,principal,person_id,tainted,expected",
-    [
-        ("person_dm", "person:ben", 2, False, "ben"),
-        ("agent_request", "person:ben", 2, False, "ben"),
-        ("team_channel", "team", None, False, None),
-        ("tainted", "team", None, True, None),
-        ("tainted", "person:ben", 2, True, None),
-        ("routine", "team", None, False, None),
-        ("person_dm", "person:ada", 1, False, "ada"),
-    ],
-)
-def test_credential_selection(workspace, profile, principal, person_id, tainted, expected):
-    assert (
-        credential_person(Authority(principal, profile, person_id, tainted), workspace) == expected
-    )
-
-
 async def test_missing_person_never_borrows_team_grant(chatgpt_app, replay, fake_brain):
     app, _ = chatgpt_app
     await save_grant(app.state.ctx)
@@ -87,7 +68,7 @@ async def test_missing_person_never_borrows_team_grant(chatgpt_app, replay, fake
 
 async def test_missing_can_use_explicit_api_fallback(chatgpt_app, replay, fake_brain):
     app, _ = chatgpt_app
-    app.state.ctx.workspace.config.brain.api_key_fallback = True
+    app.state.ctx.workspace.config.brain.chatgpt.fallback = "openai"
     await replay()
     assert fake_brain.requests[-1].provider_auth.kind == "api_key"
 
@@ -97,8 +78,8 @@ async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
     ctx = app.state.ctx
     authority = Authority("team", "team_channel")
     await asyncio.gather(
-        provider_auth(ctx, authority, "openai_responses"),
-        provider_auth(ctx, authority, "openai_responses"),
+        auth_for(ctx, authority),
+        auth_for(ctx, authority),
     )
     assert (
         len(
@@ -106,7 +87,7 @@ async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
                 c
                 for c in slack_client.calls
                 if c.get("text")
-                == "I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+                == "I have no model sign-in for team runs. Set brain.chatgpt.team_credential in illo.yaml, or set brain.chatgpt.fallback."
             ]
         )
         == 1
@@ -116,14 +97,14 @@ async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
         await conn.execute(
             "UPDATE kv SET value=jsonb_build_object('at',clock_timestamp()-interval '61 minutes') WHERE key='chatgpt:team-notice'"
         )
-    await provider_auth(ctx, authority, "openai_responses")
+    await auth_for(ctx, authority)
     assert (
         len(
             [
                 c
                 for c in slack_client.calls
                 if c.get("text")
-                == "I have no model sign-in for team runs. Set brain.team_credential in illo.yaml, or allow the API key."
+                == "I have no model sign-in for team runs. Set brain.chatgpt.team_credential in illo.yaml, or set brain.chatgpt.fallback."
             ]
         )
         == 2
@@ -133,9 +114,9 @@ async def test_team_missing_notice_once_per_hour(chatgpt_app, slack_client):
 async def test_configured_team_credential(chatgpt_app):
     app, _ = chatgpt_app
     ctx = app.state.ctx
-    ctx.workspace.config.brain.team_credential = "ben"
+    ctx.workspace.config.brain.chatgpt.team_credential = "ben"
     await save_grant(ctx, "ben", access="ben-token")
-    auth = await provider_auth(ctx, Authority("team", "routine"), "openai_responses")
+    auth = await auth_for(ctx, Authority("team", "routine"))
     assert auth.access_token.get_secret_value() == "ben-token"
 
 
@@ -163,27 +144,27 @@ async def test_limit_reply_is_clear_and_run_token_revoked(chatgpt_app, replay):
         assert row["usage"]["credential_person"] == "ada"
 
 
+PAYER = BrainEvent(type="payer", provider="openai", auth_kind="api_key")
+
+
 @pytest.mark.parametrize(
     "events,status,expected",
     [
         # A completed run on the subscription.
         ([BrainEvent(type="final", text="Ready.", usage={"input_tokens": 5})], "completed", "chatgpt"),
         # The brain changed to the API key and completed.
-        (
-            [BrainEvent(type="final", text="Ready.", usage={"auth_kind": "api_key"})],
-            "completed",
-            "api_key",
-        ),
+        ([PAYER, BrainEvent(type="final", text="Ready.")], "completed", "api_key"),
         # The brain changed to the API key, and that request failed too.
         (
             [
+                PAYER,
                 BrainEvent(
                     type="error",
                     category="limit",
                     code="usage_limit_reached",
-                    api_key_fallback_failed=True,
+                    fallback_failed=True,
                     usage={"input_tokens": 7},
-                )
+                ),
             ],
             "failed",
             "api_key",
@@ -196,18 +177,21 @@ async def test_limit_reply_is_clear_and_run_token_revoked(chatgpt_app, replay):
         ),
         # The run reaches its time limit before the brain sends an event.
         ([], "timeout", "chatgpt"),
+        # The run reaches its time limit after the brain changed to the API key.
+        ([PAYER], "timeout", "api_key"),
     ],
 )
 async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status, expected):
     app, _ = chatgpt_app
     ctx = app.state.ctx
+    ctx.workspace.config.brain.chatgpt.fallback = "openai"
     await save_grant(ctx)
 
     class Brain:
         async def run(self, request):
             for item in events:
                 yield item
-            if not events:
+            if not [e for e in events if e.type in ("final", "error")]:
                 raise TimeoutError
 
     ctx.brain_client = Brain()
@@ -216,6 +200,10 @@ async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status,
         row = await one(conn, "SELECT * FROM runs")
     assert row["status"] == status and row["usage"]["auth_kind"] == expected
     assert row["usage"].get("credential_person") == ("ada" if expected == "chatgpt" else None)
+    # Per S5, runs.payer and runs.payer_person_id keep the first payer; legacy usage records the
+    # final payer (including on timeout) so S5 marks fallback rows unsplit.
+    assert (row["provider"], row["payer"]) == ("chatgpt", "chatgpt")
+    assert row["payer_person_id"] is not None
     counts = [e.usage.get("input_tokens") for e in events if e.usage.get("input_tokens")]
     if counts:
         assert row["usage"]["input_tokens"] == counts[0]
@@ -338,11 +326,11 @@ async def test_n9_team_grant_fallback_matches_the_safety_doc(chatgpt_app, fallba
     from tests.conftest import ROOT
 
     ctx = chatgpt_app[0].state.ctx
-    ctx.workspace.config.brain.team_credential = "ada"
-    ctx.workspace.config.brain.api_key_fallback = fallback
-    auth = await provider_auth(ctx, Authority("team", "team_channel"), "openai_responses")
+    ctx.workspace.config.brain.chatgpt.team_credential = "ada"
+    ctx.workspace.config.brain.chatgpt.fallback = "openai" if fallback else "none"
+    auth = await auth_for(ctx, Authority("team", "team_channel"))
     assert (auth.kind if auth else None) == ("api_key" if fallback else None)
     assert (
         "If the team credential has no usable grant, team runs use the API key "
-        "only when `api_key_fallback` is true."
+        "only when `brain.chatgpt.fallback` names a provider."
     ) in (ROOT / "docs/safety.md").read_text()

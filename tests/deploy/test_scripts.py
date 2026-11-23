@@ -6,6 +6,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -23,17 +24,27 @@ with (state / "calls").open("a") as log:
 revision = os.getenv("ILLO_REVISION", "local")
 if args == ["info"] or args == ["compose", "version"]:
     sys.exit(0)
-for operation in ("build", "up", "exec", "run", "stop", "down"):
+for operation in ("config", "build", "up", "exec", "run", "stop", "down"):
     if operation in args:
         break
 else:
     sys.exit("Unexpected fake Docker call")
+if operation == "config":
+    env_out = json.loads(os.getenv("FAKE_COMPOSE_ILLO_ENV", "{}"))
+    ws = os.getenv("FAKE_COMPOSE_WORKSPACE", os.getenv("ILLO_WORKSPACE_DIR", ""))
+    print(json.dumps({"services": {"illo": {"environment": env_out,
+                                            "volumes": [{"target": "/workspace", "source": ws}]}}}))
+    sys.exit(0)
 if operation == "build" and os.getenv("FAIL_BUILD") == "1":
     sys.exit(1)
-if operation == "up" and ("--remove-orphans" in args or "illo" in args):
+if operation == "up" and "postgres" not in args[args.index("up"):]:
     (state / "running").write_text(revision)
-if operation == "run" and os.getenv("FAIL_MIGRATION") == "1":
+if operation == "run" and "migrate" in args and os.getenv("FAIL_MIGRATION") == "1":
     sys.exit(1)
+if operation == "run" and "check-routes" in args and os.getenv("FAIL_ROUTES") == "1":
+    sys.exit(1)
+if operation == "run" and "check-routes" in args and os.getenv("HANG_ROUTES") == "1":
+    import time; time.sleep(5); sys.exit(0)
 if operation == "exec" and "python" in args:
     if revision == os.getenv("FAIL_HEALTH_REVISION"):
         sys.exit(1)
@@ -180,6 +191,7 @@ def test_update_deploys_new_commit_and_records_revision(install):
 def test_update_failure_returns_to_old_images(install, failure):
     init(install)
     old = git(install[0], "rev-parse", "HEAD")
+    before = len(calls(install))
     target = remote_commit(install)
     overrides = {
         "health": {"FAIL_HEALTH_REVISION": target},
@@ -193,7 +205,13 @@ def test_update_failure_returns_to_old_images(install, failure):
     assert (install[2] / "running").read_text() == old
     log = (state / "update.log").read_text()
     assert f"failed {target}: {failure}" in log
-    assert f"rollback {old} ok" in log
+    if failure == "health":
+        assert f"rollback {old} ok" in log
+    else:
+        # Build and migration fail before service replacement; keep the old stack running untouched.
+        assert "rollback" not in log
+        made = [c["args"] for c in calls(install)[before:]]
+        assert not any("--remove-orphans" in a for a in made)
     # The checkout may advance on failure. A retry must still deploy the target.
     assert run(install, "update.sh").returncode == 0
     assert (state / "last-good").read_text().strip() == target
@@ -340,3 +358,172 @@ def test_compose_reaps_orphan_processes():
     services = yaml.safe_load((ROOT / "deploy/compose.yaml").read_text())["services"]
     assert services["brain"]["init"] is True
     assert services["illo"]["init"] is True
+
+
+def test_install_creates_both_environment_files_at_mode_600(install):
+    init(install)
+    app = Path(install[1]["ILLO_ENV_FILE"])
+    brain = app.parent / "brain.env"
+    assert app.stat().st_mode & 0o777 == 0o600 and brain.stat().st_mode & 0o777 == 0o600
+    assert f"ILLO_BRAIN_ENV_FILE='{brain}'" in app.read_text()
+    assert "ILLO_PROVIDER_OPENAI_API_KEY=" in brain.read_text()
+    assert "PROVIDER" not in app.read_text().replace("ILLO_BRAIN_ENV_FILE", "")
+    # A second install recreates each service whose environment file changed.
+    assert run(install, "install.sh").returncode == 0
+    assert any(c["args"][-3:] == ["up", "-d", "--no-build"] for c in calls(install))
+
+
+@pytest.mark.parametrize("line", ["OPENAI_API_KEY='fake-key'", "ILLO_PROVIDER_OPENAI_API_KEY=x",
+                                  "export ANTHROPIC_API_KEY=x", "OPENAI_BASE_URL=",
+                                  # Compose reads both forms below. A value can name a variable.
+                                  "OPENAI_API_KEY = fake-key", "ILLO_FAKE_ALIAS=${OPENAI_API_KEY}"])
+def test_install_and_update_refuse_a_provider_key_in_the_app_file(install, line):
+    init(install)
+    path = Path(install[1]["ILLO_ENV_FILE"])
+    path.write_text(path.read_text() + line + "\n")
+    result = run(install, "install.sh")
+    assert result.returncode == 1
+    assert "holds a provider variable" in result.stderr and "fake-key" not in result.stderr
+    before = len(calls(install))
+    target = remote_commit(install)
+    assert run(install, "update.sh").returncode == 1
+    # Nothing was built, migrated, or started. The last good revision keeps running.
+    assert len(calls(install)) == before
+    log = (Path(install[1]["ILLO_STATE_DIR"]) / "update.log").read_text()
+    assert f"failed {target}: environment files" in log
+
+
+def test_the_brain_file_cannot_live_in_the_checkout(install):
+    result = run(install, "install.sh", ILLO_BRAIN_ENV_FILE=str(install[0] / "brain.env"))
+    assert result.returncode == 1
+    assert "outside the checkout" in result.stderr
+
+
+@pytest.mark.parametrize("place", ["workspace", "checkout"])
+def test_update_refuses_a_brain_file_in_the_workspace_or_the_checkout(install, place):
+    """The app mounts the workspace. A file under .git is not a local change for git status."""
+    init(install)
+    brain = Path(install[1]["ILLO_ENV_FILE"]).parent / "brain.env"
+    inside = (Path(install[1]["ILLO_WORKSPACE_DIR"]) if place == "workspace"
+              else install[0] / ".git") / "brain.env"
+    shutil.copy(brain, inside)
+    assert run(install, "install.sh", ILLO_BRAIN_ENV_FILE=str(inside)).returncode == 1
+    before = len(calls(install))
+    target = remote_commit(install)
+    result = run(install, "update.sh", ILLO_BRAIN_ENV_FILE=str(inside))
+    assert result.returncode == 1 and "outside the checkout" in result.stderr
+    assert len(calls(install)) == before
+    log = (Path(install[1]["ILLO_STATE_DIR"]) / "update.log").read_text()
+    assert f"failed {target}: environment files" in log
+
+
+def test_update_refuses_a_workspace_that_the_new_revision_rejects(install):
+    """The new images check the workspace before the migration. The old services keep running."""
+    init(install)
+    old = git(install[0], "rev-parse", "HEAD")
+    before = len(calls(install))
+    target = remote_commit(install)
+    result = run(install, "update.sh", FAIL_ROUTES="1")
+    assert result.returncode == 1 and "Nothing changed" in result.stderr
+    made = [c["args"] for c in calls(install)[before:]]
+    assert any(a[-4:] == ["brain", "python", "-m", "brain.providers"] for a in made)
+    assert any(a[-2:] == ["illo", "check-routes"] for a in made)
+    assert not any("up" in a or "migrate" in a for a in made)
+    state = Path(install[1]["ILLO_STATE_DIR"])
+    assert (install[2] / "running").read_text() == old
+    assert (state / "last-good").read_text().strip() == old
+    log = (state / "update.log").read_text()
+    assert f"failed {target}: workspace or routes" in log and "rollback" not in log
+
+
+def test_status_and_backup_read_the_saved_layout_of_the_last_good_revision(install):
+    """A refused update leaves the new layout in the checkout. Status and backup use last-good."""
+    init(install)
+    old = git(install[0], "rev-parse", "HEAD")
+    target = remote_commit(install, layout_change=True)
+    assert run(install, "update.sh", FAIL_ROUTES="1").returncode == 1
+    # Even an exported ILLO_REVISION pointing at the failed target must not override last-good.
+    status = run(install, "status.sh", ILLO_REVISION=target)
+    assert status.returncode == 0 and f"Last good revision: {old}" in status.stdout
+    args = calls(install)[-1]["args"]
+    saved = Path(install[1]["ILLO_STATE_DIR"]) / "revisions" / old / "deploy/compose.yaml"
+    assert "exec" in args and args[args.index("-f") + 1] == str(saved)
+    assert run(install, "backup.sh").returncode == 0
+    backup_args = calls(install)[-1]["args"]
+    assert "pg_dump" in backup_args and backup_args[backup_args.index("-f") + 1] == str(saved)
+
+
+def test_update_preflight_times_out_and_keeps_old_services(install):
+    init(install)
+    old = git(install[0], "rev-parse", "HEAD")
+    target = remote_commit(install)
+    bad = run(install, "update.sh", ILLO_PREFLIGHT_TIMEOUT="0")
+    assert bad.returncode == 1 and "ILLO_PREFLIGHT_TIMEOUT" in bad.stderr
+    result = run(install, "update.sh", HANG_ROUTES="1", ILLO_PREFLIGHT_TIMEOUT="1")
+    assert result.returncode == 1 and "Nothing changed" in result.stderr
+    assert (install[2] / "running").read_text() == old
+    log = (Path(install[1]["ILLO_STATE_DIR"]) / "update.log").read_text()
+    assert f"failed {target}: workspace or routes" in log and "rollback" not in log
+
+
+def test_config_parser_keeps_escaped_double_quotes(tmp_path):
+    env_file = tmp_path / "env"
+    env_file.write_text('EXAMPLE="one\\"two" # comment\nPLAIN=ok # trailing\n')
+    out = subprocess.check_output([sys.executable, str(ROOT / "deploy/config.py"), str(env_file), "EXAMPLE"], text=True).strip()
+    assert out == 'one\\"two'
+    out2 = subprocess.check_output([sys.executable, str(ROOT / "deploy/config.py"), str(env_file), "PLAIN"], text=True).strip()
+    assert out2 == "ok"
+
+
+def test_env_check_rejects_bom_provider_key_and_inline_comment_workspace(install):
+    init(install)
+    app = Path(install[1]["ILLO_ENV_FILE"])
+    original = app.read_bytes()
+    # UTF-8 BOM before a provider key on line 1 must still be refused.
+    app.write_bytes(b"\xef\xbb\xbfOPENAI_API_KEY=fake-bom-key\n" + original)
+    res = run(install, "install.sh")
+    assert res.returncode == 1 and "holds a provider variable" in res.stderr
+    assert "fake-bom-key" not in res.stderr
+    # Inline comment on ILLO_WORKSPACE_DIR must resolve the real workspace path.
+    ws = Path(install[1]["ILLO_WORKSPACE_DIR"])
+    brain_inside = ws / "brain.env"
+    ws.mkdir(exist_ok=True)
+    shutil.copy(app.parent / "brain.env", brain_inside)
+    edited = "\n".join(
+        f"ILLO_WORKSPACE_DIR={ws} # inline comment" if line.startswith("ILLO_WORKSPACE_DIR=") else line
+        for line in original.decode().splitlines()
+    ) + "\n"
+    app.write_text(edited)
+    env_no_ws = {k: v for k, v in install[1].items() if k != "ILLO_WORKSPACE_DIR"}
+    res2 = subprocess.run(
+        [str(install[0] / "deploy/install.sh")],
+        cwd=install[0],
+        env=env_no_ws | {"ILLO_BRAIN_ENV_FILE": str(brain_inside)},
+        text=True, capture_output=True, check=False,
+    )
+    assert res2.returncode == 1 and "outside the checkout" in res2.stderr
+
+
+def test_compose_gives_provider_keys_to_the_brain_only(tmp_path):
+    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose is not installed")
+    app, brain = tmp_path / "env", tmp_path / "brain.env"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ILLO_", "OPENAI_", "ANTHROPIC_"))}
+    env["ILLO_WORKSPACE_DIR"] = str(tmp_path / "workspace")
+    subprocess.run([sys.executable, str(ROOT / "deploy/init-env.py"), str(app),
+                    str(ROOT / "deploy/env.example"), str(brain),
+                    str(ROOT / "deploy/brain.env.example")],
+                   env=env, check=True, stdin=subprocess.DEVNULL)
+    brain.write_text(brain.read_text().replace(
+        "ILLO_PROVIDER_OPENAI_API_KEY=", "ILLO_PROVIDER_OPENAI_API_KEY=fake-provider-key"))
+    result = subprocess.run(
+        ["docker", "compose", "--env-file", str(app), "-f", str(ROOT / "deploy/compose.yaml"),
+         "config", "--format", "json"],
+        env=env | {"ILLO_ENV_FILE": str(app)}, capture_output=True, text=True, check=True)
+    services = json.loads(result.stdout)["services"]
+    forbidden = ("ILLO_PROVIDER_", "OPENAI_", "ANTHROPIC_")
+    for name in ("illo", "postgres", "sandbox"):
+        assert not [k for k in services[name].get("environment") or {} if k.startswith(forbidden)]
+    assert services["brain"]["environment"]["ILLO_PROVIDER_OPENAI_API_KEY"] == "fake-provider-key"
+    assert "ILLO_DATABASE_URL" not in services["brain"]["environment"]
+    assert "ILLO_VAULT_KEY" not in services["brain"]["environment"]

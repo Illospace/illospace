@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from illo.asks.cards import escape, section
 from illo.asks.service import post_dm
+from illo.brain.routes import resolve_route
 from illo.channels.slack.formatting import mrkdwn
 from illo.db import one
 from illo.gateway.events import InboundEvent
@@ -183,7 +184,7 @@ async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_nam
                  **({"channel_id": channel_id} if channel_id else {})},
     )
     try:
-        async with asyncio.timeout(ctx.workspace.config.brain.timeout_s):
+        async with asyncio.timeout(resolve_route(ctx.workspace, "digest").timeout_s):
             result = await ctx.gateway.receive(event, adapter)
     except Exception:
         return fallback(data)
@@ -193,7 +194,7 @@ async def write_brief(ctx, channel, external_id, prompt, principal, snapshot_nam
     if result.get("duplicate"):
         row = None
         with suppress(TimeoutError):
-            async with asyncio.timeout(ctx.workspace.config.brain.timeout_s):
+            async with asyncio.timeout(resolve_route(ctx.workspace, "digest").timeout_s):
                 while True:
                     async with ctx.pool.connection() as conn:
                         row = await one(
