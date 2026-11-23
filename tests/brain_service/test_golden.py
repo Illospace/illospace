@@ -137,6 +137,16 @@ CASES = {
     "provider_500": {
         "turns": [failure(500, code="server_error", type="server_error", message="PRIVATE")]
     },
+    # The model text holds the API key. Responses stops the run. Chat Completions completes
+    # it, and the service redacts the key in the stream.
+    "credential_echo": {"delivered": True, "turns": [answer("fake-golden-key. Ask Ada for the key.")]},
+    # The output limit cuts the response. Only the Responses error keeps the usage.
+    "output_limit": {"turns": [{"length": True, **answer("Release rea")}]},
+    # The second call of a batch has no ID. The first call runs before the run fails.
+    "missing_call_id": {
+        "turns": [{**calls(("lanes_search", '{"query":"release"}'), ("asks_list", "{}")),
+                   "no_id": [1]}],
+    },
 }
 
 
@@ -177,12 +187,17 @@ def responses_turn(turn, n, search):
         error = LIMIT
         return sse({"type": "response.failed",
                     "response": {"error": error, "usage": usage("responses", n)}})
+    if turn.get("length"):
+        return sse({"type": "response.output_text.delta", "delta": turn["text"]},
+                   {"type": "response.incomplete", "response": {
+                       "id": f"resp_{n}", "status": "incomplete", "usage": usage("responses", n)}})
     output = []
     if turn.get("calls"):
         output.append({"type": "reasoning", "id": f"rs_{n}", "summary": [],
                        "encrypted_content": f"opaque-{n}"})
     for i, (name, arguments) in enumerate(turn.get("calls", [])):
-        output.append({"type": "function_call", "id": f"fc_{n}_{i}", "call_id": f"call_{n}_{i}",
+        call_id = None if i in turn.get("no_id", []) else f"call_{n}_{i}"
+        output.append({"type": "function_call", "id": f"fc_{n}_{i}", "call_id": call_id,
                        "name": name, "arguments": arguments})
     text = turn.get("text") or turn.get("search")
     if search:
@@ -216,10 +231,14 @@ def chat_turn(turn, n):
     chunks += [choice({"content": part}) for part in halves(text or "") if part]
     for i, (name, arguments) in enumerate(turn.get("calls", [])):
         first, second = halves(arguments)
-        chunks.append(choice({"tool_calls": [{"index": i, "id": f"call_{n}_{i}", "type": "function",
-                                              "function": {"name": name, "arguments": first}}]}))
+        start = {"index": i, "id": f"call_{n}_{i}", "type": "function",
+                 "function": {"name": name, "arguments": first}}
+        if i in turn.get("no_id", []):
+            del start["id"]
+        chunks.append(choice({"tool_calls": [start]}))
         chunks.append(choice({"tool_calls": [{"index": i, "function": {"arguments": second}}]}))
-    chunks.append(choice({}, "tool_calls" if turn.get("calls") else "stop"))
+    finish = "length" if turn.get("length") else "tool_calls" if turn.get("calls") else "stop"
+    chunks.append(choice({}, finish))
     chunks.append({"choices": [], "usage": usage("chat", n)})
     return httpx.Response(200, text="".join("data: " + json.dumps(c) + "\n\n" for c in chunks)
                           + "data: [DONE]\n\n")
@@ -326,13 +345,26 @@ async def golden_run(app, replay, monkeypatch, wire, case):
             yield item
 
     service = create_brain(runner=runner)
-    ctx.brain_client = BrainClient(
+    client = BrainClient(
         "http://brain", "fake-golden-secret", transport=httpx.ASGITransport(app=service)
     )
+    delivered = []
+
+    class Recorder:
+        """Record the events after the service redaction, as the app gets them."""
+
+        async def run(self, request):
+            async for item in client.run(request):
+                delivered.append(item.model_dump(mode="json"))
+                yield item
+
+    ctx.brain_client = Recorder()
     await replay(text="Find the release")
     async with ctx.pool.connection() as conn:
         run = await one(conn, "SELECT status, error, usage FROM runs ORDER BY id DESC LIMIT 1")
+    extra = {"delivered": delivered} if case.get("delivered") else {}
     return json.loads(json.dumps({
+        **extra,
         "brain_runs": brain_runs,
         "provider_requests": provider.requests,
         "mcp_calls": session.calls,

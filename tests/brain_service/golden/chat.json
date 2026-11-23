@@ -257,6 +257,167 @@
    }
   }
  },
+ "credential_echo": {
+  "delivered": [
+   {
+    "type": "started",
+    "text": "",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "run_id": 1
+   },
+   {
+    "type": "started",
+    "text": "",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "catalog": [
+     "asks_list",
+     "lanes_search"
+    ],
+    "run_id": 1
+   },
+   {
+    "type": "text",
+    "text": "[redacted]. A",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "run_id": 1
+   },
+   {
+    "type": "text",
+    "text": "sk Ada for the key.",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "run_id": 1
+   },
+   {
+    "type": "final",
+    "text": "[redacted]. Ask Ada for the key.",
+    "usage": {
+     "prompt_tokens": 110,
+     "prompt_tokens_details": {
+      "cached_tokens": 1
+     },
+     "completion_tokens": 15,
+     "total_tokens": 125
+    },
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "run_id": 1
+   }
+  ],
+  "brain_runs": [
+   [
+    {
+     "type": "started",
+     "catalog": [
+      "asks_list",
+      "lanes_search"
+     ]
+    },
+    {
+     "type": "text",
+     "text": "fake-golden-key. A"
+    },
+    {
+     "type": "text",
+     "text": "sk Ada for the key."
+    },
+    {
+     "type": "final",
+     "text": "fake-golden-key. Ask Ada for the key.",
+     "usage": {
+      "prompt_tokens": 110,
+      "prompt_tokens_details": {
+       "cached_tokens": 1
+      },
+      "completion_tokens": 15,
+      "total_tokens": 125
+     }
+    }
+   ]
+  ],
+  "provider_requests": [
+   {
+    "url": "https://provider.example/v1/chat/completions",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "messages": [
+      {
+       "role": "system",
+       "content": "Use the Acme tools."
+      },
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lanes_search",
+        "description": "Search Acme lanes",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "asks_list",
+        "description": "List Acme asks",
+        "parameters": {
+         "type": "object"
+        }
+       }
+      }
+     ]
+    }
+   }
+  ],
+  "mcp_calls": [],
+  "refreshes": 0,
+  "run": {
+   "status": "completed",
+   "error": null,
+   "usage": {
+    "total_tokens": 125,
+    "prompt_tokens": 110,
+    "completion_tokens": 15,
+    "prompt_tokens_details": {
+     "cached_tokens": 1
+    }
+   }
+  }
+ },
  "customer_read_keeps_search_closed": {
   "brain_runs": [
    [
@@ -725,6 +886,95 @@
    }
   }
  },
+ "missing_call_id": {
+  "brain_runs": [
+   [
+    {
+     "type": "started",
+     "catalog": [
+      "asks_list",
+      "lanes_search"
+     ]
+    },
+    {
+     "type": "tool_call",
+     "name": "lanes_search"
+    },
+    {
+     "type": "error",
+     "category": "runtime",
+     "message": "The model requested a tool outside the run catalog"
+    }
+   ]
+  ],
+  "provider_requests": [
+   {
+    "url": "https://provider.example/v1/chat/completions",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "messages": [
+      {
+       "role": "system",
+       "content": "Use the Acme tools."
+      },
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lanes_search",
+        "description": "Search Acme lanes",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "asks_list",
+        "description": "List Acme asks",
+        "parameters": {
+         "type": "object"
+        }
+       }
+      }
+     ]
+    }
+   }
+  ],
+  "mcp_calls": [
+   {
+    "name": "lanes_search",
+    "arguments": {
+     "query": "release"
+    }
+   }
+  ],
+  "refreshes": 0,
+  "run": {
+   "status": "failed",
+   "error": "The brain run failed: runtime unknown",
+   "usage": {
+    "failure_category": "provider"
+   }
+  }
+ },
  "missing_flags_close_search": {
   "brain_runs": [
    [
@@ -899,6 +1149,92 @@
     "prompt_tokens_details": {
      "cached_tokens": 3
     }
+   }
+  }
+ },
+ "output_limit": {
+  "brain_runs": [
+   [
+    {
+     "type": "started",
+     "catalog": [
+      "asks_list",
+      "lanes_search"
+     ]
+    },
+    {
+     "type": "text",
+     "text": "Relea"
+    },
+    {
+     "type": "text",
+     "text": "se rea"
+    },
+    {
+     "type": "error",
+     "category": "limit",
+     "message": "The model response did not complete"
+    }
+   ]
+  ],
+  "provider_requests": [
+   {
+    "url": "https://provider.example/v1/chat/completions",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "messages": [
+      {
+       "role": "system",
+       "content": "Use the Acme tools."
+      },
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lanes_search",
+        "description": "Search Acme lanes",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "asks_list",
+        "description": "List Acme asks",
+        "parameters": {
+         "type": "object"
+        }
+       }
+      }
+     ]
+    }
+   }
+  ],
+  "mcp_calls": [],
+  "refreshes": 0,
+  "run": {
+   "status": "failed",
+   "error": "The brain run failed: limit unknown",
+   "usage": {
+    "failure_category": "limit"
    }
   }
  },

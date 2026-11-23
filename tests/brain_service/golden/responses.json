@@ -371,6 +371,123 @@
    }
   }
  },
+ "credential_echo": {
+  "delivered": [
+   {
+    "type": "started",
+    "text": "",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "run_id": 1
+   },
+   {
+    "type": "started",
+    "text": "",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "catalog": [
+     "asks_list",
+     "lanes_search"
+    ],
+    "run_id": 1
+   },
+   {
+    "type": "error",
+    "text": "",
+    "usage": {},
+    "category": "runtime",
+    "code": "unknown",
+    "resets_at": null,
+    "api_key_fallback_failed": false,
+    "message": "The provider returned a credential",
+    "run_id": 1
+   }
+  ],
+  "brain_runs": [
+   [
+    {
+     "type": "started",
+     "catalog": [
+      "asks_list",
+      "lanes_search"
+     ]
+    },
+    {
+     "type": "error",
+     "category": "runtime",
+     "message": "The provider returned a credential"
+    }
+   ]
+  ],
+  "provider_requests": [
+   {
+    "url": "https://provider.example/v1/responses",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "instructions": "Use the Acme tools.",
+     "input": [
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "tools": [
+      {
+       "type": "function",
+       "name": "lanes_search",
+       "description": "Search Acme lanes",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        }
+       },
+       "strict": false
+      },
+      {
+       "type": "function",
+       "name": "asks_list",
+       "description": "List Acme asks",
+       "parameters": {
+        "type": "object"
+       },
+       "strict": false
+      }
+     ],
+     "stream": true,
+     "store": false,
+     "include": [
+      "reasoning.encrypted_content"
+     ],
+     "max_output_tokens": 4096,
+     "parallel_tool_calls": true,
+     "reasoning": {
+      "effort": "medium"
+     }
+    }
+   }
+  ],
+  "mcp_calls": [],
+  "refreshes": 0,
+  "run": {
+   "status": "failed",
+   "error": "The brain run failed: runtime unknown",
+   "usage": {
+    "auth_kind": "api_key",
+    "failure_category": "provider"
+   }
+  }
+ },
  "customer_read_keeps_search_closed": {
   "brain_runs": [
    [
@@ -929,6 +1046,97 @@
    }
   }
  },
+ "missing_call_id": {
+  "brain_runs": [
+   [
+    {
+     "type": "started",
+     "catalog": [
+      "asks_list",
+      "lanes_search"
+     ]
+    },
+    {
+     "type": "tool_call",
+     "name": "lanes_search"
+    },
+    {
+     "type": "error",
+     "category": "runtime",
+     "message": "The model returned an invalid function call"
+    }
+   ]
+  ],
+  "provider_requests": [
+   {
+    "url": "https://provider.example/v1/responses",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "instructions": "Use the Acme tools.",
+     "input": [
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "tools": [
+      {
+       "type": "function",
+       "name": "lanes_search",
+       "description": "Search Acme lanes",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        }
+       },
+       "strict": false
+      },
+      {
+       "type": "function",
+       "name": "asks_list",
+       "description": "List Acme asks",
+       "parameters": {
+        "type": "object"
+       },
+       "strict": false
+      }
+     ],
+     "stream": true,
+     "store": false,
+     "include": [
+      "reasoning.encrypted_content"
+     ],
+     "max_output_tokens": 4096,
+     "parallel_tool_calls": true,
+     "reasoning": {
+      "effort": "medium"
+     }
+    }
+   }
+  ],
+  "mcp_calls": [
+   {
+    "name": "lanes_search",
+    "arguments": {
+     "query": "release"
+    }
+   }
+  ],
+  "refreshes": 0,
+  "run": {
+   "status": "failed",
+   "error": "The brain run failed: runtime unknown",
+   "usage": {
+    "auth_kind": "api_key",
+    "failure_category": "provider"
+   }
+  }
+ },
  "missing_flags_close_search": {
   "brain_runs": [
    [
@@ -1114,6 +1322,106 @@
     },
     "output_tokens_details": {
      "reasoning_tokens": 3
+    }
+   }
+  }
+ },
+ "output_limit": {
+  "brain_runs": [
+   [
+    {
+     "type": "started",
+     "catalog": [
+      "asks_list",
+      "lanes_search"
+     ]
+    },
+    {
+     "type": "error",
+     "category": "limit",
+     "message": "The model response did not complete",
+     "usage": {
+      "input_tokens": 110,
+      "input_tokens_details": {
+       "cached_tokens": 1
+      },
+      "output_tokens": 15,
+      "output_tokens_details": {
+       "reasoning_tokens": 1
+      },
+      "total_tokens": 125
+     }
+    }
+   ]
+  ],
+  "provider_requests": [
+   {
+    "url": "https://provider.example/v1/responses",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "instructions": "Use the Acme tools.",
+     "input": [
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "tools": [
+      {
+       "type": "function",
+       "name": "lanes_search",
+       "description": "Search Acme lanes",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        }
+       },
+       "strict": false
+      },
+      {
+       "type": "function",
+       "name": "asks_list",
+       "description": "List Acme asks",
+       "parameters": {
+        "type": "object"
+       },
+       "strict": false
+      }
+     ],
+     "stream": true,
+     "store": false,
+     "include": [
+      "reasoning.encrypted_content"
+     ],
+     "max_output_tokens": 4096,
+     "parallel_tool_calls": true,
+     "reasoning": {
+      "effort": "medium"
+     }
+    }
+   }
+  ],
+  "mcp_calls": [],
+  "refreshes": 0,
+  "run": {
+   "status": "failed",
+   "error": "The brain run failed: limit unknown",
+   "usage": {
+    "auth_kind": "api_key",
+    "input_tokens": 110,
+    "total_tokens": 125,
+    "output_tokens": 15,
+    "failure_category": "limit",
+    "input_tokens_details": {
+     "cached_tokens": 1
+    },
+    "output_tokens_details": {
+     "reasoning_tokens": 1
     }
    }
   }
