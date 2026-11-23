@@ -15,8 +15,8 @@ from psycopg.rows import dict_row
 from pydantic import ValidationError
 
 from illo.config import Config
-from illo.db import migrate, one
-from illo.ledger import ask_workflow, people, tokens
+from illo.db import Connection, migrate, one
+from illo.ledger import ask_workflow, people, sensors, tokens
 from illo.log import configure
 from illo.vault import Vault, delete, get_names
 from illo.workspace import load_workspace
@@ -76,6 +76,30 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+async def _report_collector_versions(conn: Connection) -> None:
+    from collectors.common import CODE_VERSION
+
+    matching = 0
+    for row in await sensors.recent_collectors(conn):
+        try:
+            detail = json.loads(row["detail"])
+        except (TypeError, ValueError, RecursionError):
+            detail = None
+        version = detail.get("version") if isinstance(detail, dict) else None
+        if version == CODE_VERSION:
+            matching += 1
+            continue
+        shown_version = version[:60] if isinstance(version, str) and version.strip() else "no version"
+        label = row["key"].removeprefix("collector:")
+        warning = (
+            f"Warning: the collector {label} runs other code ({shown_version}). "
+            f"This server has {CODE_VERSION}. Restart the collector, or update its copy of collectors/."
+        )
+        print("".join(char if char.isprintable() else "?" for char in warning))
+    if matching:
+        print(f"Collectors: {matching} run the code of this server.")
+
+
 async def doctor(config: Config) -> int:
     """Report missing requirements without exposing credentials."""
     failed = False
@@ -116,6 +140,7 @@ async def doctor(config: Config) -> int:
                 from illo.sandbox.repos import status
 
                 print(await status(conn))
+                await _report_collector_versions(conn)
     except Exception:
         print("The database is unavailable. Check ILLO_DATABASE_URL and the database service.")
         print("Repository mirrors: count and last sync are unavailable.")

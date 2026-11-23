@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,26 @@ from typing import Any
 import httpx
 
 VERSION = "0.1.0"
+
+
+def code_fingerprint(root: Path | None = None) -> str:
+    """Hash the Python files in the collector package."""
+    if root is None:
+        root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    paths = (path.relative_to(root) for path in root.rglob("*.py"))
+    for relative in sorted(paths, key=Path.as_posix):
+        path = root / relative
+        if "__pycache__" in relative.parts or not stat.S_ISREG(path.stat().st_mode):
+            continue
+        digest.update(os.fsencode(relative.as_posix()))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
+
+
+CODE_VERSION = f"{VERSION}+{code_fingerprint()}"
 
 
 class CollectorError(Exception):
@@ -147,7 +169,7 @@ class MCPClient:
                 {
                     "protocolVersion": self.protocol,
                     "capabilities": {},
-                    "clientInfo": {"name": "illo-collector", "version": VERSION},
+                    "clientInfo": {"name": "illo-collector", "version": CODE_VERSION},
                 },
             )
             self.protocol = result["protocolVersion"]

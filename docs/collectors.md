@@ -98,6 +98,32 @@ Use either systemd or cron. A file lock prevents concurrent polls for the same s
 Keep the state file outside the checkout. It has mode `600`.
 It contains hashes, request references, and delivery notes. It contains no message text or token.
 
+### Updates
+
+The collector sends a code version in the form `0.1.0+<12 hex>`.
+The last 12 characters come from a hash of the `.py` files in `collectors/`.
+The hash includes the files in `collectors/hooks/`.
+
+In `--loop` mode, the collector checks the hash after each poll. If the files change, it exits with code 75.
+The example unit uses `RestartForceExitStatus=75` to restart it after 15 seconds.
+An older unit with `Restart=on-failure` also restarts it because 75 is a nonzero exit code.
+A cron setup with `--once` starts the new code at the next run.
+A loop that started before this check was added needs one restart to load it.
+
+If the collector uses the Illo deploy checkout, a deploy updates its copy of `collectors/`.
+The service starts the new code within about one update interval plus one poll interval.
+This takes no manual step.
+
+On another machine, replace your copy of `collectors/` or run `git pull` in the checkout that the unit uses.
+If the requirements file changes, run `pip install -r collectors/t3/requirements.txt` again.
+The service restarts the collector. With another service manager, restart the collector when it exits with code 75.
+
+`illo doctor` checks the code version of each collector that reported in the last day.
+It warns when that version differs from the server's version.
+The collector can see the new files before the server finishes its deploy.
+If the old server refuses a report, the collector keeps the old hashes.
+It sends the changes again at the next poll.
+
 ### Reports and asks
 
 Each poll sends changed lanes to `lane_report`, plus a collector liveness record.

@@ -7,6 +7,9 @@ Type=simple
 ExecStart=%h/.local/share/illo-collectors/.venv/bin/python %h/.local/share/illo-collectors/collectors/t3/collector.py --config %h/.config/illo/collector.toml --loop
 Restart=on-failure
 RestartSec=15
+# Exit 75 means the code changed. Start the new code.
+SuccessExitStatus=75
+RestartForceExitStatus=75
 UMask=0077
 
 [Install]

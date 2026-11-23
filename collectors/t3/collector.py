@@ -26,16 +26,20 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from collectors.common import (
-    VERSION,
+    CODE_VERSION,
     CollectorError,
     MCPClient,
     atomic_json,
     clean,
+    code_fingerprint,
     read_token,
 )
 
 # Illo accepts 1,000 lanes in one report. A machine can have more threads than that.
 LANE_BATCH = 500
+
+# EX_TEMPFAIL tells the service to start the new code.
+RESTART_EXIT = 75
 
 
 @dataclass
@@ -729,7 +733,7 @@ class Collector:
                     "lanes": changed[start : start + LANE_BATCH],
                     "collector": {
                         "label": self.config.machine,
-                        "version": VERSION,
+                        "version": CODE_VERSION,
                         "threads_seen": len(threads),
                         "expected_every_s": self.config.poll_seconds,
                     },
@@ -829,6 +833,14 @@ class Collector:
         self.mcp.call("ask_ack", {"ask_id": answer["ask_id"]})
 
 
+def _code_changed(loaded_fingerprint: str) -> bool:
+    try:
+        return code_fingerprint() != loaded_fingerprint
+    except OSError:
+        # An update can replace files during the check. Try again after the next poll.
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path)
@@ -847,6 +859,7 @@ def main() -> int:
             source = T3Source(config)
             mcp = MCPClient(config.mcp_url, read_token(config.token_file))
             collector = Collector(config, source, mcp)
+            loaded_fingerprint = CODE_VERSION.split("+", 1)[1]
             while True:
                 try:
                     collector.poll()
@@ -859,6 +872,13 @@ def main() -> int:
                         return 1
                 if args.once:
                     return 0
+                if _code_changed(loaded_fingerprint):
+                    print(
+                        "The collector code changed. The collector stops so that its service "
+                        "starts the new code.",
+                        file=sys.stderr,
+                    )
+                    return RESTART_EXIT
                 time.sleep(config.poll_seconds)
     except (CollectorError, OSError, ValueError, TypeError) as error:
         print(

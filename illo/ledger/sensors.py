@@ -1,6 +1,15 @@
 """Record the last good and bad observation for each sensor."""
 
-from illo.db import Connection
+from illo.db import Connection, all_rows
+
+
+async def recent_collectors(conn: Connection) -> list[dict]:
+    """Read collectors that reported in the last day."""
+    return await all_rows(conn, """
+        SELECT key, detail, last_ok_at FROM sensors
+        WHERE key LIKE 'collector:%' AND last_ok_at > now() - interval '1 day'
+        ORDER BY key
+    """)
 
 
 async def ok(conn: Connection, key: str, detail: str = "", *, expected_every_s: float | None = None) -> None:

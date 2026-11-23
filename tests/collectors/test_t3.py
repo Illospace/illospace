@@ -3,11 +3,13 @@
 import copy
 import json
 import sqlite3
+from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from collectors.common import CollectorError, MCPClient
+from collectors.common import CODE_VERSION, VERSION, CollectorError, MCPClient
+from collectors.t3 import collector as module
 from collectors.t3.collector import (
     Collector,
     Config,
@@ -323,7 +325,7 @@ def test_changed_lanes_heartbeat_refresh_and_restart(setup):
     assert len(first["lanes"]) == 1
     assert first["collector"] == {
         "label": "acme-laptop",
-        "version": "0.1.0",
+        "version": CODE_VERSION,
         "threads_seen": 1,
         "expected_every_s": collector.config.poll_seconds,
     }
@@ -343,10 +345,52 @@ def test_changed_lanes_heartbeat_refresh_and_restart(setup):
     assert collector.config.state_file.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.fixture
+def loop_poll(setup, monkeypatch):
+    collector, _, _ = setup
+    monkeypatch.setattr("sys.argv", ["collector.py", "--loop"])
+    monkeypatch.setattr(Config, "load", lambda _: collector.config)
+    monkeypatch.setattr(module, "T3Source", lambda _: collector.source)
+    monkeypatch.setattr(module, "MCPClient", lambda url, token: collector.mcp)
+    poll = Mock()
+    monkeypatch.setattr(Collector, "poll", poll)
+    return poll
+
+
+@pytest.mark.parametrize("poll_fails", [False, True])
+def test_loop_restarts_after_a_poll_when_code_changes(loop_poll, monkeypatch, capsys, poll_fails):
+    fingerprint = Mock(side_effect=["a" * 12, "b" * 12])
+    monkeypatch.setattr(module, "code_fingerprint", fingerprint)
+    monkeypatch.setattr(module, "CODE_VERSION", f"{VERSION}+{fingerprint()}")
+    sleep = Mock()
+    monkeypatch.setattr(module.time, "sleep", sleep)
+    if poll_fails:
+        loop_poll.side_effect = CollectorError("The poll failed.")
+
+    assert module.main() == 75
+    loop_poll.assert_called_once_with()
+    sleep.assert_not_called()
+    assert "The collector code changed." in capsys.readouterr().err
+
+
+def test_loop_retries_the_fingerprint_after_a_file_error(loop_poll, monkeypatch):
+    class StopLoop(Exception):
+        pass
+
+    loaded = CODE_VERSION.split("+", 1)[1]
+    fingerprint = Mock(side_effect=[OSError("A file changed."), loaded])
+    monkeypatch.setattr(module, "code_fingerprint", fingerprint)
+    sleep = Mock(side_effect=[None, StopLoop])
+    monkeypatch.setattr(module.time, "sleep", sleep)
+
+    with pytest.raises(StopLoop):
+        module.main()
+    assert loop_poll.call_count == fingerprint.call_count == sleep.call_count == 2
+
+
 def test_many_lanes_go_out_in_batches_that_illo_accepts(setup, monkeypatch):
     from dataclasses import replace
 
-    from collectors.t3 import collector as module
     from illo.channels.mcp.schemas import LaneReport
 
     collector, api, now = setup

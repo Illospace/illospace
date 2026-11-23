@@ -1,9 +1,49 @@
+import hashlib
 import json
+import os
+import shutil
 
 import httpx
 import pytest
 
-from collectors.common import CollectorError, MCPClient, clean, read_token
+from collectors.common import (
+    CODE_VERSION,
+    VERSION,
+    CollectorError,
+    MCPClient,
+    clean,
+    code_fingerprint,
+    read_token,
+)
+
+
+def test_code_fingerprint_depends_on_python_paths_and_contents(tmp_path):
+    root = tmp_path / "collectors"
+    hooks = root / "hooks"
+    hooks.mkdir(parents=True)
+    (root / "main.py").write_bytes(b"main = True\n")
+    (hooks / "report.py").write_bytes(b"report = True\n")
+    expected = hashlib.sha256(b"hooks/report.py\0report = True\n\0main.py\0main = True\n\0")
+    fingerprint = expected.hexdigest()[:12]
+    assert code_fingerprint(root) == fingerprint
+
+    cache = hooks / "__pycache__" / "nested"
+    cache.mkdir(parents=True)
+    (cache / "ignored.py").write_bytes(b"ignored = True\n")
+    (root / "requirements.txt").write_text("httpx\n")
+    copy = shutil.copytree(root, tmp_path / "install" / "collectors")
+    os.utime(copy / "main.py", (1, 1))
+    assert code_fingerprint(root) == code_fingerprint(copy) == fingerprint
+
+    (copy / "main.py").write_bytes(b"main = None\n")
+    changed = code_fingerprint(copy)
+    assert changed != fingerprint
+    (copy / "extra.py").touch()
+    assert code_fingerprint(copy) != changed
+
+
+def test_code_version_includes_the_fingerprint():
+    assert CODE_VERSION == f"{VERSION}+{code_fingerprint()}"
 
 
 def test_mcp_sse_session_and_protocol():
@@ -41,6 +81,7 @@ def test_mcp_sse_session_and_protocol():
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     assert client.call("ask_pull", {}) == {"answers": []}
+    assert calls[0][0]["params"]["clientInfo"]["version"] == CODE_VERSION
     assert calls[-1][1]["mcp-session-id"] == "acme-session"
     assert calls[-1][1]["mcp-protocol-version"] == "2025-06-18"
     assert calls[-1][1]["authorization"] == "Bearer acme-token"
