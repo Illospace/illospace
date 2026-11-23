@@ -67,6 +67,29 @@ async def test_u05_fallback_drops_reasoning_and_failed_text(run_request, monkeyp
     assert any(i.get("call_id") == "call-0" for i in bodies[-1]["input"])
 
 
+async def test_in_stream_subscription_limit_keeps_fallback_tools(run_request):
+    request = subscription(run_request)
+    request.fallback_provider = "openai"
+    bodies = []
+
+    def respond(wire):
+        bodies.append(json.loads(wire.content))
+        if len(bodies) == 1:
+            return stream(complete([call()]))
+        if len(bodies) == 2:
+            return stream(
+                {"type": "response.failed", "response": {"error": {"type": "usage_limit_reached"}}},
+            )
+        return stream(complete([message()]))
+
+    events, session = await collect(request, respond, fallback=openai(api_key="fake-api-key"))
+    assert len(bodies) == 3
+    assert bodies[-1]["tools"]
+    assert bodies[-1].get("tool_choice", "auto") == "auto"
+    assert events[-1]["type"] == "final" and "limited" not in events[-1]["usage"]
+    assert len(session.calls) == 1
+
+
 async def test_u08_parallel_calls_stop_at_limit(run_request):
     run_request = subscription(run_request)
     run_request.max_tool_calls = 2

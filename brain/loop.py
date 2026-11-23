@@ -170,10 +170,6 @@ async def conversation(
                     or error.details.get("code") != "usage_limit_reached"
                 ):
                     raise
-                if "http_status" not in error.details:
-                    # Kept from the earlier Responses loop: a limit inside the stream also ends
-                    # tool use. The golden case subscription_limit_in_stream_fallback records it.
-                    limited = True
                 # Resume the current turn with its tool results. Never replay an MCP write.
                 wire.new_payer(fallback)
                 fallback_notice = str(error) + " I used the API key for this request.\n\n"

@@ -1982,8 +1982,7 @@
       "output_tokens_details": {
        "reasoning_tokens": 6
       },
-      "total_tokens": 705,
-      "limited": true
+      "total_tokens": 705
      }
     }
    ]
@@ -2131,7 +2130,31 @@
        "output": "Acme release is ready"
       }
      ],
-     "tools": [],
+     "tools": [
+      {
+       "type": "function",
+       "name": "lanes_search",
+       "description": "Search Acme lanes",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        }
+       },
+       "strict": false
+      },
+      {
+       "type": "function",
+       "name": "asks_list",
+       "description": "List Acme asks",
+       "parameters": {
+        "type": "object"
+       },
+       "strict": false
+      }
+     ],
      "stream": true,
      "store": false,
      "include": [
@@ -2139,7 +2162,6 @@
      ],
      "max_output_tokens": 4096,
      "parallel_tool_calls": true,
-     "tool_choice": "none",
      "reasoning": {
       "effort": "medium"
      }
@@ -2159,7 +2181,6 @@
    "status": "completed",
    "error": null,
    "usage": {
-    "limited": true,
     "auth_kind": "api_key",
     "input_tokens": 630,
     "total_tokens": 705,
