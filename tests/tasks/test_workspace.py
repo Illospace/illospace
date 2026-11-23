@@ -152,7 +152,7 @@ def test_unknown_wake_type_warns_and_known_config_keeps_fields(root):
 @pytest.mark.parametrize("wake", [
     {"type": "webhook", "url": "http://example.com", "secret": "token"},
     {"type": "webhook", "url": "https://user:password@example.com", "secret": "token"},
-    {"type": "webhook", "url": "https://example.com"},
+    {"type": "webhook", "url": "https://example.com", "secret": ""},
     {"type": "github_issue", "assignee": "builder", "repos": ["bad"]},
     {"type": "github_issue", "assignee": "builder", "repos": ["acme/app"], "default_repo": "acme/other"},
 ])
@@ -162,6 +162,16 @@ def test_known_wake_config_validates(root, wake):
     (root / "agents.yaml").write_text(yaml.safe_dump({"agents": [{"key": "build", "name": "Build", "owner": "ada", "wake": wake}]}))
     with pytest.raises(WorkspaceError):
         load_workspace(root)
+
+
+def test_board_webhook_can_omit_the_vault_key_name(root):
+    import yaml
+
+    wake = {"type": "webhook", "url": "https://example.com/wake"}
+    agent = {"key": "build", "name": "Build", "owner": "ada", "wake": wake}
+    (root / "agents.yaml").write_text(yaml.safe_dump({"agents": [agent]}))
+    configured = load_workspace(root).agents[0].wake
+    assert str(configured.url) == wake["url"] and configured.secret is None
 
 
 @pytest.mark.parametrize("values", [
