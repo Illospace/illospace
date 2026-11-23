@@ -30,6 +30,8 @@ SESSION_DEFAULT_S = 6 * 3600
 SESSION_MARGIN_S = 600
 # The SDK reconnects a closed socket in some seconds. Give it this number of checks first.
 MISSES_BEFORE_RESET = 3
+# The time of the last check that had a greeting. A restart reads the gap start here.
+LAST_GREETED_KEY = "slack:last-greeted"
 
 
 class SlackConnection:
@@ -42,6 +44,9 @@ class SlackConnection:
         self.session: str | None = None
         self.session_at = 0.0
         self.greeted: str | None = None
+        # The SDK names a session by the hash of its socket object. Keep the greeted
+        # object, so that Python cannot give its name to a new socket.
+        self.greeted_socket = None
         self.session_limit = float(SESSION_DEFAULT_S)
         self.misses = 0
         self.stopping = False
@@ -54,6 +59,7 @@ class SlackConnection:
             return
         if not isinstance(data, dict) or data.get("type") != "hello":
             return
+        self.greeted_socket = getattr(self.socket, "current_session", None)
         self.greeted = await self.socket.session_id()
         limit = (data.get("debug_info") or {}).get("approximate_connection_time")
         valid = isinstance(limit, int | float) and not isinstance(limit, bool) and limit > 0
@@ -137,13 +143,17 @@ class SlackConnection:
             while True:
                 try:
                     if not loaded_last_ok:
+                        # The sensor also records a socket with no greeting. Use the
+                        # time of the last greeted check, and the sensor only before it exists.
                         async with ctx.pool.connection() as conn:
-                            row = await one(
-                                conn, "SELECT extract(epoch from last_ok_at) AS at "
-                                "FROM sensors WHERE key='slack'",
-                            )
-                        if row and row["at"] is not None:
-                            last_ok = float(row["at"])
+                            last_ok = await kv.get(conn, LAST_GREETED_KEY)
+                            if last_ok is None:
+                                row = await one(
+                                    conn, "SELECT extract(epoch from last_ok_at) AS at "
+                                    "FROM sensors WHERE key='slack'",
+                                )
+                                last_ok = row["at"] if row else None
+                        last_ok = float(last_ok) if last_ok is not None else None
                         loaded_last_ok = True
                     if self.socket is None:
                         auth = await ctx.slack_client.auth_test()
@@ -164,6 +174,7 @@ class SlackConnection:
                         self.socket.on_message_listeners.append(self.on_message)
                         # A new client can get the session name of an old one. Start its record again.
                         self.session, self.session_at, self.greeted = None, 0.0, None
+                        self.greeted_socket = None
                         self.session_limit, self.misses = float(SESSION_DEFAULT_S), 0
                         await self.socket.connect()
                     if await self.alive(time.monotonic()):
@@ -178,6 +189,8 @@ class SlackConnection:
                                 self.pending.add(task)
                                 task.add_done_callback(self.pending.discard)
                             last_ok = now
+                            async with ctx.pool.connection() as conn:
+                                await kv.set(conn, LAST_GREETED_KEY, now)
                         await self.report(True)
                     else:
                         self.misses += 1

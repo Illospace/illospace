@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from illo.channels.slack import catchup, connection
 from illo.db import all_rows, one
+from illo.ledger import kv
 
 NOW = 1700000000
 ADA_DM = "D_ACME_ADA"
@@ -264,11 +265,14 @@ async def test_failed_reads_do_not_stop_the_other_conversations(
     assert "Acme private request" not in owner
 
 
-@pytest.mark.parametrize(("gap", "greet"), [
-    (120, True), (120, False), (60, True), (30, True), (None, True),
+@pytest.mark.parametrize(("gap", "greeted_gap", "greet", "start"), [
+    (120, None, True, 120), (120, None, False, None), (60, None, True, None),
+    (30, None, True, None), (None, None, True, None),
+    # A socket with no greeting wrote the sensor. The greeted time still holds the gap.
+    (10, 130, True, 130), (130, 10, True, None),
 ])
 async def test_connection_uses_the_persisted_last_good_time(
-    app, slack_client, monkeypatch, gap, greet
+    app, slack_client, monkeypatch, gap, greeted_gap, greet, start
 ):
     ctx = app.state.ctx
     ctx.config.slack_app_token = SecretStr("invented-app-token")
@@ -279,6 +283,9 @@ async def test_connection_uses_the_persisted_last_good_time(
                 "INSERT INTO sensors (key,last_ok_at) VALUES ('slack',to_timestamp(%s))",
                 (NOW - gap,),
             )
+    if greeted_gap is not None:
+        async with ctx.pool.connection() as conn:
+            await kv.set(conn, connection.LAST_GREETED_KEY, NOW - greeted_gap)
     asleep = asyncio.Event()
 
     class Socket:
@@ -327,8 +334,13 @@ async def test_connection_uses_the_persisted_last_good_time(
         await asyncio.gather(*slack.pending)
         async with ctx.pool.connection() as conn:
             sensor = await one(conn, "SELECT * FROM sensors WHERE key='slack:catch-up'")
-        if gap == 120 and greet:
-            recover.assert_awaited_once_with(ctx, slack.intake, NOW - gap, NOW)
+            greeted = await kv.get(conn, connection.LAST_GREETED_KEY)
+        if greet:
+            assert greeted == NOW
+        else:
+            assert greeted is None
+        if start is not None:
+            recover.assert_awaited_once_with(ctx, slack.intake, NOW - start, NOW)
             assert sensor["last_ok_at"] and not sensor["last_error_at"]
         else:
             recover.assert_not_awaited()
