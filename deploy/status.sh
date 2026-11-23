@@ -3,6 +3,10 @@ set -euo pipefail
 # shellcheck source=deploy/common.sh
 source "$(dirname -- "$0")/common.sh"
 load_config
+# The running services use the saved layout of the last good revision. A refused update can
+# leave a newer layout in the checkout.
+compose_file="$ILLO_STATE_DIR/revisions/$ILLO_REVISION/deploy/compose.yaml"
+[ -f "$compose_file" ] || compose_file=$DEPLOY_DIR/compose.yaml
 printf 'Last good revision: %s\n' "$ILLO_REVISION"
 status=0
 if ! compose exec -T illo python -c \

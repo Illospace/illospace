@@ -69,6 +69,14 @@ update_once() {
     fi
     stage=build
     if compose build illo brain sandbox; then
+        # The new images check the workspace and its routes before any change. An old
+        # illo.yaml stops the update here, and the old services keep running.
+        if ! compose run --rm --no-deps -T brain python -m brain.providers \
+                | compose run --rm --no-deps -T illo check-routes; then
+            record "failed $target: workspace or routes; nothing changed; last good $old"
+            printf 'The new revision refuses the workspace or its routes. Nothing changed.\n' >&2
+            return 1
+        fi
         stage=database
         if compose up -d --no-build --wait postgres; then
             stage=migration

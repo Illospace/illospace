@@ -10,14 +10,16 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || fail "Install $1, then run this command again."; }
 config_get() { python3 "$DEPLOY_DIR/config.py" "$ILLO_ENV_FILE" "$1"; }
 
+# Give status 1 for a relative path, or for a path inside the checkout or another folder.
+# Callers in a condition must use `|| return 1`: errexit is off there.
 outside_checkout() {
-    [[ "$1" = /* ]] || fail 'Use an absolute path outside the checkout.'
-    python3 - "$ILLO_ROOT" "$1" <<'PY'
+    [[ "$1" = /* ]] || { printf 'Use an absolute path outside the checkout.\n' >&2; return 1; }
+    python3 - "$@" "$ILLO_ROOT" <<'PY'
 import sys
 from pathlib import Path
-root, path = (Path(p).resolve() for p in sys.argv[1:])
-if path.is_relative_to(root):
-    sys.exit("Keep secrets and backups outside the checkout.")
+path, *folders = (Path(p).resolve() for p in sys.argv[1:])
+if any(path.is_relative_to(folder) for folder in folders):
+    sys.exit("Keep secrets and backups outside the checkout and the workspace folder.")
 PY
 }
 
@@ -50,11 +52,17 @@ load_config() {
     export ILLO_HEALTH_INTERVAL=${ILLO_HEALTH_INTERVAL:-2}
 }
 
-# The app file holds no provider key. Only the brain container loads the brain file.
+# The app file holds no provider key. Only the brain container loads the brain file. The app
+# mounts the workspace folder, so the brain file stays outside it too.
 check_env_files() {
     [ -f "$ILLO_BRAIN_ENV_FILE" ] || { printf 'Create the brain environment file %s from deploy/brain.env.example.\n' "$ILLO_BRAIN_ENV_FILE" >&2; return 1; }
-    outside_checkout "$ILLO_BRAIN_ENV_FILE"
-    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?(ILLO_PROVIDER_|OPENAI_|ANTHROPIC_)[A-Za-z0-9_]*=' "$ILLO_ENV_FILE"; then
+    local workspace
+    workspace=$(config_get ILLO_WORKSPACE_DIR) || return 1
+    outside_checkout "$ILLO_BRAIN_ENV_FILE" ${workspace:+"$workspace"} || return 1
+    # Compose reads `KEY=v`, `KEY = v`, `KEY: v`, `export KEY=v`, and a bare `KEY`, which takes
+    # the value from the shell. So refuse each line whose key starts with a provider prefix,
+    # and each reference to such a variable.
+    if grep -Eiq '(^[[:space:]]*(export[[:space:]]+)?|\$\{?)(ILLO_PROVIDER_|OPENAI_|ANTHROPIC_)' "$ILLO_ENV_FILE"; then
         printf 'The app environment file %s holds a provider variable. Move each ILLO_PROVIDER_, OPENAI_, and ANTHROPIC_ variable to %s. See docs/install.md.\n' "$ILLO_ENV_FILE" "$ILLO_BRAIN_ENV_FILE" >&2
         return 1
     fi

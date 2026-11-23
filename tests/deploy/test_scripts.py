@@ -33,7 +33,9 @@ if operation == "build" and os.getenv("FAIL_BUILD") == "1":
     sys.exit(1)
 if operation == "up" and ("--remove-orphans" in args or "illo" in args):
     (state / "running").write_text(revision)
-if operation == "run" and os.getenv("FAIL_MIGRATION") == "1":
+if operation == "run" and "migrate" in args and os.getenv("FAIL_MIGRATION") == "1":
+    sys.exit(1)
+if operation == "run" and "check-routes" in args and os.getenv("FAIL_ROUTES") == "1":
     sys.exit(1)
 if operation == "exec" and "python" in args:
     if revision == os.getenv("FAIL_HEALTH_REVISION"):
@@ -357,7 +359,9 @@ def test_install_creates_both_environment_files_at_mode_600(install):
 
 
 @pytest.mark.parametrize("line", ["OPENAI_API_KEY='fake-key'", "ILLO_PROVIDER_OPENAI_API_KEY=x",
-                                  "export ANTHROPIC_API_KEY=x", "OPENAI_BASE_URL="])
+                                  "export ANTHROPIC_API_KEY=x", "OPENAI_BASE_URL=",
+                                  # Compose reads both forms below. A value can name a variable.
+                                  "OPENAI_API_KEY = fake-key", "ILLO_FAKE_ALIAS=${OPENAI_API_KEY}"])
 def test_install_and_update_refuse_a_provider_key_in_the_app_file(install, line):
     init(install)
     path = Path(install[1]["ILLO_ENV_FILE"])
@@ -378,6 +382,55 @@ def test_the_brain_file_cannot_live_in_the_checkout(install):
     result = run(install, "install.sh", ILLO_BRAIN_ENV_FILE=str(install[0] / "brain.env"))
     assert result.returncode == 1
     assert "outside the checkout" in result.stderr
+
+
+@pytest.mark.parametrize("place", ["workspace", "checkout"])
+def test_update_refuses_a_brain_file_in_the_workspace_or_the_checkout(install, place):
+    """The app mounts the workspace. A file under .git is not a local change for git status."""
+    init(install)
+    brain = Path(install[1]["ILLO_ENV_FILE"]).parent / "brain.env"
+    inside = (Path(install[1]["ILLO_WORKSPACE_DIR"]) if place == "workspace"
+              else install[0] / ".git") / "brain.env"
+    shutil.copy(brain, inside)
+    assert run(install, "install.sh", ILLO_BRAIN_ENV_FILE=str(inside)).returncode == 1
+    before = len(calls(install))
+    target = remote_commit(install)
+    result = run(install, "update.sh", ILLO_BRAIN_ENV_FILE=str(inside))
+    assert result.returncode == 1 and "outside the checkout" in result.stderr
+    assert len(calls(install)) == before
+    log = (Path(install[1]["ILLO_STATE_DIR"]) / "update.log").read_text()
+    assert f"failed {target}: environment files" in log
+
+
+def test_update_refuses_a_workspace_that_the_new_revision_rejects(install):
+    """The new images check the workspace before the migration. The old services keep running."""
+    init(install)
+    old = git(install[0], "rev-parse", "HEAD")
+    before = len(calls(install))
+    target = remote_commit(install)
+    result = run(install, "update.sh", FAIL_ROUTES="1")
+    assert result.returncode == 1 and "Nothing changed" in result.stderr
+    made = [c["args"] for c in calls(install)[before:]]
+    assert any(a[-4:] == ["brain", "python", "-m", "brain.providers"] for a in made)
+    assert any(a[-2:] == ["illo", "check-routes"] for a in made)
+    assert not any("up" in a or "migrate" in a for a in made)
+    state = Path(install[1]["ILLO_STATE_DIR"])
+    assert (install[2] / "running").read_text() == old
+    assert (state / "last-good").read_text().strip() == old
+    log = (state / "update.log").read_text()
+    assert f"failed {target}: workspace or routes" in log and "rollback" not in log
+
+
+def test_status_reads_the_saved_layout_of_the_last_good_revision(install):
+    """A refused update leaves the new layout in the checkout. The services use the old one."""
+    init(install)
+    old = git(install[0], "rev-parse", "HEAD")
+    remote_commit(install, layout_change=True)
+    assert run(install, "update.sh", FAIL_ROUTES="1").returncode == 1
+    assert run(install, "status.sh").returncode == 0
+    args = calls(install)[-1]["args"]
+    saved = Path(install[1]["ILLO_STATE_DIR"]) / "revisions" / old / "deploy/compose.yaml"
+    assert "exec" in args and args[args.index("-f") + 1] == str(saved)
 
 
 def test_compose_gives_provider_keys_to_the_brain_only(tmp_path):

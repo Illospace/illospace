@@ -48,7 +48,9 @@ This install does not configure an egress proxy or restrict Internet destination
    Set `ILLO_ENV_FILE` to use another absolute path outside every checkout.
    The app file names the brain file in `ILLO_BRAIN_ENV_FILE`.
    A second install keeps both environment files and the workspace.
-   It refuses an app file with an `ILLO_PROVIDER_`, `OPENAI_`, or `ANTHROPIC_` variable.
+   It refuses an app file with an `ILLO_PROVIDER_`, `OPENAI_`, or `ANTHROPIC_` variable, in each
+   form that Compose reads (`KEY=v`, `KEY = v`, `KEY: v`, `export KEY=v`, a bare `KEY`), and a
+   value that names such a variable. It refuses a brain file inside the checkout or the workspace.
 
 4. The script copies `workspace.example/` to `~/.local/share/illo/workspace`.
    Set `ILLO_WORKSPACE_DIR` before the first install to use another folder.
@@ -95,7 +97,8 @@ If Slack refuses the read, Illo answers without history. Check the `slack:dm-his
    `ILLO_PROVIDER_ANTHROPIC_API_KEY` enables the `anthropic` provider (the Claude Agent SDK).
    `ILLO_PROVIDER_<NAME>_BASE_URL` changes the address of a provider.
    A custom provider also sets `ILLO_PROVIDER_<NAME>_WIRE` (`responses` or `chat`) and
-   `ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,effort:low`.
+   `ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,transcription,effort:low`.
+   The `chat` wire refuses `images` and `web_search`.
    A provider with no key is not available. The `chatgpt` provider needs no key.
    `brain.routes` in `illo.yaml` selects the provider, the model, the effort, and the limits of each run kind.
    See [Workspace files](workspace.md#routes).
@@ -273,6 +276,10 @@ deploy/update.sh --watch 300
 `--watch` defaults to 300 seconds if you omit the number.
 A shared lock stops concurrent installs, updates, backups, and restores.
 The updater builds image tags from the commit SHA and runs migrations before the restart.
+Before the migration, the new images check the workspace and its routes:
+`python -m brain.providers` in the new brain image gives the providers, and `illo check-routes`
+in the new app image checks `illo.yaml` against them. A failure stops the update with no change.
+The old services keep running.
 It checks that the new app reports the new SHA.
 It saves the last good SHA in `~/.local/state/illo/last-good`.
 It writes results to `~/.local/state/illo/update.log`.
@@ -282,6 +289,7 @@ Do not delete old image tags that you need for rollback.
 The updater applies the whole Compose project and removes orphan containers when the layout changes.
 It recreates Postgres only when its definition changes, then waits for its health before migrations and app startup.
 It saves the deploy folder of each good revision and uses that folder with the old images for rollback.
+`deploy/status.sh` also uses the saved folder of the last good revision.
 It never runs `down` during an update and keeps the named database volume.
 
 If a build, migration, restart, or health check fails, the updater starts the last good images.
