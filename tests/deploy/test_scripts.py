@@ -41,10 +41,17 @@ if operation == "up" and "postgres" not in args[args.index("up"):]:
     (state / "running").write_text(revision)
 if operation == "run" and "migrate" in args and os.getenv("FAIL_MIGRATION") == "1":
     sys.exit(1)
-if operation == "run" and "check-routes" in args and os.getenv("FAIL_ROUTES") == "1":
-    sys.exit(1)
-if operation == "run" and "check-routes" in args and os.getenv("HANG_ROUTES") == "1":
-    import time; time.sleep(5); sys.exit(0)
+if operation == "run" and "brain.providers" in args:
+    if os.getenv("FAIL_PROVIDERS") == "1":
+        sys.exit(1)
+    print(os.getenv("FAKE_PROVIDERS", '{"providers": []}'))
+    sys.exit(0)
+if operation == "run" and "check-routes" in args:
+    (state / "check_routes_stdin").write_text(sys.stdin.read())
+    if os.getenv("FAIL_ROUTES") == "1":
+        sys.exit(1)
+    if os.getenv("HANG_ROUTES") == "1":
+        import time; time.sleep(5); sys.exit(0)
 if operation == "exec" and "python" in args:
     if revision == os.getenv("FAIL_HEALTH_REVISION"):
         sys.exit(1)
@@ -527,3 +534,24 @@ def test_compose_gives_provider_keys_to_the_brain_only(tmp_path):
     assert services["brain"]["environment"]["ILLO_PROVIDER_OPENAI_API_KEY"] == "fake-provider-key"
     assert "ILLO_DATABASE_URL" not in services["brain"]["environment"]
     assert "ILLO_VAULT_KEY" not in services["brain"]["environment"]
+
+
+def test_update_preflight_passes_providers_sequentially(install):
+    """Capture brain.providers before calling check-routes; abort before check-routes if brain fails."""
+    init(install)
+    old = git(install[0], "rev-parse", "HEAD")
+    target = remote_commit(install)
+    before = len(calls(install))
+    fail = run(install, "update.sh", FAIL_PROVIDERS="1")
+    assert fail.returncode == 1 and "Nothing changed" in fail.stderr
+    made = [c["args"] for c in calls(install)[before:]]
+    assert any(a[-4:] == ["brain", "python", "-m", "brain.providers"] for a in made)
+    assert not any(a[-2:] == ["illo", "check-routes"] for a in made)
+    assert (install[2] / "running").read_text() == old
+
+    payload = '{"providers": [{"name": "chatgpt"}]}'
+    ok = run(install, "update.sh", FAKE_PROVIDERS=payload)
+    assert ok.returncode == 0
+    assert (install[2] / "check_routes_stdin").read_text().strip() == payload
+    assert (install[2] / "running").read_text() == target
+
