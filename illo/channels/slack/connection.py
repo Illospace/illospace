@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from asyncio import Lock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,7 +16,9 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
+from illo.channels.slack.catchup import MIN_GAP_S, catch_up
 from illo.channels.slack.intake import SlackIntake
+from illo.db import one
 from illo.ledger import kv, sensors
 
 log = logging.getLogger(__name__)
@@ -35,6 +38,7 @@ class SlackConnection:
         self.socket: SocketModeClient | None = None
         self.intake: SlackIntake | None = None
         self.pending: set[asyncio.Task] = set()
+        self.catch_up_lock = Lock()
         self.session: str | None = None
         self.session_at = 0.0
         self.greeted: str | None = None
@@ -105,12 +109,42 @@ class SlackConnection:
             log.error("Slack could not handle an event")
             await self.report(False)
 
+    async def recover(self, gap_start: float, gap_end: float) -> None:
+        async with self.catch_up_lock:
+            try:
+                result = await catch_up(self.ctx, self.intake, gap_start, gap_end)
+                failed = result.failed
+            except Exception:
+                failed = True
+            detail = "Slack could not finish the catch-up"
+            if failed:
+                log.error(detail)
+            try:
+                async with self.ctx.pool.connection() as conn:
+                    if failed:
+                        await sensors.error(conn, "slack:catch-up", detail)
+                    else:
+                        await sensors.ok(conn, "slack:catch-up")
+            except Exception:
+                log.error("Slack could not record the catch-up result")
+
     async def run(self) -> None:
         """The SDK reconnects active sockets. Start again with a new client when it does not."""
         ctx = self.ctx
+        last_ok = None
+        loaded_last_ok = False
         try:
             while True:
                 try:
+                    if not loaded_last_ok:
+                        async with ctx.pool.connection() as conn:
+                            row = await one(
+                                conn, "SELECT extract(epoch from last_ok_at) AS at "
+                                "FROM sensors WHERE key='slack'",
+                            )
+                        if row and row["at"] is not None:
+                            last_ok = float(row["at"])
+                        loaded_last_ok = True
                     if self.socket is None:
                         auth = await ctx.slack_client.auth_test()
                         async with ctx.pool.connection() as conn:
@@ -134,6 +168,12 @@ class SlackConnection:
                         await self.socket.connect()
                     if await self.alive(time.monotonic()):
                         self.misses = 0
+                        now = time.time()
+                        if not self.stopping and last_ok is not None and now - last_ok > MIN_GAP_S:
+                            task = asyncio.create_task(self.recover(last_ok, now))
+                            self.pending.add(task)
+                            task.add_done_callback(self.pending.discard)
+                        last_ok = now
                         await self.report(True)
                     else:
                         self.misses += 1
