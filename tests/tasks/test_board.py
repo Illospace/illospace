@@ -42,7 +42,7 @@ def frame_fields(response, frame_id):
     return fields(SimpleNamespace(text=response.text.split(f'id="{frame_id}">', 1)[1].split('</article>', 1)[0]))
 
 
-async def test_signin_static_empty_board_and_csp(ctx, browser):
+async def test_signin_static_empty_board(ctx, browser):
     response = await browser.http.get('/web/board')
     assert response.status_code == 302
     assert response.headers['location'] == '/web/signin?next=%2Fweb%2Fboard'
@@ -59,7 +59,6 @@ async def test_signin_static_empty_board_and_csp(ctx, browser):
                              ('work', 'In work', 'No task is in work.'),
                              ('done', 'Done today', 'Nothing closed in the last 24 hours.')]:
         assert f'>{title}</h2>' in column(page, key) and line in column(page, key)
-    assert "script-src 'self'" in page.headers['content-security-policy']
     assert page.headers['cache-control'] == 'no-store'
     assert page.text.count('<script') == 1 and '<script src="/web/board.js" defer></script>' in page.text
     assert not re.search(r'\sstyle\s*=', page.text)
@@ -69,6 +68,16 @@ async def test_signin_static_empty_board_and_csp(ctx, browser):
     assert signin.next_path('/web/board#a17') == '/web/board#a17'
     for path in ['/web/board?next=//evil.example', '/web/board#bad', '/web/board//evil.example', '/web/board%0a']:
         assert signin.next_path(path) == ''
+
+
+async def test_board_csp_allows_same_origin_refresh(ctx, browser):
+    await login(ctx, browser.http, 'ada')
+    page = await browser.http.get('/web/board')
+    assert page.status_code == 200
+    policy = page.headers['content-security-policy']
+    directives = {directive.strip() for directive in policy.split(';')}
+    assert {"default-src 'none'", "script-src 'self'", "connect-src 'self'"} <= directives
+    assert "'unsafe-inline'" not in policy
 
 
 @pytest.mark.parametrize('source', ['board', 'other'])

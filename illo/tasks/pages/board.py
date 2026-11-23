@@ -11,7 +11,7 @@ from illo.tasks import progress
 from illo.tasks.pages import ask_page, render, signin
 
 HEADERS = {**render.HEADERS, 'Content-Security-Policy':
-           render.HEADERS['Content-Security-Policy'] + "; script-src 'self'"}
+           render.HEADERS['Content-Security-Policy'] + "; script-src 'self'; connect-src 'self'"}
 
 
 async def needs(conn, person):
