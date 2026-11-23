@@ -515,12 +515,14 @@ def test_boot_settings_reject_invalid_values(var, val):
 def test_worker_environment_strips_proxy_credentials(monkeypatch):
     from brain.process import worker_environment
 
-    monkeypatch.setenv("HTTPS_PROXY", "http://user:fake-proxy-secret@proxy.example:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "//user:fake-proxy-secret@proxy.example:8080")
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
-    monkeypatch.setenv("http_proxy", "user:secret@proxy.example:3128")
+    monkeypatch.setenv("http_proxy", "http://[::1")
+    monkeypatch.setenv("https_proxy", "user:secret@proxy.example:3128")
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
     env = worker_environment()
     assert "HTTPS_PROXY" not in env
     assert "http_proxy" not in env
+    assert "https_proxy" not in env
     assert env["HTTP_PROXY"] == "http://proxy.example:3128"
     assert env["NO_PROXY"] == "localhost,127.0.0.1"

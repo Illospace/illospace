@@ -39,6 +39,7 @@ update_once() {
     old=$(cat "$ILLO_STATE_DIR/last-good")
     replaced=0
     preflight_timeout=${ILLO_PREFLIGHT_TIMEOUT:-60}
+    [[ "$preflight_timeout" =~ ^[0-9]+$ ]] && [ "$preflight_timeout" -gt 0 ] || fail 'ILLO_PREFLIGHT_TIMEOUT must be a positive integer.'
     if [ -n "$(git status --porcelain)" ]; then
         record 'failed: the checkout has local changes'
         return 1
@@ -80,7 +81,7 @@ update_once() {
             return 1
         fi
         stage=database
-        if compose up -d --no-build --wait postgres; then
+        if compose up -d --no-build --no-recreate --wait postgres; then
             stage=migration
             if compose run --rm --no-deps -T illo migrate; then
                 stage=start

@@ -457,11 +457,22 @@ def test_update_preflight_times_out_and_keeps_old_services(install):
     init(install)
     old = git(install[0], "rev-parse", "HEAD")
     target = remote_commit(install)
+    bad = run(install, "update.sh", ILLO_PREFLIGHT_TIMEOUT="0")
+    assert bad.returncode == 1 and "ILLO_PREFLIGHT_TIMEOUT" in bad.stderr
     result = run(install, "update.sh", HANG_ROUTES="1", ILLO_PREFLIGHT_TIMEOUT="1")
     assert result.returncode == 1 and "Nothing changed" in result.stderr
     assert (install[2] / "running").read_text() == old
     log = (Path(install[1]["ILLO_STATE_DIR"]) / "update.log").read_text()
     assert f"failed {target}: workspace or routes" in log and "rollback" not in log
+
+
+def test_config_parser_keeps_escaped_double_quotes(tmp_path):
+    env_file = tmp_path / "env"
+    env_file.write_text('EXAMPLE="one\\"two" # comment\nPLAIN=ok # trailing\n')
+    out = subprocess.check_output([sys.executable, str(ROOT / "deploy/config.py"), str(env_file), "EXAMPLE"], text=True).strip()
+    assert out == 'one\\"two'
+    out2 = subprocess.check_output([sys.executable, str(ROOT / "deploy/config.py"), str(env_file), "PLAIN"], text=True).strip()
+    assert out2 == "ok"
 
 
 def test_env_check_rejects_bom_provider_key_and_inline_comment_workspace(install):

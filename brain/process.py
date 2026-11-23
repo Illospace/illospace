@@ -21,8 +21,13 @@ WORKER_ENVIRONMENT = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "PYTHONP
 
 
 def safe_proxy(value: str) -> bool:
-    parts = urlsplit(value if "://" in value else "http://" + value)
-    return not (parts.username or parts.password or "@" in parts.netloc)
+    if "@" in value:
+        return False
+    try:
+        parts = urlsplit(value if "://" in value or value.startswith("//") else "http://" + value)
+    except ValueError:
+        return False
+    return not (parts.username or parts.password)
 
 
 def worker_environment() -> dict:

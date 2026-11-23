@@ -123,7 +123,7 @@ compose() {
 compose_timeout() {
     local seconds=$1
     shift
-    timeout "$seconds" docker compose --project-name "$ILLO_PROJECT_NAME" --env-file "$ILLO_ENV_FILE" \
+    timeout --kill-after=5 "$seconds" docker compose --project-name "$ILLO_PROJECT_NAME" --env-file "$ILLO_ENV_FILE" \
         -f "${compose_file:-$DEPLOY_DIR/compose.yaml}" "$@"
 }
 

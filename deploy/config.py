@@ -11,7 +11,16 @@ def parse_value(raw: str) -> str:
     value = raw.strip()
     if value.startswith(("'", '"')):
         quote = value[0]
-        end = value.find(quote, 1)
+        end = -1
+        i = 1
+        while i < len(value):
+            if quote == '"' and value[i] == "\\":
+                i += 2
+                continue
+            if value[i] == quote:
+                end = i
+                break
+            i += 1
         if end < 0:
             raise ValueError("Use one line for each environment value")
         trailing = value[end + 1 :].strip()

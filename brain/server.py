@@ -100,10 +100,10 @@ def create_app(*, concurrency: int | None = None, runner=run_worker, table=None,
                     if result.status_code != 200:
                         return JSONResponse(status_code=502, content={"category": "runtime"})
                     raw = bytearray()
-                    async for chunk in result.aiter_bytes(chunk_size=65536):
-                        raw.extend(chunk)
-                        if len(raw) > 262144:
+                    async for chunk in result.aiter_bytes():
+                        if len(raw) + len(chunk) > 262144:
                             return JSONResponse(status_code=502, content={"category": "runtime"})
+                        raw.extend(chunk)
             reply = json.loads(raw)
             # The transcript goes into the inbound message. It never holds the provider key.
             check_echo(reply, item.api_key)
