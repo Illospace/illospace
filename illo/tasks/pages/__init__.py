@@ -23,15 +23,31 @@ def base_url(ctx):
             or ctx.config.public_url).rstrip("/")
 
 
-def url(ctx, task_id):
-    return base_url(ctx) + f"/t/{task_id}"
+def path(workspace, item_id, *, ask=False, on_board=False):
+    if workspace.config.pages.open == 'board' and on_board:
+        return f"/web/board#{'a' if ask else 't'}{item_id}"
+    return f"/{'web/a' if ask else 't'}/{item_id}"
 
 
-def workspace_url(workspace, task_id):
+async def person_path(conn, workspace, person, item_id, *, ask=False):
+    on_board = False
+    if workspace.config.pages.open == 'board':
+        from illo.tasks.pages.board import needs
+
+        frames, _ = await needs(conn, person)
+        on_board = any(kind == ('a' if ask else 't') and row['id'] == item_id for _, kind, row in frames)
+    return path(workspace, item_id, ask=ask, on_board=on_board)
+
+
+def url(ctx, task_id, *, on_board=False):
+    return base_url(ctx) + path(ctx.workspace, task_id, on_board=on_board)
+
+
+def workspace_url(workspace, task_id, *, on_board=False):
     from illo.config import Config
 
     base = workspace.config.pages.url or workspace.config.connect.public_url or Config.from_env().public_url
-    return base.rstrip("/") + f"/t/{task_id}"
+    return base.rstrip("/") + path(workspace, task_id, on_board=on_board)
 
 
 async def stale(conn, row, page):
@@ -60,11 +76,15 @@ async def read(conn, ctx, viewer, task_id):
     if not row:
         raise tasks.TaskError("The task was not found.")
     page = await one(conn, "SELECT * FROM task_pages WHERE task_id=%s", (task_id,))
+    address = url(ctx, task_id)
+    if viewer.human and ctx.workspace.config.pages.open == 'board':
+        person = await tasks._identity(conn, viewer)
+        address = base_url(ctx) + await person_path(conn, ctx.workspace, person, task_id)
     return {"task": task_id, "blocks": [{k: v for k, v in block.items() if k != "image_link"}
                        for block in page["blocks"]] if page else [],
             "result_version": page["result_version"] if page else None,
             "current_result_version": row["result_version"], "stale": await stale(conn, row, page),
-            "url": url(ctx, task_id),
+            "url": address,
             "author": page["author"] if page else None,
             "written_at": page["written_at"] if page else None,
             "visibility": row["visibility"]}

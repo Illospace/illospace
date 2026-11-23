@@ -134,7 +134,11 @@ async def is_live(conn, ask):
 
 
 async def prepare_card(ctx, conn, data):
-    data['page_url'] = pages.base_url(ctx) + f"/web/a/{data['id']}" if pages.enabled(ctx) else None
+    data['page_url'] = None
+    if pages.enabled(ctx):
+        destination = (await pages.person_path(conn, ctx.workspace, data['owner'], data['id'], ask=True)
+                       if data.get('owner') else f"/web/a/{data['id']}")
+        data['page_url'] = pages.base_url(ctx) + destination
     requester = data.get('requester') or {}
     data['full_proof'] = not pages.enabled(ctx) and requester.get('scopes') == ['agent']
     if data['full_proof'] and data.get('owner'):

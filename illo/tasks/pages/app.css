@@ -2,6 +2,8 @@
 :root{
   color-scheme:light dark;
   --bg:#f6f7f5; --card:#ffffff; --ink:#0b0b0b; --soft:#666762; --line:#e1e2de; --dot:#d6d7d2;
+  /* a frame on the board lifts off the paper; its action strip is one step nearer the paper */
+  --shadow:0 1px 2px rgba(0,0,0,.04),0 14px 30px -20px rgba(0,0,0,.30); --strip:#fafaf9;
   --radius:20px; --inner:14px;
   font:1rem/1.5 ui-rounded,"SF Pro Rounded","Nunito","Segoe UI",system-ui,-apple-system,sans-serif;
   background:var(--bg); color:var(--ink);
@@ -9,6 +11,7 @@
 /* Dark is the same system with paper and ink exchanged. */
 @media (prefers-color-scheme:dark){:root{
   --bg:#0b0b0b; --card:#161615; --ink:#f6f7f5; --soft:#a3a49f; --line:#2e2e2c; --dot:#262624;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 18px 36px -18px rgba(0,0,0,.9); --strip:#121211;
 }}
 *{box-sizing:border-box}
 body{margin:0; overflow-wrap:anywhere; min-height:100vh;
@@ -20,10 +23,11 @@ a:hover{text-decoration-color:currentColor}
 .top .mark{width:1.5rem; height:1.5rem; flex:none; color:var(--ink)}
 .top b{color:var(--ink); font-weight:600}
 .top .grow{flex:1}
-.top form{margin:0} .top button{all:unset; cursor:pointer; text-decoration:underline; text-decoration-color:var(--soft); text-underline-offset:.15em}
+.top form{margin:0} .top form button{all:unset; cursor:pointer; text-decoration:underline; text-decoration-color:var(--soft); text-underline-offset:.15em}
 .top button:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
 /* the page is one frame on the paper, as a frame on the board */
-main{max-width:46rem; margin:1.2rem auto 7rem; padding:1.1rem 1.2rem 1.2rem; background:var(--card); border:1px solid var(--line); border-radius:var(--radius)}
+main,.f{padding:1.1rem 1.2rem 1.2rem; background:var(--card); border:1px solid var(--line); border-radius:var(--radius)}
+main{max-width:46rem; margin:1.2rem auto 7rem}
 @media (max-width:48rem){main{margin:.6rem .6rem 7rem; padding:.9rem .9rem 1rem}}
 .chips{display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 .6rem; padding:0; list-style:none; font-size:.8rem}
 .chips li{border:1px solid var(--line); border-radius:99px; padding:.05rem .65rem; color:var(--soft)}
@@ -143,3 +147,104 @@ body.frame{background:transparent; margin:0; min-height:0}
 .progress.s12{height:47.7rem}
 /* a step text takes more lines on a phone */
 @media (max-width:30rem){.progress.s1{height:22rem} .progress.s2{height:26rem} .progress.s3{height:30rem} .progress.s4{height:34rem} .progress.s5{height:38rem} .progress.s6{height:42rem} .progress.s7{height:46rem} .progress.s8{height:50rem} .progress.s9{height:54rem} .progress.s10{height:58rem} .progress.s11{height:62rem} .progress.s12{height:66rem}}
+
+/* The board: the columns of decisions on the dotted paper. With no script it is a normal page that scrolls. */
+.zoom{display:none}
+.board{padding:1.6rem 1rem 5rem}
+.world{display:grid; grid-template-columns:minmax(0,26fr) minmax(0,18.5fr) minmax(0,18.5fr); gap:3.5rem; align-items:start;
+  max-width:70rem; margin:0 auto; font-size:.9rem; line-height:1.45}
+.column{min-width:0}
+.column-title{font-size:1.4rem; line-height:1.15; letter-spacing:-.02em; font-weight:700; margin:0 .25rem .2rem}
+.column-line{color:var(--soft); font-size:.8rem; margin:0 .25rem 1.15rem}
+.column-more{color:var(--soft); font-size:.8rem; margin:.2rem .25rem 0}
+#board-changed{display:inline-block; margin:0 0 1rem; font-size:.85rem; text-decoration:none}
+/* a frame: the frame of the pages, lifted off the paper */
+.world .f{margin:0 0 1.1rem; padding:1rem 1.1rem 1.1rem; box-shadow:var(--shadow); cursor:auto}
+.f:target{outline:2px solid var(--ink); outline-offset:3px}
+.f h1{font-size:1.15rem; line-height:1.25; letter-spacing:-.015em; margin:.1rem 0 .3rem}
+.f h1 a{text-decoration:none}
+.f h1 a:is(:hover,:focus-visible){text-decoration:underline; text-decoration-color:currentColor}
+.f p{margin:.4rem 0}
+.f .chips{font-size:.7rem; gap:.25rem; margin:0 0 .65rem}
+.f .chips li{padding:.08rem .5rem; white-space:nowrap}
+.f .ask{font-size:.88rem; margin:0 0 .9rem}
+/* inside a frame the blocks lie flat on the card; only a preview keeps its own frame, as its reader sees it */
+.f .block{margin:0 0 1.05rem; border:0; border-radius:0; background:none; overflow:visible}
+.f .block>h2{font-size:.64rem; padding:0 0 .4rem}
+.f .block .body{padding:0}
+.f .block>.links{padding:0}
+.f .missing{padding:.8rem 0}
+.f .preview{border:1px solid var(--line); border-radius:var(--inner); background:var(--card); overflow:hidden}
+.f .preview>h2{padding:.6rem .8rem 0}
+.f .preview .as{padding:.65rem .8rem .15rem} .f .preview .text{padding:.25rem .8rem .7rem}
+.f .preview .badge{width:1.8rem; height:1.8rem; font-size:.85rem}
+.f .image img{border-radius:var(--inner)}
+.f .image figcaption{padding:.45rem 0 0; font-size:.78rem}
+.f .checks{padding:0}
+.f .checks li{padding:.4rem 0}
+.f .checks li:first-child{padding-top:.1rem}
+.f .checks .dot{width:1rem; height:1rem; font-size:.62rem}
+.f .checks small{font-size:.75rem}
+.f .bar{font-size:.8rem}
+.f .prose pre,.f .prose .table{overflow:hidden; white-space:pre-wrap}
+/* the short proof of a request: one line for each entry, as the facts of the page */
+.f .proof-short{display:grid; grid-template-columns:minmax(4.5rem,26%) 1fr; gap:.8rem; align-items:baseline;
+  margin:0; border:0; border-top:1px solid var(--line); border-radius:0; background:none}
+.f .ask+.proof-short{border-top:0}
+.f .proof-short>h2{padding:.5rem 0; text-transform:none; letter-spacing:0; font-size:.8rem; font-weight:400}
+.f .proof-short .body{padding:.45rem 0}
+.f .proof-short+p{font-size:.82rem; margin:.3rem 0 0}
+.f .proof-short .links{margin:0}
+/* the action strip: the foot of the frame */
+.f .decide{position:static; margin:1rem -1.1rem -1.1rem; padding:.75rem 1.1rem; background:var(--strip);
+  border-top:1px solid var(--line); border-radius:0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px)}
+.f .decide .in{max-width:none; gap:.45rem}
+.f .btn{font-size:.82rem; padding:.38rem .95rem}
+.f .decide textarea{min-height:4.2rem; margin:.6rem 0 .5rem; font-size:.88rem; background:var(--card)}
+.f .decide details[open]>summary{border-color:var(--ink)}
+/* "In work" and "Done today": compact cards */
+:is(#work,#done) .f{padding:.8rem .95rem .85rem; border-radius:16px; margin-bottom:.75rem}
+:is(#work,#done) .f h1{font-size:.95rem; line-height:1.3; letter-spacing:-.01em; margin:0}
+.card-head{display:flex; align-items:center; gap:.5rem; font-size:.78rem; margin:0 0 .3rem}
+.f .card-head{margin:0 0 .3rem}
+.card-head b{font-weight:600}
+.card-head span:last-child{margin-left:auto; color:var(--soft); font-size:.72rem; white-space:nowrap}
+.card-lines{display:flex; flex-wrap:wrap; align-items:center; column-gap:.45rem; color:var(--soft); font-size:.8rem; margin-top:.2rem}
+.f .card-lines p{margin:0}
+.card-lines p+p::before{content:""; display:inline-block; width:3px; height:3px; margin:0 .45rem 0 0; border-radius:50%; background:currentColor; vertical-align:middle}
+.f .count{display:flex; align-items:center; gap:.65rem; margin:.55rem 0 .05rem; color:var(--soft); font-size:.74rem; white-space:nowrap}
+.count progress{flex:1; height:4px; border:0; border-radius:99px; background:var(--line); appearance:none; -webkit-appearance:none; overflow:hidden}
+.count progress::-webkit-progress-bar{background:var(--line)}
+.count progress::-webkit-progress-value{background:var(--ink); border-radius:99px}
+.count progress::-moz-progress-bar{background:var(--ink); border-radius:99px}
+/* the mark of a holder: a dot that pulses while the agent works, a still dot, a ring before the agent starts */
+.pulse{position:relative; flex:none; width:.5rem; height:.5rem; border-radius:50%; background:var(--ink)}
+.pulse.ring{background:none; box-shadow:inset 0 0 0 1.5px var(--soft)}
+.pulse.live::after{content:""; position:absolute; inset:0; border-radius:50%; background:var(--ink); animation:pulse 1.8s ease-out infinite}
+@keyframes pulse{from{transform:scale(1); opacity:.45} to{transform:scale(2.8); opacity:0}}
+#done .f{display:grid; grid-template-columns:1.1rem 1fr; column-gap:.6rem; align-items:start}
+.tick{grid-row:span 2; width:1.1rem; height:1.1rem; margin-top:.12rem; border-radius:50%; display:grid; place-items:center;
+  background:var(--ink); color:var(--card); font-size:.62rem; font-weight:700}
+#done .f p{grid-column:2; margin:.15rem 0 0; color:var(--soft); font-size:.8rem}
+/* the canvas: the script adds the class; the paper and the bar stay, the world moves */
+.canvas,.canvas body{height:100%; overflow:hidden}
+.canvas body{background-image:none}
+.canvas .top{position:fixed; inset:0 0 auto; z-index:5; background:color-mix(in srgb,var(--bg) 84%,transparent);
+  -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px)}
+.canvas .board{position:fixed; inset:0; padding:0; overflow:hidden; cursor:grab; touch-action:none;
+  background-image:radial-gradient(circle,var(--dot) 1px,transparent 1.2px); background-size:22px 22px}
+.canvas .board.drag{cursor:grabbing; user-select:none; -webkit-user-select:none}
+.canvas .world{position:absolute; left:0; top:0; margin:0; max-width:none; width:max-content; transform-origin:0 0;
+  grid-template-columns:26rem 18.5rem 18.5rem; padding-bottom:2rem}
+.canvas .glide{transition:background-position .45s cubic-bezier(.2,.7,.2,1),background-size .45s cubic-bezier(.2,.7,.2,1)}
+.canvas .glide .world{transition:transform .45s cubic-bezier(.2,.7,.2,1)}
+.canvas .zoom{display:flex; order:1; gap:.3rem; margin-left:.5rem}
+.zoom .btn{display:grid; place-items:center; width:1.75rem; height:1.75rem; padding:0; font-size:1rem; font-weight:500; line-height:1}
+.zoom [data-zoom="fit"]{width:auto; padding:0 .75rem; font-size:.8rem; font-weight:600}
+@media (prefers-reduced-motion:reduce){.canvas .glide,.canvas .glide .world{transition:none} .pulse.live::after{animation:none}}
+@media (max-width:47.999rem){
+  .board{padding:1rem .6rem 4rem}
+  .world{grid-template-columns:minmax(0,1fr); gap:2rem}
+  .world .f{padding:.95rem .95rem 1rem}
+  .f .decide{margin:1rem -.95rem -1rem; padding:.7rem .95rem}
+}

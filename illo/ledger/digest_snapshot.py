@@ -76,11 +76,11 @@ def thread_link(row):
     return ""
 
 
-def task_link(workspace, row):
+def task_link(workspace, row, *, on_board=False):
     if workspace.config.pages.enabled:
         from illo.tasks.pages import workspace_url
 
-        return workspace_url(workspace, row["id"])
+        return workspace_url(workspace, row["id"], on_board=on_board)
     return thread_link(row)
 
 
@@ -148,6 +148,12 @@ async def task_records(conn, workspace, now, since, person=None):
     members = await all_rows(conn, "SELECT key,name FROM people")
     names = {"person:" + p["key"]: p["name"] for p in members}
     names.update({"agent:" + a.key: a.name for a in workspace.agents})
+    board_ids = set()
+    if person and workspace.config.pages.enabled and workspace.config.pages.open == 'board':
+        from illo.tasks.pages.board import needs
+
+        frames, _ = await needs(conn, person)
+        board_ids = {row['id'] for _, kind, row in frames if kind == 't'}
     records = []
     for row in rows:
         history = by_task.get(row["id"], [])
@@ -164,7 +170,7 @@ async def task_records(conn, workspace, now, since, person=None):
         records.append({
             "row": row, "events": history, "period": period, "wait_since": since_wait, "restarts": restarts,
             "reviewer": await tasks.reviewer(conn, workspace, row),
-            "item": {"id": row["id"], "title": row["title"], "link": task_link(workspace, row),
+            "item": {"id": row["id"], "title": row["title"], "link": task_link(workspace, row, on_board=row["id"] in board_ids),
                      "holder": holder, "reason": wait_reason(row, period, holder),
                      "age_hours": hours(now, since_wait), "due_at": row["due_at"],
                      "silent_hours": hours(now, base),
@@ -222,11 +228,21 @@ async def build(conn, person, now, workspace):
         WHERE a.owner_person_id=%s AND (a.state='open' OR a.delivery_state='failed')
         AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s)
         ORDER BY a.due_at NULLS LAST,a.id""", (person["id"], person["id"]))
+    ask_links = {}
+    if workspace.config.pages.enabled and workspace.config.pages.open == 'board':
+        from illo.config import Config
+        from illo.tasks.pages import path
+        from illo.tasks.pages.board import needs as board_needs
+
+        base = (workspace.config.pages.url or workspace.config.connect.public_url or Config.from_env().public_url).rstrip('/')
+        frames, _ = await board_needs(conn, person)
+        ids = {row['id'] for _, kind, row in frames if kind == 'a'}
+        ask_links = {a['id']: base + path(workspace, a['id'], ask=True, on_board=a['id'] in ids) for a in asks}
     return {
         "name": person["name"], "needs_you": [r["item"] for r in needs[:7]],
         "needs_you_total": len(needs), "your_agents": agents,
         "finished_total": len(finished), "finished": [done_item(r, names) for r in finished[:5]],
-        "due": due, "asks": [{"title": a["question"], "link": card_link(a),
+        "due": due, "asks": [{"title": a["question"], "link": ask_links.get(a["id"], card_link(a)),
             "reason": "The answer did not reach its agent." if a["delivery_state"] == "failed" else "Please answer.",
             "age_hours": hours(now, a["created_at"])} for a in asks],
         "faults": await read_faults(conn, now, since, person["key"]) if person["role"] == "owner" else [],

@@ -14,7 +14,7 @@ from illo.db import one
 from illo.ledger import audit, tasks
 from illo.ledger.tokens import digest
 from illo.tasks import pages
-from illo.tasks.pages import ask_page, images, outside, render, signin
+from illo.tasks.pages import ask_page, board, images, outside, render, signin
 
 
 def html(body, status=200, headers=render.HEADERS):
@@ -71,9 +71,10 @@ def signin_path(destination):
     return '/web/signin' + ('?' + urlencode({'next': destination}) if destination else '')
 
 
-def start_form(destination, label):
-    action = signin_path(destination)
-    return f'<form method="post" action="{escape(action)}"><button class="btn go">{escape(label)}</button></form>'
+def start_form(destination, label, *, keep_fragment=False):
+    # The browser can keep a board frame fragment through a POST to the current URL.
+    action = '' if keep_fragment else f' action="{escape(signin_path(destination))}"'
+    return f'<form method="post"{action}><button class="btn go">{escape(label)}</button></form>'
 
 
 async def link_sign_in(ctx, conn, request, person, key):
@@ -137,7 +138,8 @@ async def sign_in(ctx, request):
                 '<main class="signin"><h1>Sign in to Illo</h1>'
                 '<p>The fast way: in Slack, press <b>Open the page</b> on a task card from Illo.</p>'
                 '<p>The other way: Illo gives you a code here. You send the code to Illo in Slack.</p>'
-                + start_form(destination, 'Get a code') + '</main>', title='Sign in to Illo'))
+                + start_form(destination, 'Get a code', keep_fragment=destination == '/web/board')
+                + '</main>', title='Sign in to Illo'))
         approved = await signin.continue_session(conn, handle)
         if approved:
             token, destination = approved
@@ -148,7 +150,8 @@ async def sign_in(ctx, request):
         if pending['expired'] or pending['decision'] != 'pending' or pending['continued_at']:
             return html(render.document(
                 '<main class="signin"><h1>The sign-in ended.</h1><p>The code is denied, used, or expired.</p>'
-                + start_form(pending['next_path'], 'Get a new code') + '</main>'))
+                + start_form(pending['next_path'], 'Get a new code',
+                             keep_fragment=destination == pending['next_path'] == '/web/board') + '</main>'))
     body = ('<main class="signin"><h1>Sign in to Illo</h1>'
             '<p>Send this line to Illo in a Slack direct message. Then press Approve on the card.</p>'
             '<p class="code">connect ' + escape(signin.pairing_line(handle)) + '</p>'
@@ -240,7 +243,7 @@ async def decide(ctx, request, task_id):
             args={'id': task_id}, decision='allow', reason='The person acts on the task page.', target=f'task {task_id}')
     # The same sender reads committed events from either surface. The durable wake runs on its existing timer.
     await slack_tasks.tick(ctx)
-    return redirect(f'/t/{task_id}')
+    return redirect(f'/web/board#t{task_id}' if values.get('from') == 'board' else f'/t/{task_id}')
 
 
 class LinkLogFilter(logging.Filter):
@@ -267,6 +270,16 @@ async def setup(ctx):
             # The address of a sign-in link holds its key, also when pages are off.
             return html(render.document('<main><h1>The task was not found.</h1></main>'), 404,
                         LINK_HEADERS if path == '/web/signin' else render.HEADERS)
+        if path == '/web/board':
+            token = request.cookies.get(signin.SESSION_COOKIE, '')
+            async with ctx.pool.connection() as conn:
+                person = await signin.session(conn, token)
+                if not person:
+                    return redirect(signin_path('/web/board'), 302)
+                return html(await board.page(ctx, conn, person, token), headers=board.HEADERS)
+        if path == '/web/board.js':
+            return Response(Path(__file__).with_name('board.js').read_text(),
+                            media_type='text/javascript', headers=render.HEADERS)
         if path == '/web/app.css':
             return Response(Path(__file__).with_name('app.css').read_text(), media_type='text/css', headers=render.HEADERS)
         if path == '/web/signin':
@@ -302,7 +315,7 @@ async def setup(ctx):
         return await task_page(ctx, request, task_id, file_position=position, progress=path.endswith('/progress'))
 
     for path, methods in [('/web/signin', ['GET', 'POST']), ('/web/signout', ['POST']),
-                          ('/web/app.css', ['GET']), ('/web/a/{ask_id}', ['GET']),
+                          ('/web/app.css', ['GET']), ('/web/board', ['GET']), ('/web/board.js', ['GET']), ('/web/a/{ask_id}', ['GET']),
                           ('/web/a/{ask_id}/answer', ['POST']), ('/web/a/{ask_id}/file/{position}', ['GET']), ('/t/{task_id}', ['GET']),
                           ('/t/{task_id}/progress', ['GET']), ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
         ctx.app.add_api_route(path, route, methods=methods)

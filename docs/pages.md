@@ -180,3 +180,36 @@ When the task leaves work, the frame stops its refresh and links back to the tas
 Illo keeps a task-to-lane key when the existing lane handler finds a match.
 This key preserves the link after a lane stops. It does not change the rule for a live lane.
 Task readers cannot read progress text from another person's private lane.
+
+## Board
+
+Open `/web/board` after sign-in. The header shows the date in your time zone.
+Each task and request page also has a **Board** link.
+The board has three columns, with at most 30 frames in each column:
+
+- **Needs you** shows tasks that wait for you and open requests that you must answer. The oldest wait comes first.
+  Each frame has the page blocks and the same forms as its page.
+  A request shows the first three proof entries in short form. Open its page for the complete proof.
+- **In work** shows visible tasks in `todo` or `working` that do not wait for you. The latest change comes first.
+  An agent frame shows its stage, current action, and step count. A person frame names its holder.
+- **Done today** shows visible tasks closed in the last 24 hours. The latest close comes first.
+  Each frame names the person who approved it, or gives the close time.
+
+Each title opens its own page. A frame named in the address has an ink outline.
+Forms from the board return to that frame. Access stays the same as on each page.
+The board states how many more frames the task list in Slack holds.
+
+With a script, drag the paper or a column title to pan. The wheel and arrow keys also pan.
+Use **+**, **−**, **Fit**, Ctrl or Command with the wheel, or a touch pinch to zoom.
+The zoom range is 0.4 to 1.5. A frame cannot move on its own.
+The browser keeps the view in session storage across a form post.
+Every 30 seconds, a visible tab reads the two work columns again when no form has focus or typed text.
+The **Needs you** column stays intact. A link asks you to read the board again when its frame IDs change.
+Below 48rem, the board stays a normal page with one column below the other.
+Without a script, all columns scroll as a normal page and all forms work.
+The board has no animated moves, including with reduced motion.
+
+Set `pages.open: board` to send people to a frame that is currently in their **Needs you** column.
+This applies to Slack page buttons, task links, and the morning brief.
+Other links keep the page address. The default, `pages.open: page`, keeps the current links.
+Agent results always give the task or request page address.

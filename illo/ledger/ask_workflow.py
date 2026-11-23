@@ -301,8 +301,21 @@ async def expire_ask(conn: Connection, ask_id: int) -> None:
     )
 
 
+PAGE_FROM = """FROM asks a JOIN people p ON p.id=%s AND p.active
+    WHERE p.id IN (a.owner_person_id,a.requester_person_id)"""
+
+
+async def page_search(conn, person_id, *, limit=30):
+    """Use the page access rule for the open requests that this person must answer."""
+    return await all_rows(conn, "SELECT a.*,count(*) OVER () AS board_total " + PAGE_FROM + """
+        AND a.owner_person_id=p.id AND a.state='open'
+        AND (a.expires_at IS NULL OR a.expires_at>clock_timestamp())
+        AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.id=a.lane_id AND a.source_ref IS NOT NULL
+            AND (l.state IN ('done','failed') OR l.closed_at IS NOT NULL))
+        ORDER BY a.created_at,a.id LIMIT %s""", (person_id, min(30, max(1, limit))))
+
+
 async def page_read(conn, ask_id, person_id, *, lock=False):
     """A page belongs only to the ask's active participants, regardless of lane rights."""
-    return await one(conn, """SELECT a.* FROM asks a JOIN people p ON p.id=%s AND p.active
-        WHERE a.id=%s AND p.id IN (a.owner_person_id,a.requester_person_id)"""
+    return await one(conn, "SELECT a.* " + PAGE_FROM + " AND a.id=%s"
         + (" FOR UPDATE OF a" if lock else ""), (person_id, ask_id))
