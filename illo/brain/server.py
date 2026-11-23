@@ -18,7 +18,7 @@ def _error(request_id, code: int, message: str):
     )
 
 
-def initialize_result(params: dict, name: str) -> dict:
+def initialize_result(params: dict, name: str, instructions: str | None = None) -> dict:
     """Both MCP endpoints use the same stateless protocol negotiation."""
     version = params.get("protocolVersion", PROTOCOL_VERSION)
     if not isinstance(version, str) or version not in {
@@ -32,6 +32,7 @@ def initialize_result(params: dict, name: str) -> dict:
         "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": False}},
         "serverInfo": {"name": name, "version": "0.1.0"},
+        **({"instructions": instructions} if instructions is not None else {}),
     }
 
 
