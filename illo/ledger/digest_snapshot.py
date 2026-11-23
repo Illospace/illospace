@@ -98,10 +98,14 @@ def wait_record(row, events):
     return (period[-1]["at"] if period else row["created_at"]), period
 
 
+def wait_check(event):
+    return event["data"].get("source") == "wait_check" and event["kind"] in {"reminded", "message"}
+
+
 def wait_reason(row, period, name):
     for event in period:
         # The last wait check read the live state. Its text is the best reason.
-        if event["data"].get("source") == "wait_check" and event["kind"] in {"reminded", "message"}:
+        if wait_check(event):
             return event["text"][:600]
     for event in period:
         if event["kind"] == "question":
@@ -120,6 +124,14 @@ def wait_reason(row, period, name):
     if not row["holder"]:
         return "the ticket waits for an owner; choose a holder"
     return "choose the next step"
+
+
+def short_action(reason):
+    action = " ".join(reason.split())
+    if len(action) <= 160:
+        return action
+    end = action.rfind(" ", 0, 160)
+    return action[:end if end != -1 else 159] + "…"
 
 
 async def task_records(conn, workspace, now, since, person=None):
@@ -238,19 +250,25 @@ async def team_snapshot(conn, workspace, now):
             if item["new"]:
                 new_waits.append({k: item[k] for k in ("id", "title", "link", "reason", "age_hours")}
                                  | {"action_by": names.get(target, target)})
+            oldest = {k: item[k] for k in ("id", "title", "link")} | {"action": short_action(item["reason"])}
             entry = waiting.setdefault(target, {"name": names.get(target, target), "count": 0,
-                                                "oldest_hours": 0, "oldest": item})
+                                                "oldest_hours": 0, "oldest": oldest})
             entry["count"] += 1
             if item["age_hours"] >= entry["oldest_hours"]:
-                entry.update(oldest_hours=item["age_hours"], oldest={k: item[k] for k in ("id", "title", "link")})
+                entry.update(oldest_hours=item["age_hours"], oldest=oldest)
         facts = []
+        check_text = None
         for event in r["period"]:
             if event["kind"] == "wake_failed" and event["data"].get("final"):
-                facts.append("the wake failed: " + event["text"])
-                break
-            if event["data"].get("escalated"):
-                facts.append(f"the holder stays silent after {event['data']['restarts']} restarts")
-                break
+                fact = "the wake failed: " + event["text"]
+            elif event["data"].get("escalated"):
+                fact = f"the holder stays silent after {event['data']['restarts']} restarts"
+            else:
+                if check_text is None and wait_check(event):
+                    check_text = event["text"][:600]
+                continue
+            facts.append(check_text if check_text is not None else fact)
+            break
         if not row["holder"]:
             unheld = next((e["at"] for e in reversed(r["events"])
                            if e["kind"] == "handed" and not e["data"].get("holder")), row["created_at"])

@@ -169,6 +169,64 @@ async def test_team_real_stops_wait_counts_and_holder_counts(conn, workspace):
     assert "no signal" not in text and "Old lane" not in text
 
 
+@pytest.mark.parametrize("check_is_newer", [True, False])
+@pytest.mark.parametrize("kind,values,stop_text,stop_fact,check_kind", [
+    ("wake_failed", {"final": True}, "Add a link of kind repo to the task.",
+     "the wake failed: Add a link of kind repo to the task.", "message"),
+    ("state", {"escalated": True, "restarts": 2}, "The holder is silent after 2 restarts.",
+     "the holder stays silent after 2 restarts", "reminded"),
+])
+async def test_team_stuck_uses_newer_wait_check(conn, workspace, check_is_newer,
+                                              kind, values, stop_text, stop_fact, check_kind):
+    row = await make(conn, workspace, holder="agent:build")
+    await conn.execute("UPDATE tasks SET waits_for='person:ada' WHERE id=%s", (row["id"],))
+    await stamp(conn, row, 4)
+    check_text = "The release passed. Choose the date."
+    stop = kind, stop_text, values
+    check = check_kind, check_text, {"source": "wait_check"}
+    earlier_check = check_kind, "The release still needs a review.", {"source": "wait_check"}
+    events = [(3, stop), (2, earlier_check), (1, check)] if check_is_newer else [(2, check), (1, stop)]
+    for age, spec in events:
+        event = await tasks._event(conn, row, "code", *spec)
+        await conn.execute("UPDATE task_events SET at=%s WHERE id=%s",
+                           (NOW - timedelta(hours=age), event["id"]))
+
+    data = await digest_snapshot.team_snapshot(conn, workspace, NOW)
+    expected = check_text if check_is_newer else stop_fact
+    assert next(i for i in data["stuck"] if i["id"] == row["id"])["fact"] == expected
+    text = team_text(data)
+    assert f"• #{row['id']} Repair the export: {expected.rstrip('.')}. Ada must act." in text.splitlines()
+    if check_is_newer:
+        assert stop_text not in text
+
+
+async def test_team_waiting_shows_the_oldest_task_action(conn, workspace):
+    newer = await make(conn, workspace, "Choose the date", holder="person:ada")
+    await stamp(conn, newer, 2)
+    older = await make(conn, workspace, "Confirm the draft", holder="agent:build")
+    await tasks.return_work(conn, older["id"], workspace=workspace, viewer=BUILD, message="The draft is ready.")
+    await stamp(conn, older, 10)
+    await tasks._event(conn, older, "code", "message", " Review\n<draft>  & confirm. ", {"source": "wait_check"})
+
+    data = await digest_snapshot.team_snapshot(conn, workspace, NOW)
+    ada = next(p for p in data["waiting"] if p["name"] == "Ada")
+    assert ada["oldest"] == {"id": older["id"], "title": "Confirm the draft", "link": "",
+                             "action": "Review <draft> & confirm."}
+    line = f"• Ada: 2 tasks; oldest wait 10 h: #{older['id']} Confirm the draft."
+    assert f"{line} Action: Review &lt;draft&gt; &amp; confirm." in team_text(data).splitlines()
+    ada["oldest"]["action"] = ""
+    assert line in team_text(data).splitlines()
+
+
+def test_short_action_cuts_at_a_word():
+    assert digest_snapshot.short_action("Confirm the draft.") == "Confirm the draft."
+    head = "Read the plan " * 11 + "today"
+    action = digest_snapshot.short_action(head + " and confirm the date.")
+    assert action == head + "…"
+    assert len(action) == 160
+    assert digest_snapshot.short_action("a" * 161) == "a" * 159 + "…"
+
+
 async def test_private_tasks_and_personal_data_never_enter_team_snapshot(conn, ada, ben, workspace):
     changed = workspace.model_copy(deep=True)
     changed.lists.extend([TaskList(key="ada-private", name="Private", owner="ada"),

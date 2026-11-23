@@ -19,7 +19,7 @@ LEGACY_INSTRUCTIONS = """Write the team brief for {team}. Call `team_snapshot` f
 Write one short message from a colleague. Start with one opening line that makes sense on a lock screen.
 Give the fact and the action first. Use short active sentences. Omit empty sections. Use this order:
 - Done: the count and at most 7 titles, each with the holder and proof. Then "and N more".
-- Waiting on people: each person's task count, oldest wait, and single oldest task.
+- Waiting on people: each person's task count, oldest wait, and single oldest task with its action.
 - Stuck: only the tasks in `stuck`. Give the task ID, title, fact, and who must act.
 - In work: one line with how many tasks agents hold and how many people hold.
 Use neutral words about tasks. Never judge a person or call other work stuck.
@@ -34,7 +34,7 @@ Use these parts in this order. Omit an empty part.
 - Done since the last brief: the count, and 7 titles at most, each with its proof.
 - New: each task in `new_waits` and each task in `stuck`. One line for each: the task number, who acts, the action, and why the task waits.
   Example of the shape: "#12, Ada: test the export on staging and report the result. The agent cannot sign in."
-- Still waiting: one line. Give each person's count from `waiting` and the oldest wait. Do not list these tasks again.
+- Still waiting: one line. Give each person's count from `waiting`, the oldest wait, and the action of the oldest task. Do not list these tasks again.
 - In work: one line.
 
 Before you write a line in "New", read the task, its ticket, and the live state with your read tools. A task in the snapshot can be done by now.
@@ -52,9 +52,12 @@ def fallback_text(data):
     if data["waiting"]:
         lines.append("Waiting on people:")
         for person in data["waiting"]:
-            lines.append(f"• {escape(person['name'])}: {person['count']} "
-                         + ("task" if person["count"] == 1 else "tasks") + "; "
-                         f"oldest wait {person['oldest_hours']:g} h: {task_label(person['oldest'])}.")
+            oldest = person["oldest"]
+            line = (f"• {escape(person['name'])}: {counted(person['count'], 'task')}; "
+                    f"oldest wait {person['oldest_hours']:g} h: {task_label(oldest)}.")
+            if action := oldest.get("action"):
+                line += " " + sentence(f"Action: {escape(action)}")
+            lines.append(line)
     if data["stuck"]:
         lines.append("Stuck:")
         lines.extend(sentence(f"• {task_label(i)}: {escape(i['fact'])}") + f" {escape(i['action_by'])} must act."

@@ -394,6 +394,9 @@ The deep run checks each waiting or stuck task before it speaks.
 It says stuck only after it checks that a person must act.
 The snapshot-only path keeps the earlier section order.
 
+For each person in `waiting`, `oldest` includes a short `action` from the wait reason of that task.
+If a wait check follows a final wake failure or an escalation in the same wait, `stuck` uses the latest check's text.
+
 The first brief uses 24 hours. Later briefs use the separate `digest-team` state.
 The text uses neutral facts about tasks. It does not judge a person's work.
 No link is invented when a task has no Slack thread.
