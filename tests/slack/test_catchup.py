@@ -414,3 +414,16 @@ async def test_counts_an_old_reply_in_a_followed_thread(app, intake, slack_clien
     assert result.too_old == 1
     person, _ = notices(slack_client)
     assert "It missed 1 message from you." in person
+
+
+async def test_a_failed_gap_write_starts_no_catch_up(app, intake, monkeypatch):
+    slack = connection.SlackConnection(app.state.ctx)
+    slack.intake = intake
+
+    async def fail():
+        raise RuntimeError("The database is not reachable")
+
+    monkeypatch.setattr(slack, "save_pending", fail)
+    with pytest.raises(RuntimeError):
+        await slack.start_recovery(NOW - 700, NOW)
+    assert slack.pending_starts == [] and not slack.pending

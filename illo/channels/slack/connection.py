@@ -44,6 +44,8 @@ class SlackConnection:
         self.pending: set[asyncio.Task] = set()
         self.catch_up_lock = Lock()
         self.pending_starts: list[float] = []
+        # Change the list and its saved copy together, so an old write cannot win.
+        self.pending_lock = Lock()
         self.session: str | None = None
         self.session_at = 0.0
         self.greeted: str | None = None
@@ -127,8 +129,14 @@ class SlackConnection:
 
     async def start_recovery(self, gap_start: float, gap_end: float) -> None:
         # Save the gap before the task starts, so a restart cannot lose it.
-        self.pending_starts.append(gap_start)
-        await self.save_pending()
+        async with self.pending_lock:
+            self.pending_starts.append(gap_start)
+            try:
+                await self.save_pending()
+            except Exception:
+                # No task starts. The next check tries this gap again.
+                self.pending_starts.remove(gap_start)
+                raise
         task = asyncio.create_task(self.recover(gap_start, gap_end))
         self.pending.add(task)
         task.add_done_callback(self.pending.discard)
@@ -137,12 +145,13 @@ class SlackConnection:
         async with self.catch_up_lock:
             await self.read_gap(gap_start, gap_end)
             # A cancelled catch-up keeps its saved start for the next run.
-            if gap_start in self.pending_starts:
-                self.pending_starts.remove(gap_start)
-            try:
-                await self.save_pending()
-            except Exception:
-                log.error("Slack could not record the catch-up result")
+            async with self.pending_lock:
+                if gap_start in self.pending_starts:
+                    self.pending_starts.remove(gap_start)
+                try:
+                    await self.save_pending()
+                except Exception:
+                    log.error("Slack could not record the catch-up result")
 
     async def read_gap(self, gap_start: float, gap_end: float) -> None:
         try:
