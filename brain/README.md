@@ -21,10 +21,12 @@ User settings, project settings, skills, hooks, plugins, and session persistence
 Each run has an empty work folder and separate config, cache, and temporary folders.
 Each run starts a fresh process. The service does not reuse a conversation.
 
-Both OpenAI loops offer only the tools from the authenticated MCP `tools/list` response.
-Each loop sends tool results back through its API and streams the answer.
+The loop (`loop.py`) serves both OpenAI wire formats. Each format has an adapter in `wire/`.
+The loop offers only the tools from the authenticated MCP `tools/list` response.
+It sends tool results back through the wire format and streams the answer.
 It refuses a tool name outside that run's catalog.
-Each model request uses one turn. The service stops after `max_turns` requests.
+The limit `max_turns` counts tool calls, not model requests. Each call of a batch counts.
+After a call over the limit, one last request has no tools and asks for the answer.
 MCP tool errors remain tool results, so the model can explain them.
 Provider errors end the run. The service does not retry an MCP write.
 The Responses loop can retry a rejected reasoning parameter once, before it executes any tool.

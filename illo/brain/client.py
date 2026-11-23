@@ -1,4 +1,4 @@
-"""HTTP contract for the separate brain service."""
+"""HTTP contract for the brain service. `brain/models.py` is the service copy of the request."""
 
 import json
 import os

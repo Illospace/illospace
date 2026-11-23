@@ -3,7 +3,7 @@
 import pytest
 
 from brain.models import RunRequest as ServiceRequest
-from brain.runtimes import openai_responses
+from brain.wire import responses
 from illo.brain.final_text import broken, guard
 from illo.db import one
 from illo.ledger import audit
@@ -41,39 +41,21 @@ async def test_effort_reaches_person_dm_payload(app, replay, fake_brain, monkeyp
     request = fake_brain.requests[-1]
     assert request.effort == "high"
     request = ServiceRequest.model_validate(request.wire())
-    seen = []
-    class Response:
-        is_error = False
-        def raise_for_status(self):
-            pass
-        async def aiter_lines(self):
-            return
-            yield
-    class Stream:
-        async def __aenter__(self):
-            return Response()
-        async def __aexit__(self, *args):
-            return False
-    class Http:
-        def stream(self, method, url, **kwargs):
-            seen.append(kwargs["json"])
-            return Stream()
+
+    def effort(request):
+        payload = responses.Responses(request, []).payload(request, tools_disabled=False)
+        return payload["reasoning"]["effort"]
+
     monkeypatch.setenv("OPENAI_API_KEY", "fake")
     monkeypatch.delenv("ILLO_BRAIN_EFFORT", raising=False)
-    openai_responses._without_effort.clear()
-    async for _ in openai_responses.response_chunks(request, [], [], Http()):
-        pass
-    assert seen[-1]["reasoning"]["effort"] == "high"
+    responses._without_effort.clear()
+    assert effort(request) == "high"
     # The run's own effort wins. The environment is only the default for a request with no effort.
     monkeypatch.setenv("ILLO_BRAIN_EFFORT", "low")
-    async for _ in openai_responses.response_chunks(request, [], [], Http()):
-        pass
-    assert seen[-1]["reasoning"]["effort"] == "high"
+    assert effort(request) == "high"
     bare = request.model_copy()
     bare.model_fields_set.discard("effort")
-    async for _ in openai_responses.response_chunks(bare, [], [], Http()):
-        pass
-    assert seen[-1]["reasoning"]["effort"] == "low"
+    assert effort(bare) == "low"
 
 
 async def test_final_answer_guard_runs_before_delivery(app, replay, fake_brain):

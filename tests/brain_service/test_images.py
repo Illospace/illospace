@@ -11,9 +11,10 @@ from fastapi.responses import JSONResponse
 from mcp.types import Tool
 from pydantic import ValidationError
 
+from brain import loop
 from brain.models import ChatGPTAuth, RunImage
-from brain.runtimes import openai_responses
 from brain.server import create_app
+from brain.wire.responses import Responses
 from illo.brain.client import RunImage as ClientImage
 from illo.brain.client import RunRequest as ClientRequest
 from tests.brain_service.test_openai_responses import FakeResponses
@@ -44,7 +45,8 @@ async def test_responses_body_includes_image_for_both_sign_ins(
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         events = [
             e
-            async for e in openai_responses.conversation(
+            async for e in loop.conversation(
+                Responses,
                 run_request,
                 FakeMCPSession(),
                 [Tool(name="lanes_search", inputSchema={"type": "object"})],
@@ -120,7 +122,7 @@ async def test_provider_image_echo_never_enters_service_logs(run_request, monkey
 async def test_image_data_in_tool_arguments_never_reaches_mcp(run_request, monkeypatch):
     from mcp.types import Tool
 
-    from brain.models import RunError
+    from brain.errors import RunError
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
     run_request.runtime = "openai_responses"
@@ -131,7 +133,8 @@ async def test_image_data_in_tool_arguments_never_reaches_mcp(run_request, monke
         with pytest.raises(RunError, match="private image data"):
             _ = [
                 e
-                async for e in openai_responses.conversation(
+                async for e in loop.conversation(
+                    Responses,
                     run_request,
                     session,
                     [Tool(name="lanes_search", inputSchema={"type": "object"})],
@@ -163,7 +166,8 @@ async def test_provider_refusal_of_images_retries_with_text_only(run_request, mo
     ) as client:
         events = [
             e
-            async for e in openai_responses.conversation(
+            async for e in loop.conversation(
+                Responses,
                 run_request,
                 FakeMCPSession(),
                 [Tool(name="lanes_search", inputSchema={"type": "object"})],
@@ -173,4 +177,4 @@ async def test_provider_refusal_of_images_retries_with_text_only(run_request, mo
     assert events[-1]["type"] == "final"
     assert "input_image" in json.dumps(provider.requests[0]["input"])
     for body in provider.requests[1:]:
-        assert body["input"][0]["content"] == "Find the release" + openai_responses.IMAGES_REFUSED
+        assert body["input"][0]["content"] == "Find the release" + loop.IMAGES_REFUSED

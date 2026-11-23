@@ -6,7 +6,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from brain.runtimes import openai_compat
+from brain import loop
+from brain.wire.chat import Chat
 from tests.brain_service.conftest import serve
 
 
@@ -87,7 +88,7 @@ async def test_stream_tool_result_and_usage(
     async with serve(provider.app) as base:
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        events = [item async for item in openai_compat.run(run_request, tmp_path)]
+        events = [item async for item in loop.run(Chat, run_request, tmp_path)]
     assert events[0]["catalog"] == ["asks_list", "lanes_search", "slack_post_status"]
     assert [item["name"] for item in events if item["type"] == "tool_call"] == ["lanes_search"]
     assert events[-1] == {
@@ -117,7 +118,7 @@ async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp
     async with serve(provider.app) as base:
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        events = [item async for item in openai_compat.run(run_request, None)]
+        events = [item async for item in loop.run(Chat, run_request, None)]
     assert events[-1]["type"] == "final"
     assert provider.requests[1]["messages"][-1]["content"] == "Acme release is ready"
     assert "duplicate payload" not in json.dumps(provider.requests)
@@ -129,7 +130,7 @@ async def test_turn_limit(run_request, fake_mcp, monkeypatch, tmp_path):
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
         run_request.max_turns = 2
-        events = [item async for item in openai_compat.run(run_request, tmp_path)]
+        events = [item async for item in loop.run(Chat, run_request, tmp_path)]
     assert len(provider.requests) == 4
     assert len(fake_mcp.calls) == 2
     assert events[-1]["type"] == "final"
@@ -144,14 +145,14 @@ async def test_unknown_tool_cannot_execute(run_request, fake_mcp, monkeypatch, t
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
         with pytest.raises(ExceptionGroup):
-            _ = [item async for item in openai_compat.run(run_request, tmp_path)]
+            _ = [item async for item in loop.run(Chat, run_request, tmp_path)]
     assert fake_mcp.calls == []
 
 
 async def test_provider_auth_error_survives_mcp_task_group(run_request, fake_mcp, monkeypatch):
     from fastapi.responses import JSONResponse
 
-    from brain.worker import error_category
+    from brain.errors import error_category
 
     provider = FastAPI()
 
@@ -163,18 +164,15 @@ async def test_provider_auth_error_survives_mcp_task_group(run_request, fake_mcp
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
         with pytest.raises(ExceptionGroup) as error:
-            _ = [item async for item in openai_compat.run(run_request, None)]
+            _ = [item async for item in loop.run(Chat, run_request, None)]
     assert error_category(error.value) == "auth"
 
 
-def test_empty_base_url_means_the_default(monkeypatch):
+def test_empty_base_url_means_the_default(run_request, monkeypatch):
     """Compose passes OPENAI_BASE_URL as an empty string when the operator sets none."""
-    import inspect
-
-    from brain.runtimes import openai_compat
-
-    source = inspect.getsource(openai_compat.conversation)
-    assert 'os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"' in source
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    url = Chat(run_request, []).url(run_request)
+    assert url == "https://api.openai.com/v1/chat/completions"
 
 
 @pytest.mark.parametrize("effort", [None, "none"])
@@ -187,7 +185,7 @@ async def test_optional_reasoning_effort(run_request, fake_mcp, monkeypatch, eff
     async with serve(provider.app) as base:
         monkeypatch.setenv("OPENAI_BASE_URL", base + "/v1")
         run_request.mcp_url = fake_mcp.url
-        _ = [item async for item in openai_compat.run(run_request, None)]
+        _ = [item async for item in loop.run(Chat, run_request, None)]
     assert all(r.get("reasoning_effort") == effort for r in provider.requests)
     if effort is None:
         assert all("reasoning_effort" not in r for r in provider.requests)

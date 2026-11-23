@@ -210,7 +210,7 @@ A draft needs a person. In a run with no person, a draft becomes `deny`. Each ca
 
 **Code.**
 - `endpoint` in `illo/brain/server.py` lists only the registered Illo tools in the grant of the run.
-- `brain/runtimes/claude.py` turns off the built-in tools of the Claude Agent SDK. `brain/runtimes/openai_compat.py` offers only the tools that the Illo server lists. Codex CLI is not a runtime, because it shows the model extra tools.
+- `brain/wire/agent_sdk.py` turns off the built-in tools of the Claude Agent SDK. `brain/loop.py` offers only the tools that the Illo server lists, for the Responses and Chat Completions adapters. Codex CLI is not a runtime, because it shows the model extra tools.
 - `web_read_public_page` is an Illo tool with its own checks. It reads only a URL from the inbound event, or the root page of its host.
 - `deploy/compose.yaml` keeps the brain off the `db` network. The brain has no host mount and no Docker socket.
 

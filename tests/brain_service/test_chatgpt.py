@@ -6,9 +6,11 @@ import httpx
 import pytest
 from mcp.types import Tool
 
-from brain.models import ChatGPTAuth, RunError
-from brain.runtimes import openai_responses
+from brain import loop
+from brain.errors import RunError
+from brain.models import ChatGPTAuth
 from brain.server import create_app
+from brain.wire.responses import Responses
 from tests.brain_service.test_openai_responses import FakeResponses
 from tests.brain_service.test_service import lines, post
 from tests.fakes import FakeMCPSession
@@ -26,7 +28,7 @@ async def collect(request, handler, names=("lanes_search",)):
     tools = [Tool(name=n, inputSchema={"type": "object"}) for n in names]
     session = FakeMCPSession()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = [e async for e in openai_responses.conversation(request, session, tools, client)]
+        events = [e async for e in loop.conversation(Responses, request, session, tools, client)]
     return events, session
 
 
@@ -232,7 +234,8 @@ async def test_token_echo_in_tool_arguments_cannot_reach_mcp(run_request):
         with pytest.raises(RunError, match="The provider returned a credential"):
             _ = [
                 e
-                async for e in openai_responses.conversation(
+                async for e in loop.conversation(
+                    Responses,
                     request,
                     session,
                     [Tool(name="lanes_search", inputSchema={"type": "object"})],

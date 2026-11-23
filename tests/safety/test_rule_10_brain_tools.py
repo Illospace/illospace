@@ -12,9 +12,9 @@ from mcp.types import Tool
 
 from brain.models import RunRequest
 from brain.process import run_worker
-from brain.runtimes.claude import options
-from brain.runtimes.openai_compat import function_tools
-from brain.runtimes.openai_responses import build_request
+from brain.wire.agent_sdk import options
+from brain.wire.chat import function_tools
+from brain.wire.responses import build_request
 from tests.brain_service.conftest import TOOLS, FakeMCP, serve
 
 

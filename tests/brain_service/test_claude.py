@@ -3,8 +3,8 @@
 import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 
-from brain.models import RunError
-from brain.runtimes.claude import translate
+from brain.errors import RunError
+from brain.wire.agent_sdk import translate
 
 
 class ScriptedClient:
@@ -67,7 +67,7 @@ async def test_tool_limit_uses_one_separate_client_without_tools(run_request, tm
 
     from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage
 
-    from brain.runtimes import claude
+    from brain.wire import agent_sdk as claude
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
     clients = []

@@ -238,7 +238,7 @@ async def test_worker_exit_without_an_answer_is_an_internal_failure(run_request)
 
 
 def test_unknown_worker_exception_keeps_only_the_internal_category():
-    from brain.worker import failure_event
+    from brain.errors import failure_event
 
     result = failure_event(ValueError("fake-credential-in-an-error"))
     assert result["category"] == "internal"

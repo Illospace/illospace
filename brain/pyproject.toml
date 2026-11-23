@@ -16,5 +16,5 @@ dependencies = [
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.9"]
 
 [tool.setuptools]
-packages = ["brain", "brain.runtimes"]
+packages = ["brain", "brain.wire"]
 package-dir = {brain = "."}

@@ -11,10 +11,29 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from brain.errors import identifier
 from brain.models import ChatGPTAuth, RunRequest, event
 from brain.process import run_worker
-from brain.runtimes.claude import has_auth
-from brain.runtimes.provider_errors import identifier
+from brain.wire.agent_sdk import has_auth
+
+
+def redact(item: dict, body: RunRequest, secret: str) -> str:
+    """Give the JSON line of an event. A provider cannot echo a credential into the stream."""
+    line = json.dumps(item)
+    for value in (
+        *(image.data.get_secret_value() for image in body.images),
+        body.mcp_token.get_secret_value(),
+        secret,
+        os.getenv("ANTHROPIC_API_KEY"),
+        os.getenv("ANTHROPIC_AUTH_TOKEN"),
+        os.getenv("OPENAI_API_KEY"),
+        *((body.provider_auth.access_token.get_secret_value(),
+           body.provider_auth.account_id.get_secret_value())
+          if isinstance(body.provider_auth, ChatGPTAuth) else ()),
+    ):
+        if value:
+            line = line.replace(json.dumps(value)[1:-1], "[redacted]")
+    return line
 
 
 def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
@@ -28,22 +47,13 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
 
     @app.get("/healthz")
     async def health():
-        return {
-            "status": "ok",
-            "runtimes": {
-                "claude": {"usable": has_auth()},
-                "openai_compat": {
-                    "usable": bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL")),
-                    "experimental": True,
-                },
-                "openai_responses": {
-                    "usable": bool(os.getenv("OPENAI_API_KEY")),
-                    "api_key": bool(os.getenv("OPENAI_API_KEY")),
-                    "per_run_chatgpt": True,
-                },
-                "echo": {"usable": True},
-            },
-        }
+        key = bool(os.getenv("OPENAI_API_KEY"))
+        return {"status": "ok", "runtimes": {
+            "claude": {"usable": has_auth()},
+            "openai_compat": {"usable": key or bool(os.getenv("OPENAI_BASE_URL")), "experimental": True},
+            "openai_responses": {"usable": key, "api_key": key, "per_run_chatgpt": True},
+            "echo": {"usable": True},
+        }}
 
     @app.post("/run")
     async def run(body: RunRequest, request: Request):
@@ -63,24 +73,7 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                     async with asyncio.timeout(limit), aclosing(runner(body)) as stream:
                         async for item in stream:
                             item["run_id"] = body.run_id
-                            # Do not let a provider echo a credential into the stream.
-                            line = json.dumps(item)
-                            for value in (
-                                *(image.data.get_secret_value() for image in body.images),
-                                body.mcp_token.get_secret_value(),
-                                secret,
-                                os.getenv("ANTHROPIC_API_KEY"),
-                                os.getenv("ANTHROPIC_AUTH_TOKEN"),
-                                os.getenv("OPENAI_API_KEY"),
-                                body.provider_auth.access_token.get_secret_value()
-                                if isinstance(body.provider_auth, ChatGPTAuth)
-                                else None,
-                                body.provider_auth.account_id.get_secret_value()
-                                if isinstance(body.provider_auth, ChatGPTAuth)
-                                else None,
-                            ):
-                                if value:
-                                    line = line.replace(json.dumps(value)[1:-1], "[redacted]")
+                            line = redact(item, body, secret)
                             if item["type"] == "error":
                                 safe = json.loads(line)
                                 logging.getLogger(__name__).warning(
@@ -98,29 +91,11 @@ def create_app(*, concurrency: int | None = None, runner=run_worker) -> FastAPI:
                             if item["type"] in ("final", "error"):
                                 return
                 except TimeoutError:
-                    yield (
-                        json.dumps(
-                            event(
-                                "error",
-                                run_id=body.run_id,
-                                category="timeout",
-                                message="The brain run timed out",
-                            )
-                        )
-                        + "\n"
-                    )
+                    yield json.dumps(event("error", run_id=body.run_id, category="timeout",
+                                           message="The brain run timed out")) + "\n"
                 except Exception:
-                    yield (
-                        json.dumps(
-                            event(
-                                "error",
-                                run_id=body.run_id,
-                                category="internal",
-                                message="The brain run failed",
-                            )
-                        )
-                        + "\n"
-                    )
+                    yield json.dumps(event("error", run_id=body.run_id, category="internal",
+                                           message="The brain run failed")) + "\n"
 
         return StreamingResponse(
             events(),

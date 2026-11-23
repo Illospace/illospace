@@ -4,7 +4,7 @@ import unicodedata
 
 import pytest
 
-from brain.runtimes.outside_data import data_text as runtime_data_text
+from brain.outside_data import data_text as runtime_data_text
 from illo.tools._format import Compact, data_text
 from illo.tools.registry import MAX_RESULT_CHARS, Tool
 

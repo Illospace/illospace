@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from brain.models import RunError
+from brain.errors import RunError
 from tests.brain_service.test_chatgpt import collect, subscription
 
 

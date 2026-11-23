@@ -19,10 +19,11 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, Tool
 from pydantic import SecretStr
 
+from brain.errors import failure_event
+from brain.loop import conversation
 from brain.models import RunRequest as ServiceRequest
-from brain.runtimes import openai_compat, openai_responses
 from brain.server import create_app as create_brain
-from brain.worker import failure_event
+from brain.worker import RUNTIMES
 from illo.brain.client import BrainClient
 from illo.connectors import chatgpt
 from illo.db import one
@@ -291,18 +292,13 @@ class Session:
 async def drive(request, session, transport):
     """The one entry point of the brain loop that the golden cases use.
 
-    It makes the HTTP client as the run function of each wire does, without the MCP connection.
+    It runs the loop with the worker's adapter for the wire, without the MCP connection.
     """
-    if request.runtime == "openai_compat":
-        headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"]}
-        loop = openai_compat.conversation
-    else:
-        headers = {}
-        loop = openai_responses.conversation
     async with httpx.AsyncClient(
-        headers=headers, timeout=request.timeout_s, follow_redirects=False, transport=transport
+        timeout=request.timeout_s, follow_redirects=False, transport=transport
     ) as http:
-        async for item in loop(request, session, TOOLS, http):
+        wire = RUNTIMES[request.runtime].args[0]
+        async for item in conversation(wire, request, session, TOOLS, http):
             yield item
 
 

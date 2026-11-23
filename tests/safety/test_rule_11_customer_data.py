@@ -11,8 +11,9 @@ import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent, Tool
 
+from brain.loop import conversation
 from brain.models import ChatGPTAuth
-from brain.runtimes.openai_responses import conversation
+from brain.wire.responses import Responses
 from illo.connectors import aws
 from illo.connectors.config import Auth, Connector
 from illo.db import one
@@ -303,6 +304,7 @@ async def test_next_provider_request_has_no_web_search(run_request, monkeypatch,
         events = [
             e
             async for e in conversation(
+                Responses,
                 run_request,
                 session,
                 [Tool(name="aws_read", inputSchema={"type": "object"})],
@@ -340,6 +342,7 @@ async def test_missing_run_flags_close_provider_search(run_request, monkeypatch)
         _ = [
             e
             async for e in conversation(
+                Responses,
                 run_request,
                 session,
                 [Tool(name="aws_read", inputSchema={"type": "object"})],

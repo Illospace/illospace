@@ -8,10 +8,11 @@ import pytest
 import yaml
 from psycopg.conninfo import make_conninfo
 
+from brain import loop
+from brain.errors import failure_event
 from brain.models import RunRequest as ServiceRequest
-from brain.runtimes import openai_responses
 from brain.server import create_app
-from brain.worker import failure_event
+from brain.wire.responses import Responses
 from illo.brain.client import BrainClient
 from illo.cli import execute, parser
 from illo.connectors import chatgpt_smoke
@@ -101,7 +102,8 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
         assert isinstance(request, ServiceRequest)
         brain_wires.append(request.wire())
         try:
-            async for item in openai_responses.run(
+            async for item in loop.run(
+                Responses,
                 request, tmp_path, transport=httpx.MockTransport(respond)
             ):
                 yield item
