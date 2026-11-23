@@ -5,7 +5,7 @@ Use these parts in this order. Omit an empty part.
 - Done since the last brief: the count, and 7 titles at most, each with its proof.
 - New: each task in `new_waits` and each task in `stuck`. One line for each: the task number, who acts, the action, and why the task waits.
   Example of the shape: "#12, Ada: test the export on staging and report the result. The agent cannot sign in."
-- Still waiting: one line. Give each person's count from `waiting` and the oldest wait. Do not list these tasks again.
+- Still waiting: one line. Give each person's count from `waiting`, the oldest wait, and the action of the oldest task. Do not list these tasks again.
 - In work: one line.
 
 Before you write a line in "New", read the task, its ticket, and the live state with your read tools. A task in the snapshot can be done by now.
