@@ -41,10 +41,14 @@ This install does not configure an egress proxy or restrict Internet destination
 
 3. The script asks for the Slack bot token and app token with hidden input.
    Press Enter to add them later.
-   The script creates `~/.config/illo/env` with mode `600`.
-   It generates the database password, the vault key, and the brain secret.
+   The script creates two environment files with mode `600`:
+   `~/.config/illo/env` for the app and `~/.config/illo/brain.env` for the brain.
+   It generates the database password, the vault key, and the brain secret in the app file.
+   The brain file holds the provider keys. Only the brain container loads it.
    Set `ILLO_ENV_FILE` to use another absolute path outside every checkout.
-   A second install keeps the existing environment file and workspace.
+   The app file names the brain file in `ILLO_BRAIN_ENV_FILE`.
+   A second install keeps both environment files and the workspace.
+   It refuses an app file with an `ILLO_PROVIDER_`, `OPENAI_`, or `ANTHROPIC_` variable.
 
 4. The script copies `workspace.example/` to `~/.local/share/illo/workspace`.
    Set `ILLO_WORKSPACE_DIR` before the first install to use another folder.
@@ -58,6 +62,7 @@ This install does not configure an egress proxy or restrict Internet destination
 
    ```text
    The workspace is valid.
+   The brain has a provider for each route.
    The database is ready.
    The vault key is valid.
    Slack is optional and has no bot token.
@@ -69,6 +74,7 @@ Do not use shell commands, variable expansion, or multiline values in this file.
 Keep secrets outside the checkout and outside the workspace.
 The Compose file accepts `ILLO_ENV_FILE`; the scripts always set its absolute path.
 Direct Compose commands must pass the same file with `--env-file`.
+Compose reads `ILLO_BRAIN_ENV_FILE` from that file. Never put a provider key in the app file.
 
 ## Set up the team
 
@@ -83,30 +89,33 @@ If Slack refuses the read, Illo answers without history. Check the `slack:dm-his
    Replace the example people with your team members and their real Slack IDs.
    Edit `illo.yaml` for the team's repositories and model.
    Add Illo to a Slack channel, then mention it. No channel entry is required.
-3. For the `claude` runtime, set `ANTHROPIC_API_KEY`.
-   You can also set `ANTHROPIC_BASE_URL`.
-   The runtime uses the Claude Agent SDK.
-   For OpenAI, set `ILLO_BRAIN_RUNTIME=openai_responses` and `OPENAI_API_KEY`.
-   Set `ILLO_BRAIN_MODEL` to the OpenAI model and `ILLO_BRAIN_EFFORT` to its reasoning effort (default `low`).
-   `OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
-   This runtime uses Responses with `store: false` and only the Illo MCP tools.
-   To use each person's ChatGPT subscription, set `brain.runtime: openai_responses` and `brain.auth: chatgpt` in `illo.yaml`.
+3. Choose the providers and the routes.
+   The brain environment file holds the provider keys. See `deploy/brain.env.example`.
+   `ILLO_PROVIDER_OPENAI_API_KEY` enables the `openai` provider (Responses, with `store: false`).
+   `ILLO_PROVIDER_ANTHROPIC_API_KEY` enables the `anthropic` provider (the Claude Agent SDK).
+   `ILLO_PROVIDER_<NAME>_BASE_URL` changes the address of a provider.
+   A custom provider also sets `ILLO_PROVIDER_<NAME>_WIRE` (`responses` or `chat`) and
+   `ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,effort:low`.
+   A provider with no key is not available. The `chatgpt` provider needs no key.
+   `brain.routes` in `illo.yaml` selects the provider, the model, the effort, and the limits of each run kind.
+   See [Workspace files](workspace.md#routes).
+   Each provider uses only the Illo MCP tools.
+   To use each person's ChatGPT subscription, give a route the `chatgpt` provider and set `brain.chatgpt`.
    Keep `ILLO_VAULT_KEY` in the main app's environment, outside the checkout.
    Each member sends `connect my ChatGPT` in their own Slack DM with Illo.
    The DM gives a device code. ChatGPT sign-in needs no public Illo address.
    Send `connect my ChatGPT with a link` to use the OpenAI link and paste the final local address.
-   Set `brain.team_credential` to an active person key, or omit it to use `default_owner`.
-   `brain.api_key_fallback` defaults to `false`. Set it to `true` only to allow the brain's API key as a fallback.
+   Set `brain.chatgpt.team_credential` to an active person key.
+   `brain.chatgpt.fallback` defaults to `none`. Set it to an API-key provider, for example `openai`, only to allow that key as a fallback.
    The brain needs no sign-in file, refresh token, or host mount.
    Check that the provider's terms allow this use. An API key is the alternative.
    See [The model sign-in](connectors.md#the-model-sign-in) for the device and paste steps.
-   For `openai_compat`, set `ILLO_BRAIN_RUNTIME=openai_compat`, `OPENAI_API_KEY`, and `OPENAI_BASE_URL`.
-   Set `ILLO_BRAIN_MODEL` to the model name that the provider accepts.
-   Set `ILLO_BRAIN_OPENAI_COMPAT_REASONING_EFFORT` only if that provider needs it.
    See [the brain guide](../brain/README.md) for API details and live measurements.
-   The `echo` runtime needs no model key and is only for tests.
-4. Recreate the services after an environment change.
-   Use the saved revision so Compose starts the correct image tags:
+   The `fake` provider (`ILLO_PROVIDER_FAKE=1`) needs no model key and is only for tests.
+4. Recreate the services after an environment change: run `deploy/install.sh` again.
+   The brain reads its providers once at start. After a key change, check `GET /providers`
+   (run `illo doctor` in the app container).
+   You can also use Compose directly, with the saved revision so Compose starts the correct image tags:
 
    ```sh
    export ILLO_ENV_FILE="$HOME/.config/illo/env"
@@ -236,13 +245,14 @@ deploy/smoke.sh
 ```
 
 It builds both images and starts a separate Compose project with a random name.
-It uses the `echo` brain runtime, no Slack connection, and no model key.
+It uses the `fake` provider (`ILLO_PROVIDER_FAKE=1`) on every route, no Slack connection, and no model key.
 It checks both services, runs `illo doctor`, creates a temporary agent token, and calls MCP `initialize`.
 It also checks a database backup and restore.
 The command removes its containers, networks, volume, and temporary files when it ends.
 Set `ILLO_SMOKE_PORT=18485` if port `18484` is in use.
 
-For a persistent trial, run the normal install and set `ILLO_BRAIN_RUNTIME=echo` in the environment file.
+For a persistent trial, run the normal install. Add `ILLO_PROVIDER_FAKE=1` to the brain file,
+and give `brain.routes.default` the `fake` provider and the model `fake` in `illo.yaml`.
 Leave both Slack tokens blank.
 Then run the Compose command above to recreate the services.
 

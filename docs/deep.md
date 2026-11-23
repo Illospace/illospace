@@ -49,12 +49,9 @@ Set these blocks in `illo.yaml`. See [Workspace](workspace.md) for the full sett
 
 ```yaml
 brain:
-  deep:
-    # model: use the normal brain.model when absent
-    effort: high
-    max_turns: 80
-    timeout_s: 1200
-    max_output_tokens: 16000
+  routes:
+    # The deep route takes each field that it omits from default, for example the model.
+    deep: {effort: high, max_tool_calls: 80, timeout_s: 1200, max_output_tokens: 16000}
 deep:
   enabled: true
   max_per_person_per_day: 20
@@ -73,11 +70,11 @@ digest:
   # Keep the other required digest settings.
 ```
 
-`brain.deep.max_turns` accepts 1 to 200. `timeout_s` accepts up to 3600 seconds.
+`max_tool_calls` accepts 1 to 200. `timeout_s` accepts up to 3600 seconds.
 `web.search` accepts `provider` or `off`. `web.fetch` accepts `on` or `off`.
-The Responses runtime offers provider search. Other runtimes can use `web_fetch`.
+A provider with the `web_search` capability offers provider search. Other providers can use `web_fetch`.
 The API-key path uses `max_output_tokens`. The ChatGPT path keeps its provider limit.
-The service also caps deep runs with `ILLO_BRAIN_DEEP_TIMEOUT_S`, which defaults to 1800 seconds.
+The brain service also caps each run with `ILLO_BRAIN_MAX_TIMEOUT_S`, which defaults to 1800 seconds.
 `deep.max_queue` counts queued runs. The daily limit uses the UTC day and includes scheduled personal runs.
 The worker runs one job at a time. An expired lease fails the job and never starts it again.
 
