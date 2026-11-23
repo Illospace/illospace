@@ -9,22 +9,47 @@ import httpx
 
 from illo.brain.client import BrainEvent, RunRequest
 from illo.brain.prompts import build_for_run
-from illo.brain.routes import Payer, resolve_route, run_kind, select_payer
+from illo.brain.routes import (
+    Payer,
+    raises_failure,
+    resolve_route,
+    run_kind,
+    select_payer,
+    sends_refresh_notice,
+    web_search_allowed,
+)
 from illo.connectors import chatgpt
+from illo.db import one
+from illo.gateway.principal import Authority
 from illo.gateway.replies import FAILURE_TEXTS, RunFailure, failure_category
 from illo.ledger import runs, sensors
 from illo.tools._format import data_text
 
 
 @dataclass(frozen=True)
-class RunOptions:
-    """The deep context of a run. S3 moves deep runs onto the normal lifecycle."""
-
+class DeepContext:
     deep_run_id: int
     kind: str
-    web_search: bool = False
+    authority: Authority
+    task_actor: str | None
+    deliver: dict
+    # Team requests have a requester even when the run has no person ID.
+    requester_id: int | None = None
     customer_read: bool = False
     personal_read: bool = False
+
+
+async def _setup_deep(ctx, deep: DeepContext) -> None:
+    from illo.deep.ports import refresh_repos
+
+    if deep.requester_id is not None:
+        async with ctx.pool.connection() as conn:
+            if not await one(conn, "SELECT id FROM people WHERE id=%s AND active", (deep.requester_id,)):
+                raise RunFailure("internal", detail="inactive_person")
+    try:
+        await refresh_repos(ctx)
+    except Exception as exc:
+        raise RunFailure(failure_category(exc), detail="repo_refresh") from exc
 
 
 def safe_event(item, auth, images=()):
@@ -44,8 +69,8 @@ class RunManager:
         self.capacity = asyncio.Condition()
         self.active = 0
 
-    async def execute(self, event, authority, event_id: int, on_event=None, *,
-                      deep: RunOptions | None = None) -> str:
+    async def start_run(self, event, authority, event_id: int | None, on_event=None, *,
+                        deep: DeepContext | None = None) -> str:
         """The channel can relay progress. Only final text leaves through the gateway."""
         async with self.capacity:
             await self.capacity.wait_for(
@@ -53,83 +78,75 @@ class RunManager:
             )
             self.active += 1
         try:
-            return await self._execute(event, authority, event_id, on_event, deep)
+            return await self._start_run(event, authority, event_id, on_event, deep)
         finally:
             async with self.capacity:
                 self.active -= 1
                 self.capacity.notify_all()
 
-    async def _execute(self, event, authority, event_id, on_event, deep):
+    async def _start_run(self, event, authority, event_id, on_event, deep):
         ctx = self.ctx
         policy = ctx.workspace.config.brain.chatgpt
-        background = event.channel in {"digest", "team_digest", "deep"}
         route = resolve_route(ctx.workspace, run_kind(event, authority, deep=deep is not None))
-        fields = {"principal": authority.principal, "person_id": authority.person_id,
-                  "profile": authority.profile, "event_id": event_id, "route": route.kind,
-                  "model": route.model, "tool_limit": route.max_tool_calls}
-        try:
-            payer = await select_payer(ctx, route, authority, notify=not background)
-        except chatgpt.TemporaryRefresh:
-            if background:
-                raise RunFailure("provider") from None
-            return chatgpt.TEMPORARY
-        if payer is None:
-            if background:
-                raise RunFailure("provider")
-            if authority.tainted or authority.profile == "tainted":
-                async with ctx.pool.connection() as conn:
-                    row = await runs.create(conn, **fields, tainted=True, provider=route.provider)
-                    await runs.finish(
-                        conn, row["id"], usage={"skipped": "no_model_credential"}
-                    )
-                return (
-                    'I did not answer this message. No model sign-in is allowed for messages from outside the team.'
-                )
-            if policy.person_credential == "team":
-                return chatgpt.team_missing(ctx.workspace)
-            return chatgpt.MISSING if authority.person_id is not None else (
-                'I did not answer this message. I have no model sign-in for it.'
-            )
-        provider = ctx.providers[payer.provider]
-        capabilities = provider["capabilities"]
+        notify = sends_refresh_notice(route.kind)
         async with ctx.pool.connection() as conn:
-            row = await runs.create(conn, **fields, tainted=authority.tainted, provider=payer.provider,
-                                    payer=payer.kind, payer_person_id=payer.person_id)
+            row = await runs.create(
+                conn, principal=authority.principal, person_id=authority.person_id,
+                profile=authority.profile, tainted=authority.tainted, event_id=event_id,
+                route=route.kind, provider=route.provider, model=route.model, tool_limit=route.max_tool_calls,
+                deep_run_id=deep.deep_run_id if deep else None, deep_kind=deep.kind if deep else None,
+                customer_read=bool(deep and deep.customer_read), personal_read=bool(deep and deep.personal_read),
+            )
+            run_id = row["id"]
             if deep:
-                await conn.execute("UPDATE runs SET deep_run_id=%s,deep_kind=%s,customer_read=%s,personal_read=%s WHERE id=%s",
-                                   (deep.deep_run_id, deep.kind, deep.customer_read, deep.personal_read, row["id"]))
-                await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (row["id"], deep.deep_run_id))
-            token = await runs.mint_token(conn, row["id"], route.timeout_s)
-            system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
-        from illo.channels.slack.images import for_run
-
-        images, image_context = await for_run(ctx, event, authority, capabilities["images"])
-        auth = payer.auth
-        usage_payer = payer
-        request = RunRequest(
-            images=images,
-            run_id=row["id"],
-            system_prompt=system_prompt,
-            user_message=(data_text("inbound-message", event.text)
-                          if authority.tainted or authority.profile in {"tainted", "outsider"}
-                          or authority.principal == "outsider" else event.text),
-            mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
-            mcp_token=token,
-            **payer.request(),
-            model=route.model,
-            effort=route.effort,
-            max_tool_calls=route.max_tool_calls,
-            timeout_s=route.timeout_s,
-            max_output_tokens=route.max_output_tokens,
-            web_search=bool(deep and deep.web_search and not deep.customer_read
-                            and not deep.personal_read and capabilities["web_search"]),
-        )
-        if image_context:
-            request.user_message += "\n\n" + image_context
+                await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (run_id, deep.deep_run_id))
         status, error, usage, final = "failed", None, {}, None
-        failure = "internal"
+        payer = provider = request = None
+        failure, detail = "internal", None
         try:
             async with asyncio.timeout(route.timeout_s):
+                if deep:
+                    await _setup_deep(ctx, deep)
+                payer = await select_payer(ctx, route, authority, notify=notify)
+                if payer is None:
+                    detail, error = "no_payer", "No model sign-in is available"
+                    if raises_failure(route.kind):
+                        raise RunFailure("provider")
+                    if authority.tainted or authority.profile == "tainted":
+                        usage["skipped"] = "no_model_credential"
+                        return 'I did not answer this message. No model sign-in is allowed for messages from outside the team.'
+                    if policy.person_credential == "team":
+                        return chatgpt.team_missing(ctx.workspace)
+                    return chatgpt.MISSING if authority.person_id is not None else (
+                        'I did not answer this message. I have no model sign-in for it.'
+                    )
+                from illo.channels.slack.images import for_run
+
+                usage_payer, auth = payer, payer.auth
+                provider = ctx.providers[payer.provider]
+                async with ctx.pool.connection() as conn:
+                    token = await runs.mint_token(conn, run_id, route.timeout_s)
+                    system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
+                images, image_context = await for_run(ctx, event, authority, provider["capabilities"]["images"])
+                request = RunRequest(
+                    images=images,
+                    run_id=run_id,
+                    system_prompt=system_prompt,
+                    user_message=(data_text("inbound-message", event.text)
+                                  if authority.tainted or authority.profile in {"tainted", "outsider"}
+                                  or authority.principal == "outsider" else event.text),
+                    mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
+                    mcp_token=token,
+                    **payer.request(),
+                    model=route.model,
+                    effort=route.effort,
+                    max_tool_calls=route.max_tool_calls,
+                    timeout_s=route.timeout_s,
+                    max_output_tokens=route.max_output_tokens,
+                    web_search=web_search_allowed(ctx.workspace, route, provider, deep),
+                )
+                if image_context:
+                    request.user_message += "\n\n" + image_context
                 turns = 0
                 for attempt in range(2):
                     retry = False
@@ -138,7 +155,7 @@ class RunManager:
                             item = safe_event(item, auth, request.images)
                             if item.type == "web_search":
                                 async with ctx.pool.connection() as conn:
-                                    await conn.execute("UPDATE runs SET web_read=true,outside_read=true,usage=jsonb_set(usage,'{web_search_calls}',to_jsonb(COALESCE((usage->>'web_search_calls')::int,0)+1)) WHERE id=%s", (row["id"],))
+                                    await conn.execute("UPDATE runs SET web_read=true,outside_read=true,usage=jsonb_set(usage,'{web_search_calls}',to_jsonb(COALESCE((usage->>'web_search_calls')::int,0)+1)) WHERE id=%s", (run_id,))
                             if item.type == "payer" and payer.fallback:
                                 # Keep the first payer in runs.payer/payer_person_id (S5); legacy
                                 # usage tracks the final payer so S5 marks fallback rows unsplit.
@@ -159,14 +176,18 @@ class RunManager:
                                     authority,
                                     force=True,
                                     rejected_token=auth.access_token.get_secret_value(),
-                                    notify=not background,
+                                    notify=notify,
                                 )
                                 if fresh is not None:
                                     payer = usage_payer = fresh
                                     auth = fresh.auth
-                                    request = request.model_copy(update=payer.request())
+                                    request = request.model_copy(update={
+                                        **payer.request(),
+                                        "web_search": web_search_allowed(ctx.workspace, route, ctx.providers[payer.provider], deep),
+                                    })
                                     retry = True
                                     break
+                                detail = "sign_in"
                                 if policy.person_credential == "team" and not authority.tainted:
                                     final = chatgpt.team_missing(ctx.workspace)
                                     error = "The team model sign-in is unavailable"
@@ -206,43 +227,47 @@ class RunManager:
                         break
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
+            if raises_failure(route.kind) and status != "completed":
+                raise RunFailure(failure)
+            if event.channel in {"deep", "digest", "email", "routine", "slack", "team_digest"}:
+                from illo.brain.final_text import guard
+
+                async with ctx.pool.connection() as conn:
+                    final = await guard(conn, run_id, final)
+            return final
         except chatgpt.TemporaryRefresh:
-            failure, error = "provider", "The model sign-in service is unavailable"
-            if background:
+            detail, error = "sign_in", "The model sign-in service is unavailable"
+            if raises_failure(route.kind):
                 raise RunFailure("provider") from None
-            final = chatgpt.TEMPORARY
+            return chatgpt.TEMPORARY
         except (TimeoutError, httpx.TimeoutException):
             failure = "timeout"
             status, error = "timeout", "The run reached its time limit"
             raise RunFailure("timeout") from None
         except asyncio.CancelledError:
-            error = "The run was cancelled"
+            status, error = "failed", "The run was cancelled"
             raise
         except Exception as exc:
             failure = failure_category(exc)
+            if isinstance(exc, RunFailure) and exc.detail:
+                detail = exc.detail
+            if status == "completed":
+                status = "failed"
             error = error or "The brain run failed"
             raise
         finally:
             if status != "completed":
-                usage = {**usage, "failure_category": failure}
-            if provider["wire"] == "responses":
+                usage["failure_category"] = detail or failure
+            if provider and provider["wire"] == "responses":
                 usage = {k: v for k, v in usage.items() if k != "credential_person"} | usage_payer.usage()
             async with ctx.pool.connection() as conn:
-                if (payer.provider, payer.kind, payer.person_id) != (
-                        row["provider"], row["payer"], row["payer_person_id"]):
+                if payer is not None:
                     await conn.execute(
                         "UPDATE runs SET provider=%s,payer=%s,payer_person_id=%s WHERE id=%s",
-                        (payer.provider, payer.kind, payer.person_id, row["id"]))
-                await runs.finish(conn, row["id"], status, usage=usage, error=error)
-                if status == "completed":
-                    await sensors.ok(conn, "brain")
-                else:
-                    await sensors.error(conn, "brain", error or "The brain run failed")
-        if background and status != "completed":
-            raise RunFailure(failure)
-        if event.channel in {"slack", "email", "routine", "digest", "team_digest", "deep"}:
-            from illo.brain.final_text import guard
-
-            async with ctx.pool.connection() as conn:
-                final = await guard(conn, row["id"], final)
-        return final
+                        (payer.provider, payer.kind, payer.person_id, run_id))
+                await runs.finish(conn, run_id, status, usage=usage, error=error)
+                if request is not None:
+                    if status == "completed":
+                        await sensors.ok(conn, "brain")
+                    else:
+                        await sensors.error(conn, "brain", error or "The brain run failed")

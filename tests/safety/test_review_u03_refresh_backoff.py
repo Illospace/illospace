@@ -31,7 +31,7 @@ async def test_refresh_backoff(chatgpt_app, slack_client, failure):
     from illo.gateway import InboundEvent
     from illo.gateway.principal import Authority
 
-    result = await ctx.gateway.run_manager.execute(
+    result = await ctx.gateway.run_manager.start_run(
         InboundEvent(channel="slack", external_id="temporary", kind="dm"),
         Authority("person:ada", "person_dm", person["id"]),
         None,
@@ -40,6 +40,8 @@ async def test_refresh_backoff(chatgpt_app, slack_client, failure):
     assert await chatgpt.access(ctx, person) is None
     assert len(calls) == 1
     async with ctx.pool.connection() as conn:
+        run = await one(conn, "SELECT status,usage FROM runs")
+        assert run["status"] == "failed" and run["usage"]["failure_category"] == "sign_in"
         row = await grants.load(conn, person["id"])
         assert row["broken_at"] is None and row["next_refresh_at"] is not None
         assert (await one(conn, "SELECT detail FROM sensors WHERE key='chatgpt:ada'"))["detail"]

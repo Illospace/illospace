@@ -1,14 +1,15 @@
 """The run kind comes from the verified event channel and the authority, not the profile alone."""
 
 import dataclasses
+from typing import get_args
 
 import pytest
 
-from illo.brain.routes import resolve_route, run_kind
+from illo.brain.routes import raises_failure, resolve_route, run_kind, sends_refresh_notice
 from illo.gateway import InboundEvent
 from illo.gateway.principal import Authority, resolve
 from illo.ledger import tokens
-from illo.workspace import RouteSettings, Routine, TeamDigestConfig
+from illo.workspace import RouteSettings, Routine, RunKind, TeamDigestConfig
 
 EVENTS = {
     "person_dm": ("slack", "dm", "U_ACME_ADA", {}),
@@ -104,6 +105,12 @@ def test_a_tainted_authority_is_tainted_on_every_channel():
     for channel in ("slack", "email", "routine", "digest", "mcp"):
         event = InboundEvent(channel=channel, external_id="x", kind="message")
         assert run_kind(event, Authority("team", "person_dm", tainted=True), deep=False) == "tainted"
+
+
+@pytest.mark.parametrize("kind", get_args(RunKind))
+def test_refresh_notice_and_failure_decisions(kind):
+    assert sends_refresh_notice(kind) is (kind not in {"digest", "deep"})
+    assert raises_failure(kind) is (kind in {"digest", "deep"})
 
 
 @pytest.mark.parametrize("channel,profile", [("slack", "routine"), ("chat", "person_dm"),

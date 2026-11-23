@@ -14,10 +14,13 @@ from mcp.types import CallToolResult, TextContent, Tool
 from brain.loop import conversation
 from brain.models import ChatGPTAuth
 from brain.wire.responses import Responses
+from illo.brain.routes import resolve_route, web_search_allowed
+from illo.brain.run_manager import DeepContext
 from illo.connectors import aws
 from illo.connectors.config import Auth, Connector
 from illo.db import one
 from illo.deep.worker import tick
+from illo.gateway.principal import Authority
 from illo.ledger import runs
 from illo.tools.checks import check, scope
 from illo.tools.registry import Refusal, ToolContext
@@ -27,6 +30,27 @@ from tests.connectors.test_mcp import call, mcp_app  # noqa: F401
 from tests.tool_results import read_result
 
 CLOSED = "This run read customer data. The web is closed for this run."
+
+
+@pytest.mark.parametrize("blocked_by", [
+    "off", "brief", "person_dm", "customer_read", "personal_read", "capability",
+    "no_context", "chat_route", None,
+])
+def test_initial_web_search_checks_every_guard(workspace, blocked_by):
+    workspace = workspace.model_copy(deep=True)
+    workspace.config.web.search = "off" if blocked_by == "off" else "provider"
+    route = resolve_route(workspace, "person_dm" if blocked_by == "chat_route" else "deep")
+    authority = (Authority("person:ada", "person_dm", 1) if blocked_by == "person_dm"
+                 else Authority("team", "team_channel"))
+    deep = DeepContext(
+        deep_run_id=1, kind="brief" if blocked_by == "brief" else "request",
+        authority=authority, task_actor=None, deliver={"none": True},
+        customer_read=blocked_by == "customer_read", personal_read=blocked_by == "personal_read",
+    )
+    assert web_search_allowed(
+        workspace, route, {"capabilities": {} if blocked_by == "capability" else {"web_search": True}},
+        None if blocked_by == "no_context" else deep,
+    ) is (blocked_by is None)
 
 
 async def rpc_call(rpc, token, name, args=None):

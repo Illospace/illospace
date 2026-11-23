@@ -22,20 +22,24 @@ async def create(
     tool_limit: int | None = None,
     event_id: int | None = None,
     tainted: bool = False,
+    deep_run_id: int | None = None,
+    deep_kind: str | None = None,
+    customer_read: bool = False,
+    personal_read: bool = False,
 ) -> dict:
     """The gateway sets the principal once, before the brain starts.
 
-    A brain run has a route, a payer, and a tool limit. A direct run has none of them.
+    A brain run has a route and a tool limit. The run manager selects the payer later.
     """
     return await one(
         conn,
         """
         INSERT INTO runs (principal,person_id,profile,provider,model,route,payer,payer_person_id,
-                          tool_limit,event_id,tainted)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
+                          tool_limit,event_id,tainted,deep_run_id,deep_kind,customer_read,personal_read)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
     """,
         (principal, person_id, profile, provider, model, route, payer, payer_person_id,
-         tool_limit, event_id, tainted),
+         tool_limit, event_id, tainted, deep_run_id, deep_kind, customer_read, personal_read),
     )
 
 
@@ -103,4 +107,13 @@ async def finish(
         WHERE id = %s AND status = 'running'
     """,
         (status, Jsonb(usage or {}), error, run_id),
+    )
+
+
+async def expire_run(conn: Connection, run_id: int, error: str) -> None:
+    """End a run with an expired lease and mark its event as failed."""
+    await finish(conn, run_id, "timeout", usage={"failure_category": "timeout"}, error=error)
+    await conn.execute(
+        "UPDATE events SET status='failed' WHERE id=(SELECT event_id FROM runs WHERE id=%s)",
+        (run_id,),
     )

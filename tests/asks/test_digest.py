@@ -7,6 +7,9 @@ import pytest
 
 from illo.brain.client import BrainEvent, ProviderAuth
 from illo.db import one
+from illo.deep import start
+from illo.deep.worker import claim
+from illo.gateway.principal import Authority
 from illo.ledger import lanes, people
 from illo.ledger.digest_snapshot import sensor_fault
 from illo.routines.digest import (
@@ -159,20 +162,26 @@ async def test_fallback_on_model_failure_once(app, fake_brain, slack_client, mon
     assert posts(slack_client)[0]["text"] == fallback_text(empty()) + "\n\n" + FIRST_BRIEF
 
 
-async def test_brief_queue_timeout_uses_fallback(app, slack_client, monkeypatch):
+async def occupy_deep_queue(ctx):
+    async with ctx.pool.connection() as conn:
+        await start(ctx, conn, kind="scout", job="Check the plan.",
+                    authority=Authority("team", "routine"), deliver={"none": True})
+        await claim(ctx, conn)
+    ctx.workspace.config.brain.routes["deep"] = RouteSettings(timeout_s=0.05)
+
+
+async def test_brief_queue_timeout_uses_fallback(app, slack_client):
     ctx = app.state.ctx
     await only_ada(ctx)
     ctx.workspace = ctx.workspace.model_copy(deep=True)
-    ctx.workspace.config.brain.routes["deep"] = RouteSettings(timeout_s=0.01)
-
-    async def wait(*args, **kwargs):
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(ctx.gateway.run_manager, "execute", wait)
+    await occupy_deep_queue(ctx)
     await send_due(ctx, NOW)
     await send_due(ctx, NOW)
     assert len(posts(slack_client)) == 1
     assert posts(slack_client)[0]["text"] == fallback_text(empty()) + "\n\n" + FIRST_BRIEF
+    async with ctx.pool.connection() as conn:
+        brief = await one(conn, "SELECT state,run_id FROM deep_runs WHERE kind='brief'")
+    assert brief == {"state": "queued", "run_id": None}
 
 
 async def test_person_zone_reload_does_not_repeat_brief(app, fake_brain, slack_client):

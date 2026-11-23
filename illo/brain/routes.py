@@ -58,6 +58,27 @@ def resolve_route(workspace, kind: RunKind) -> Route:
     return Route(kind=kind, **fields)
 
 
+def sends_refresh_notice(kind: RunKind) -> bool:
+    return kind not in {"digest", "deep"}
+
+
+def raises_failure(kind: RunKind) -> bool:
+    return kind in {"digest", "deep"}
+
+
+def web_search_allowed(workspace, route: Route, provider: dict, deep) -> bool:
+    return (
+        deep is not None
+        and route.kind == "deep"
+        and workspace.config.web.search == "provider"
+        and deep.kind != "brief"
+        and deep.authority.profile != "person_dm"
+        and not deep.customer_read
+        and not deep.personal_read
+        and bool(provider["capabilities"].get("web_search"))
+    )
+
+
 @dataclass(frozen=True)
 class Payer:
     """`provider` runs: the route's, or the fallback before the run. The brain can change to
