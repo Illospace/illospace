@@ -61,6 +61,23 @@ class SlackIntake:
             return CLIP_ERROR
         return None
 
+    def accepts_message(self, message: dict) -> bool:
+        """Skip Illo's messages and unsupported Slack subtypes."""
+        return (
+            message.get("user") != self.bot_id
+            and not (self.bot_identity and message.get("bot_id") == self.bot_identity)
+            and message.get("subtype")
+            in {None, "bot_message", "file_share", "slack_video", "thread_broadcast"}
+        )
+
+    async def follows(self, channel: str, thread: str) -> bool:
+        """Say if Illo follows this channel thread, so a reply needs no mention."""
+        async with self.ctx.pool.connection() as conn:
+            expires = await kv.get(conn, f"slack:team-brief:{channel}:{thread}")
+            if expires:
+                return datetime.now(UTC) < datetime.fromisoformat(expires)
+            return bool(await kv.get(conn, f"slack:thread:{channel}:{thread}"))
+
     async def receive(self, envelope: dict) -> dict | None:
         if envelope.get("type") == "view_submission":
             from illo.channels.slack.modals import prepare
@@ -78,21 +95,7 @@ class SlackIntake:
             if raw.get("user") == self.bot_id and raw.get("channel"):
                 await self.join_notice(raw["channel"])
             return
-        if kind not in {"message", "app_mention"}:
-            return
-        if (
-            raw.get("user") == self.bot_id
-            or self.bot_identity
-            and raw.get("bot_id") == self.bot_identity
-            or raw.get("subtype")
-            not in {
-                None,
-                "bot_message",
-                "file_share",
-                "slack_video",
-                "thread_broadcast",
-            }
-        ):
+        if kind not in {"message", "app_mention"} or not self.accepts_message(raw):
             return
         channel, ts = raw.get("channel"), raw.get("ts")
         if not channel or not ts:
@@ -144,13 +147,7 @@ class SlackIntake:
                 return {"decision": "agent_oauth"}
         mentioned = kind == "app_mention" or f"<@{self.bot_id}>" in raw.get("text", "")
         if thread and not dm:
-            async with self.ctx.pool.connection() as conn:
-                expires = await kv.get(conn, f"slack:team-brief:{channel}:{thread}")
-                follows = (
-                    datetime.now(UTC) < datetime.fromisoformat(expires) if expires else
-                    bool(await kv.get(conn, f"slack:thread:{channel}:{thread}"))
-                )
-                mentioned = mentioned or follows
+            mentioned = mentioned or await self.follows(channel, thread)
         if private and not mentioned:
             # Illo keeps no text of a private channel unless a person speaks to it.
             return {"decision": "ignore"}

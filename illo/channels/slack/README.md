@@ -51,6 +51,13 @@ A channel is private when Slack says so, when `illo.yaml` sets `visibility: priv
 
 The Slack sensor records connection health every 10 seconds.
 The SDK reconnects a lost socket. The channel also retries a failed initial connection.
+After a gap of more than 60 seconds, Illo reads the Slack history for missed messages.
+It reads up to three days and up to 200 messages per conversation.
+Illo sends messages up to 24 hours old through normal intake.
+It sends a DM to people whose requests are too old to answer.
+After a gap of more than 10 minutes, Illo sends the owner a notice.
+Illo cannot recover button presses from Slack history.
+It cannot recover thread replies if the first message in the thread is older than the gap window.
 Shutdown cancels pending work and closes the socket.
 
 Tests use invented payloads and recording clients. They make no Slack calls.

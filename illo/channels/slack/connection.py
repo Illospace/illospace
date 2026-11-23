@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from asyncio import Lock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,7 +16,9 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
+from illo.channels.slack.catchup import MIN_GAP_S, catch_up
 from illo.channels.slack.intake import SlackIntake
+from illo.db import one
 from illo.ledger import kv, sensors
 
 log = logging.getLogger(__name__)
@@ -27,6 +30,10 @@ SESSION_DEFAULT_S = 6 * 3600
 SESSION_MARGIN_S = 600
 # The SDK reconnects a closed socket in some seconds. Give it this number of checks first.
 MISSES_BEFORE_RESET = 3
+# The time of the last check that had a greeting. A restart reads the gap start here.
+LAST_GREETED_KEY = "slack:last-greeted"
+# The start of the oldest catch-up that has not finished. A restart starts it again.
+PENDING_KEY = "slack:catch-up-pending"
 
 
 class SlackConnection:
@@ -35,9 +42,16 @@ class SlackConnection:
         self.socket: SocketModeClient | None = None
         self.intake: SlackIntake | None = None
         self.pending: set[asyncio.Task] = set()
+        self.catch_up_lock = Lock()
+        self.pending_starts: list[float] = []
+        # Change the list and its saved copy together, so an old write cannot win.
+        self.pending_lock = Lock()
         self.session: str | None = None
         self.session_at = 0.0
         self.greeted: str | None = None
+        # The SDK names a session by the hash of its socket object. Keep the greeted
+        # object, so that Python cannot give its name to a new socket.
+        self.greeted_socket = None
         self.session_limit = float(SESSION_DEFAULT_S)
         self.misses = 0
         self.stopping = False
@@ -50,6 +64,7 @@ class SlackConnection:
             return
         if not isinstance(data, dict) or data.get("type") != "hello":
             return
+        self.greeted_socket = getattr(self.socket, "current_session", None)
         self.greeted = await self.socket.session_id()
         limit = (data.get("debug_info") or {}).get("approximate_connection_time")
         valid = isinstance(limit, int | float) and not isinstance(limit, bool) and limit > 0
@@ -105,12 +120,84 @@ class SlackConnection:
             log.error("Slack could not handle an event")
             await self.report(False)
 
+    async def save_pending(self) -> None:
+        async with self.ctx.pool.connection() as conn:
+            if self.pending_starts:
+                await kv.set(conn, PENDING_KEY, min(self.pending_starts))
+            else:
+                await kv.delete(conn, PENDING_KEY)
+
+    async def start_recovery(self, gap_start: float, gap_end: float) -> None:
+        # Save the gap before the task starts, so a restart cannot lose it.
+        async with self.pending_lock:
+            self.pending_starts.append(gap_start)
+            try:
+                await self.save_pending()
+            except Exception:
+                # No task starts. The next check tries this gap again.
+                self.pending_starts.remove(gap_start)
+                raise
+        task = asyncio.create_task(self.recover(gap_start, gap_end))
+        self.pending.add(task)
+        task.add_done_callback(self.pending.discard)
+
+    async def recover(self, gap_start: float, gap_end: float) -> None:
+        async with self.catch_up_lock:
+            await self.read_gap(gap_start, gap_end)
+            # A cancelled catch-up keeps its saved start for the next run.
+            async with self.pending_lock:
+                if gap_start in self.pending_starts:
+                    self.pending_starts.remove(gap_start)
+                try:
+                    await self.save_pending()
+                except Exception:
+                    log.error("Slack could not record the catch-up result")
+
+    async def read_gap(self, gap_start: float, gap_end: float) -> None:
+        try:
+            result = await catch_up(self.ctx, self.intake, gap_start, gap_end)
+            failed = result.failed
+        except Exception:
+            failed = True
+        detail = "Slack could not finish the catch-up"
+        if failed:
+            log.error(detail)
+        try:
+            async with self.ctx.pool.connection() as conn:
+                if failed:
+                    await sensors.error(conn, "slack:catch-up", detail)
+                else:
+                    await sensors.ok(conn, "slack:catch-up")
+        except Exception:
+            log.error("Slack could not record the catch-up result")
+
     async def run(self) -> None:
         """The SDK reconnects active sockets. Start again with a new client when it does not."""
         ctx = self.ctx
+        last_ok = None
+        loaded_last_ok = False
         try:
             while True:
                 try:
+                    if not loaded_last_ok:
+                        # The sensor also records a socket with no greeting. Use the
+                        # time of the last greeted check, and the sensor only before it exists.
+                        async with ctx.pool.connection() as conn:
+                            last_ok = await kv.get(conn, LAST_GREETED_KEY)
+                            if last_ok is None:
+                                row = await one(
+                                    conn, "SELECT extract(epoch from last_ok_at) AS at "
+                                    "FROM sensors WHERE key='slack'",
+                                )
+                                if row and row["at"] is not None:
+                                    # Save it now. A socket with no greeting changes the sensor.
+                                    last_ok = float(row["at"])
+                                    await kv.set(conn, LAST_GREETED_KEY, last_ok)
+                            pending = await kv.get(conn, PENDING_KEY)
+                        last_ok = float(last_ok) if last_ok is not None else None
+                        if pending is not None:
+                            last_ok = min(float(pending), last_ok if last_ok is not None else float(pending))
+                        loaded_last_ok = True
                     if self.socket is None:
                         auth = await ctx.slack_client.auth_test()
                         async with ctx.pool.connection() as conn:
@@ -130,10 +217,21 @@ class SlackConnection:
                         self.socket.on_message_listeners.append(self.on_message)
                         # A new client can get the session name of an old one. Start its record again.
                         self.session, self.session_at, self.greeted = None, 0.0, None
+                        self.greeted_socket = None
                         self.session_limit, self.misses = float(SESSION_DEFAULT_S), 0
                         await self.socket.connect()
                     if await self.alive(time.monotonic()):
                         self.misses = 0
+                        # Only a greeting proves that events arrive. Before it, keep the
+                        # old time, so a socket that never gets events stays in the gap.
+                        if self.greeted == self.session:
+                            now = time.time()
+                            if (not self.stopping and last_ok is not None
+                                    and now - last_ok > MIN_GAP_S):
+                                await self.start_recovery(last_ok, now)
+                            last_ok = now
+                            async with ctx.pool.connection() as conn:
+                                await kv.set(conn, LAST_GREETED_KEY, now)
                         await self.report(True)
                     else:
                         self.misses += 1
