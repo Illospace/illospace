@@ -6,6 +6,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -340,3 +341,65 @@ def test_compose_reaps_orphan_processes():
     services = yaml.safe_load((ROOT / "deploy/compose.yaml").read_text())["services"]
     assert services["brain"]["init"] is True
     assert services["illo"]["init"] is True
+
+
+def test_install_creates_both_environment_files_at_mode_600(install):
+    init(install)
+    app = Path(install[1]["ILLO_ENV_FILE"])
+    brain = app.parent / "brain.env"
+    assert app.stat().st_mode & 0o777 == 0o600 and brain.stat().st_mode & 0o777 == 0o600
+    assert f"ILLO_BRAIN_ENV_FILE='{brain}'" in app.read_text()
+    assert "ILLO_PROVIDER_OPENAI_API_KEY=" in brain.read_text()
+    assert "PROVIDER" not in app.read_text().replace("ILLO_BRAIN_ENV_FILE", "")
+    # A second install recreates each service whose environment file changed.
+    assert run(install, "install.sh").returncode == 0
+    assert any(c["args"][-3:] == ["up", "-d", "--no-build"] for c in calls(install))
+
+
+@pytest.mark.parametrize("line", ["OPENAI_API_KEY='fake-key'", "ILLO_PROVIDER_OPENAI_API_KEY=x",
+                                  "export ANTHROPIC_API_KEY=x", "OPENAI_BASE_URL="])
+def test_install_and_update_refuse_a_provider_key_in_the_app_file(install, line):
+    init(install)
+    path = Path(install[1]["ILLO_ENV_FILE"])
+    path.write_text(path.read_text() + line + "\n")
+    result = run(install, "install.sh")
+    assert result.returncode == 1
+    assert "holds a provider variable" in result.stderr and "fake-key" not in result.stderr
+    before = len(calls(install))
+    target = remote_commit(install)
+    assert run(install, "update.sh").returncode == 1
+    # Nothing was built, migrated, or started. The last good revision keeps running.
+    assert len(calls(install)) == before
+    log = (Path(install[1]["ILLO_STATE_DIR"]) / "update.log").read_text()
+    assert f"failed {target}: environment files" in log
+
+
+def test_the_brain_file_cannot_live_in_the_checkout(install):
+    result = run(install, "install.sh", ILLO_BRAIN_ENV_FILE=str(install[0] / "brain.env"))
+    assert result.returncode == 1
+    assert "outside the checkout" in result.stderr
+
+
+def test_compose_gives_provider_keys_to_the_brain_only(tmp_path):
+    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose is not installed")
+    app, brain = tmp_path / "env", tmp_path / "brain.env"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ILLO_", "OPENAI_", "ANTHROPIC_"))}
+    env["ILLO_WORKSPACE_DIR"] = str(tmp_path / "workspace")
+    subprocess.run([sys.executable, str(ROOT / "deploy/init-env.py"), str(app),
+                    str(ROOT / "deploy/env.example"), str(brain),
+                    str(ROOT / "deploy/brain.env.example")],
+                   env=env, check=True, stdin=subprocess.DEVNULL)
+    brain.write_text(brain.read_text().replace(
+        "ILLO_PROVIDER_OPENAI_API_KEY=", "ILLO_PROVIDER_OPENAI_API_KEY=fake-provider-key"))
+    result = subprocess.run(
+        ["docker", "compose", "--env-file", str(app), "-f", str(ROOT / "deploy/compose.yaml"),
+         "config", "--format", "json"],
+        env=env | {"ILLO_ENV_FILE": str(app)}, capture_output=True, text=True, check=True)
+    services = json.loads(result.stdout)["services"]
+    forbidden = ("ILLO_PROVIDER_", "OPENAI_", "ANTHROPIC_")
+    for name in ("illo", "postgres", "sandbox"):
+        assert not [k for k in services[name].get("environment") or {} if k.startswith(forbidden)]
+    assert services["brain"]["environment"]["ILLO_PROVIDER_OPENAI_API_KEY"] == "fake-provider-key"
+    assert "ILLO_DATABASE_URL" not in services["brain"]["environment"]
+    assert "ILLO_VAULT_KEY" not in services["brain"]["environment"]

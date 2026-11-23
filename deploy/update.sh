@@ -62,6 +62,11 @@ update_once() {
     fi
     export ILLO_REVISION=$target
     export ILLO_MIGRATE_ON_START=0
+    if ! check_env_files; then
+        # Nothing changed yet. The running services stay on the last good revision.
+        record "failed $target: environment files; last good $old"
+        return 1
+    fi
     stage=build
     if compose build illo brain sandbox; then
         stage=database

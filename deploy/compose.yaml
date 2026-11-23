@@ -24,6 +24,7 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         ILLO_REVISION: ${ILLO_REVISION:-local}
+    # The app file holds no provider key. deploy/install.sh refuses one.
     env_file: ${ILLO_ENV_FILE:-../.env}
     environment:
       ILLO_WORKSPACE_DIR: /workspace
@@ -53,16 +54,10 @@ services:
     build:
       context: ../brain
       dockerfile: Dockerfile
+    # Only the brain loads the brain file with the provider keys. The app never loads it.
+    env_file: ${ILLO_BRAIN_ENV_FILE:?Set ILLO_BRAIN_ENV_FILE in the environment file}
     environment:
       ILLO_BRAIN_SECRET: ${ILLO_BRAIN_SECRET:?Set ILLO_BRAIN_SECRET in the environment file}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      ILLO_BRAIN_MODEL: ${ILLO_BRAIN_MODEL:-}
-      ILLO_BRAIN_CONCURRENCY: ${ILLO_BRAIN_CONCURRENCY:-4}
-      ILLO_BRAIN_TIMEOUT_S: ${ILLO_BRAIN_TIMEOUT_S:-300}
-      ILLO_BRAIN_EFFORT: ${ILLO_BRAIN_EFFORT:-}
       HOME: /tmp
     user: '10001:10001'
     read_only: true

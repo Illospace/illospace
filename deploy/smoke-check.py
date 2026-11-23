@@ -45,29 +45,35 @@ async def check_brain(client: httpx.AsyncClient) -> None:
         person = await people.get(conn, "ada")
         run = await runs.create(
             conn, principal="person:ada", person_id=person["id"],
-            profile="person_dm", runtime="echo", model="echo",
+            profile="person_dm", route="person_dm", provider="fake", model="fake",
+            payer="api_key", tool_limit=2,
         )
         token = await runs.mint_token(conn, run["id"], 60)
         await conn.commit()
         body = {
             "run_id": run["id"], "system_prompt": "List the tools.",
             "user_message": "List the tools.", "mcp_url": "http://illo:8080/brain/mcp",
-            "mcp_token": token, "runtime": "echo", "model": "echo",
-            "max_turns": 2, "timeout_s": 30,
+            "mcp_token": token, "provider": "fake", "model": "fake",
+            "max_tool_calls": 2, "timeout_s": 30,
         }
         url = os.environ["ILLO_BRAIN_URL"] + "/run"
+        secret = {"X-Illo-Brain-Secret": os.environ["ILLO_BRAIN_SECRET"]}
+        described = await client.get(os.environ["ILLO_BRAIN_URL"] + "/providers", headers=secret)
+        described.raise_for_status()
+        assert "fake" in {item["name"] for item in described.json()["providers"]}
+        print("The brain describes its providers.")
         try:
             unauthorized = await client.post(url, json=body)
             assert unauthorized.status_code == 401
             response = await client.post(
                 url, json=body,
-                headers={"X-Illo-Brain-Secret": os.environ["ILLO_BRAIN_SECRET"]},
+                headers=secret,
             )
             response.raise_for_status()
             events = [json.loads(line) for line in response.text.splitlines() if line]
             assert any(event["type"] == "started" for event in events)
-            assert events[-1]["type"] == "final", "The echo brain did not finish"
-            print("The authenticated echo brain run passed.")
+            assert events[-1]["type"] == "final", "The fake provider run did not finish"
+            print("The authenticated fake provider run passed.")
         finally:
             await runs.finish(conn, run["id"], "completed")
 

@@ -32,6 +32,9 @@ load_config() {
     export ILLO_PROJECT_NAME=${ILLO_PROJECT_NAME:-$(config_get ILLO_PROJECT_NAME)}
     ILLO_PROJECT_NAME=${ILLO_PROJECT_NAME:-illo}
     export ILLO_PROJECT_NAME
+    export ILLO_BRAIN_ENV_FILE=${ILLO_BRAIN_ENV_FILE:-$(config_get ILLO_BRAIN_ENV_FILE)}
+    ILLO_BRAIN_ENV_FILE=${ILLO_BRAIN_ENV_FILE:-${ILLO_ENV_FILE%/*}/brain.env}
+    export ILLO_BRAIN_ENV_FILE
     export ILLO_REVISION=${ILLO_REVISION:-$(config_get ILLO_REVISION)}
     if [ -z "$ILLO_REVISION" ] && [ -f "$ILLO_STATE_DIR/last-good" ]; then
         ILLO_REVISION=$(cat "$ILLO_STATE_DIR/last-good")
@@ -45,6 +48,16 @@ load_config() {
     ILLO_HEALTH_ATTEMPTS=${ILLO_HEALTH_ATTEMPTS:-60}
     export ILLO_HEALTH_ATTEMPTS
     export ILLO_HEALTH_INTERVAL=${ILLO_HEALTH_INTERVAL:-2}
+}
+
+# The app file holds no provider key. Only the brain container loads the brain file.
+check_env_files() {
+    [ -f "$ILLO_BRAIN_ENV_FILE" ] || { printf 'Create the brain environment file %s from deploy/brain.env.example.\n' "$ILLO_BRAIN_ENV_FILE" >&2; return 1; }
+    outside_checkout "$ILLO_BRAIN_ENV_FILE"
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?(ILLO_PROVIDER_|OPENAI_|ANTHROPIC_)[A-Za-z0-9_]*=' "$ILLO_ENV_FILE"; then
+        printf 'The app environment file %s holds a provider variable. Move each ILLO_PROVIDER_, OPENAI_, and ANTHROPIC_ variable to %s. See docs/install.md.\n' "$ILLO_ENV_FILE" "$ILLO_BRAIN_ENV_FILE" >&2
+        return 1
+    fi
 }
 
 compose() {
