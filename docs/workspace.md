@@ -323,6 +323,7 @@ Illo starts a brief at its due time or up to 2 minutes later.
 If a run starts and the send fails, the next check tries again with the same delivery key.
 Illo can retry for up to 2 hours after the due time.
 After 2 hours, Illo records the brief as `skipped` and does not send it.
+A failed team brief does not stop the personal briefs of the same check.
 
 In a DM, `digest_snapshot` and the older alias `asks_digest` return the same personal data.
 The task list supplies all work facts. Lanes supply run evidence, not a second picture of work.

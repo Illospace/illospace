@@ -88,7 +88,7 @@ async def check(ctx, conn: Connection, now: datetime | None = None) -> None:
             log.warning("A background job stopped: %s", job)
             await _notify(
                 ctx, conn,
-                f"A background job stopped: `{job}`. Its last report was at {report_time(since)}. "
+                f"A background job stopped: `{job}`. It has not reported since {report_time(since)}. "
                 "Work that needs this job can wait too, such as the briefs. "
                 "Run `illo doctor` on the Illo host to see the silent jobs.",
                 alert_key=key,

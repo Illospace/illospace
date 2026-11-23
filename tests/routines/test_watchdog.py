@@ -44,7 +44,7 @@ async def test_alert_and_recovery_go_once_to_each_active_owner(app, slack_client
         await watchdog.check(ctx, conn, now)
         job = JOB.removeprefix("job:")
         assert posts(slack_client) == [
-            f"A background job stopped: `{job}`. Its last report was at {report_time(since)}. "
+            f"A background job stopped: `{job}`. It has not reported since {report_time(since)}. "
             "Work that needs this job can wait too, such as the briefs. "
             "Run `illo doctor` on the Illo host to see the silent jobs."
         ] * 2

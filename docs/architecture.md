@@ -446,6 +446,7 @@ It measures from the last report or the process start, whichever is later.
 A job is silent after more than 10 job intervals, with a minimum of 10 minutes.
 The watchdog sends one alert and one recovery message by Slack DM to active workspace owners
 (`role: owner` in `people.yaml`).
+If no owner gets the alert, the watchdog tries again at the next check.
 `/healthz` returns HTTP 200 when the database answers and shows `ok`, `silent`, or `unknown` in `jobs`.
 `illo doctor` lists silent jobs.
 
