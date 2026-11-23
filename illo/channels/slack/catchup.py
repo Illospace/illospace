@@ -170,7 +170,10 @@ async def _read_conversation(client, channel, oldest, latest, result):
 
 
 async def _record_old(ctx, intake, message, kind, external_id):
-    if kind == "message" and f"<@{intake.bot_id}>" not in (message.get("text") or ""):
+    # Use the checks of live intake: a mention, or a reply in a thread that Illo follows.
+    if (kind == "message" and f"<@{intake.bot_id}>" not in (message.get("text") or "")
+            and not (message.get("thread_ts")
+                     and await intake.follows(message["channel"], message["thread_ts"]))):
         return None
     if team := message.get("user_team"):
         if not intake.team_id:
