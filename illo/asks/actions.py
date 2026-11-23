@@ -50,7 +50,8 @@ async def handle(ctx, person, action):
             option = next((o for o in ask["options"] if o["id"] == parts[3]), None)
             if option is None or (operation == "always" and not can_always(ask)):
                 return
-            answered = await answer(conn, ask_id, person["id"], option=option["id"])
+            answered = await answer(conn, ask_id, person["id"], option=option["id"],
+                                    workspace=ctx.workspace)
             if not answered:
                 return
             if operation == "always":
@@ -106,7 +107,8 @@ async def claim_thread(ctx, event, authority):
         elif not event.text.strip():
             text = "Reply in this thread with your answer."
         else:
-            answered = await answer(conn, ask["id"], authority.person_id, text=event.text)
+            answered = await answer(conn, ask["id"], authority.person_id, text=event.text,
+                                    workspace=ctx.workspace)
             text = "Answer saved." if answered else "This question is closed. No answer is needed."
     await refresh_ask(ctx, ask["id"])
     return text

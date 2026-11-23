@@ -1,5 +1,6 @@
 """Setup reads credentials without a live GitHub call."""
 
+import pytest
 from pydantic import SecretStr
 
 from illo.sources.github import setup
@@ -35,11 +36,14 @@ async def test_setup_token_and_sensor_report_flush(app, monkeypatch):
         assert row["last_error_at"] and row["detail"] == "GitHub rate limit reached"
 
 
-async def test_setup_app_key_from_vault(app, monkeypatch):
+@pytest.mark.parametrize("token", [None, "example-test-token"])
+async def test_setup_app_key_from_vault(app, monkeypatch, token):
     from cryptography.fernet import Fernet
 
     ctx = app.state.ctx
     ctx.github_client = None
+    if token:
+        ctx.config.github_token = SecretStr(token)
     ctx.config.github_app_id = "123"
     ctx.config.github_app_installation_id = "456"
     ctx.config.vault_key = SecretStr(Fernet.generate_key().decode())
@@ -49,5 +53,6 @@ async def test_setup_app_key_from_vault(app, monkeypatch):
         )
     monkeypatch.setattr(ctx, "every", lambda *args: None)
     await setup(ctx)
+    assert ctx.github_client.token == token
     assert ctx.github_client.private_key == "example-test-key"
     assert ctx.github_client.installation_id == "456"

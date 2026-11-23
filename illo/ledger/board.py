@@ -24,14 +24,22 @@ STATES = Literal["open", "resolved", "archived"]
 ISSUE = re.compile(r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9_.-]+)/issues/([0-9]+)")
 MUTATION = "board_mutation"
 
-# Task links predate the board and can use mixed case or leading zeros.
-_TICKET = r"regexp_replace(lower(tt.url), '/issues/0+([1-9][0-9]*)$', '/issues/\1')"
-_PRIVATE_TASKS = f"""SELECT 1 FROM tasks t WHERE t.visibility='private'
+# Task links predate the board and can use variants of the same issue URL.
+_TICKET = r"""regexp_replace(split_part(split_part(lower(tt.url), '#', 1), '?', 1),
+    '/issues/0*([1-9][0-9]*)/?$', '/issues/\1')"""
+PRIVATE_TASKS = f"""SELECT 1 FROM tasks t WHERE t.visibility='private'
     AND (t.id=b.task_id OR t.id IN (
         SELECT tt.task_id FROM task_tickets tt WHERE b.ticket_url={_TICKET}
     ))"""
-_VISIBLE = f"""(b.visibility='team' OR b.owner_person_id=%(person_id)s)
-    AND NOT EXISTS ({_PRIVATE_TASKS} AND t.owner_person_id IS DISTINCT FROM %(person_id)s)"""
+
+
+def visible_to(person_id="%(person_id)s"):
+    """Build the thread ACL for a SQL expression that identifies the viewer."""
+    return f"""(b.visibility='team' OR b.owner_person_id={person_id})
+        AND NOT EXISTS ({PRIVATE_TASKS} AND t.owner_person_id IS DISTINCT FROM {person_id})"""
+
+
+VISIBLE = visible_to()
 _OPEN_DECISIONS = """SELECT d.id FROM board_posts d
     WHERE d.thread_id=b.id AND d.kind='decision_needed'
       AND NOT EXISTS (
@@ -43,7 +51,7 @@ _UNREAD = """FROM board_mentions m JOIN board_threads b ON b.id=m.thread_id
       AND NOT EXISTS (
         SELECT 1 FROM board_mention_acks a
         WHERE a.post_id=m.post_id AND a.target=m.target AND a.reader_key=%(reader_key)s
-      ) AND """ + _VISIBLE
+      ) AND """ + VISIBLE
 
 
 class Link(Arguments):
@@ -158,8 +166,8 @@ async def _task(conn, reader, task_id, ticket_url):
 
 async def _thread(conn, params, *, lock=False):
     suffix = " FOR UPDATE OF b" if lock else ""
-    row = await one(conn, f"""SELECT b.*, EXISTS ({_PRIVATE_TASKS}) AS private_task
-        FROM board_threads b WHERE b.id=%(thread_id)s AND {_VISIBLE}{suffix}""", params)
+    row = await one(conn, f"""SELECT b.*, EXISTS ({PRIVATE_TASKS}) AS private_task
+        FROM board_threads b WHERE b.id=%(thread_id)s AND {VISIBLE}{suffix}""", params)
     if not row:
         raise ValueError(NOT_FOUND)
     return row
@@ -171,8 +179,8 @@ async def _open_thread(conn, reader, title, visibility, task_id, ticket_url):
             "owner": owner, "task_id": task_id, "ticket": ticket_url}
     while True:
         if task_id is not None or ticket_url is not None:
-            row = await one(conn, f"""SELECT b.*, ({_VISIBLE}) AS visible,
-                    EXISTS ({_PRIVATE_TASKS}) AS private_task
+            row = await one(conn, f"""SELECT b.*, ({VISIBLE}) AS visible,
+                    EXISTS ({PRIVATE_TASKS}) AS private_task
                 FROM board_threads b WHERE b.state='open' AND b.visibility=%(visibility)s
                   AND (b.visibility='team' OR b.owner_person_id=%(owner)s)
                   AND (b.task_id=%(task_id)s OR b.ticket_url=%(ticket)s OR (
@@ -245,7 +253,7 @@ def _receipt(row):
 
 
 async def _replay(conn, reader, source_ref, request_hash):
-    row = await one(conn, f"""SELECT p.id,p.thread_id,p.ask_id,p.request_hash,({_VISIBLE}) AS visible
+    row = await one(conn, f"""SELECT p.id,p.thread_id,p.ask_id,p.request_hash,({VISIBLE}) AS visible
         FROM board_posts p JOIN board_threads b ON b.id=p.thread_id
         WHERE p.token_id=%(token_id)s AND p.source_ref=%(source_ref)s""",
         {**reader.params(), "token_id": reader.token_id, "source_ref": source_ref})
@@ -263,6 +271,8 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
                source_ref=None, blocks=(), mentions=(), question=None, options=None,
                recommended=None, client_name="", model=""):
     """Append one agent post. The caller commits a turn cap outcome."""
+    from illo.board.wake import enqueue_for_post
+
     reader = await _reader(conn, workspace, token)
     await mcp.lock_token(conn, reader.token_id, "board")
     request = {
@@ -307,7 +317,8 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
     if thread["consecutive_agent_posts"] >= workspace.config.board.max_consecutive_agent_posts:
         if thread["stalled_reason"] is None:
             await conn.execute("""UPDATE board_threads SET stalled_reason='turn_cap',
-                updated_at=clock_timestamp() WHERE id=%s""", (thread["id"],))
+                stalled_at=statement_timestamp(),updated_at=statement_timestamp()
+                WHERE id=%s""", (thread["id"],))
             await _record_mutation(conn, reader)
         return TurnCapReached(thread["id"])
 
@@ -330,7 +341,8 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
     row = await one(conn, """INSERT INTO board_posts
         (thread_id,actor,person_id,token_id,provenance,kind,text,blocks,mentions,
          reply_to_post_id,ask_id,source_ref,request_hash)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id,thread_id,ask_id""",
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id,thread_id,ask_id,actor,is_human,kind,mentions,reply_to_post_id""",
         (thread["id"], reader.actor, reader.person_id, reader.token_id, Jsonb(provenance), kind,
          text, Jsonb(blocks), list(recipients), reply_to_post_id, ask["id"] if ask else None,
          source_ref, request_hash))
@@ -343,6 +355,7 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
     await conn.execute("""UPDATE board_threads SET last_post_at=clock_timestamp(),
         updated_at=clock_timestamp(),consecutive_agent_posts=consecutive_agent_posts+1
         WHERE id=%s""", (thread["id"],))
+    await enqueue_for_post(conn, workspace, thread=thread, post=row)
     await _record_mutation(conn, reader)
     return _receipt(row)
 
@@ -356,7 +369,7 @@ def _thread_result(row, workspace):
 
 
 async def _recent(conn, workspace, reader, *, state, task_id=None, ticket_url=None, query=None, limit):
-    rows = await all_rows(conn, f"""SELECT b.* FROM board_threads b WHERE {_VISIBLE}
+    rows = await all_rows(conn, f"""SELECT b.* FROM board_threads b WHERE {VISIBLE}
         AND (%(state)s::text IS NULL OR b.state=%(state)s)
         AND (%(task_id)s::bigint IS NULL OR b.task_id=%(task_id)s OR (
           b.task_id IS NULL AND b.ticket_url IN (
@@ -385,7 +398,7 @@ async def read(conn, *, workspace, token, thread_id=None, after_post_id=0, state
             FROM board_posts p WHERE p.thread_id=b.id AND p.id>%(after)s
             ORDER BY p.id LIMIT %(limit)s
         ) page) AS posts
-        FROM board_threads b WHERE b.id=%(thread_id)s AND {_VISIBLE}""", params)
+        FROM board_threads b WHERE b.id=%(thread_id)s AND {VISIBLE}""", params)
     if not row:
         raise ValueError(NOT_FOUND)
     return {"thread": _thread_result(row, workspace), "posts": row["posts"],
@@ -413,7 +426,7 @@ async def _require_posts(conn, reader, post_ids, thread_id=None):
     row = await one(conn, f"""SELECT count(*) AS n FROM board_posts p
         JOIN board_threads b ON b.id=p.thread_id
         WHERE p.id=ANY(%(post_ids)s) AND (%(thread_id)s::bigint IS NULL OR b.id=%(thread_id)s)
-          AND {_VISIBLE}""",
+          AND {VISIBLE}""",
         {**reader.params(), "post_ids": post_ids, "thread_id": thread_id})
     if row["n"] != len(set(post_ids)):
         raise ValueError(NOT_FOUND)
@@ -452,7 +465,7 @@ async def resolve(conn, *, workspace, token, thread_id, state="resolved", summar
     if thread["state"] == "archived":
         raise ValueError("The thread is archived.")
     if state != "open" and await one(conn, f"""SELECT 1 FROM board_threads b
-        WHERE b.id=%(thread_id)s AND {_VISIBLE} AND EXISTS ({_OPEN_DECISIONS})""", params):
+        WHERE b.id=%(thread_id)s AND {VISIBLE} AND EXISTS ({_OPEN_DECISIONS})""", params):
         raise ValueError("A person must answer each open decision before you close this thread.")
     if thread["state"] == state and thread["resolution_summary"] == summary:
         return _thread_result(thread, workspace)
@@ -469,8 +482,10 @@ async def resolve(conn, *, workspace, token, thread_id, state="resolved", summar
     return _thread_result(row, workspace)
 
 
-async def record_decision(conn, ask):
+async def record_decision(conn, ask, *, workspace=None):
     """Append the answer while the authenticated ask service still holds its lock."""
+    from illo.board.wake import enqueue_for_post
+
     if (ask["answered_via"] != "person" or ask["answered_by_person_id"] != ask["owner_person_id"]):
         return
     linked = await one(conn, """SELECT p.id,p.thread_id,owner.key FROM board_posts p
@@ -479,14 +494,22 @@ async def record_decision(conn, ask):
     if not linked:
         return
     params = {"person_id": ask["owner_person_id"], "thread_id": linked["thread_id"]}
-    await _thread(conn, params, lock=True)
+    thread = await _thread(conn, params, lock=True)
     option = next((o["label"] for o in ask["options"] if o["id"] == ask["answer_option"]), "")
     answer = "\n".join(value for value in (option, ask["answer_text"]) if value)[:16000]
-    await conn.execute("""INSERT INTO board_posts
+    post = await one(conn, """INSERT INTO board_posts
         (thread_id,actor,is_human,person_id,provenance,kind,text,reply_to_post_id)
-        VALUES (%s,%s,true,%s,%s,'decision',%s,%s)""",
+        VALUES (%s,%s,true,%s,%s,'decision',%s,%s)
+        RETURNING id,actor,is_human,kind,mentions,reply_to_post_id""",
         (linked["thread_id"], f"person:{linked['key']}", ask["owner_person_id"],
          Jsonb({"person_key": linked["key"]}), answer, linked["id"]))
+    if workspace is not None:
+        stall_at = None
+        if thread["stalled_reason"] == "turn_cap":
+            stall_at = thread.get("stalled_at") or thread["updated_at"]
+        await enqueue_for_post(conn, workspace, thread=thread, post=post,
+                               prior_pending_post_id=linked["id"], prior_turn_cap_at=stall_at)
     await conn.execute("""UPDATE board_threads SET last_post_at=clock_timestamp(),
-        updated_at=clock_timestamp(),consecutive_agent_posts=0,stalled_reason=NULL WHERE id=%s""",
+        updated_at=clock_timestamp(),consecutive_agent_posts=0,stalled_reason=NULL,stalled_at=NULL
+        WHERE id=%s""",
         (linked["thread_id"],))

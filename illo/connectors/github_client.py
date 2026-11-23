@@ -22,6 +22,11 @@ class GitHubError(RuntimeError):
         super().__init__(f"GitHub returned status {status}")
 
 
+class GitHubAppRequired(RuntimeError):
+    def __init__(self):
+        super().__init__("GitHub App installation credentials are required.")
+
+
 class GitHubClient:
     def __init__(
         self,
@@ -121,9 +126,11 @@ class GitHubClient:
         self._installation_tokens[installation] = (result["token"], expires)
         return result["token"]
 
-    async def _auth(self, path: str = "") -> str:
-        if self.token:
+    async def _auth(self, path: str = "", *, app_only: bool = False) -> str:
+        if self.token and not app_only:
             return self.token
+        if app_only and not (self.app_id and self.private_key and self.installation_id):
+            raise GitHubAppRequired()
         async with self._auth_lock:
             # This lock covers discovery and tokens. JWT calls do not take the lock again.
             installation = await self._installation_for(path)
@@ -143,9 +150,11 @@ class GitHubClient:
                     raise
                 return await self._installation_auth(str(self.installation_id))
 
-    async def _request(self, method: str, path: str, *, bearer: str | None = None, **kwargs) -> Any:
+    async def _request(
+        self, method: str, path: str, *, bearer: str | None = None, app_only: bool = False, **kwargs
+    ) -> Any:
         for attempt in range(4):
-            auth = bearer or await self._auth(path)
+            auth = bearer or await self._auth(path, app_only=app_only)
             headers = {
                 "Authorization": f"Bearer {auth}",
                 "Accept": "application/vnd.github+json",
@@ -188,7 +197,8 @@ class GitHubClient:
                     delay -= step
                 continue
             if response.status_code >= 400:
-                if response.status_code == 401 and not bearer and not self.token and attempt == 0:
+                if (response.status_code == 401 and not bearer
+                        and (app_only or not self.token) and attempt == 0):
                     async with self._auth_lock:
                         self._installation_tokens = {
                             installation: cached
@@ -220,12 +230,14 @@ class GitHubClient:
             return {}
 
     async def _pages(
-        self, path: str, *, params: dict | None = None, key: str | None = None
+        self, path: str, *, params: dict | None = None, key: str | None = None,
+        app_only: bool = False,
     ) -> list[dict]:
         rows = []
         for page in range(1, 10001):
             result = await self._request(
-                "GET", path, params={**(params or {}), "per_page": 100, "page": page}
+                "GET", path, app_only=app_only,
+                params={**(params or {}), "per_page": 100, "page": page},
             )
             if key and result.get("incomplete_results"):
                 raise GitHubError(503)
@@ -248,9 +260,10 @@ class GitHubClient:
             q += f" state:{state}"
         return await self._pages("/search/issues", params={"q": q}, key="items")
 
-    async def get_issue(self, repo: str, number: int) -> dict:
-        item = await self._request("GET", f"/repos/{repo}/issues/{number}")
-        item["comments_data"] = await self._pages(f"/repos/{repo}/issues/{number}/comments")
+    async def get_issue(self, repo: str, number: int, *, app_only: bool = False) -> dict:
+        path = f"/repos/{repo}/issues/{number}"
+        item = await self._request("GET", path, app_only=app_only)
+        item["comments_data"] = await self._pages(f"{path}/comments", app_only=app_only)
         return item
 
     async def create_issue(
@@ -305,9 +318,9 @@ class GitHubClient:
             "POST", f"/repos/{repo}/issues/{number}/labels", json={"labels": labels}
         )
 
-    async def comment_issue(self, repo: str, number: int, body: str) -> dict:
+    async def comment_issue(self, repo: str, number: int, body: str, *, app_only: bool = False) -> dict:
         return await self._request(
-            "POST", f"/repos/{repo}/issues/{number}/comments", json={"body": body}
+            "POST", f"/repos/{repo}/issues/{number}/comments", app_only=app_only, json={"body": body}
         )
 
     async def get_commit(self, repo: str, ref: str) -> dict:
