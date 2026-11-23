@@ -144,27 +144,27 @@ async def test_limit_reply_is_clear_and_run_token_revoked(chatgpt_app, replay):
         assert row["usage"]["credential_person"] == "ada"
 
 
+PAYER = BrainEvent(type="payer", provider="openai", auth_kind="api_key")
+
+
 @pytest.mark.parametrize(
     "events,status,expected",
     [
         # A completed run on the subscription.
         ([BrainEvent(type="final", text="Ready.", usage={"input_tokens": 5})], "completed", "chatgpt"),
         # The brain changed to the API key and completed.
-        (
-            [BrainEvent(type="final", text="Ready.", usage={"auth_kind": "api_key"})],
-            "completed",
-            "api_key",
-        ),
+        ([PAYER, BrainEvent(type="final", text="Ready.")], "completed", "api_key"),
         # The brain changed to the API key, and that request failed too.
         (
             [
+                PAYER,
                 BrainEvent(
                     type="error",
                     category="limit",
                     code="usage_limit_reached",
                     fallback_failed=True,
                     usage={"input_tokens": 7},
-                )
+                ),
             ],
             "failed",
             "api_key",
@@ -177,18 +177,21 @@ async def test_limit_reply_is_clear_and_run_token_revoked(chatgpt_app, replay):
         ),
         # The run reaches its time limit before the brain sends an event.
         ([], "timeout", "chatgpt"),
+        # The run reaches its time limit after the brain changed to the API key.
+        ([PAYER], "timeout", "api_key"),
     ],
 )
 async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status, expected):
     app, _ = chatgpt_app
     ctx = app.state.ctx
+    ctx.workspace.config.brain.chatgpt.fallback = "openai"
     await save_grant(ctx)
 
     class Brain:
         async def run(self, request):
             for item in events:
                 yield item
-            if not events:
+            if not [e for e in events if e.type in ("final", "error")]:
                 raise TimeoutError
 
     ctx.brain_client = Brain()
@@ -197,6 +200,10 @@ async def test_run_records_the_sign_in_kind(chatgpt_app, replay, events, status,
         row = await one(conn, "SELECT * FROM runs")
     assert row["status"] == status and row["usage"]["auth_kind"] == expected
     assert row["usage"].get("credential_person") == ("ada" if expected == "chatgpt" else None)
+    # The payer columns follow the payer event, also when the run ends in a timeout.
+    assert (row["provider"], row["payer"]) == (
+        ("openai", "api_key") if expected == "api_key" else ("chatgpt", "chatgpt"))
+    assert (row["payer_person_id"] is None) == (expected == "api_key")
     counts = [e.usage.get("input_tokens") for e in events if e.usage.get("input_tokens")]
     if counts:
         assert row["usage"]["input_tokens"] == counts[0]

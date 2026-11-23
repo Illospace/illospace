@@ -23,6 +23,11 @@ from tests.conftest import ROOT
 def test_smoke_parser():
     args = parser().parse_args(["chatgpt", "smoke", "--person", "ada"])
     assert args.person == "ada" and args.action == "smoke" and args.route == "person_dm"
+    # The smoke builds a person's own authority. Other run kinds have another authority, so
+    # the smoke cannot check their payer truthfully.
+    for kind in ("team_channel", "tainted", "agent_request", "deep"):
+        with pytest.raises(SystemExit):
+            parser().parse_args(["chatgpt", "smoke", "--person", "ada", "--route", kind])
 
 
 @pytest.mark.parametrize(
@@ -40,7 +45,7 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
     data["brain"]["routes"] = {
         "default": {"provider": "chatgpt", "model": "test-model", "effort": "low"},
         # The explicit API-key check uses a route on an API-key provider.
-        "agent_request": {"provider": "openai"},
+        "routine": {"provider": "openai"},
     }
     data["brain"]["chatgpt"] = {
         "team_credential": "ada",
@@ -119,7 +124,7 @@ async def test_smoke_uses_refresh_and_brain_wire(chatgpt_app, monkeypatch, tmp_p
     monkeypatch.setattr(chatgpt_smoke, "BrainClient", lambda url: client)
     args = ["chatgpt", "smoke", "--person", "ben" if mode == "team" else "ada"]
     if mode == "explicit_api":
-        args += ["--route", "agent_request"]
+        args += ["--route", "routine"]
     result = await execute(parser().parse_args(args), ctx.config)
     output = capsys.readouterr().out
     assert result == (0 if mode in {"success", "fallback", "explicit_api", "team"} else 1)

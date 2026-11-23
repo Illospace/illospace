@@ -49,7 +49,7 @@ async def test_chatgpt_request_and_function_round_trip(run_request, monkeypatch)
 
     events, session = await collect(request, respond)
     assert events[-1]["type"] == "final" and events[-1]["text"] == "Release ready."
-    assert events[-1]["usage"]["auth_kind"] == "chatgpt"
+    assert not [e for e in events if e["type"] == "payer"]
     assert len(session.calls) == 1
     for body, head in zip(provider.requests, headers, strict=True):
         assert head["authorization"] == "Bearer " + MARKER
@@ -110,7 +110,7 @@ async def test_limit_and_api_fallback_resume_tool_results(
             + json.dumps(
                 {
                     "type": "response.completed",
-                    # A provider field with the same name cannot change the sign-in record.
+                    # A provider field cannot act as the payer. The payer event is the record.
                     "response": {
                         "status": "completed",
                         "output": output,
@@ -130,8 +130,10 @@ async def test_limit_and_api_fallback_resume_tool_results(
     else:
         events, session = await collect(request, respond, fallback=api)
         assert events[-1]["text"].endswith("I used the API key for this request.\n\nReady.")
-        # The ledger shows that the API key paid for the end of this run.
-        assert events[-1]["usage"]["auth_kind"] == "api_key"
+        # The brain tells the app at the switch that the API key pays for the rest of the run.
+        assert [e for e in events if e["type"] == "payer"] == [
+            {"type": "payer", "provider": "openai", "auth_kind": "api_key"}]
+        assert events[-1]["usage"]["input_tokens"] == 6
         assert len(session.calls) == 1 and len(wires) == 3
 
 

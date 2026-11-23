@@ -7,26 +7,19 @@ import httpx
 
 from illo.brain.client import BrainEvent, RunRequest
 
-EFFORTS = ["low", "medium", "high", "xhigh"]
-
-
-def provider(name, wire, *, images=True, web_search=True):
-    return {"name": name, "wire": wire,
-            "capabilities": {"images": images, "web_search": web_search, "efforts": EFFORTS}}
-
 
 class FakeBrain:
-    """Use ASGITransport in tests, or a network HTTP URL for local checks."""
+    """Use ASGITransport in tests, or a network HTTP URL for local checks.
 
-    # A test double of the brain's `GET /providers`. The brain owns the real description.
-    PROVIDERS = {item["name"]: item for item in (
-        provider("fake", "fake"), provider("chatgpt", "responses"), provider("openai", "responses"),
-        provider("anthropic", "agent_sdk", images=False, web_search=False))}
+    `catalog` is the answer of `GET /providers`. The test fixtures derive it from the brain.
+    """
 
     def __init__(
-        self, script: list[dict] | None = None, *, transport=None, final_text: str | None = None
+        self, script: list[dict] | None = None, *, transport=None, final_text: str | None = None,
+        catalog: dict[str, dict] | None = None,
     ):
         self.script = script if script is not None else [{"name": "lanes_search", "arguments": {}}]
+        self.catalog = catalog or {}
         self.transport = transport
         self.final_text = final_text
         self.requests: list[RunRequest] = []
@@ -34,7 +27,7 @@ class FakeBrain:
         self.transcripts: list[dict] = []
 
     async def providers(self) -> dict[str, dict]:
-        return self.PROVIDERS
+        return self.catalog
 
     async def transcribe(self, provider, model, extension, audio, timeout) -> str | None:
         self.transcripts.append({"provider": provider, "model": model, "extension": extension})

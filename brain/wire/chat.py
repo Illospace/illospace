@@ -16,7 +16,6 @@ def function_tools(tools: list[Tool]) -> list[dict]:
 
 
 class Chat:
-    records_payer = False
     # Kept from the earlier Chat loop. It has no echo check: the service redacts the stream.
     checks_echo = False
     # Kept from the earlier Chat loop. It reads no run flags, because it never sends web search.

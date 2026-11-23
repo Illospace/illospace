@@ -14,9 +14,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from brain import providers
-from brain.errors import identifier
+from brain.errors import RunError, identifier
 from brain.models import ChatGPTAuth, RunRequest, event
 from brain.process import run_worker
+from brain.tools import check_echo
 
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 FAKE_TRANSCRIPT = "This is the fake transcript."
@@ -69,15 +70,13 @@ def create_app(*, concurrency: int | None = None, runner=run_worker, table=None,
     @app.get("/providers")
     async def describe(request: Request):
         authorize(request)
-        return {"providers": [provider.describe() for provider in table.values()]}
+        return providers.description(table)
 
     @app.post("/transcribe")
     async def transcribe(request: Request, provider: str, model: str, extension: str):
         authorize(request)
         item = table.get(provider)
-        # An OpenAI-shaped provider with a key, or the fake provider. ChatGPT has no key.
-        usable = item is not None and (
-            item.wire == "fake" or item.wire in ("responses", "chat") and bool(item.api_key))
+        usable = item is not None and item.transcription
         if not usable or not re.fullmatch(r"[a-z0-9]{1,8}", extension) or not 0 < len(model) <= 128:
             return JSONResponse(status_code=422, content={"category": "config"})
         audio = await request.body()
@@ -95,8 +94,11 @@ def create_app(*, concurrency: int | None = None, runner=run_worker, table=None,
                     files={"file": (f"clip.{extension}", audio, "application/octet-stream")},
                 )
             ok = result.status_code == 200 and len(result.content) <= 262144
-            text = result.json().get("text") if ok else None
-        except (httpx.HTTPError, ValueError, AttributeError):
+            reply = result.json() if ok else {}
+            # The transcript goes into the inbound message. It never holds the provider key.
+            check_echo(reply, item.api_key)
+            text = reply.get("text")
+        except (httpx.HTTPError, ValueError, AttributeError, RunError):
             text = None
         if not isinstance(text, str) or not text.strip():
             return JSONResponse(status_code=502, content={"category": "runtime"})

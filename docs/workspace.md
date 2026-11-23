@@ -53,8 +53,8 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `brain.chatgpt.person_credential` | `own` (default) or `team`. `team` uses `team_credential` for untainted person runs. |
 | `brain.chatgpt.tainted_credential` | `none` (default), `team`, or `api_key`. Select the payer for tainted and outsider runs. `api_key` needs `fallback`. |
 | `brain.chatgpt.allowed_accounts` | Other ChatGPT account emails that a person can connect. Default: none. |
-| `brain.chatgpt.fallback` | `none` (default) or an API-key provider on the Responses wire, for example `openai`. It pays when the grant is missing, broken, or at its limit. |
-| `brain.transcription.provider` | The provider for voice clips with `voice.transcription: brain`. Default: `openai`. |
+| `brain.chatgpt.fallback` | `none` (default) or an API-key provider on the Responses wire, for example `openai`. It pays when the grant is missing, broken, or at its limit. It must accept each effort of the `chatgpt` routes, images, and web search. |
+| `brain.transcription.provider` | The provider for voice clips with `voice.transcription: brain`. It needs the `transcription` capability. Default: `openai`. |
 | `brain.transcription.model` | Default: `gpt-4o-mini-transcribe`. |
 | `deep.enabled` | Allow deep work. Default: `true`. A sandbox is optional. |
 | `deep.max_per_person_per_day` | Daily limit for each person, in UTC. Default: 20. |
@@ -170,6 +170,8 @@ Each run records its route, provider, model, payer, and tool limit in `runs`.
 For a provider on the Responses wire, `runs.usage` also records `auth_kind`, also when a run fails.
 When the run uses a ChatGPT grant, it also records the payer's key as `credential_person`.
 A fallback records `auth_kind: api_key`, the fallback provider, and no `credential_person`.
+The brain sends a `payer` event when it changes to the fallback during a run. The app records the
+new payer at once, so a later failure or timeout keeps it.
 
 After sign-in, run this command in the main app environment:
 
@@ -178,7 +180,8 @@ illo chatgpt smoke --person ada
 ```
 
 `--person` accepts an active person key or database ID.
-`--route` selects the route of a run kind. Default: `person_dm`.
+`--route` selects the route of a run kind: `person_dm` (default), `routine`, or `digest`.
+The check uses the person's own authority, the authority of these run kinds for one person.
 The command resolves the payer with the normal rules. The route's provider must use the Responses wire.
 The main app refreshes it when needed. It sends `provider_auth` to the brain for this check.
 The brain offers only `smoke_ping`, a test function with no team data or side effects.

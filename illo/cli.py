@@ -3,9 +3,9 @@
 import argparse
 import asyncio
 import getpass
+import json
 import sys
 from pathlib import Path
-from typing import get_args
 from urllib.parse import urlsplit
 
 import httpx
@@ -19,7 +19,7 @@ from illo.db import migrate, one
 from illo.ledger import ask_workflow, people, tokens
 from illo.log import configure
 from illo.vault import Vault, delete, get_names
-from illo.workspace import RunKind, load_workspace
+from illo.workspace import load_workspace
 
 
 def parser() -> argparse.ArgumentParser:
@@ -31,6 +31,8 @@ def parser() -> argparse.ArgumentParser:
     archive.add_argument("file")
     archive.add_argument("--dry-run", action="store_true")
     commands.add_parser("doctor")
+    # deploy/update.sh pipes `python -m brain.providers` of the new brain image into it.
+    commands.add_parser("check-routes")
     commands.add_parser("stats")
     commands.add_parser("reload")
     commands.add_parser("routines").add_subparsers(dest="action", required=True).add_parser("list")
@@ -69,7 +71,8 @@ def parser() -> argparse.ArgumentParser:
     chatgpt.add_parser("status")
     smoke = chatgpt.add_parser("smoke")
     smoke.add_argument("--person", required=True)
-    smoke.add_argument("--route", choices=get_args(RunKind), default="person_dm")
+    # The smoke builds a person's own authority: the authority of these run kinds only.
+    smoke.add_argument("--route", choices=("person_dm", "routine", "digest"), default="person_dm")
     return result
 
 
@@ -155,6 +158,13 @@ async def execute(args, config: Config) -> int:
         return await smoke(config, args.person, route=args.route)
     if args.command == "doctor":
         return await doctor(config)
+    if args.command == "check-routes":
+        from illo.brain.client import provider_table
+        from illo.brain.routes import check_routes
+
+        check_routes(load_workspace(config.workspace_dir), provider_table(json.load(sys.stdin)))
+        print("The workspace and its routes are valid.")
+        return 0
     if args.command == "reload":
         if not config.reload_token:
             raise ValueError("Set ILLO_RELOAD_TOKEN before a reload")

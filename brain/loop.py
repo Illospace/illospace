@@ -132,7 +132,7 @@ async def send(wire, request: RunRequest, http: httpx.AsyncClient, *, tools_disa
             response.raise_for_status()
             async for chunk in chunks(response):
                 if wire.checks_echo:
-                    check_echo(request, chunk, wire.provider.api_key, error=wire.failed(chunk))
+                    check_echo(chunk, wire.provider.api_key, request, error=wire.failed(chunk))
                 for part in wire.read(request, chunk):
                     yield part
             return
@@ -182,6 +182,8 @@ async def conversation(
                 request = request.model_copy(update={
                     "provider_auth": ApiKeyAuth(), "provider": fallback.name,
                     "fallback_provider": None})
+                # The app records the payer at once, so a later failure or timeout keeps it.
+                yield event("payer", provider=fallback.name, auth_kind="api_key")
         turn = None
         for part in wire.finish(request):
             if isinstance(part := take(part, usage), Turn):
@@ -192,11 +194,7 @@ async def conversation(
             answer = turn.answer
             if limited:
                 answer = last_answer(answer, usage, asked_for_tools=bool(turn.calls))
-            # The sign-in that made the last model request. After a fallback this is the API
-            # key. Add it after the provider counts, so a provider field cannot change it.
-            payer = {"auth_kind": request.provider_auth.kind} if wire.records_payer else {}
-            yield event("final", text=fallback_notice + answer, usage={**usage, **payer},
-                        **({"auth_kind": request.provider_auth.kind} if request.smoke else {}))
+            yield event("final", text=fallback_notice + answer, usage=usage)
             return
         # The limit counts tool calls, not model turns. Each call of a batch counts.
         for call in turn.calls:

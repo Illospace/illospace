@@ -23,3 +23,11 @@ def fake_provider(root):
     del data["brain"]["chatgpt"]
     config.write_text(yaml.safe_dump(data, sort_keys=False))
     return root
+
+
+def provider_catalog() -> dict[str, dict]:
+    """The brain's own description of its built-in providers, for a fake brain."""
+    from brain.providers import BUILT_IN, description
+    from illo.brain.client import provider_table
+
+    return provider_table(description(BUILT_IN))

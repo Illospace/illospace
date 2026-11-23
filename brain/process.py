@@ -10,13 +10,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from brain.models import BrainEvent, RunRequest, event
-from brain.providers import PREFIX, Provider
+from brain.providers import Provider
+
+# The worker gets its provider and the fallback on standard input. Its environment holds only
+# these names, so no key of the brain file reaches it, whatever the name of the variable.
+WORKER_ENVIRONMENT = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "PYTHONPATH",
+                      "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                      "http_proxy", "https_proxy", "no_proxy")
 
 
 def worker_environment() -> dict:
-    """The worker gets its provider on standard input. It never sees the other keys."""
-    return {k: v for k, v in os.environ.items()
-            if not k.startswith(PREFIX) and k != "ILLO_BRAIN_SECRET"}
+    return {name: os.environ[name] for name in WORKER_ENVIRONMENT if name in os.environ}
 
 
 async def run_worker(

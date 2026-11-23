@@ -8,7 +8,8 @@ The Illo MCP server checks each tool call with the run token.
 ## Providers
 
 The service builds its provider table once at start (`providers.py`). Only that module reads provider keys.
-`GET /providers` describes each provider: its name, its wire, and its capabilities (`images`, `web_search`, `efforts`).
+`GET /providers` describes each provider: its name, its wire, and its capabilities (`images`, `web_search`,
+`efforts`, `transcription`). `python -m brain.providers` prints the same description; `deploy/update.sh` uses it.
 It never gives a key or an address.
 
 | Provider | Wire | Key variable |
@@ -20,10 +21,13 @@ It never gives a key or an address.
 
 `ILLO_PROVIDER_<NAME>_BASE_URL` changes the address of a provider.
 A custom provider also sets `ILLO_PROVIDER_<NAME>_WIRE` (`responses` or `chat`) and
-`ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,effort:low,effort:high`.
+`ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,transcription,effort:low,effort:high`.
+The `chat` wire sends text only and has no web search: it refuses `images` and `web_search`.
+`transcription` means that the provider has `<base URL>/audio/transcriptions`. `openai` has it.
 A provider with no key is not in the table, except `chatgpt`.
 A wrong `ILLO_PROVIDER_` variable stops the service at start. The error names the variable, never its value.
-The worker of a run gets only the provider of that run, on its standard input. Its environment has no provider key.
+The worker of a run gets only the provider of that run and its fallback, on its standard input.
+Its environment is a short allowlist (`WORKER_ENVIRONMENT` in `process.py`), so it holds no key of the brain file.
 A key change needs a new brain container. Then check `GET /providers`.
 
 Claude uses `tools=[]` to remove built-in tools.
@@ -276,7 +280,8 @@ The service refuses all runs when that secret is absent.
 It does not test a key with the provider. The reply contains no credential or provider address.
 `POST /transcribe?provider=&model=&extension=` requires the same header. The body is the audio.
 It sends the audio to `<base URL>/audio/transcriptions` of that provider and returns `{"text": ...}`.
-An unknown provider, or one with no key, gives HTTP 422 with `category: config`.
+An unknown provider, or one with no `transcription` capability, gives HTTP 422 with `category: config`.
+A reply that echoes the provider key gives HTTP 502 with `category: runtime`, the same check as a run.
 
 `POST /run` requires the `X-Illo-Brain-Secret` header.
 Its JSON body has these fields:
@@ -296,7 +301,7 @@ Its JSON body has these fields:
 | `max_output_tokens` | Optional output cap for the API-key Responses path. The ChatGPT path omits it. |
 | `web_search` | Add the provider web search tool. The provider needs the `web_search` capability. Default: `false`. |
 | `timeout_s` | Active run deadline in seconds, up to 3600. Default: 300. The service caps it. |
-| `fallback_provider` | Optional. An API-key Responses provider for a ChatGPT limit. Only with `chatgpt`. |
+| `fallback_provider` | Optional. An API-key Responses provider for a ChatGPT limit. Only with `chatgpt`. It must accept the whole request too: images, web search, and effort. |
 
 The response uses `application/x-ndjson`. Each line is one JSON object with `type` and `run_id`.
 
@@ -311,13 +316,14 @@ The response uses `application/x-ndjson`. Each line is one JSON object with `typ
 The first `started` event confirms admission. A later `started` event gives the runtime catalog.
 The Responses, Chat Completions, and fake wires use the MCP names without the Claude `mcp__illo__` prefix.
 A run ends with one `final` or `error` event.
+A `payer` event (`provider`, `auth_kind: api_key`) says that the loop changed to the fallback provider. It comes before the retry.
 An error has `message` and `category`: `auth`, `timeout`, `runtime`, `limit`, `config`, or `internal`.
-`config` means that the table cannot serve the request: an unknown provider, a missing capability, an effort that the provider does not accept, or a wrong fallback. No worker starts.
+`config` means that the table cannot serve the request: an unknown provider, a missing capability, an effort that the provider does not accept, or a fallback that cannot serve the same request. No worker starts.
 Provider failures also carry `code`, `provider_type`, and the HTTP status when available.
 Only short identifiers enter those fields. Invalid or absent identifiers become `unknown`.
 The event and service log omit provider message text, prompts, tool results, and keys.
 The main app stores `The brain run failed: <category> <code>` in `runs.error`.
-A final event has `text` and `usage`. Usage fields come from the runtime.
+A final event has `text` and `usage`. Usage fields come from the runtime. The payer is not a usage field.
 The OpenAI-compatible loop adds numeric usage fields across its turns.
 A failed request before the stream starts uses HTTP 401, 422, or 503.
 Validation errors and provider exceptions do not echo the request or secrets.
@@ -389,7 +395,7 @@ The live test reads `ILLO_PROVIDER_ANTHROPIC_API_KEY` and, if set, `ILLO_PROVIDE
 
 ### Subscription smoke check
 
-Run `illo chatgpt smoke --person <key-or-id> [--route <run kind>]` from the main app environment after sign-in.
+Run `illo chatgpt smoke --person <key-or-id> [--route person_dm|routine|digest]` from the main app environment after sign-in.
 See [Workspace files](../docs/workspace.md#check-the-chatgpt-connection).
 The request sets `smoke: true` on the normal `/run` contract and passes per-run `provider_auth`.
 This check offers only the fixed `smoke_ping` function. It does not connect to the team MCP endpoint.

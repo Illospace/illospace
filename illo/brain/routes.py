@@ -60,13 +60,24 @@ def resolve_route(workspace, kind: RunKind) -> Route:
 
 @dataclass(frozen=True)
 class Payer:
-    """`provider` is the provider that runs: the route's, or the fallback before the run."""
+    """`provider` runs: the route's, or the fallback before the run. The brain can change to
+    `fallback` during the run, and then sends a payer event."""
 
     kind: str
     provider: str
     person_id: int | None = None
     person_key: str | None = None
     auth: ProviderAuth = field(default_factory=ProviderAuth, repr=False)
+    fallback: str | None = None
+
+    def request(self) -> dict:
+        return {"provider": self.provider, "provider_auth": self.auth,
+                "fallback_provider": self.fallback}
+
+    def usage(self) -> dict:
+        """The legacy payer fields of runs.usage. S5 moves them out."""
+        return {"auth_kind": self.kind,
+                **({"credential_person": self.person_key} if self.kind == "chatgpt" else {})}
 
 
 async def select_payer(ctx, route: Route, authority, *, force=False, rejected_token=None,
@@ -97,7 +108,8 @@ async def select_payer(ctx, route: Route, authority, *, force=False, rejected_to
     auth = (await chatgpt.access(ctx, person, force=force, rejected_token=rejected_token,
                                  notify=notify) if person else None)
     if auth is not None:
-        return Payer("chatgpt", "chatgpt", person["id"], person["key"], auth)
+        return Payer("chatgpt", "chatgpt", person["id"], person["key"], auth,
+                     api_key.provider if api_key else None)
     if api_key:
         return api_key
     if person:
@@ -129,21 +141,32 @@ def check_policy(brain, people: set[str]) -> None:
 
 
 def check_routes(workspace, providers: dict[str, dict]) -> None:
-    """Check each route against the brain's providers. Raise ValueError with the reason."""
+    """Check each route against the brain's providers. Raise ValueError with the reason.
+
+    A chatgpt route can change to the fallback before or during a run, so the fallback must
+    accept the same requests: each effort of these routes, images, and web search.
+    """
+    brain = workspace.config.brain
+    fallback = providers.get(brain.chatgpt.fallback) if brain.chatgpt.fallback != "none" else None
+    if brain.chatgpt.fallback != "none" and (
+        brain.chatgpt.fallback == "chatgpt" or (fallback or {}).get("wire") != "responses"
+        or not (fallback["capabilities"]["images"] and fallback["capabilities"]["web_search"])
+    ):
+        raise ValueError("brain.chatgpt.fallback: use a provider with an API key on the "
+                         "Responses wire, with images and web search")
     for kind in get_args(RunKind):
         route = resolve_route(workspace, kind)
         provider = providers.get(route.provider)
         if provider is None:
             raise ValueError(f"brain.routes.{kind}: the brain has no provider {route.provider}")
-        if route.effort is not None and route.effort not in provider["capabilities"]["efforts"]:
-            raise ValueError(f"brain.routes.{kind}: {route.provider} does not accept the "
-                             f"effort {route.effort}")
-    fallback = workspace.config.brain.chatgpt.fallback
-    if fallback != "none" and (
-        fallback == "chatgpt" or providers.get(fallback, {}).get("wire") != "responses"
-    ):
-        raise ValueError("brain.chatgpt.fallback: use a provider with an API key on the "
-                         "Responses wire")
-    transcription = workspace.config.brain.transcription.provider
-    if workspace.config.voice.transcription == "brain" and transcription not in providers:
-        raise ValueError(f"brain.transcription: the brain has no provider {transcription}")
+        for name, item in ((route.provider, provider),
+                           *(((brain.chatgpt.fallback, fallback),)
+                             if route.provider == "chatgpt" and fallback else ())):
+            if route.effort is not None and route.effort not in item["capabilities"]["efforts"]:
+                raise ValueError(f"brain.routes.{kind}: {name} does not accept the effort "
+                                 f"{route.effort}")
+    transcription = brain.transcription.provider
+    if workspace.config.voice.transcription == "brain" and not providers.get(
+            transcription, {}).get("capabilities", {}).get("transcription"):
+        raise ValueError(f"brain.transcription: the brain has no provider {transcription} "
+                         "with transcription")

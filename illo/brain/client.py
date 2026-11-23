@@ -72,7 +72,7 @@ class RunRequest(BaseModel):
 
 class BrainEvent(BaseModel):
     model_config = ConfigDict(extra="allow")
-    type: Literal["started", "text", "tool_call", "web_search", "final", "error"]
+    type: Literal["started", "text", "tool_call", "web_search", "payer", "final", "error"]
     text: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
     category: Literal["auth", "timeout", "runtime", "limit", "config", "internal"] = "runtime"
@@ -83,6 +83,11 @@ class BrainEvent(BaseModel):
     def failure_reason(self) -> str:
         code = self.code if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.code) else "unknown"
         return f"The brain run failed: {self.category} {code}"
+
+
+def provider_table(description: dict) -> dict[str, dict]:
+    """Index `GET /providers` (or `python -m brain.providers`) by provider name."""
+    return {item["name"]: item for item in description["providers"]}
 
 
 class BrainClient:
@@ -103,7 +108,7 @@ class BrainClient:
         async with self.client(10) as client:
             response = await client.get("/providers")
             response.raise_for_status()
-        return {item["name"]: item for item in response.json()["providers"]}
+        return provider_table(response.json())
 
     async def transcribe(self, provider: str, model: str, extension: str, audio: bytes,
                          timeout: float) -> str | None:

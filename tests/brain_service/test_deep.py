@@ -197,4 +197,4 @@ async def test_subscription_fallback_keeps_search_ids(run_request, monkeypatch):
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         events = [item async for item in loop.conversation(Responses, run_request, provider, Session(), TOOLS, client, fallback)]
     assert len(bodies) == 3
-    assert events[-1]["usage"]["auth_kind"] == "api_key"
+    assert {"type": "payer", "provider": "openai", "auth_kind": "api_key"} in events

@@ -12,7 +12,7 @@ from illo.brain.client import BrainClient, RunRequest
 from illo.brain.routes import resolve_route, select_payer
 from illo.connectors.chatgpt import ChatGPTClient, TemporaryRefresh
 from illo.db import all_rows, create_pool
-from illo.gateway.principal import Authority
+from illo.gateway.principal import person_authority
 from illo.workspace import load_workspace
 
 
@@ -47,28 +47,24 @@ async def smoke(config, person_id, *, route="person_dm"):
                     "SELECT id,key FROM people WHERE active AND (key=%s OR id::text=%s)",
                     (person_id, person_id),
                 )
-            if len(people) != 1:
-                raise ValueError("The person is missing, inactive, or ambiguous")
-            person = people[0]
-            authority = Authority("person:" + person["key"], "person_dm", person["id"])
+                if len(people) != 1:
+                    raise ValueError("The person is missing, inactive, or ambiguous")
+                authority = await person_authority(conn, "person:" + people[0]["key"])
             payer = await select_payer(ctx, route, authority)
             if payer is None:
                 raise ValueError("The person has no usable ChatGPT grant. API fallback is off")
             auth_kind = payer.kind
-            fallback = workspace.config.brain.chatgpt.fallback
             request = RunRequest(
                 run_id=0,
                 system_prompt="Call smoke_ping once. Then reply Ready.",
                 user_message="Check the function tool.",
                 mcp_url=config.public_url.rstrip("/") + "/brain/mcp",
                 mcp_token="smoke-no-mcp-access",
-                provider=payer.provider,
+                **payer.request(),
                 model=route.model,
                 effort=route.effort,
                 max_tool_calls=2,
                 timeout_s=route.timeout_s,
-                provider_auth=payer.auth,
-                fallback_provider=fallback if payer.kind == "chatgpt" and fallback != "none" else None,
                 smoke=True,
             )
             async with (
@@ -76,16 +72,14 @@ async def smoke(config, person_id, *, route="person_dm"):
                 aclosing(BrainClient(config.brain_url).run(request)) as stream,
             ):
                 async for item in stream:
+                    if item.type == "payer":
+                        auth_kind = "api_key"
                     if item.type == "error":
                         usage = item.usage
-                        if item.fallback_failed:
-                            auth_kind = "api_key"
                         status = http_status(getattr(item, "http_status", None))
                         reason = item.failure_reason()
                         break
                     if item.type == "final":
-                        used = getattr(item, "auth_kind", auth_kind)
-                        auth_kind = used if used in {"chatgpt", "api_key"} else "unknown"
                         round_trip = getattr(item, "tool_round_trip", False) is True
                         usage = item.usage
                         reason = "The function tool did not complete a round trip"

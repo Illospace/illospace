@@ -74,7 +74,7 @@ async def test_u13_startup_waits_while_the_brain_is_not_reachable(pool, fake_bra
     app = create_app(Config(workspace_dir=changed_workspace(tmp_path, {})), pool=pool,
                      brain_client=fake_brain)
     async with app.router.lifespan_context(app):
-        assert app.state.ctx.providers == fake_brain.PROVIDERS
+        assert app.state.ctx.providers == fake_brain.catalog
     assert len(attempts) == 3
 
 
@@ -89,3 +89,40 @@ async def test_u13_reload_refuses_while_the_brain_is_not_reachable(app, monkeypa
     with pytest.raises(ValueError, match="not reachable"):
         await ctx.reload()
     assert ctx.workspace is previous
+
+
+def plain(**capabilities):
+    """A custom provider on the Responses wire, as the brain describes it."""
+    return {"name": "plain", "wire": "responses", "capabilities": {
+        "images": True, "web_search": True, "efforts": ["low", "medium", "high"],
+        "transcription": False, **capabilities}}
+
+
+@pytest.mark.parametrize("fallback,change,reason", [
+    # A missing grant or a subscription limit sends the deep run (effort high) to the fallback.
+    (plain(efforts=["low", "medium"]), {}, "brain.routes.deep: plain does not accept the effort high"),
+    (plain(images=False), {}, "brain.chatgpt.fallback: use a provider"),
+    (plain(web_search=False), {}, "brain.chatgpt.fallback: use a provider"),
+    # The voice provider must transcribe.
+    (plain(), {"voice": "brain", "transcription": {"provider": "anthropic", "model": "m"}},
+     "brain.transcription: the brain has no provider anthropic with transcription"),
+])
+def test_u13_the_fallback_and_the_voice_provider_must_serve_their_requests(
+        tmp_path, fallback, change, reason):
+    from illo.brain.routes import check_routes
+    from illo.workspace import load_workspace
+    from tests.workspaces import provider_catalog
+
+    root = changed_workspace(tmp_path, {"chatgpt": {"team_credential": "ada", "fallback": "plain"}})
+    path = root / "illo.yaml"
+    data = yaml.safe_load(path.read_text())
+    if change:
+        data["voice"] = {**data.get("voice", {}), "transcription": change["voice"]}
+        data["brain"]["transcription"] = change["transcription"]
+    path.write_text(yaml.safe_dump(data))
+    workspace = load_workspace(root)
+    with pytest.raises(ValueError, match=reason):
+        check_routes(workspace, {**provider_catalog(), "plain": fallback})
+    # The same workspace passes with a fallback that serves each request.
+    if not change:
+        check_routes(workspace, {**provider_catalog(), "plain": plain(efforts=["low", "medium", "high"])})

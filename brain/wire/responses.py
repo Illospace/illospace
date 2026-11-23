@@ -115,7 +115,6 @@ def arguments(call: dict):
 
 
 class Responses:
-    records_payer = True
     checks_echo = True
     reads_run_flags = True
     missing_id = "The model returned an invalid function call"

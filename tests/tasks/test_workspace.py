@@ -7,7 +7,7 @@ import pytest
 
 from illo.cli import parser
 from illo.workspace import WorkspaceError, fingerprint, load_workspace
-from tests.workspaces import task_workspace
+from tests.workspaces import provider_catalog, task_workspace
 
 ROOT = Path(__file__).parents[2]
 
@@ -118,7 +118,8 @@ async def test_doctor_prints_task_reference_warnings(pool, root, capsys, monkeyp
     from illo.cli import doctor
     from illo.config import Config
 
-    monkeypatch.setattr("illo.brain.client.BrainClient", lambda url: FakeBrain())
+    monkeypatch.setattr("illo.brain.client.BrainClient",
+                        lambda url: FakeBrain(catalog=provider_catalog()))
 
     (root / "lists/warn.md").write_text("---\nname: Warn\nholders: [agent:missing]\ndone: [fake:missing]\n---\nInstructions")
     assert await doctor(Config(database_url=pool.conninfo, workspace_dir=root)) == 0

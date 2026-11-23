@@ -83,7 +83,8 @@ async def test_providers_hold_no_secret(monkeypatch):
     described = {item["name"]: item for item in response.json()["providers"]}
     assert set(described) == {"chatgpt", "fake", "openai", "anthropic", "local"}
     assert described["local"] == {"name": "local", "wire": "chat", "capabilities": {
-        "images": False, "web_search": False, "efforts": ["none"]}}
+        "images": False, "web_search": False, "efforts": ["none"], "transcription": False}}
+    assert described["openai"]["capabilities"]["transcription"] is True
     assert described["chatgpt"]["wire"] == "responses"
     assert described["anthropic"]["capabilities"]["images"] is False
     for secret in ("fake-openai-secret", "fake-anthropic-secret", "fake-local-secret",
@@ -126,6 +127,11 @@ def test_a_provider_without_a_key_is_not_in_the_table():
     ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
       "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1",
       "ILLO_PROVIDER_LOCAL_CAPABILITIES": "shell"}, "ILLO_PROVIDER_LOCAL_CAPABILITIES"),
+    # The Chat Completions wire sends text only and has no web search tool.
+    *(({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
+        "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1",
+        "ILLO_PROVIDER_LOCAL_CAPABILITIES": capability}, "ILLO_PROVIDER_LOCAL_CAPABILITIES")
+      for capability in ("images", "web_search")),
 ])
 def test_a_wrong_provider_variable_stops_the_service(environ, variable):
     with pytest.raises(ValueError, match=variable) as error:
@@ -157,6 +163,30 @@ async def test_a_route_that_does_not_fit_is_a_config_error(run_request, change, 
     events = lines(await post(create_app(runner=runner, table=table), run_request))
     assert events[-1]["category"] == "config" and reason in events[-1]["message"]
     assert not called
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"effort": "high"}, "The fallback: The provider does not accept this effort"),
+    ({"images": [{"mime": "image/png", "data": "ZmFrZQ=="}]}, "The fallback: The provider cannot"),
+])
+async def test_a_fallback_that_cannot_serve_the_request_is_a_config_error(run_request, change,
+                                                                          reason):
+    """The loop can switch to the fallback during the run. The same rule checks both."""
+    from brain.models import ChatGPTAuth, RunImage
+    from brain.providers import Provider
+
+    table = {"chatgpt": providers.BUILT_IN["chatgpt"],
+             "plain": Provider("plain", "responses", "http://x", "k", efforts=("low",))}
+    run_request.provider, run_request.fallback_provider = "chatgpt", "plain"
+    run_request.provider_auth = ChatGPTAuth(access_token="fake-access", account_id="fake-account")
+    for key, value in change.items():
+        setattr(run_request, key, [RunImage(**v) for v in value] if key == "images" else value)
+
+    async def runner(request, *_):
+        yield event("final", text="no", usage={})
+
+    events = lines(await post(create_app(runner=runner, table=table), run_request))
+    assert events[-1]["category"] == "config" and reason in events[-1]["message"]
 
 
 async def test_one_service_serves_chatgpt_and_openai_with_their_own_keys(run_request, monkeypatch):
@@ -206,11 +236,37 @@ async def test_transcribe_with_the_fake_provider(monkeypatch):
     assert missing.status_code == 422 and missing.json() == {"category": "config"}
 
 
+@pytest.mark.parametrize("transcription", [True, False])
+async def test_a_transcript_never_returns_the_provider_key(transcription):
+    """A provider that echoes its authorization header gets no text into the inbound message."""
+    from brain.providers import Provider
+
+    def echo(request):
+        return httpx.Response(200, json={"text": "Heard: " + request.headers["Authorization"]})
+
+    table = {"plain": Provider("plain", "chat", "https://models.example/v1", "fake-plain-key",
+                               transcription=transcription)}
+    app = create_app(table=table, transport=httpx.MockTransport(echo))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://brain"
+    ) as http:
+        response = await http.post(
+            "/transcribe", params={"provider": "plain", "model": "fake-model", "extension": "m4a"},
+            content=b"audio", headers={"X-Illo-Brain-Secret": "service-test-secret"})
+    assert "fake-plain-key" not in response.text
+    # A provider without transcription is a settings error. A key echo is a provider failure.
+    assert (response.status_code, response.json()) == (
+        (502, {"category": "runtime"}) if transcription else (422, {"category": "config"}))
+
+
 async def test_the_worker_never_sees_the_other_keys(run_request, tmp_path, monkeypatch):
-    monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-other-key")
+    """The worker environment is an allowlist. A key with an old or unknown name stays out."""
+    for name in ("ILLO_PROVIDER_OPENAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                 "ANTHROPIC_API_KEY", "ACME_TOKEN"):
+        monkeypatch.setenv(name, "fake-other-key")
     code = ("import json,os,sys; sys.stdin.readline(); given=json.loads(sys.stdin.readline()); "
             "print(json.dumps({'type':'final','text':json.dumps(sorted(k for k in os.environ "
-            "if k.startswith('ILLO_PROVIDER_') or k=='ILLO_BRAIN_SECRET')),"
+            "if 'fake-other-key' in os.environ[k] or k=='ILLO_BRAIN_SECRET')),"
             "'given':given['provider']['name']}),flush=True)")
     events = [e async for e in run_worker(run_request, FAKE, None, [sys.executable, "-c", code])]
     assert json.loads(events[-1]["text"]) == [] and events[-1]["given"] == "fake"
