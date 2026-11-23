@@ -183,11 +183,15 @@ REQUIRED = {"run_id", "system_prompt", "user_message", "mcp_url", "mcp_token"}
 
 
 def contract(model) -> tuple[dict, dict]:
+    return schema_contract(model.model_json_schema(), client=model is RunRequest)
+
+
+def schema_contract(schema: dict, *, client: bool) -> tuple[dict, dict]:
     """Give the top-level schema keys, and each field with its references resolved.
 
     Pydantic makes each title from a name, so the titles are not compared.
     """
-    schema = model.model_json_schema()
+    schema = dict(schema)
     definitions = schema.pop("$defs", {})
 
     def walk(node):
@@ -195,16 +199,32 @@ def contract(model) -> tuple[dict, dict]:
             return [walk(item) for item in node]
         if not isinstance(node, dict):
             return node
-        if "$ref" in node:
-            return walk(definitions[node["$ref"].removeprefix("#/$defs/")])
-        return {key: {name: walk(item) for name, item in value.items()}
-                if key == "properties" else walk(value)
-                for key, value in node.items() if key != "title"}
+        keywords = {key: {name: walk(item) for name, item in value.items()}
+                    if key == "properties" else walk(value)
+                    for key, value in node.items() if key not in ("$ref", "title")}
+        if "$ref" not in node:
+            return keywords
+        # Keep the keywords beside a reference too, for example a bound or a default.
+        resolved = walk(definitions[node["$ref"].removeprefix("#/$defs/")])
+        return {"$ref": resolved, **keywords} if keywords else resolved
 
     fields = {name: walk(field) for name, field in schema.pop("properties").items()}
     required = set(schema.pop("required"))
-    assert required == REQUIRED | (REQUIRED_BY_CLIENT if model is RunRequest else set())
+    assert required == REQUIRED | (REQUIRED_BY_CLIENT if client else set())
     return walk(schema), fields
+
+
+def test_contract_sees_a_keyword_beside_a_reference():
+    schema = RunRequest.model_json_schema()
+    name, field = next((name, field) for name, field in schema["properties"].items() if "$ref" in field)
+    changed = {**schema, "properties": {**schema["properties"], name: {**field, "maxProperties": 1}}}
+    assert contract(RunRequest)[1][name] != schema_contract(changed, client=True)[1][name]
+    # A property named "title" beside a reference is a field, not a schema title.
+    titled = {**field, "properties": {"title": {"type": "string"}}}
+    other = {**field, "properties": {"title": {"type": "integer"}}}
+    fields = [schema_contract({**schema, "properties": {**schema["properties"], name: value}}, client=True)[1][name]
+              for value in (titled, other)]
+    assert fields[0] != fields[1]
 
 
 def test_one_wire_contract_in_two_copies():

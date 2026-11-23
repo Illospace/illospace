@@ -109,10 +109,12 @@ async def test_stream_tool_result_and_usage(
     assert "fake-run-token" not in json.dumps(provider.requests)
 
 
-async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp, monkeypatch):
+@pytest.mark.parametrize("structured", [{"result": "duplicate payload must stay out"}, {"run_flags": None}])
+async def test_structured_payload_does_not_reach_the_model(run_request, fake_mcp, monkeypatch, structured):
+    # The Chat wire reads no run flags, so empty flag metadata does not stop the run.
     fake_mcp.result_override = {
         "content": [{"type": "text", "text": "Acme release is ready"}],
-        "structuredContent": {"result": "duplicate payload must stay out"},
+        "structuredContent": structured,
     }
     provider = FakeProvider()
     async with serve(provider.app) as base:

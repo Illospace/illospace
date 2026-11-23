@@ -282,7 +282,7 @@ The loop owns the rules of a run:
 
 Other owners:
 
-- `brain/tools.py` is the Illo MCP boundary. It parses the tool arguments, maps an MCP failure to a tool result, and makes the result text. On the Responses wire, it refuses a provider chunk that echoes a credential or private image data. The Chat Completions wire has no such check today; the service redaction removes the credential from its events. It reads the run flags: a customer read, a personal read, or a result with no flag metadata closes web search for the rest of the run. The app makes the run flags (`illo/brain/server.py`).
+- `brain/tools.py` is the Illo MCP boundary. It parses the tool arguments, maps an MCP failure to a tool result, and makes the result text. On the Responses wire, it refuses a provider chunk that echoes a credential or private image data. The Chat Completions wire has no such check today; the service redaction removes the credential from its events. On the Responses wire, it reads the run flags: a customer read, a personal read, or a result with no flag metadata closes web search for the rest of the run. The Chat Completions wire reads no run flags today, because it never sends web search. The app makes the run flags (`illo/brain/server.py`).
 - `brain/errors.py` has the error categories: `auth`, `timeout`, `runtime`, `limit`, `internal`. A provider message never enters an event or a log.
 - `brain/server.py` (`redact`) removes credentials from each event line before the line leaves the service.
 

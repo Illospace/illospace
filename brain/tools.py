@@ -93,7 +93,7 @@ def model_text(result: dict) -> str:
     return ("Tool error.\n" if result.get("isError") else "") + text
 
 
-async def execute(session, request: RunRequest, call: Call) -> str:
+async def execute(session, request: RunRequest, call: Call, *, run_flags: bool) -> str:
     """Run one checked call and give the result text. MCP failures stay tool results."""
     try:
         arguments = json.loads(call.arguments)
@@ -109,7 +109,8 @@ async def execute(session, request: RunRequest, call: Call) -> str:
             result = {"isError": True, "content": [{"type": "text", "text": "The MCP tool failed"}]}
     # The app makes the run flags. A customer or personal read closes web search for the
     # rest of the run. Missing metadata also closes it, so a lost result cannot reopen search.
-    flags = result.get("structuredContent", {}).get("run_flags", {})
-    if flags.get("customer_read") is not False or flags.get("personal_read") is not False:
-        request.web_search = False
+    if run_flags:
+        flags = result.get("structuredContent", {}).get("run_flags", {})
+        if flags.get("customer_read") is not False or flags.get("personal_read") is not False:
+            request.web_search = False
     return model_text(result)

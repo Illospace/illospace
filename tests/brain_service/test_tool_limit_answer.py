@@ -129,3 +129,32 @@ async def test_self_looping_adapter_uses_the_loop_last_request(run_request, limi
     assert [e["type"] for e in events] == ["started", "final"]
     assert events[-1]["text"] == "The release is ready."
     assert events[-1]["usage"] == {"input_tokens": 5, "limited": True}
+
+
+@pytest.mark.parametrize("stage", ["steps", "last request"])
+async def test_self_looping_closes_each_request_when_the_caller_closes(run_request, stage):
+    """A cancelled run closes the SDK client at once, not later at garbage collection."""
+    from contextlib import aclosing
+
+    closed = []
+
+    async def steps():
+        try:
+            yield {"type": "started", "catalog": []}
+            yield {"type": "error", "category": "limit", "usage": {}}
+        finally:
+            closed.append("steps")
+
+    async def without_tools(prompt):
+        try:
+            yield {"type": "started", "catalog": []}
+            yield {"type": "final", "text": "Done", "usage": {}}
+        finally:
+            closed.append("last request")
+
+    events = loop.self_looping(run_request, steps(), [], without_tools)
+    async with aclosing(events):
+        await anext(events)
+        if stage == "last request":
+            await anext(events)
+    assert closed[-1] == stage

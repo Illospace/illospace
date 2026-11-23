@@ -20,6 +20,8 @@ class Chat:
     records_payer = False
     # Kept from the earlier Chat loop. It has no echo check: the service redacts the stream.
     checks_echo = False
+    # Kept from the earlier Chat loop. It reads no run flags, because it never sends web search.
+    reads_run_flags = False
     missing_id = "The model requested a tool outside the run catalog"
 
     def __init__(self, request: RunRequest, tools: list[Tool]):

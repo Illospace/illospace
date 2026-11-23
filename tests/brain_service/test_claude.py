@@ -114,3 +114,46 @@ async def test_tool_limit_uses_one_separate_client_without_tools(run_request, tm
     assert "fake-run-token" not in json.dumps(final.queries)
     assert not [e for e in events if e["type"] == "error"]
     assert events[-1]["usage"] == {"input_tokens": 5, "limited": True}
+
+
+@pytest.mark.parametrize("stage", ["first request", "last request"])
+async def test_closed_run_closes_the_sdk_client_at_once(run_request, tmp_path, monkeypatch, stage):
+    """A closed run must close its SDK client before the close returns, not at garbage collection."""
+    from contextlib import aclosing
+
+    from brain.wire import agent_sdk as claude
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    opened, closed = [], []
+    scripts = [
+        [AssistantMessage(model="fake", content=[TextBlock(text="Reading the lanes.")]),
+         ResultMessage(subtype="error_max_turns", duration_ms=1, duration_api_ms=1,
+                       is_error=True, num_turns=2, session_id="fake", usage={})],
+        [AssistantMessage(model="fake", content=[TextBlock(text="The release is ready.")]),
+         ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                       num_turns=1, session_id="final", result="The release is ready.", usage={})],
+    ]
+
+    class Client(ScriptedClient):
+        def __init__(self, options):
+            super().__init__(scripts[len(opened)])
+            opened.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            closed.append(opened.index(self))
+
+        async def query(self, text):
+            pass
+
+    monkeypatch.setattr(claude, "ClaudeSDKClient", Client)
+    run_request.max_turns = 1
+    events = claude.run(run_request, tmp_path)
+    async with aclosing(events):
+        await anext(events)
+        while stage == "last request" and len(opened) < 2:
+            await anext(events)
+        assert len(closed) < len(opened)
+    assert closed == list(range(len(opened)))

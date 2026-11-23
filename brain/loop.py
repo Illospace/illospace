@@ -82,12 +82,14 @@ async def self_looping(request: RunRequest, steps: AsyncIterator[BrainEvent], tr
         return
     context = data_text("transcript", transcript)
     prompt = request.user_message + "\n\n" + context + "\n\n" + LIMIT_INSTRUCTION
-    async for item in without_tools(prompt):
-        if item["type"] == "final":
-            add_usage(usage, item.get("usage") or {})
-            item["text"] = last_answer(item["text"], usage)
-            item["usage"] = usage
-        yield item
+    final = without_tools(prompt)
+    async with aclosing(final):
+        async for item in final:
+            if item["type"] == "final":
+                add_usage(usage, item.get("usage") or {})
+                item["text"] = last_answer(item["text"], usage)
+                item["usage"] = usage
+            yield item
 
 
 async def chunks(response: httpx.Response) -> AsyncIterator[dict]:
@@ -211,7 +213,7 @@ async def conversation(
                 continue
             tool_calls += 1
             yield event("tool_call", name=call.name)
-            wire.add_result(call, await execute(session, request, call))
+            wire.add_result(call, await execute(session, request, call, run_flags=wire.reads_run_flags))
         if limited:
             wire.add_instruction(LIMIT_INSTRUCTION)
 

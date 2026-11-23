@@ -7,6 +7,7 @@ server. The SDK counts its own turns, so the adapter gives it `max_turns + 1`.
 import json
 import os
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import asdict, replace
 from pathlib import Path
 from urllib.parse import urlparse
@@ -161,5 +162,7 @@ async def run(request: RunRequest, directory: Path) -> AsyncIterator[BrainEvent]
             async for item in translate(client):
                 yield item
 
-    async for item in self_looping(request, steps(), transcript, without_tools):
-        yield item
+    events = self_looping(request, steps(), transcript, without_tools)
+    async with aclosing(events):
+        async for item in events:
+            yield item
