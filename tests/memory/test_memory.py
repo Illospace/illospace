@@ -379,6 +379,13 @@ async def test_no_git_keeps_file_and_sensor(memory_ctx, call, monkeypatch):
         assert (await one(conn, "SELECT * FROM sensors WHERE key='workspace'"))["last_error_at"]
 
 
+# A CI runner can trust each directory in its system or global git config (safe.directory=*).
+# Skip the system and global config, so that only the safe.directory of the call can trust the workspace.
+ISOLATED_GIT = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+# The only git variables that Illo's own git call sets.
+ILLO_GIT = {"GIT_TERMINAL_PROMPT", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+
+
 @pytest.mark.parametrize("home", [None, "/no-home-for-this-uid"])
 async def test_git_no_home_safe_directory_and_child_environment(memory_ctx, monkeypatch, home):
     original = asyncio.create_subprocess_exec
@@ -387,19 +394,20 @@ async def test_git_no_home_safe_directory_and_child_environment(memory_ctx, monk
         commands.append(args)
         assert args[1:3] == ("-c", f"safe.directory={memory_ctx.workspace.root}")
         assert os.path.isdir(kwargs["env"]["HOME"])
-        assert "GIT_DIR" not in kwargs["env"] and "GIT_WORK_TREE" not in kwargs["env"]
-        kwargs["env"]["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+        assert {key for key in kwargs["env"] if key.startswith("GIT_")} <= ILLO_GIT
+        kwargs["env"].update(ISOLATED_GIT)
         return await original(*args, **kwargs)
     monkeypatch.delenv("HOME", raising=False)
     if home:
         monkeypatch.setenv("HOME", home)
     monkeypatch.setenv("GIT_DIR", "/wrong")
     monkeypatch.setenv("GIT_WORK_TREE", "/wrong")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/wrong")
     monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", checked)
     untrusted = subprocess.run(["git", "-C", str(memory_ctx.workspace.root), "status", "--porcelain"],
-        env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
-             "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}, capture_output=True)
+        env={**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **ISOLATED_GIT},
+        capture_output=True)
     assert untrusted.returncode != 0 and b"dubious ownership" in untrusted.stderr
     assert await gitstore._git(memory_ctx.workspace.root, "status", "--porcelain")
     assert commands
