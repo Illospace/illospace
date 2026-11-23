@@ -58,6 +58,8 @@ def build(
 ) -> str:
     """Return base text, profile text, run facts, matching rules, and the skill list."""
     key = prompt_profile(principal, profile, event_channel)
+    if key == "board_coordinator":
+        return PROFILE_TEXTS[key]
     deep = event_channel == "deep"
     parts = [BASE_PROMPT, PROFILE_TEXTS.get("deep" if deep else key, "")]
     if deep and brief_channel:

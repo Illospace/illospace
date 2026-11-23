@@ -195,6 +195,8 @@ class SlackIntake:
                 ),
             },
         )
+        if dm:
+            event.payload["raw_slack_text"] = raw.get("text", "")
         if dm and text != raw.get("text", ""):
             # Claims use only what the person typed, before block or thread context.
             event.payload["slack_typed_text"] = raw.get("text", "")

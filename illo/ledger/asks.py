@@ -113,6 +113,11 @@ async def list_open(
     )
 
 
+async def is_board_ask(conn, ask):
+    return bool(ask and ((ask.get("source_ref") or "").startswith("board:")
+                        or await one(conn, "SELECT 1 FROM board_posts WHERE ask_id=%s", (ask["id"],))))
+
+
 async def answer(
     conn: Connection,
     ask_id: int,
@@ -134,7 +139,8 @@ async def answer(
           answered_via=%s,answered_at=now(),delivery_state='pending'
         WHERE id=%s AND owner_person_id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now())
           AND (%s::text IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements(options) o WHERE o->>'id'=%s))
-          AND (%s='person' OR NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id))
+          AND (%s='person' OR (NOT COALESCE(starts_with(a.source_ref,'board:'),false)
+            AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)))
         RETURNING *
     """,
         (option, text, person_id, via, ask_id, person_id, option, option, via),
@@ -149,6 +155,8 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
             "SELECT * FROM asks WHERE id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now()) FOR UPDATE",
             (ask_id,),
         )
+        if await is_board_ask(conn, ask):
+            return None
         rule = await one(
             conn, "SELECT * FROM rules WHERE id=%s AND removed_at IS NULL FOR UPDATE", (rule_id,)
         )

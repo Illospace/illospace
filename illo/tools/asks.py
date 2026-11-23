@@ -122,6 +122,8 @@ async def asks_create(ctx, args):
 
 async def answer_preflight(ctx, args):
     ask = await ledger.lock_ask(ctx.conn, args["id"])
+    if await asks.is_board_ask(ctx.conn, ask):
+        return Decision("deny", "Answer this board question with its buttons or on the thread page.")
     if (
         not ask
         or ask["owner_person_id"] != ctx.run["person_id"]
@@ -142,6 +144,7 @@ async def asks_answer(ctx, args):
     ask = await ledger.lock_ask(ctx.conn, args["id"])
     if (
         not ask
+        or await asks.is_board_ask(ctx.conn, ask)
         or ask["owner_person_id"] != ctx.run["person_id"]
         or not await is_live(ctx.conn, ask)
     ):
@@ -162,6 +165,8 @@ async def asks_answer(ctx, args):
 
 async def asks_answer_with_rule(ctx, args):
     ask = await asks.get(ctx.conn, args["id"], principal=ctx.principal)
+    if await asks.is_board_ask(ctx.conn, ask):
+        raise ValueError("Answer this board question with its buttons or on the thread page.")
     if not ask or not await is_live(ctx.conn, ask):
         return {"answered": False}
     answered = await asks.answer_with_rule(ctx.conn, args["id"], args["rule_id"])

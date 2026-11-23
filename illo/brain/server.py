@@ -98,7 +98,9 @@ async def endpoint(request: Request):
                     )
                 count = run["usage"].get("tool_calls", 0)
                 # Every brain run stores its route's limit. A run with none gets no tool call.
-                if count >= (run["tool_limit"] or 0):
+                if run["profile"] == "board_coordinator":
+                    called = await ctx.registry.call(ToolContext(conn, run, ctx), name, args)
+                elif count >= (run["tool_limit"] or 0):
                     # Count and audit denied calls without running a handler.
                     await audit.write(
                         conn,

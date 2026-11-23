@@ -15,6 +15,10 @@ from illo.gateway.replies import error_text, failure_category
 log = logging.getLogger(__name__)
 
 
+class ClaimRetry(RuntimeError):
+    """A verified claim needs the same event again."""
+
+
 class Gateway:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -74,7 +78,8 @@ class Gateway:
         ctx = self.ctx
         async with ctx.pool.connection() as conn:
             # Keep agent bearer tokens out of the inbox and the audit arguments.
-            payload = {"text": event.text, "payload": event.payload, "reply_to": event.reply_to}
+            payload = {"text": "" if event.channel == "board" else event.text,
+                       "payload": event.payload, "reply_to": event.reply_to}
             for fn in self.payload_filters:
                 payload = fn(payload)
             event_id = await record_event(conn, event, payload)
@@ -100,26 +105,27 @@ class Gateway:
                 raise RuntimeError("The channel has no delivery adapter")
             if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
                 raise ValueError("The message is too long")
-            for prepare in self.preparers:
+            for prepare in self.preparers if event.channel != "board" else ():
                 prepared = await prepare(ctx, event, authority)
                 if prepared is not None:
                     event = prepared
             authority = await self.context_authority(event, authority, event_id)
             if len(event.text) > ctx.workspace.config.run_limits.max_message_chars:
                 raise ValueError("The message is too long")
-            prepared_payload = {"text": event.text}
-            for fn in self.payload_filters:
-                prepared_payload = fn(prepared_payload)
-            async with ctx.pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE events SET payload=jsonb_set(payload,'{text}',%s) WHERE id=%s",
-                    (Jsonb(prepared_payload["text"]), event_id),
-                )
+            if event.channel != "board":
+                prepared_payload = {"text": event.text}
+                for fn in self.payload_filters:
+                    prepared_payload = fn(prepared_payload)
+                async with ctx.pool.connection() as conn:
+                    await conn.execute(
+                        "UPDATE events SET payload=jsonb_set(payload,'{text}',%s) WHERE id=%s",
+                        (Jsonb(prepared_payload["text"]), event_id),
+                    )
             claimed = None
             claim_event = event
             if event.channel == "slack" and "slack_typed_text" in event.payload:
                 claim_event = event.model_copy(update={"text": event.payload["slack_typed_text"]})
-            for claim in self.claims:
+            for claim in self.claims if event.channel != "board" else ():
                 claimed = await claim(ctx, claim_event, authority)
                 if claimed is not None:
                     break
@@ -164,9 +170,13 @@ class Gateway:
                     """
                     UPDATE events SET status='handled',payload=payload || %s WHERE id=%s
                 """,
-                    (Jsonb({"final_answer": text}), event_id),
+                    (Jsonb({} if event.channel == "board" else {"final_answer": text}), event_id),
                 )
             return {"decision": decision, "event_id": event_id, "text": text}
+        except ClaimRetry:
+            async with ctx.pool.connection() as conn:
+                await conn.execute("DELETE FROM events WHERE id=%s AND status='received'", (event_id,))
+            return {"decision": "retry", "retryable": True}
         except (Exception, asyncio.CancelledError) as exc:
             category = failure_category(exc)
             async with ctx.pool.connection() as conn:

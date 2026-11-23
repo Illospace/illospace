@@ -554,3 +554,24 @@ The shared block schema is in `illo/tasks/pages/schema.py`.
 Page tools are absent when pages are off. Direct calls also fail.
 Wait checks can write only their bound task page, even after a web read.
 This exception changes no task state and grants no other task write.
+
+## Message board coordination
+
+The `board` event channel connects the coordinator to the gateway.
+A scan records an episode for each question, person mention, or turn cap that still needs help.
+The coordinator claims a thread with a time-limited lease and reserves each model attempt in Postgres.
+A separate job sends due Slack messages and uses Slack metadata to find an uncertain send.
+
+Board changes lock the thread first, then episodes, escalations, and asks in that order.
+Budget locks follow these row locks. Ask-only card refreshes do not take board row locks.
+
+| Advisory lock | Use |
+| --- | --- |
+| `12000010` | Scan and claim coordinator work. |
+| `12000011` | Claim and reconcile Slack delivery work. |
+| `12000012` | Reserve coordinator and escalation budgets. |
+| `12000013` | Claim board wake work. |
+
+A card send reserves an ask ID before Slack receives it.
+The ask row and the Slack receipt commit together.
+A board reply checks the Slack sender, DM channel, and root message before it writes a human post.

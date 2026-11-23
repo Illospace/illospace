@@ -54,6 +54,7 @@ SETUP_MODULES = (
     "illo.routines.stale",
     "illo.routines.heartbeat",
     "illo.routines.watchdog",
+    "illo.board",
     "illo.asks",
     "illo.notes",
     "illo.memory",
@@ -109,6 +110,9 @@ class AppContext:
                 raise
             async with self.pool.connection() as conn:
                 await workspace.sync_people(conn)
+            for warning in workspace.warnings:
+                if warning not in self.workspace.warnings:
+                    log.warning("%s", warning)
             self.workspace, self.providers = workspace, providers
 
 
@@ -149,6 +153,8 @@ def create_app(config: Config | None = None, *, brain_client=None, pool=None) ->
             workspace = load_workspace(config.workspace_dir)
             providers = await brain_providers(brain, wait=True)
             check_routes(workspace, providers)
+            for warning in workspace.warnings:
+                log.warning("%s", warning)
             async with db_pool.connection() as conn:
                 await workspace.sync_people(conn)
             registry = Registry()

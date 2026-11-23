@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import time
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -97,7 +98,8 @@ def _webhook_agent(workspace, target):
                  and agent.wake.type == "webhook"), None)
 
 
-async def _webhook_post(conn, thread_id, post_id, target, agent, *, holder=False, owner_id=None):
+async def _webhook_post(conn, workspace, thread_id, post_id, target, agent, *, holder=False, owner_id=None,
+                        delivery=False):
     post = await one(conn, f"""
         SELECT p.id,p.kind,p.at,p.actor,p.is_human,p.person_id,p.token_id,p.provenance,p.mentions,
             owner.id AS owner_id,
@@ -122,8 +124,22 @@ async def _webhook_post(conn, thread_id, post_id, target, agent, *, holder=False
           AND {board.visible_to("owner.id")}
     """, {"thread_id": thread_id, "post_id": post_id, "target": target,
           "owner": agent.owner, "agent": agent.key, "holder": holder, "owner_id": owner_id})
-    if post and post["actor"] == "illo" and not (post["agent_active"] and _headstart(post, target)):
-        return None
+    if post and post["actor"] == "illo":
+        from illo.board import acl, episodes, packet
+
+        if not post["agent_active"] or not _headstart(post, target):
+            return None
+        if episode_id := post["provenance"].get("episode_id"):
+            episode = await one(conn, "SELECT * FROM board_episodes WHERE id=%s AND thread_id=%s",
+                                (episode_id, thread_id))
+            thread = await acl.thread_access(conn, thread_id)
+            if (not episode or not thread or thread["state"] != "open"
+                    or (delivery and (episode["state"] != "headstart"
+                                      or not episode["headstart_until"]
+                                      or episode["headstart_until"] <= datetime.now(UTC)))
+                    or not await episodes.is_pending(conn, episode)
+                    or not await acl.target_ok(conn, workspace, thread, target, await packet.asker_post(conn, episode))):
+                return None
     return post
 
 
@@ -160,7 +176,7 @@ async def enqueue_for_post(conn, workspace, *, thread, post, prior_pending_post_
             targets.setdefault(task["holder"], True)
     for target, holder in targets.items():
         agent = _webhook_agent(workspace, target)
-        if agent and (visible := await _webhook_post(conn, thread_id, post["id"], target, agent, holder=holder)):
+        if agent and (visible := await _webhook_post(conn, workspace, thread_id, post["id"], target, agent, holder=holder)):
             payload = {"holder_owner_id": visible["owner_id"]} if holder else {}
             await conn.execute("""
                 INSERT INTO board_wakes (thread_id,post_id,target_kind,target_ref,payload)
@@ -271,8 +287,8 @@ async def _deliver_webhook(ctx, wake):
     secret = None
     owner_id = wake["payload"].get("holder_owner_id")
     async with ctx.pool.connection() as conn:
-        post = await _webhook_post(conn, wake["thread_id"], wake["post_id"], wake["target_ref"],
-                                   agent, holder=owner_id is not None, owner_id=owner_id)
+        post = await _webhook_post(conn, workspace, wake["thread_id"], wake["post_id"], wake["target_ref"],
+                                   agent, holder=owner_id is not None, owner_id=owner_id, delivery=True)
         if not post:
             return THREAD_UNAVAILABLE
         if agent.wake.secret:

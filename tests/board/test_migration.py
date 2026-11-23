@@ -29,7 +29,10 @@ async def test_board_migration_applies_to_an_existing_database_and_a_fresh_one(p
             assert "1900_board.sql" not in await migrate(conn, before_board)
             await conn.execute("INSERT INTO people (key,name) VALUES ('ada','Ada')")
             await conn.commit()
-            assert await migrate(conn) == ["1900_board.sql", "1901_board_wakes.sql"]
+            assert await migrate(conn) == [
+                "1900_board.sql", "1901_board_wakes.sql",
+                "1902_board_coordinator.sql", "1903_board_coordinator_validate.sql",
+            ]
             assert await migrate(conn) == []
             assert await one(conn, "SELECT name FROM people WHERE key='ada'") == {"name": "Ada"}
             tables = await all_rows(conn, "SELECT tablename FROM pg_tables WHERE schemaname='board_upgrade'")

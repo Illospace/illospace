@@ -186,11 +186,15 @@ async def await_text(conn: Connection, ask_id):
 
 
 async def thread_ask(conn: Connection, person_id, channel, thread):
-    return await one(
-        conn,
-        "SELECT * FROM asks WHERE owner_person_id=%s AND slack_channel=%s AND slack_ts=%s AND awaiting_text=true FOR UPDATE",
-        (person_id, channel, thread),
-    )
+    from illo.ledger.board import lock_for_ask
+
+    row = await one(conn, """SELECT id FROM asks WHERE owner_person_id=%s
+        AND slack_channel=%s AND slack_ts=%s AND awaiting_text=true""", (person_id, channel, thread))
+    if not row:
+        return None
+    ask = await lock_for_ask(conn, row["id"])
+    return ask if (ask and ask["owner_person_id"] == person_id and ask["slack_channel"] == channel
+                   and ask["slack_ts"] == thread and ask["awaiting_text"]) else None
 
 
 async def due_asks(conn: Connection):
@@ -317,5 +321,19 @@ async def page_search(conn, person_id, *, limit=30):
 
 async def page_read(conn, ask_id, person_id, *, lock=False):
     """A page belongs only to the ask's active participants, regardless of lane rights."""
-    return await one(conn, "SELECT a.* " + PAGE_FROM + " AND a.id=%s"
-        + (" FOR UPDATE OF a" if lock else ""), (person_id, ask_id))
+    from illo.ledger.board import lock_for_ask
+
+    query = "SELECT a.* " + PAGE_FROM + " AND a.id=%s"
+    row = await one(conn, query, (person_id, ask_id))
+    if row and lock:
+        if not await lock_for_ask(conn, row["id"]):
+            return None
+        row = await one(conn, query, (person_id, ask_id))
+    if row:
+        from illo.ledger import board
+
+        thread_id = await board.ask_thread_id(conn, ask_id)
+        if thread_id is not None and not await one(conn, f"""SELECT 1 FROM board_threads b
+            WHERE b.id=%(thread_id)s AND {board.VISIBLE}""", {"thread_id": thread_id, "person_id": person_id}):
+            return None
+    return row

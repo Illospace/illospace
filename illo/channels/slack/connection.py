@@ -115,7 +115,12 @@ class SlackConnection:
 
     async def handle(self, payload: dict) -> None:
         try:
-            await self.intake.receive(payload)
+            # Socket Mode already acknowledged the envelope. Retry the released event here.
+            for _ in range(4):
+                result = await self.intake.receive(payload)
+                if not result or not result.get("retryable"):
+                    break
+                await asyncio.sleep(1)
         except Exception:
             log.error("Slack could not handle an event")
             await self.report(False)
