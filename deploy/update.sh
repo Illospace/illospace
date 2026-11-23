@@ -35,7 +35,7 @@ rollback() {
 }
 
 update_once() {
-    local old target stage before replaced preflight_timeout
+    local old target stage before replaced preflight_timeout providers
     old=$(cat "$ILLO_STATE_DIR/last-good")
     replaced=0
     preflight_timeout=${ILLO_PREFLIGHT_TIMEOUT:-60}
@@ -73,9 +73,9 @@ update_once() {
     stage=build
     if compose build illo brain sandbox; then
         # The new images check the brain settings, workspace, and routes before any change.
-        # An old illo.yaml or bad brain setting stops the update here, and the old services keep running.
-        if ! compose_timeout "$preflight_timeout" run --rm --no-deps -T brain python -m brain.providers \
-                | compose_timeout "$preflight_timeout" run --rm --no-deps -T illo check-routes; then
+        # Capture brain.providers first: piping two `docker compose run -T` calls can deadlock on stdio.
+        if ! providers=$(compose_timeout "$preflight_timeout" run --rm --no-deps -T brain python -m brain.providers </dev/null) \
+                || ! printf '%s\n' "$providers" | compose_timeout "$preflight_timeout" run --rm --no-deps -T illo check-routes; then
             record "failed $target: workspace or routes; nothing changed; last good $old"
             printf 'The new revision refuses the workspace or its routes. Nothing changed.\n' >&2
             return 1
