@@ -70,6 +70,9 @@ This install does not configure an egress proxy or restrict Internet destination
    Slack is optional and has no bot token.
    ```
 
+   When a collector reports in the last day, `illo doctor` also checks its code version.
+   See [collector updates](collectors.md#updates).
+
 The environment file uses literal `KEY=value` lines.
 Use single quotes around values with spaces, `#`, or `$`.
 Do not use shell commands, variable expansion, or multiline values in this file.
