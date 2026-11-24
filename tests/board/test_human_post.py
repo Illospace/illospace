@@ -95,6 +95,37 @@ async def test_human_refusals_and_reopen(app, client):
                                   (p["thread_id"],)))["closed_at"] is None
 
 
+async def test_human_resolve_closes_thread_and_episodes(app, client):
+    ctx = app.state.ctx
+    agent = await client()
+    post = await agent.call("board_post", {"title": "Stale thread", "kind": "question", "text": "Need this?",
+                                           "mentions": ["person:ada"]})
+    thread_id = post["thread_id"]
+    async with ctx.pool.connection() as conn:
+        person = await people.get(conn, "ada")
+        with pytest.raises(ValueError, match="open or resolve"):
+            await board.human_resolve(conn, workspace=ctx.workspace, person=person,
+                                      thread_id=thread_id, state="archived")
+        result = await board.human_resolve(conn, workspace=ctx.workspace, person=person,
+                                           thread_id=thread_id, state="resolved", summary="Not needed")
+        assert result["id"] == thread_id and result["state"] == "resolved"
+        row = await one(conn, "SELECT state,resolved_by,resolution_summary,closed_at FROM board_threads WHERE id=%s",
+                        (thread_id,))
+        assert row["state"] == "resolved"
+        assert row["resolved_by"] == "person:ada"
+        assert row["resolution_summary"] == "Not needed"
+        assert row["closed_at"] is not None
+        open_episodes = await all_rows(conn, "SELECT id FROM board_episodes WHERE thread_id=%s AND state='open'",
+                                       (thread_id,))
+        assert open_episodes == []
+        pending_esc = await all_rows(
+            conn,
+            "SELECT id FROM board_escalations WHERE thread_id=%s AND state IN ('pending','sending','sent')",
+            (thread_id,),
+        )
+        assert pending_esc == []
+
+
 async def test_human_hourly_cap_and_unicode_length(app, client):
     ctx = app.state.ctx
     row = await (await client()).call("board_post", {"title": "Work", "text": "Ready"})

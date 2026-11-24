@@ -1,13 +1,62 @@
-/* Pan and zoom on the board. With no script, or on a phone, the board is a normal page and each form works. */
+/* Pan, zoom, movable sticky notes, and live connector lines on the board.
+ * With no script, or on a phone, the board is a normal page and each form works. */
 (() => {
   const small = matchMedia('(max-width: 47.999rem)'), still = matchMedia('(prefers-reduced-motion: reduce)');
   const root = document.documentElement, board = document.querySelector('.board');
   const world = board.querySelector('.world'), top = document.querySelector('.top');
   const KEY = 'illo-board-camera', MIN = .4, MAX = 1.5, GLIDE = 450;
+  const NOTES_KEY = `illo-board-notes:${board.dataset.viewer || ''}`;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
   const control = 'input,textarea,select,button,a,summary,[contenteditable="true"]';
-  let cam = {x: 0, y: 0, s: 1}, drag = null, pinch = null, busy = false, timer = 0, moved = false;
+  let cam = {x: 0, y: 0, s: 1}, drag = null, cardDrag = null, pinch = null, busy = false, timer = 0, moved = false;
+  let notes = {}, topZ = 2;
   const pointers = new Map();
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+  const linksSvg = document.createElementNS(SVG_NS, 'svg');
+  linksSvg.classList.add('board-links');
+  linksSvg.setAttribute('aria-hidden', 'true');
+  world.prepend(linksSvg);
+
+  function loadNotes() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(NOTES_KEY) || '{}');
+      if (parsed && typeof parsed === 'object') notes = parsed;
+    } catch (_) { notes = {}; }
+  }
+  function saveNotes() {
+    try {
+      if (Object.keys(notes).length) localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+      else localStorage.removeItem(NOTES_KEY);
+    } catch (_) { /* Storage is optional. */ }
+  }
+  function noteOffset(el) {
+    if (small.matches || !el?.id) return {x: 0, y: 0};
+    const p = notes[el.id];
+    return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : {x: 0, y: 0};
+  }
+  function placeNotes() {
+    for (const el of world.querySelectorAll('.f[id]')) {
+      const p = noteOffset(el);
+      if (!small.matches && (p.x || p.y)) {
+        el.style.transform = `translate(${p.x}px,${p.y}px)`;
+        el.classList.add('moved');
+      } else {
+        el.style.removeProperty('transform');
+        el.classList.remove('moved');
+      }
+    }
+  }
+  function resetNotes() {
+    notes = {};
+    saveNotes();
+    if (!still.matches && !small.matches) {
+      world.classList.add('reset-notes');
+      setTimeout(() => { world.classList.remove('reset-notes'); drawLinks(); }, 320);
+    }
+    placeNotes();
+    drawLinks();
+  }
 
   // The visible part of the paper: below the bar, with a margin on each side.
   function view() {
@@ -62,7 +111,77 @@
   function at(el) {
     let x = 0, y = 0;
     for (let n = el; n && n !== world; n = n.offsetParent) { x += n.offsetLeft; y += n.offsetTop; }
-    return {x, y};
+    const p = el.matches?.('.f[id]') ? noteOffset(el) : {x: 0, y: 0};
+    return {x: x + p.x, y: y + p.y};
+  }
+  function box(el) {
+    const p = at(el);
+    return {l: p.x, t: p.y, w: el.offsetWidth, h: el.offsetHeight, r: p.x + el.offsetWidth, b: p.y + el.offsetHeight};
+  }
+  function drawLinks() {
+    if (small.matches) { linksSvg.replaceChildren(); return; }
+    const cards = [...world.querySelectorAll('.f[id]')];
+    const byId = new Map(cards.map(c => [c.id, c]));
+    const edges = [], seen = new Set();
+    const addEdge = (a, b, kind) => {
+      if (!a || !b || a === b) return;
+      const key = [a.id, b.id].sort().join('::') + ':' + kind;
+      if (seen.has(key)) return;
+      seen.add(key);
+      edges.push([a, b, kind]);
+    };
+    const groups = new Map();
+    for (const c of cards) {
+      if (c.dataset.task) addEdge(c, byId.get('t' + c.dataset.task), 'task');
+      if (c.dataset.parent) addEdge(c, byId.get('t' + c.dataset.parent), 'task');
+      if (c.dataset.group) {
+        const list = groups.get(c.dataset.group) || [];
+        list.push(c);
+        groups.set(c.dataset.group, list);
+      }
+    }
+    for (const list of groups.values()) {
+      for (let i = 0; i + 1 < list.length; i++) addEdge(list[i], list[i + 1], 'group');
+    }
+    const frag = document.createDocumentFragment();
+    let maxW = world.offsetWidth, maxH = world.offsetHeight;
+    for (const [elA, elB, kind] of edges) {
+      const a = box(elA), b = box(elB);
+      maxW = Math.max(maxW, a.r + 40, b.r + 40);
+      maxH = Math.max(maxH, a.b + 40, b.b + 40);
+      const ax = a.l + a.w / 2, ay = a.t + a.h / 2, bx = b.l + b.w / 2, by = b.t + b.h / 2;
+      let x1, y1, x2, y2, d;
+      if (Math.abs(ax - bx) >= Math.min(a.w, b.w) * .6) {
+        const leftFirst = ax < bx;
+        x1 = leftFirst ? a.r : a.l; y1 = ay;
+        x2 = leftFirst ? b.l : b.r; y2 = by;
+        const bend = Math.max(36, Math.abs(x2 - x1) * .42);
+        const c1x = leftFirst ? x1 + bend : x1 - bend;
+        const c2x = leftFirst ? x2 - bend : x2 + bend;
+        d = `M${x1} ${y1} C${c1x} ${y1},${c2x} ${y2},${x2} ${y2}`;
+      } else {
+        const topFirst = ay < by;
+        x1 = ax; y1 = topFirst ? a.b : a.t;
+        x2 = bx; y2 = topFirst ? b.t : b.b;
+        const bend = Math.max(18, Math.abs(y2 - y1) * .45);
+        const c1y = topFirst ? y1 + bend : y1 - bend;
+        const c2y = topFirst ? y2 - bend : y2 + bend;
+        d = `M${x1} ${y1} C${x1} ${c1y},${x2} ${c2y},${x2} ${y2}`;
+      }
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('class', `link-curve link-${kind}`);
+      frag.appendChild(path);
+      for (const [cx, cy] of [[x1, y1], [x2, y2]]) {
+        const dot = document.createElementNS(SVG_NS, 'circle');
+        dot.setAttribute('cx', cx); dot.setAttribute('cy', cy); dot.setAttribute('r', '3');
+        dot.setAttribute('class', `link-dot link-${kind}`);
+        frag.appendChild(dot);
+      }
+    }
+    linksSvg.setAttribute('width', String(Math.ceil(maxW)));
+    linksSvg.setAttribute('height', String(Math.ceil(maxH)));
+    linksSvg.replaceChildren(frag);
   }
   // A frame of the address: zoom 1, the frame near the top, in the middle.
   function show(el, glide) {
@@ -83,6 +202,8 @@
   function start() {
     root.classList.add('canvas');
     scrollTo(0, 0);
+    loadNotes();
+    placeNotes();
     let saved = null;
     try { saved = JSON.parse(sessionStorage.getItem(KEY)); } catch (_) { /* Storage is optional. */ }
     const valid = saved && [saved.x, saved.y, saved.s].every(Number.isFinite) && saved.s >= MIN && saved.s <= MAX;
@@ -96,9 +217,12 @@
       draw();
       if (el) setTimeout(() => show(el, true), 60);
     }
+    drawLinks();
     // Pictures change the height of a frame when they load. Place the frame again if the person did not move.
-    addEventListener('load', () => { if (el && !moved && !(valid && saved.resume === location.hash)) show(el, true); },
-      {once: true});
+    addEventListener('load', () => {
+      drawLinks();
+      if (el && !moved && !(valid && saved.resume === location.hash)) show(el, true);
+    }, {once: true});
   }
   function stop() {
     root.classList.remove('canvas');
@@ -106,11 +230,13 @@
     world.style.removeProperty('transform');
     board.style.removeProperty('background-size');
     board.style.removeProperty('background-position');
-    pointers.clear(); drag = pinch = null;
+    placeNotes();
+    linksSvg.replaceChildren();
+    pointers.clear(); drag = cardDrag = pinch = null;
   }
   if (!small.matches) start();
   small.addEventListener('change', () => (small.matches ? stop() : start()));
-  addEventListener('resize', () => { if (!small.matches) draw(); });
+  addEventListener('resize', () => { if (!small.matches) { draw(); drawLinks(); } });
   addEventListener('hashchange', () => { const el = frame(); if (el && !small.matches) show(el, true); });
 
   // The browser scrolls a box to show a focused element or a target. The script moves the world in place of that.
@@ -120,6 +246,20 @@
     board.scrollTop = board.scrollLeft = 0;
     reveal(event.target.closest('summary,button,a,textarea') || event.target);
   });
+  board.addEventListener('toggle', () => { if (!small.matches) requestAnimationFrame(drawLinks); }, true);
+  // One-click quick-reply chips fill the sibling reply box and submit immediately.
+  board.addEventListener('click', event => {
+    const chip = event.target.closest('[data-quick-reply]');
+    if (!chip) return;
+    const scope = chip.closest('.decide, .quick-reply');
+    const form = scope?.querySelector('form[action$="/reply"]');
+    const text = form?.elements.text;
+    if (!form || !text) return;
+    text.value = chip.dataset.quickReply;
+    text.dispatchEvent(new Event('input', {bubbles: true}));
+    form.requestSubmit();
+  });
+
   const needs = document.getElementById('needs');
   const draftKey = id => `illo-draft:${board.dataset.viewer}:${id}`;
   try {
@@ -153,6 +293,7 @@
     const c = centre();
     zoom(cam.s * (button.dataset.zoom === 'in' ? 1.25 : .8), c.x, c.y, true);
   }));
+  top.querySelector('[data-layout="reset"]')?.addEventListener('click', resetNotes);
 
   // Two fingers on a trackpad pan. A pinch arrives as a wheel with ctrlKey: it zooms smoothly about the pointer.
   board.addEventListener('wheel', event => {
@@ -182,7 +323,7 @@
   });
   board.addEventListener('gestureend', event => { event.preventDefault(); gesture = null; });
 
-  // A drag on the paper or on a column title pans. A drag on a frame stays a text selection, a click, or typing.
+  // A drag on a sticky-note handle moves that card. A drag on the paper or on a column title pans.
   const pair = () => {
     const [a, b] = [...pointers.values()];
     return {x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y)};
@@ -193,13 +334,28 @@
       pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
       if (pointers.size === 2) {
         pinch = {...pair(), cam: {...cam}};
-        drag = null;
+        drag = cardDrag = null;
         return;
       }
     }
-    if (event.button !== 0 || event.target.closest('.f,#board-changed')) return;
+    if (event.button !== 0) return;
+    const grip = event.target.closest('.note-grip, .card-head');
+    if (grip && !event.target.closest(control)) {
+      const card = grip.closest('.f[id]');
+      if (card) {
+        const cur = noteOffset(card);
+        cardDrag = {el: card, id: card.id, pointerId: event.pointerId,
+          startX: event.clientX, startY: event.clientY, baseX: cur.x, baseY: cur.y};
+        card.style.zIndex = String(++topZ);
+        card.classList.add('dragging');
+        try { board.setPointerCapture(event.pointerId); } catch (_) { /* Synthetic event. */ }
+        event.preventDefault();
+        return;
+      }
+    }
+    if (event.target.closest('.f,#board-changed')) return;
     drag = {id: event.pointerId, x: event.clientX - cam.x, y: event.clientY - cam.y};
-    board.setPointerCapture(event.pointerId);
+    try { board.setPointerCapture(event.pointerId); } catch (_) { /* Synthetic event. */ }
     board.classList.add('drag');
     board.classList.remove('glide');
   });
@@ -210,6 +366,14 @@
       cam = {s, x: p.x - (pinch.x - pinch.cam.x) * k, y: p.y - (pinch.y - pinch.cam.y) * k};
       moved = true;
       draw();
+    } else if (cardDrag?.pointerId === event.pointerId) {
+      const x = Math.round(cardDrag.baseX + (event.clientX - cardDrag.startX) / cam.s);
+      const y = Math.round(cardDrag.baseY + (event.clientY - cardDrag.startY) / cam.s);
+      notes[cardDrag.id] = {x, y};
+      cardDrag.el.style.transform = `translate(${x}px,${y}px)`;
+      cardDrag.el.classList.add('moved');
+      moved = true;
+      drawLinks();
     } else if (drag?.id === event.pointerId) {
       cam.x = event.clientX - drag.x; cam.y = event.clientY - drag.y;
       moved = true;
@@ -219,6 +383,12 @@
   const release = event => {
     pointers.delete(event.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (cardDrag?.pointerId === event.pointerId) {
+      cardDrag.el.classList.remove('dragging');
+      cardDrag = null;
+      saveNotes();
+      drawLinks();
+    }
     if (drag?.id === event.pointerId) { drag = null; board.classList.remove('drag'); }
   };
   board.addEventListener('pointerup', release);
@@ -236,13 +406,15 @@
     draw(true);
   });
 
-  // Refresh the read-only columns while the person writes in Needs you.
-  function editing() {
-    return needs.contains(document.activeElement) && document.activeElement.matches('input,textarea,select,button') ||
-      [...needs.querySelectorAll('textarea,input:not([type="hidden"])')].some(i => i.value !== i.defaultValue);
+  // Refresh the other columns while the person writes in Needs you or opens an inline reply.
+  function editingIn(section) {
+    if (!section) return false;
+    return section.contains(document.activeElement) && document.activeElement.matches('input,textarea,select,button') ||
+      !!section.querySelector('details.quick-reply[open]') ||
+      [...section.querySelectorAll('textarea,input:not([type="hidden"])')].some(i => i.value !== i.defaultValue);
   }
   async function refresh() {
-    if (document.hidden || busy) return;
+    if (document.hidden || busy || cardDrag) return;
     busy = true;
     try {
       const response = await fetch('/web/board', {cache: 'no-store', credentials: 'same-origin'});
@@ -252,12 +424,15 @@
       if (document.hidden || next.querySelector('.board')?.dataset.viewer !== board.dataset.viewer) return;
       for (const id of ['work', 'threads', 'done']) {
         const column = next.querySelector('.world > section.column#' + id);
-        if (column && !column.querySelector('form')) {
-          document.getElementById(id).replaceChildren(...[...column.childNodes].map(node => document.importNode(node, true)));
+        const current = document.getElementById(id);
+        if (column && current && !editingIn(current)) {
+          current.replaceChildren(...[...column.childNodes].map(node => document.importNode(node, true)));
         }
       }
+      placeNotes();
+      drawLinks();
       const ids = doc => [...doc.querySelectorAll('#needs > .f')].map(f => f.id).sort().join(',');
-      if (!editing() && next.getElementById('needs') && ids(next) !== ids(document) &&
+      if (!editingIn(needs) && next.getElementById('needs') && ids(next) !== ids(document) &&
           !document.getElementById('board-changed')) {
         const link = document.createElement('a');
         link.id = 'board-changed'; link.className = 'btn go'; link.href = '/web/board';

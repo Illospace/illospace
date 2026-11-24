@@ -621,6 +621,69 @@ async def test_fragment_page_size_and_board_confirmation(ctx, app, http, browser
     assert last.text.count('<li class="post ') == 1 and 'data-more' not in last.text
 
 
+async def test_board_sticky_notes_quick_chips_and_resolve(ctx, app, http, browser):
+    ben = await AgentClient.create(app, http, 'ben')
+    async with ctx.pool.connection() as conn:
+        parent = await one(conn, """INSERT INTO tasks(list_key,title,brief,created_by,owner_person_id,state,holder)
+            VALUES ('bugs','Parent ship','','person:ada',%s,'working','agent:ben') RETURNING id""", (ben.person_id,))
+        child = await one(conn, """INSERT INTO tasks(list_key,title,brief,created_by,owner_person_id,parent_id,state,holder)
+            VALUES ('bugs','Child fix','','person:ada',%s,%s,'working','agent:ben') RETURNING id""",
+            (ben.person_id, parent['id']))
+    t1 = await ben.call('board_post', {'title': 'Ship check', 'kind': 'question', 'text': 'Ship now?',
+                                       'task_id': parent['id'], 'mentions': ['person:ada']})
+    t2 = await ben.call('board_post', {'title': 'Related check', 'text': 'Follow up'})
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE board_threads SET group_key='release-check' WHERE id=ANY(%s)",
+                           ([t1['thread_id'], t2['thread_id']],))
+    await login(ctx, browser.http, 'ada')
+    home = await browser.http.get('/web/board')
+    assert home.status_code == 200
+    assert not re.search(r'\sstyle\s*=', home.text)
+    assert 'data-layout="reset"' in home.text
+    assert 'class="note-grip"' in home.text
+    assert f'data-parent="{parent["id"]}" id="t{child["id"]}"' in home.text
+    assert f'data-group="release-check" data-task="{parent["id"]}" id="b{t1["thread_id"]}"' in home.text
+    assert f'data-group="release-check" id="th{t2["thread_id"]}"' in home.text
+    assert 'data-quick-reply="Go ahead"' in home.text
+    threads_html = column(home, 'threads')
+    assert 'details class="quick-reply"' in threads_html
+    assert f'action="/web/board/t/{t2["thread_id"]}/resolve"' in threads_html
+    assert 'Not needed</button>' in threads_html
+
+    csrf = fields(home)['csrf']
+    bad_csrf = await browser.http.post(f'/web/board/t/{t2["thread_id"]}/resolve', data={'csrf': 'wrong', 'from': 'board'})
+    assert bad_csrf.status_code == 403
+
+    resolved = await browser.http.post(
+        f'/web/board/t/{t2["thread_id"]}/resolve',
+        data={'csrf': csrf, 'from': 'board', 'summary': 'Not needed'},
+    )
+    assert resolved.status_code == 303 and resolved.headers['location'] == '/web/board'
+    after = await browser.http.get('/web/board')
+    assert f'id="th{t2["thread_id"]}"' not in after.text
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, 'SELECT state,resolved_by,resolution_summary FROM board_threads WHERE id=%s',
+                        (t2['thread_id'],))
+        assert row == {'state': 'resolved', 'resolved_by': 'person:ada', 'resolution_summary': 'Not needed'}
+
+    thread_page = await browser.http.get(f'/web/board/t/{t1["thread_id"]}')
+    assert f'action="/web/board/t/{t1["thread_id"]}/resolve"' in thread_page.text
+    assert 'data-quick-reply="Go ahead"' in thread_page.text
+    res_thread = await browser.http.post(
+        f'/web/board/t/{t1["thread_id"]}/resolve',
+        data={'csrf': csrf},
+    )
+    assert res_thread.status_code == 303 and res_thread.headers['location'] == f'/web/board/t/{t1["thread_id"]}'
+    assert 'This thread is resolved.' in (await browser.http.get(f'/web/board/t/{t1["thread_id"]}')).text
+
+    await ben.call('board_resolve', {'thread_id': t1['thread_id'], 'state': 'archived'})
+    archived_res = await browser.http.post(
+        f'/web/board/t/{t1["thread_id"]}/resolve',
+        data={'csrf': csrf, 'from': 'board'},
+    )
+    assert archived_res.status_code == 200 and 'archived' in archived_res.text
+
+
 async def test_board_live_refresh_preserves_drafts_in_chromium(ctx, app, http, browser):
     import os
 

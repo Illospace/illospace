@@ -327,6 +327,7 @@ async def setup(ctx):
                           ('/web/app.css', ['GET']), ('/web/board', ['GET']), ('/web/board.js', ['GET']), ('/web/a/{ask_id}', ['GET']),
                           ('/web/board/t/{id}', ['GET']), ('/web/board/t/{id}/posts', ['GET']),
                           ('/web/board/t/{id}/seen', ['POST']), ('/web/board/t/{id}/reply', ['POST']),
+                          ('/web/board/t/{id}/resolve', ['POST']),
                           ('/web/board/t/{id}/reopen', ['POST']), ('/web/board/t/{id}/file/{post_id}/{position}', ['GET']),
                           ('/web/thread.js', ['GET']), ('/web/a/{ask_id}/answer', ['POST']), ('/web/a/{ask_id}/file/{position}', ['GET']), ('/t/{task_id}', ['GET']),
                           ('/t/{task_id}/progress', ['GET']), ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:

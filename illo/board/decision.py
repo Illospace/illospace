@@ -46,10 +46,27 @@ class Decision(Arguments):
     group_clear: bool = False
 
 
-_FENCE = re.compile(r"```json\s+(.*?)\s*```", re.DOTALL)
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _SLACK_FORM = re.compile(r"<[^<>]*>")
 _URL = re.compile(r"(?:[a-z][a-z0-9+.-]*://|www\.|mailto:)\S+", re.IGNORECASE)
 _BROADCAST = re.compile(r"@(?:here|channel|everyone)\b", re.IGNORECASE)
+
+
+def _strip_nulls(value):
+    if not isinstance(value, dict):
+        return value
+    cleaned = {k: v for k, v in value.items() if v is not None}
+    if isinstance(cleaned.get("escalate"), dict):
+        esc = {k: v for k, v in cleaned["escalate"].items() if v is not None}
+        if isinstance(esc.get("options"), list):
+            esc["options"] = [
+                {k: v for k, v in opt.items() if v is not None} if isinstance(opt, dict) else opt
+                for opt in esc["options"]
+            ]
+        cleaned["escalate"] = esc
+    if isinstance(cleaned.get("headstart"), dict):
+        cleaned["headstart"] = {k: v for k, v in cleaned["headstart"].items() if v is not None}
+    return cleaned
 
 
 def unescape_slack(value):
@@ -109,7 +126,7 @@ def parse(text, snapshot):
     except (ValueError, RecursionError):
         raise InvalidDecision("not_json") from None
     try:
-        decision = Decision.model_validate(value)
+        decision = Decision.model_validate(_strip_nulls(value))
     except ValidationError:
         raise InvalidDecision("schema") from None
 
