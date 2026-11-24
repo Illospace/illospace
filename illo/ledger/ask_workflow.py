@@ -311,7 +311,20 @@ PAGE_FROM = """FROM asks a JOIN people p ON p.id=%s AND p.active
 
 async def page_search(conn, person_id, *, limit=30):
     """Use the page access rule for the open requests that this person must answer."""
-    return await all_rows(conn, "SELECT a.*,count(*) OVER () AS board_total " + PAGE_FROM + """
+    from illo.ledger import board
+
+    return await all_rows(conn, f"""SELECT a.*,count(*) OVER () AS board_total,
+        linked.id AS board_thread_id,linked.title AS board_thread_title
+        FROM asks a JOIN people p ON p.id=%s AND p.active
+        LEFT JOIN LATERAL (
+            SELECT min(b.id) AS id,min(b.title) AS title,
+                (count(*)=1 AND bool_and({board.visible_to('p.id')})) AS visible
+            FROM board_threads b WHERE b.id IN (
+                SELECT thread_id FROM board_posts WHERE ask_id=a.id
+                UNION SELECT thread_id FROM board_escalations WHERE ask_id=a.id)
+            HAVING count(*)>0
+        ) linked ON true
+        WHERE linked.visible IS DISTINCT FROM false
         AND a.owner_person_id=p.id AND a.state='open'
         AND (a.expires_at IS NULL OR a.expires_at>clock_timestamp())
         AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.id=a.lane_id AND a.source_ref IS NOT NULL

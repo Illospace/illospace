@@ -47,6 +47,11 @@ async def test_page_gate_requires_registered_get_route(app, client, fake_brain):
     ctx.workspace.config.board.coordinator.enabled = True
     ctx.workspace.config.pages.enabled = True
     await question(client)
+    assert coordinator.board_pages_ready(ctx)
+    ctx.workspace.config.pages.enabled = False
+    assert not coordinator.board_pages_ready(ctx)
+    ctx.workspace.config.pages.enabled = True
+    app.router.routes[:] = [route for route in app.routes if getattr(route, "path", None) != "/web/board/t/{id}"]
     assert not coordinator.board_pages_ready(ctx)
     await coordinator.run_coordinator(ctx)
     await escalate.send_due(ctx)

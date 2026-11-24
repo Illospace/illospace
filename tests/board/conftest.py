@@ -49,10 +49,6 @@ def coordinator_ctx(app, fake_brain):
     cfg.settle_seconds = 0
     ctx.workspace.config.pages.enabled = True
 
-    async def placeholder(id: int):
-        return {"id": id}
-
-    app.add_api_route("/web/board/t/{id}", placeholder, methods=["GET"])
     fake_brain.script = []
     return ctx
 

@@ -151,7 +151,7 @@ body.frame{background:transparent; margin:0; min-height:0}
 /* The board: the columns of decisions on the dotted paper. With no script it is a normal page that scrolls. */
 .zoom{display:none}
 .board{padding:1.6rem 1rem 5rem}
-.world{display:grid; grid-template-columns:minmax(0,26fr) minmax(0,18.5fr) minmax(0,18.5fr); gap:3.5rem; align-items:start;
+.world{display:grid; grid-template-columns:minmax(0,26fr) repeat(3,minmax(0,18.5fr)); gap:3.5rem; align-items:start;
   max-width:70rem; margin:0 auto; font-size:.9rem; line-height:1.45}
 .column{min-width:0}
 .column-title{font-size:1.4rem; line-height:1.15; letter-spacing:-.02em; font-weight:700; margin:0 .25rem .2rem}
@@ -235,7 +235,7 @@ body.frame{background:transparent; margin:0; min-height:0}
   background-image:radial-gradient(circle,var(--dot) 1px,transparent 1.2px); background-size:22px 22px}
 .canvas .board.drag{cursor:grabbing; user-select:none; -webkit-user-select:none}
 .canvas .world{position:absolute; left:0; top:0; margin:0; max-width:none; width:max-content; transform-origin:0 0;
-  grid-template-columns:26rem 18.5rem 18.5rem; padding-bottom:2rem}
+  grid-template-columns:26rem repeat(3,18.5rem); padding-bottom:2rem}
 .canvas .glide{transition:background-position .45s cubic-bezier(.2,.7,.2,1),background-size .45s cubic-bezier(.2,.7,.2,1)}
 .canvas .glide .world{transition:transform .45s cubic-bezier(.2,.7,.2,1)}
 .canvas .zoom{display:flex; order:1; gap:.3rem; margin-left:.5rem}

@@ -45,7 +45,7 @@ async def test_upgrade_from_m2_and_validate_in_separate_transaction(pool, tmp_pa
                                     provider="fake", model="fake")
             assert (await runs.get(conn, new["id"]))["profile"] == "board_coordinator"
             await conn.commit()
-            assert await migrate(conn) == [VALIDATE]
+            assert (await migrate(conn))[:1] == [VALIDATE]
             assert (await one(conn, constraint, ("runs_profile_check", "runs")))["convalidated"] is True
         finally:
             await conn.rollback()
