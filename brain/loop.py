@@ -212,11 +212,11 @@ async def conversation(
                             yield item
                 break
             except Exception as error:
-                if isinstance(error, RunError) and error.category == "transient":
-                    raise
                 if subscription_limit is not None:
                     raise RunError("limit", str(subscription_limit) + " The API fallback failed.",
                                    **subscription_limit.details, fallback_failed=True) from None
+                if isinstance(error, RunError) and error.category == "transient":
+                    raise
                 if (
                     not isinstance(error, RunError)
                     or attempt

@@ -116,3 +116,12 @@ async def test_gemini_smoke_requires_dependent_rounds_and_the_image(
     assert row["usage"]["smoke"] is True
     assert row["status"] == ("completed" if outcome == "pass" else "failed")
     assert smoke.load_workspace(root).config.brain.routes["default"].provider == "chatgpt"
+
+
+async def test_smoke_session_accepts_empty_token_on_step_one():
+    from brain.tools import SmokeSession
+
+    session = SmokeSession()
+    result = await session.call_tool("smoke_step", {"n": 1, "token": ""})
+    assert session.steps == 1 and result.content[0].text == session.token
+

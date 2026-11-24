@@ -112,7 +112,8 @@ async def select_payer(ctx, route: Route, authority, *, force=False, rejected_to
     api_key = Payer("api_key", policy.fallback) if policy.fallback != "none" else None
     if authority.tainted or authority.profile in {"tainted", "outsider"}:
         if policy.tainted_credential == "none":
-            await chatgpt.notify_team_missing(ctx, tainted=True)
+            if notify:
+                await chatgpt.notify_team_missing(ctx, tainted=True)
             return None
         if policy.tainted_credential == "api_key":
             return api_key
@@ -144,7 +145,7 @@ async def select_payer(ctx, route: Route, authority, *, force=False, rejected_to
             )
         if pending:
             raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
-    if not own and route.kind != "board_coordinator":
+    if notify and not own and route.kind != "board_coordinator":
         await chatgpt.notify_team_missing(ctx)
     return None
 

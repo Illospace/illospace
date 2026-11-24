@@ -41,6 +41,8 @@ async def error_body(response: httpx.Response) -> dict:
     await response.aread()
     try:
         body = response.json()
+        if isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict):
+            body = body[0]
         error = body.get("error", {}) if isinstance(body, dict) else {}
         return error if isinstance(error, dict) else {}
     except ValueError:

@@ -110,6 +110,9 @@ async def test_smoke_uses_normal_grant_refresh_and_fallback(
     if mode in {"missing", "no_as"}:
         assert not brain_wires and not requests and "No model sign-in" in output
         assert token_backend.refresh_count == 0
+        async with ctx.pool.connection() as conn:
+            sensor = await one(conn, "SELECT 1 FROM sensors WHERE last_error_at IS NOT NULL LIMIT 1")
+        assert sensor is None
     else:
         assert brain_wires[0]["provider_auth"]["access_token"] == "fresh-access"
         assert brain_wires[0]["smoke"] is True and brain_wires[0]["run_id"] == row["id"]

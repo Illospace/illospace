@@ -1,12 +1,13 @@
 """The Chat Completions adapter.
 
 A non-streaming assistant message is kept verbatim. In a stream, group tool calls
-by index, in index order. Join message content, function names, and function
-arguments in delta order. All other strings keep the first non-empty value.
-A later different non-empty value is a runtime error. Merge nested objects key
-by key, including unknown fields at the message and call levels. Null values
-yield to actual values. Other values must agree when repeated. The call index
-belongs to the stream and is not part of the assistant message.
+by index, in index order. Join message content, reasoning fragments (`reasoning`,
+`reasoning_content`), function names, and function arguments in delta order. All
+other strings keep the first non-empty value. A later different non-empty value
+is a runtime error. Merge nested objects key by key, including unknown fields at
+the message and call levels. Null values yield to actual values. Other values
+must agree when repeated. The call index belongs to the stream and is not part
+of the assistant message.
 """
 
 from mcp.types import Tool
@@ -137,7 +138,11 @@ class Chat:
         if not self.streaming:
             self.message = part
             return
-        merge(self.message, {k: v for k, v in part.items() if k != "tool_calls"}, {("content",)})
+        merge(
+            self.message,
+            {k: v for k, v in part.items() if k != "tool_calls"},
+            {("content",), ("reasoning",), ("reasoning_content",)},
+        )
         for call in part.get("tool_calls") or []:
             index = call.get("index")
             if type(index) is not int or index < 0:

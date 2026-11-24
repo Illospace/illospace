@@ -56,8 +56,11 @@ class SmokeSession:
 
     async def call_tool(self, name, arguments):
         step = arguments.get("n")
+        token = arguments.get("token")
+        if token == "" and self.token is None:
+            token = None
         if (name != SMOKE_TOOL.name or type(step) is not int or step != self.steps + 1
-                or step > 3 or arguments.get("token") != self.token
+                or step > 3 or token != self.token
                 or arguments.keys() - {"n", "token"}):
             raise RunError("runtime", "The smoke tool received the wrong step or token")
         self.steps = step

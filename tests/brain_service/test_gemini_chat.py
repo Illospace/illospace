@@ -11,6 +11,7 @@ from mcp.types import Tool
 from brain import loop, providers
 from brain.errors import RunError
 from brain.models import RunImage
+from brain.providers import BUILT_IN
 from brain.wire.chat import Chat
 from brain.wire.responses import Responses
 from tests.brain_service.conftest import openai
@@ -247,3 +248,76 @@ async def test_transient_retry_depends_on_output_in_this_request(run_request, ge
         assert error.value.category == "transient"
         assert len(requests) == 2 and not sleeps
     assert len(session.calls) == 1
+
+
+async def test_list_wrapped_error_body_maps_key_error_without_image_retry(run_request, gemini):
+    run_request.images = [RunImage(mime="image/png", data=DATA)]
+    calls = 0
+
+    def respond(_):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json=[{"error": {
+            "code": 400, "status": "INVALID_ARGUMENT",
+            "details": [{"reason": "API_KEY_INVALID"}],
+        }}])
+
+    with pytest.raises(RunError) as error:
+        await collect(run_request, gemini, respond)
+    assert error.value.category == "config"
+    assert calls == 1
+
+
+async def test_stream_joins_reasoning_fragments(run_request, gemini):
+    bodies = []
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return sse(
+                choice("delta", {"role": "assistant", "reasoning_content": "First ", "reasoning": "a "}),
+                choice("delta", {"reasoning_content": "step.", "reasoning": "b."}),
+                choice("delta", {"tool_calls": [{"index": 0, **call()}]}, "tool_calls"),
+            )
+        return sse(choice("delta", {"content": "Ready."}, "stop"))
+
+    events = await collect(run_request, gemini, respond, FakeMCPSession())
+    assert events[-1]["text"] == "Ready."
+    assistant = bodies[1]["messages"][2]
+    assert assistant["reasoning_content"] == "First step."
+    assert assistant["reasoning"] == "a b."
+
+
+async def test_transient_fallback_failure_keeps_subscription_limit(run_request, monkeypatch):
+    from brain.models import ChatGPTAuth
+
+    sleeps, calls = [], 0
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(loop, "sleep", sleep)
+    run_request.provider = "chatgpt"
+    run_request.provider_auth = ChatGPTAuth(access_token="fake-access", account_id="acct")
+    run_request.fallback_provider = "openai"
+    primary = BUILT_IN["chatgpt"]
+    fallback = openai()
+
+    def respond(_):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"error": {"type": "usage_limit_reached"}})
+        return httpx.Response(503)
+
+    with pytest.raises(RunError) as error:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async for _ in loop.conversation(
+                Responses, run_request, primary, FakeMCPSession(), [TOOL], http, fallback,
+            ):
+                pass
+    assert error.value.category == "limit"
+    assert error.value.details["fallback_failed"] is True
+    assert sleeps == [2]
+    assert calls == 3
+
