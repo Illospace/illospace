@@ -216,3 +216,23 @@ async def test_saved_personal_findings_block_later_web(app, fake_brain, monkeypa
     result = read_result(fake_brain.results[-1])
     assert result["decision"] == "deny"
     assert "read private data" in result["reason"]
+
+
+async def test_manual_personal_scout_for_member(app):
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        ben = await one(conn, "SELECT * FROM people WHERE key='ben'")
+    ev = InboundEvent(
+        channel="slack",
+        external_id="slack:dm:ben-scout",
+        kind="dm",
+        sender=ben["slack_id"],
+        text="run my scout",
+    )
+    reply = await scout.manual(ctx, ev, Authority("person:ben", "person_dm", ben["id"]))
+    assert reply == "Your personal scout starts now. Findings come to your Slack DM."
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM deep_runs ORDER BY id DESC LIMIT 1")
+    assert row["principal"] == "person:ben" and row["kind"] == "scout"
+    assert row["context"]["scout_destination"] == {"slack_dm": {"person_id": ben["id"]}}
+

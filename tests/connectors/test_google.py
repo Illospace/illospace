@@ -264,3 +264,100 @@ async def test_service_account_signs_fixed_read_only_scope(google_app):
         await store.vault(ctx).set(conn, "acme-service", json.dumps(account))
         await client.call(conn, ctx, cfg, None, "drive_search", {"query": "plan"})
     assert len(requests) == 2
+
+
+async def test_personal_sweep_seen_memory_and_isolation(google_app, rpc):
+    from datetime import UTC, datetime, timedelta
+
+    from illo.db import one
+    from illo.ledger import kv, runs
+    from tests.tool_results import read_result
+
+    ctx = google_app.state.ctx
+    ada = await seed(ctx, owner="ada")
+    ben = await seed(ctx, owner="ben")
+
+    async def mint(person_key, person_id, profile="person_dm"):
+        async with ctx.pool.connection() as conn:
+            run = await runs.create(
+                conn,
+                principal=f"person:{person_key}" if profile == "person_dm" else "team",
+                person_id=person_id if profile == "person_dm" else None,
+                profile=profile,
+                tainted=False,
+                provider="fake",
+                tool_limit=12,
+                model="fake",
+            )
+            return run, await runs.mint_token(conn, run["id"], 60)
+
+    ada_run, ada_token = await mint("ada", ada["id"])
+    _, ben_token = await mint("ben", ben["id"])
+    _, team_token = await mint("ada", ada["id"], profile="team_channel")
+
+    # Seed an expired entry (> 30 days) for Ada to verify pruning.
+    async with ctx.pool.connection() as conn:
+        await kv.set(
+            conn,
+            f"personal-sweep:{ada['id']}",
+            [
+                {
+                    "key": "gmail:old-msg",
+                    "summary": "Expired notice",
+                    "seen_at": (datetime.now(UTC) - timedelta(days=45)).isoformat(),
+                }
+            ],
+        )
+
+    mark = read_result(
+        (
+            await rpc(
+                ada_token,
+                "tools/call",
+                {
+                    "name": "sweep_mark_seen",
+                    "arguments": {
+                        "items": [
+                            {"key": "gmail:msg-1", "summary": "Acme renewal due Friday"},
+                            {"key": "cal:evt-2", "summary": "Quarterly review prep"},
+                        ]
+                    },
+                },
+            )
+        ).json()["result"]
+    )
+    assert mark["decision"] == "allow"
+    assert mark["result"] == {"saved": 2, "total": 2}
+
+    ada_seen = read_result(
+        (await rpc(ada_token, "tools/call", {"name": "sweep_seen_list", "arguments": {}})).json()[
+            "result"
+        ]
+    )
+    assert ada_seen["decision"] == "allow"
+    assert "gmail:msg-1" in ada_seen["result"]
+    assert "cal:evt-2" in ada_seen["result"]
+    assert "gmail:old-msg" not in ada_seen["result"]
+
+    # Reading sweep memory marks the run personal_read so private info cannot leak.
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT personal_read FROM runs WHERE id=%s", (ada_run["id"],))
+        assert row["personal_read"] is True
+
+    # Ben cannot see Ada's sweep items.
+    ben_seen = read_result(
+        (await rpc(ben_token, "tools/call", {"name": "sweep_seen_list", "arguments": {}})).json()[
+            "result"
+        ]
+    )
+    assert ben_seen["decision"] == "allow"
+    assert "gmail:msg-1" not in ben_seen["result"]
+
+    # Team channel cannot call personal sweep tools.
+    team_try = read_result(
+        (await rpc(team_token, "tools/call", {"name": "sweep_seen_list", "arguments": {}})).json()[
+            "result"
+        ]
+    )
+    assert team_try["decision"] == "deny"
+
