@@ -52,6 +52,8 @@ skills_get: Read the steps of one team skill by its name
 slack_post_channel: Post in a configured team channel (`channel`: its id; `thread_ts` to answer in a thread). It becomes a draft card after a personal or private read.
 slack_read_thread: Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.
 slack_send_dm: Send a Slack DM to one team member (`person`: a person key). For a question that needs an answer, use `asks_create` instead. It becomes a draft card after a personal or private read. At most 3 per run.
+sweep_mark_seen: Record item keys (such as `gmail:<id>` or `cal:<id>`) surfaced in this person's proactive personal sweep so future sweeps do not repeat them.
+sweep_seen_list: List item keys already surfaced in this person's proactive personal sweep over the last 30 days, so you do not repeat them.
 task_cancel: Cancel a task with a reason. It has no next move. The task and its full record stay in the ledger for later reads.
 task_create: Create a task from the person's words. Give a list, title, and brief. A holder is `person:<key>` or `agent:<key>`. Illo starts an agent holder itself and files its ticket: never file one for the task. A pieces array creates the parent and its pieces in one call.
 task_done: Confirm a task for the person who made this request. The Done checks must pass. Use force true and a reason to override failed checks.
