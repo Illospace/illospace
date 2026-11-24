@@ -18,6 +18,13 @@
   } catch (_) { /* Storage is optional. */ }
   text?.addEventListener('input', save);
   form?.addEventListener('submit', save);
+  document.getElementById('reply')?.addEventListener('click', event => {
+    const chip = event.target.closest('[data-quick-reply]');
+    if (!chip || !form || !text) return;
+    text.value = chip.dataset.quickReply;
+    save();
+    form.requestSubmit();
+  });
 
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let busy = false, stopped = false, lastPost = Date.now(), timer, firstNew, newCount = 0;
