@@ -50,7 +50,7 @@ BUILT_IN = {
                        images=True, web_search=True, efforts=EFFORTS, transcription=True),
     "anthropic": Provider("anthropic", "agent_sdk", efforts=EFFORTS),
     "gemini": Provider("gemini", "chat", "https://generativelanguage.googleapis.com/v1beta/openai/",
-                       images=True, efforts=("minimal", *EFFORTS)),
+                       images=True, efforts=("minimal", *EFFORTS), stream_tools=False),
     "fake": Provider("fake", "fake", images=True, web_search=True, efforts=EFFORTS,
                      transcription=True),
 }

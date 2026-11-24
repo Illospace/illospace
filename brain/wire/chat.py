@@ -50,8 +50,11 @@ def chat_error(error, status: int | None = None) -> RunError:
         status = error["code"]
     reason = error.get("status")
     details = error.get("details")
+    message = error.get("message") if isinstance(error.get("message"), str) else ""
     key_error = reason == "INVALID_ARGUMENT" and (
-        error.get("param") == "api_key" or any(
+        error.get("param") == "api_key"
+        or "api key" in message.lower()
+        or any(
             isinstance(detail, dict) and detail.get("reason") in ("API_KEY_INVALID", "API_KEY_EXPIRED")
             for detail in (details if isinstance(details, list) else [])
         )

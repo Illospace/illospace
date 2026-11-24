@@ -122,14 +122,16 @@ async def test_assistant_message_is_replayed_with_all_fields(run_request, gemini
      {"tool_calls": [{"index": 0, "unknown": "second"}]}),
 ])
 async def test_conflicting_non_fragment_strings_fail_without_echo(run_request, gemini, first, later):
+    streaming = replace(gemini, stream_tools=True)
     with pytest.raises(RunError, match="conflicting message fields") as error:
-        await collect(run_request, gemini, lambda _: sse(choice("delta", first), choice("delta", later)))
+        await collect(run_request, streaming, lambda _: sse(choice("delta", first), choice("delta", later)))
     assert error.value.category == "runtime"
     assert "first" not in str(error.value) and "second" not in str(error.value)
 
 
 @pytest.mark.parametrize("refusal", [False, True])
 async def test_chat_image_part_and_text_retry(run_request, gemini, refusal):
+    assert gemini.stream_tools is False
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     bodies = []
 
@@ -145,7 +147,7 @@ async def test_chat_image_part_and_text_retry(run_request, gemini, refusal):
                 return httpx.Response(400, json={"error": {"status": "INVALID_ARGUMENT"}})
         else:
             assert body["messages"][1]["content"] == run_request.user_message + loop.IMAGES_REFUSED
-        return sse(choice("delta", {"content": "Ready."}, "stop"))
+        return httpx.Response(200, json=choice("message", {"role": "assistant", "content": "Ready."}, "stop"))
 
     events = await collect(run_request, gemini, respond)
     assert len(bodies) == (2 if refusal else 1)
@@ -154,6 +156,7 @@ async def test_chat_image_part_and_text_retry(run_request, gemini, refusal):
 
 @pytest.mark.parametrize("split", [True, False])
 async def test_image_echo_never_reaches_mcp(run_request, gemini, split):
+    streaming = replace(gemini, stream_tools=True)
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     session = FakeMCPSession()
     part = call(query=DATA)
@@ -164,7 +167,7 @@ async def test_image_echo_never_reaches_mcp(run_request, gemini, split):
         part["function"]["arguments"] = args[:midpoint]
         tail = [choice("delta", {"tool_calls": [{"index": 0, "function": {"arguments": args[midpoint:]}}]})]
     with pytest.raises(RunError, match="private image data"):
-        await collect(run_request, gemini, lambda _: sse(
+        await collect(run_request, streaming, lambda _: sse(
             choice("delta", {"tool_calls": [{"index": 0, **part}]}),
             *tail, choice("delta", {}, "tool_calls"),
         ), session)
@@ -205,7 +208,7 @@ async def test_chat_errors_use_structured_status(run_request, gemini, monkeypatc
 async def test_transient_retry_depends_on_output_in_this_request(run_request, gemini, monkeypatch, after, wire):
     sleeps, requests = [], []
     session = FakeMCPSession()
-    provider = gemini if wire is Chat else openai()
+    provider = replace(gemini, stream_tools=True) if wire is Chat else openai()
     run_request.provider = provider.name
 
     async def sleep(seconds):
@@ -250,17 +253,18 @@ async def test_transient_retry_depends_on_output_in_this_request(run_request, ge
     assert len(session.calls) == 1
 
 
-async def test_list_wrapped_error_body_maps_key_error_without_image_retry(run_request, gemini):
+@pytest.mark.parametrize("payload", [
+    [{"error": {"code": 400, "status": "INVALID_ARGUMENT", "details": [{"reason": "API_KEY_INVALID"}]}}],
+    [{"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Please pass a valid API key"}}],
+])
+async def test_list_wrapped_error_body_maps_key_error_without_image_retry(run_request, gemini, payload):
     run_request.images = [RunImage(mime="image/png", data=DATA)]
     calls = 0
 
     def respond(_):
         nonlocal calls
         calls += 1
-        return httpx.Response(400, json=[{"error": {
-            "code": 400, "status": "INVALID_ARGUMENT",
-            "details": [{"reason": "API_KEY_INVALID"}],
-        }}])
+        return httpx.Response(400, json=payload)
 
     with pytest.raises(RunError) as error:
         await collect(run_request, gemini, respond)
@@ -269,6 +273,7 @@ async def test_list_wrapped_error_body_maps_key_error_without_image_retry(run_re
 
 
 async def test_stream_joins_reasoning_fragments(run_request, gemini):
+    streaming = replace(gemini, stream_tools=True)
     bodies = []
 
     def respond(request):
@@ -281,7 +286,7 @@ async def test_stream_joins_reasoning_fragments(run_request, gemini):
             )
         return sse(choice("delta", {"content": "Ready."}, "stop"))
 
-    events = await collect(run_request, gemini, respond, FakeMCPSession())
+    events = await collect(run_request, streaming, respond, FakeMCPSession())
     assert events[-1]["text"] == "Ready."
     assistant = bodies[1]["messages"][2]
     assert assistant["reasoning_content"] == "First step."
