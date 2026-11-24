@@ -853,30 +853,55 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
     return await _human_receipt(conn, row, person, replayed=False)
 
 
-async def human_resolve(conn, *, workspace, person, thread_id, state="open"):
-    """Reopen a board thread on behalf of a signed-in person."""
-    if state != "open":
-        raise ValueError("A person can only reopen a thread here.")
+async def human_resolve(conn, *, workspace, person, thread_id, state="open", summary=""):
+    """Reopen or resolve a board thread on behalf of a signed-in person."""
+    if state not in {"open", "resolved"}:
+        raise ValueError("A person can only open or resolve a thread here.")
     await lock_thread(conn, thread_id)
     thread = await _human_thread(conn, person, thread_id)
     if thread["state"] == "archived":
         raise BoardError("The thread is archived. It is read-only.")
-    if thread["state"] == "open":
+    if thread["state"] == state:
         return await _thread_result_with_episode(conn, thread, workspace)
     from illo.board.episodes import close_items
 
     try:
         async with conn.transaction():
-            await close_items(conn, thread, reason="thread_closed")
+            await close_items(
+                conn,
+                thread,
+                reason="thread_closed",
+                person_id=person["id"] if state == "resolved" else None,
+            )
             await _human_limit(conn, person)
-            thread = await one(conn, """UPDATE board_threads SET state='open',closed_at=NULL,
-                resolved_at=NULL,resolved_by=NULL,updated_at=clock_timestamp(),reopened_at=clock_timestamp()
-                WHERE id=%s RETURNING *""", (thread_id,))
+            if state == "resolved":
+                clean_summary = " ".join(summary.split())[:280]
+                thread = await one(
+                    conn,
+                    """UPDATE board_threads SET state='resolved',closed_at=clock_timestamp(),
+                    resolved_at=clock_timestamp(),resolved_by=%s,resolution_summary=%s,
+                    stalled_reason=NULL,stalled_at=NULL,updated_at=clock_timestamp()
+                    WHERE id=%s RETURNING *""",
+                    ("person:" + person["key"], clean_summary, thread_id),
+                )
+            else:
+                thread = await one(
+                    conn,
+                    """UPDATE board_threads SET state='open',closed_at=NULL,
+                    resolved_at=NULL,resolved_by=NULL,updated_at=clock_timestamp(),reopened_at=clock_timestamp()
+                    WHERE id=%s RETURNING *""",
+                    (thread_id,),
+                )
     except UniqueViolation:
         raise BoardError("This task or ticket already has an open thread in this scope.") from None
+    reason = (
+        "The person resolves the board thread."
+        if state == "resolved"
+        else "The person reopens the board thread."
+    )
     await audit.write(conn, principal="person:" + person["key"], tool="board_human_resolve",
                       args={"thread": thread_id, "state": state}, decision="allow",
-                      reason="The person reopens the board thread.", target=f"board thread {thread_id}")
+                      reason=reason, target=f"board thread {thread_id}")
     return await _thread_result_with_episode(conn, thread, workspace)
 
 

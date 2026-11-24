@@ -308,16 +308,36 @@ def options(workspace, people, pending, *, selected=None):
     return body
 
 
-def reply_form(thread_id, csrf, *, text='', draft=None, choices='', fixed=None, from_board=False):
+QUICK_REPLIES = ('Go ahead', 'Looks good', 'Hold for now')
+
+
+def quick_chips(replies=QUICK_REPLIES):
+    buttons = ''.join(
+        f'<button class="chip-btn" type="button" data-quick-reply="{e(item)}">{e(item)}</button>'
+        for item in replies
+    )
+    return '<div class="quick-chips" role="group" aria-label="Quick replies">' + buttons + '</div>'
+
+
+def resolve_form(thread_id, csrf, *, from_board=False, label='Not needed', compact=False):
+    cls = 'btn btn-sm btn-quiet' if compact else 'btn btn-quiet'
+    body = f'<form class="resolve-form" method="post" action="{path(thread_id)}/resolve">' + hidden('csrf', csrf)
+    if from_board:
+        body += hidden('from', 'board')
+    return body + f'<button class="{cls}">{e(label)}</button></form>'
+
+
+def reply_form(thread_id, csrf, *, text='', draft=None, choices='', fixed=None, from_board=False, compact=False):
     body = (f'<form method="post" action="{path(thread_id)}/reply">' + hidden('csrf', csrf)
             + hidden('draft', draft or token_urlsafe(16)))
     if from_board:
         body += hidden('from', 'board') + hidden('reply_to', fixed or '')
     else:
         body += '<label>Reply to <select name="reply_to" id="reply-to">' + choices + '</select></label>'
-    return (body + '<textarea name="text" required maxlength="4000" '
-            'placeholder="Write to the agents. They read it on the board.">' + e(text)
-            + '</textarea><button class="btn go">Send</button></form>')
+    placeholder = 'One-line reply to wake the agents…' if compact else 'Write to the agents. They read it on the board.'
+    cls = 'btn btn-sm go' if compact else 'btn go'
+    return (body + f'<textarea name="text" required maxlength="4000" placeholder="{placeholder}">' + e(text)
+            + f'</textarea><button class="{cls}">Send</button></form>')
 
 
 def composer(thread, csrf, choices, mine, *, refused=False, text='', draft=None):
@@ -331,7 +351,9 @@ def composer(thread, csrf, choices, mine, *, refused=False, text='', draft=None)
     if thread['state'] == 'open':
         body += ('<details' + (' open' if mine or refused else '') + '><summary class="btn'
                  + (' go' if mine else '') + '">Reply…</summary>'
-                 + reply_form(thread_id, csrf, text=text, draft=draft, choices=choices) + '</details>')
+                 + quick_chips()
+                 + reply_form(thread_id, csrf, text=text, draft=draft, choices=choices) + '</details>'
+                 + resolve_form(thread_id, csrf, label='Resolve'))
     elif refused:
         body += ('<details open><summary class="btn">Reply…</summary>'
                  '<textarea aria-label="Reply" readonly>' + e(text) + '</textarea></details>')
@@ -455,6 +477,16 @@ async def route(ctx, request, action):
             if action == 'reopen':
                 await board.human_resolve(conn, workspace=ctx.workspace, person=person, thread_id=thread_id)
                 return redirect(path(thread_id))
+            if action == 'resolve':
+                await board.human_resolve(
+                    conn,
+                    workspace=ctx.workspace,
+                    person=person,
+                    thread_id=thread_id,
+                    state='resolved',
+                    summary=values.get('summary', '') or 'Not needed.',
+                )
+                return redirect('/web/board' if values.get('from') == 'board' else path(thread_id))
             if values.get('reply_to') and reply_to is None:
                 return missing(MISSING)
             if reply_to is not None:

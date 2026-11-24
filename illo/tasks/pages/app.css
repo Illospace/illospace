@@ -318,9 +318,49 @@ body.frame{background:transparent; margin:0; min-height:0}
 .f .post{padding:.2rem 0 0}
 .f .post .prose{font-size:.88rem}
 .f .decide form[action$="/reply"]{display:contents}
-.f .decide .in:has(form[action$="/reply"]){display:grid; grid-template-columns:auto 1fr; align-items:center}
+.f .decide .in:has(form[action$="/reply"]){display:grid; grid-template-columns:auto auto 1fr; align-items:center}
+.f .decide .in:has(form[action$="/reply"]) .quick-chips{grid-column:1 / -1}
 .f .decide form[action$="/reply"] textarea{grid-column:1 / -1; margin:0 0 .1rem}
-.f .decide .in:has(form[action$="/reply"])>a{justify-self:end}
+.f .decide .in:has(form[action$="/reply"])>a{justify-self:end; white-space:nowrap}
+.quick-chips{display:flex; flex-wrap:wrap; gap:.35rem; margin:0 0 .45rem}
+.chip-btn{font:inherit; font-size:.76rem; font-weight:600; border-radius:99px; padding:.2rem .68rem; border:1px solid var(--line);
+  background:var(--card); color:var(--ink); cursor:pointer}
+.chip-btn:hover{border-color:var(--ink); background:var(--bg)}
+.btn.btn-sm{font-size:.76rem; padding:.24rem .72rem}
+.btn.btn-quiet{color:var(--soft); background:transparent}
+.btn.btn-quiet:hover{color:var(--ink); border-color:var(--ink)}
+.resolve-form{margin:0}
+/* inline sticky-note actions inside compact thread cards */
+.note-actions{display:flex; flex-wrap:wrap; align-items:flex-start; gap:.4rem; margin:.65rem 0 0; padding-top:.55rem; border-top:1px solid var(--line)}
+.note-actions details.quick-reply{border:0; padding:0; flex:0 1 auto}
+.note-actions details.quick-reply[open]{flex:1 1 100%}
+.note-actions details.quick-reply>summary{list-style:none; display:inline-block}
+.note-actions details.quick-reply>summary::-webkit-details-marker{display:none}
+.note-actions details.quick-reply[open]>summary{border-color:var(--ink); margin-bottom:.45rem}
+.note-actions form[action$="/reply"]{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.4rem; align-items:end; margin:0}
+.note-actions form[action$="/reply"] textarea{min-height:2.4rem; margin:0; padding:.4rem .65rem; font-size:.82rem; border-radius:10px;
+  border:1px solid var(--line); background:var(--bg); color:var(--ink); resize:vertical}
+/* tactile drag handle for sticky notes on the desktop canvas */
+.note-grip{display:none}
+.canvas .note-grip{display:grid; place-items:center; height:1rem; margin:-.55rem -.4rem .25rem; cursor:grab; touch-action:none}
+.canvas #done .f .note-grip{grid-column:1 / -1}
+.canvas .note-grip span{width:2rem; height:3px; border-radius:99px; background:var(--line); transition:background .15s,width .15s}
+.canvas .f:hover .note-grip span{background:var(--soft); width:2.5rem}
+.canvas .f .card-head{cursor:grab}
+.canvas .f{position:relative; z-index:1; will-change:transform}
+.canvas .f.moved{box-shadow:0 2px 6px rgba(0,0,0,.07),0 18px 34px -18px rgba(0,0,0,.36)}
+.canvas .f.dragging{cursor:grabbing; user-select:none; -webkit-user-select:none;
+  box-shadow:0 8px 18px rgba(0,0,0,.14),0 26px 46px -18px rgba(0,0,0,.45)}
+.canvas .f.dragging .note-grip,.canvas .f.dragging .card-head{cursor:grabbing}
+.canvas .world.reset-notes .f{transition:transform .3s cubic-bezier(.2,.7,.2,1)}
+/* SVG connector curves behind sticky notes */
+.board-links{display:none}
+.canvas .board-links{display:block; position:absolute; left:0; top:0; pointer-events:none; overflow:visible; z-index:0}
+.link-curve{fill:none; stroke-width:1.6; stroke-linecap:round}
+.link-curve.link-task{stroke:var(--ink); opacity:.42}
+.link-curve.link-group{stroke:var(--soft); stroke-dasharray:5 5; opacity:.5}
+.link-dot.link-task{fill:var(--ink); opacity:.55}
+.link-dot.link-group{fill:var(--soft); opacity:.6}
 /* the threads column: groups read as quiet captions */
 .group-title{display:flex; align-items:center; gap:.45rem; font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; color:var(--soft);
   font-weight:600; margin:1.35rem .25rem .6rem}
@@ -343,8 +383,8 @@ body.frame{background:transparent; margin:0; min-height:0}
 .canvas .glide .world{transition:transform .45s cubic-bezier(.2,.7,.2,1)}
 .canvas .zoom{display:flex; order:1; gap:.3rem; margin-left:.5rem}
 .zoom .btn{display:grid; place-items:center; width:1.75rem; height:1.75rem; padding:0; font-size:1rem; font-weight:500; line-height:1}
-.zoom [data-zoom="fit"]{width:auto; padding:0 .75rem; font-size:.8rem; font-weight:600}
-@media (prefers-reduced-motion:reduce){.canvas .glide,.canvas .glide .world{transition:none} .pulse.live::after{animation:none}}
+.zoom [data-zoom="fit"],.zoom [data-layout="reset"]{width:auto; padding:0 .75rem; font-size:.8rem; font-weight:600}
+@media (prefers-reduced-motion:reduce){.canvas .glide,.canvas .glide .world,.canvas .world.reset-notes .f{transition:none} .pulse.live::after{animation:none}}
 @media (max-width:47.999rem){
   .board{padding:1rem .6rem 4rem}
   .world{grid-template-columns:minmax(0,1fr); gap:2rem}

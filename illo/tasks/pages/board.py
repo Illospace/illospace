@@ -18,7 +18,7 @@ async def needs(conn, person):
     viewer = tasks.Viewer(person['key'], 'person:' + person['key'], human=True)
     waiting = await tasks.search(conn, viewer=viewer, board='needs')
     asks = await ask_workflow.page_search(conn, person['id'])
-    threads = await all_rows(conn, f"""SELECT b.id,b.title,b.group_key,b.stalled_reason,w.*,count(*) OVER () AS board_total,
+    threads = await all_rows(conn, f"""SELECT b.id,b.title,b.group_key,b.task_id,b.stalled_reason,w.*,count(*) OVER () AS board_total,
         (b.visibility='private' OR EXISTS ({ledger.PRIVATE_TASKS})) AS private,
         COALESCE(w.post_id,(SELECT id FROM board_posts WHERE thread_id=b.id ORDER BY id DESC LIMIT 1)) AS preview_post_id
         FROM board_threads b JOIN LATERAL (
@@ -45,6 +45,20 @@ def age(at):
 
 def title(row):
     return f'<h1><a href="/t/{row["id"]}">' + e(row['title']) + '</a></h1>'
+
+
+NOTE_GRIP = '<div class="note-grip" aria-hidden="true"><span></span></div>'
+
+
+def note_attrs(*, group_key=None, task_id=None, parent_id=None):
+    parts = []
+    if group_key:
+        parts.append(f' data-group="{e(group_key)}"')
+    if task_id:
+        parts.append(f' data-task="{int(task_id)}"')
+    if parent_id:
+        parts.append(f' data-parent="{int(parent_id)}"')
+    return ''.join(parts)
 
 
 async def waiting_frame(ctx, conn, kind, row, person, csrf, labels):
@@ -79,7 +93,9 @@ async def thread_frame(ctx, conn, row, person, csrf, people):
         body += '<ol class="posts">' + await board_thread.post_html(ctx, post, person, people) + '</ol>'
     fixed = row['post_id'] if post and post['kind'] != 'decision_needed' else None
     return (body + '<div class="decide"><div class="in">'
+            + board_thread.quick_chips()
             + board_thread.reply_form(thread_id, csrf, fixed=fixed, from_board=True)
+            + board_thread.resolve_form(thread_id, csrf, from_board=True, label='Not needed')
             + f'<a class="btn" href="{url}">Open the thread</a></div></div>')
 
 
@@ -115,7 +131,7 @@ async def open_threads(conn, person):
     ) ep ON true ORDER BY c.card_order""", {'person_id': person['id']})
 
 
-def thread_card(ctx, row, person, people):
+def thread_card(ctx, row, person, people, csrf):
     now = datetime.now(UTC)
     agent_at = row['agent_at']
     waits = row['wait_name']
@@ -137,13 +153,25 @@ def thread_card(ctx, row, person, people):
     else:
         line = 'Quiet'
     count = row['posts']
-    return (f'<article class="f"><p class="card-head"><span class="pulse {mark}"></span><b>{e(name)}</b>'
+    attrs = note_attrs(group_key=row.get('group_key'), task_id=row.get('task_id'))
+    actions = (
+        '<div class="note-actions">'
+        '<details class="quick-reply"><summary class="btn btn-sm">Reply</summary>'
+        + board_thread.quick_chips()
+        + board_thread.reply_form(row['id'], csrf, from_board=True, compact=True)
+        + '</details>'
+        + board_thread.resolve_form(row['id'], csrf, from_board=True, label='Not needed', compact=True)
+        + '</div>'
+    )
+    return (f'<article class="f"{attrs} id="th{row["id"]}">{NOTE_GRIP}'
+            f'<p class="card-head"><span class="pulse {mark}"></span><b>{e(name)}</b>'
             f'<span>{e(age(row["last_post_at"]))}</span></p>'
             f'<h1><a href="{board_thread.path(row["id"])}">{e(row["title"])}</a></h1>'
-            f'<div class="card-lines"><p>{count} {"post" if count == 1 else "posts"}</p><p>{e(line)}</p></div></article>')
+            f'<div class="card-lines"><p>{count} {"post" if count == 1 else "posts"}</p><p>{e(line)}</p></div>'
+            + actions + '</article>')
 
 
-def threads_column(ctx, threads, person, people):
+def threads_column(ctx, threads, person, people, csrf):
     total, waits = (threads[0]['total'], threads[0]['waits']) if threads else (0, 0)
     line = f'{total} open · {waits} {"waits" if waits == 1 else "wait"} for a person' if total else 'No open thread.'
     body = '<section class="column" id="threads"><h2 class="column-title">Threads</h2><p class="column-line">' + e(line) + '</p>'
@@ -155,7 +183,7 @@ def threads_column(ctx, threads, person, people):
             if grouped and key != previous:
                 name = board_thread.group_title(key) if key else 'Other threads'
                 body += f'<h3 class="group-title">{e(name)}<span>{row["group_count"]}</span></h3>'
-            body += thread_card(ctx, row, person, people)
+            body += thread_card(ctx, row, person, people, csrf)
             previous = key
         if total > 30:
             body += f'<p class="column-more">{total - 30} more open threads.</p>'
@@ -200,7 +228,10 @@ async def done_frame(ctx, conn, row, person):
 
 def column(key, label, line, frames, total, *, attributes=''):
     body = f'<section class="column" id="{key}"{attributes}><h2 class="column-title">{label}</h2><p class="column-line">'
-    body += e(line) + '</p>' + ''.join(f'<article class="f" id="{key}">{body}</article>' for key, body in frames)
+    body += e(line) + '</p>' + ''.join(
+        f'<article class="f"{extra} id="{frame_key}">{NOTE_GRIP}{frame_body}</article>'
+        for frame_key, frame_body, extra in frames
+    )
     if total > 30:
         body += f'<p class="column-more">{total - 30} more. Open the task list in Slack to see them.</p>'
     return body + '</section>'
@@ -218,12 +249,24 @@ async def page(ctx, conn, person, token, *, markers=None):
     extra = '<span>' + e(date) + '</span><span class="zoom">'
     for action, label, text in [('out', 'Zoom out', '−'), ('in', 'Zoom in', '+'), ('fit', 'Show all', 'Fit')]:
         extra += f'<button class="btn" type="button" data-zoom="{action}" aria-label="{label}">{text}</button>'
+    extra += '<button class="btn" type="button" data-layout="reset" aria-label="Reset note layout">Reset</button>'
     extra += '</span>'
     body = render.top('Board', person, csrf, extra=extra, board=True)
     body += '<div class="board" data-viewer="' + e(person['key']) + '"><div class="world">'
     line = (f'{total} {"thing" if total == 1 else "things"} · the oldest waits {age(waiting[0][0])}'
             if waiting else 'Nothing waits for you.')
-    frames = [(f'{kind}{row["id"]}', await waiting_frame(ctx, conn, kind, row, person, csrf, labels)) for _, kind, row in waiting]
+    frames = [
+        (
+            f'{kind}{row["id"]}',
+            await waiting_frame(ctx, conn, kind, row, person, csrf, labels),
+            note_attrs(
+                group_key=row.get('group_key') if kind == 'b' else None,
+                task_id=row.get('task_id') if kind == 'b' else None,
+                parent_id=row.get('parent_id') if kind == 't' else None,
+            ),
+        )
+        for _, kind, row in waiting
+    ]
     attrs = ''
     marker_thread = board_thread.bigint(markers.get('sent_thread')) if markers else None
     if marker_thread and (draft := await board_thread.sent_draft(conn, marker_thread, person, markers.get('sent'))):
@@ -231,12 +274,18 @@ async def page(ctx, conn, person, token, *, markers=None):
     body += column('needs', 'Needs you', line, frames, total, attributes=attrs)
     n, m = (work[0]['board_agents'], work[0]['board_people']) if work else (0, 0)
     line = f'Agents hold {n} {"task" if n == 1 else "tasks"}, people hold {m}' if work else 'No task is in work.'
-    frames = [(f't{row["id"]}', await work_frame(ctx, conn, row, person, viewer)) for row in work]
+    frames = [
+        (f't{row["id"]}', await work_frame(ctx, conn, row, person, viewer), note_attrs(parent_id=row.get('parent_id')))
+        for row in work
+    ]
     body += column('work', 'In work', line, frames, work[0]['board_total'] if work else 0)
-    body += threads_column(ctx, threads, person, labels)
+    body += threads_column(ctx, threads, person, labels, csrf)
     total = done[0]['board_total'] if done else 0
     line = f'{total} {"task" if total == 1 else "tasks"} in the last 24 hours' if done else 'Nothing closed in the last 24 hours.'
-    frames = [(f't{row["id"]}', await done_frame(ctx, conn, row, person)) for row in done]
+    frames = [
+        (f't{row["id"]}', await done_frame(ctx, conn, row, person), note_attrs(parent_id=row.get('parent_id')))
+        for row in done
+    ]
     body += column('done', 'Done today', line, frames, total) + '</div></div>'
     body += '<script src="/web/board.js" defer></script>'
     return render.document(body, title='Board', body_class='board-page')
