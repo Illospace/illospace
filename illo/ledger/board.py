@@ -14,9 +14,10 @@ from pydantic import Field, TypeAdapter, ValidationError, field_validator
 from illo.db import all_rows, one
 from illo.ledger import agent_oauth, asks, audit, mcp
 from illo.tasks.access import token_viewer
+from illo.tasks.pages import outside
 from illo.tasks.pages.markdown import safe_url
-from illo.tasks.pages.schema import Checks, TextPreview
-from illo.tools.registry import Arguments
+from illo.tasks.pages.schema import Checks, Image, TextPreview
+from illo.tools.registry import Arguments, Refusal
 
 NOT_FOUND = "The board item was not found."
 POST_KINDS = Literal["message", "finding", "question", "answer", "handoff", "decision_needed"]
@@ -74,7 +75,7 @@ class Links(Arguments):
     items: list[Link] = Field(min_length=1, max_length=12)
 
 
-Block = Annotated[TextPreview | Checks | Links, Field(discriminator="kind")]
+Block = Annotated[TextPreview | Checks | Links | Image, Field(discriminator="kind")]
 _BLOCKS = TypeAdapter(list[Block])
 
 
@@ -156,11 +157,11 @@ def canonical_ticket(workspace, value):
     return f"https://github.com/{name}/issues/{number}"
 
 
-async def _task(conn, reader, task_id, ticket_url):
+async def _task(conn, reader, task_id, ticket_url, *, lock=True):
     mapped = []
     if ticket_url:
         mapped = await all_rows(conn, f"""SELECT t.* FROM task_tickets tt
-            JOIN tasks t ON t.id=tt.task_id WHERE {TICKET_MATCH}=%s FOR SHARE OF t""", (ticket_url,))
+            JOIN tasks t ON t.id=tt.task_id WHERE {TICKET_MATCH}=%s""" + (" FOR SHARE OF t" if lock else ""), (ticket_url,))
         if any(t["visibility"] == "private" and t["owner_person_id"] != reader.person_id
                for t in mapped):
             raise ValueError(NOT_FOUND)
@@ -171,7 +172,7 @@ async def _task(conn, reader, task_id, ticket_url):
         return mapped[0]
     if task_id is not None:
         task = await one(conn, """SELECT * FROM tasks
-            WHERE id=%s AND (visibility='team' OR owner_person_id=%s) FOR SHARE""",
+            WHERE id=%s AND (visibility='team' OR owner_person_id=%s)""" + (" FOR SHARE" if lock else ""),
             (task_id, reader.person_id))
         if not task:
             raise ValueError(NOT_FOUND)
@@ -180,35 +181,39 @@ async def _task(conn, reader, task_id, ticket_url):
 
 
 async def _thread(conn, params, *, lock=False):
-    suffix = " FOR UPDATE OF b" if lock else ""
+    if lock and not await one(conn, f"""SELECT b.id FROM board_threads b
+        WHERE b.id=%(thread_id)s AND {VISIBLE} FOR UPDATE OF b""", params):
+        raise ValueError(NOT_FOUND)
     row = await one(conn, f"""SELECT b.*, EXISTS ({PRIVATE_TASKS}) AS private_task
-        FROM board_threads b WHERE b.id=%(thread_id)s AND {VISIBLE}{suffix}""", params)
+        FROM board_threads b WHERE b.id=%(thread_id)s AND {VISIBLE}""", params)
     if not row:
         raise ValueError(NOT_FOUND)
     return row
 
 
-async def _open_thread(conn, reader, title, visibility, task_id, ticket_url):
-    owner = reader.person_id if visibility == "private" else None
-    args = {**reader.params(), "title": title, "actor": reader.actor, "visibility": visibility,
-            "owner": owner, "task_id": task_id, "ticket": ticket_url}
+async def _matching_thread(conn, args, *, lock=False):
+    if args["task_id"] is None and args["ticket"] is None:
+        return None
+    row = await one(conn, f"""SELECT b.*, ({VISIBLE}) AS visible,
+            EXISTS ({PRIVATE_TASKS}) AS private_task
+        FROM board_threads b WHERE b.state='open' AND b.visibility=%(visibility)s
+          AND (b.visibility='team' OR b.owner_person_id=%(owner)s)
+          AND (b.task_id=%(task_id)s OR b.ticket_url=%(ticket)s OR (
+              b.task_id IS NULL AND b.ticket_url IN (
+                SELECT {TICKET_MATCH} FROM task_tickets tt WHERE tt.task_id=%(task_id)s
+              )))
+        ORDER BY (b.task_id=%(task_id)s) DESC NULLS LAST,
+          (b.ticket_url=%(ticket)s) DESC NULLS LAST,b.id LIMIT 1"""
+        + (" FOR UPDATE OF b" if lock else ""), args)
+    if row and not row["visible"]:
+        raise ValueError(NOT_FOUND)
+    return row
+
+
+async def _open_thread(conn, args):
     while True:
-        if task_id is not None or ticket_url is not None:
-            row = await one(conn, f"""SELECT b.*, ({VISIBLE}) AS visible,
-                    EXISTS ({PRIVATE_TASKS}) AS private_task
-                FROM board_threads b WHERE b.state='open' AND b.visibility=%(visibility)s
-                  AND (b.visibility='team' OR b.owner_person_id=%(owner)s)
-                  AND (b.task_id=%(task_id)s OR b.ticket_url=%(ticket)s OR (
-                      b.task_id IS NULL AND b.ticket_url IN (
-                        SELECT {TICKET_MATCH} FROM task_tickets tt WHERE tt.task_id=%(task_id)s
-                      )))
-                ORDER BY (b.task_id=%(task_id)s) DESC NULLS LAST,
-                  (b.ticket_url=%(ticket)s) DESC NULLS LAST,b.id LIMIT 1 FOR UPDATE OF b""",
-                args)
-            if row:
-                if not row["visible"]:
-                    raise ValueError(NOT_FOUND)
-                return row
+        if row := await _matching_thread(conn, args, lock=True):
+            return await _thread(conn, {**args, "thread_id": row["id"]})
         row = await one(conn, """INSERT INTO board_threads
             (title,visibility,owner_person_id,created_by,task_id,ticket_url)
             VALUES (%(title)s,%(visibility)s,%(owner)s,%(actor)s,%(task_id)s,%(ticket)s)
@@ -253,14 +258,116 @@ def _clean_hint(value):
     return "".join(c for c in value if not unicodedata.category(c).startswith("C")).strip()[:80]
 
 
+def reject_preview_image(blocks):
+    if isinstance(blocks, (list, tuple)) and any(
+        isinstance(block, dict) and block.get("kind") == "preview" and block.get("image") is not None
+        for block in blocks
+    ):
+        raise Refusal("Put the picture in its own image block.")
+    return blocks
+
+
 def _safe_blocks(blocks):
+    reject_preview_image(blocks)
     try:
         clean = [block.model_dump() for block in _BLOCKS.validate_python(blocks)]
     except ValidationError:
-        raise ValueError("Use only text preview, checks, and links blocks.") from None
+        raise ValueError("Use only text preview, checks, links, and image blocks.") from None
+    if len(clean) > 6:
+        raise ValueError("Use at most six blocks.")
+    if sum(block["kind"] == "image" for block in clean) > 4:
+        raise ValueError("Use at most four pictures.")
     if len(json.dumps(clean).encode()) > 32 * 1024:
         raise ValueError("Board blocks must fit in 32 KB.")
     return clean
+
+
+def _request_hash(request):
+    # The source reference selects the receipt. It has never been part of the request digest.
+    body = {key: value for key, value in request.items() if key != "source_ref"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+async def _post_thread(conn, workspace, reader, request, *, lock=False):
+    thread_id = request["thread_id"]
+    title, visibility = request["title"], request["visibility"]
+    task_id, ticket = request["task_id"], request["ticket_url"]
+    if thread_id is not None:
+        if task_id is not None or ticket is not None or title is not None:
+            raise ValueError("Use thread_id by itself to select an existing thread.")
+        params = {**reader.params(), "thread_id": thread_id}
+        thread = await _thread(conn, params, lock=lock)
+    else:
+        ticket = canonical_ticket(workspace, ticket) if ticket is not None else None
+        task = await _task(conn, reader, task_id, ticket, lock=lock)
+        if task and task["visibility"] == "private":
+            visibility = "private"
+        if not (title or task or ticket):
+            raise ValueError("Give a title, task ID, or ticket URL for the thread.")
+        task_id = task["id"] if task else None
+        args = {**reader.params(), "title": title or (task["title"] if task else ticket)[:200],
+                "actor": reader.actor, "visibility": visibility or "team",
+                "owner": reader.person_id if visibility == "private" else None,
+                "task_id": task_id, "ticket": ticket}
+        thread = await (_open_thread(conn, args) if lock else _matching_thread(conn, args))
+    private = visibility == "private"
+    if thread:
+        private = thread["visibility"] == "private" or thread.get("private_task", False)
+        if visibility == "private" and not private:
+            raise ValueError("Use a private thread for a private post.")
+        if thread["state"] != "open":
+            raise ValueError("The thread is closed.")
+    if reply_to := request["reply_to_post_id"]:
+        if not thread:
+            raise ValueError(NOT_FOUND)
+        await _require_posts(conn, reader, [reply_to], thread["id"])
+    return thread, private, task_id, ticket
+
+
+def _at_turn_cap(workspace, thread):
+    return thread and thread["consecutive_agent_posts"] >= workspace.config.board.max_consecutive_agent_posts
+
+
+async def preflight_post_images(conn, workspace, token, request, blocks):
+    reader = await _reader(conn, workspace, token)
+    source_ref = request["source_ref"]
+    if source_ref is not None:
+        replay = await _replay(conn, reader, source_ref, _request_hash(request))
+        if replay:
+            return replay, False
+    await _check_limit(conn, reader)
+    thread, private, _, _ = await _post_thread(conn, workspace, reader, request)
+    if _at_turn_cap(workspace, thread):
+        return None, None
+    recipients = await _recipients(conn, workspace, reader, request["mentions"], private=private)
+    _decision_fields(request, recipients)
+    count = 0
+    for block in blocks:
+        if block["kind"] != "image":
+            continue
+        image = block["image"]
+        if "repo" in image:
+            if image["repo"] not in workspace.config.board.shareable_image_repos:
+                raise ValueError("Pictures from this repository cannot go on the board. Use a public HTTPS picture.")
+            count += 1
+        elif workspace.config.pages.outside_images:
+            count += 1
+    allowed = True
+    for _ in range(count):
+        allowed = await agent_oauth.limit(conn, "board_image_fetch", str(reader.token_id), 20) and allowed
+    return None, allowed
+
+
+def _decision_fields(request, recipients):
+    if request["kind"] != "decision_needed":
+        return None
+    people = [person for target, person in recipients.items() if target.startswith("person:")]
+    question, options, recommended = (request[key] for key in ("question", "options", "recommended"))
+    if len(people) != 1 or not question or not 1 <= len(question) <= 240:
+        raise ValueError("Give one person mention and a question of up to 240 characters.")
+    if not options or not 2 <= len(options) <= 5 or not recommended:
+        raise ValueError("Give two to five options and a recommended option ID.")
+    return people[0]
 
 
 def _receipt(row):
@@ -284,12 +391,12 @@ async def _replay(conn, reader, source_ref, request_hash):
 async def post(conn, *, workspace, token, text, kind="message", thread_id=None, title=None,
                task_id=None, ticket_url=None, visibility=None, reply_to_post_id=None,
                source_ref=None, blocks=(), mentions=(), question=None, options=None,
-               recommended=None, client_name="", model=""):
+               recommended=None, client_name="", model="", prepared=None):
     """Append one agent post. The caller commits a turn cap outcome."""
     from illo.board.wake import enqueue_for_post
 
+    await mcp.lock_token(conn, token["id"], "board")
     reader = await _reader(conn, workspace, token)
-    await mcp.lock_token(conn, reader.token_id, "board")
     request = {
         "text": text, "kind": kind, "thread_id": thread_id, "title": title,
         "task_id": task_id, "ticket_url": ticket_url, "visibility": visibility,
@@ -299,37 +406,19 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
     }
     request_hash = None
     if source_ref is not None:
-        request_hash = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+        request_hash = _request_hash(request)
         replay = await _replay(conn, reader, source_ref, request_hash)
         if replay:
+            if prepared is not None:
+                await _thread(conn, {**reader.params(), "thread_id": replay["thread_id"]}, lock=True)
             return replay
     await _check_limit(conn, reader)
 
     if kind == "decision":
         raise ValueError("A person must answer the linked ask.")
     blocks = _safe_blocks(blocks)
-    if thread_id is not None:
-        thread = await _thread(conn, {**reader.params(), "thread_id": thread_id}, lock=True)
-        if task_id is not None or ticket_url is not None or title is not None:
-            raise ValueError("Use thread_id by itself to select an existing thread.")
-    else:
-        ticket_url = canonical_ticket(workspace, ticket_url) if ticket_url is not None else None
-        task = await _task(conn, reader, task_id, ticket_url)
-        if task and task["visibility"] == "private":
-            visibility = "private"
-        if not (title or task or ticket_url):
-            raise ValueError("Give a title, task ID, or ticket URL for the thread.")
-        task_id = task["id"] if task else None
-        thread = await _open_thread(conn, reader, title or (task["title"] if task else ticket_url)[:200],
-                                    visibility or "team", task_id, ticket_url)
-    private = thread["visibility"] == "private" or thread.get("private_task", False)
-    if visibility == "private" and not private:
-        raise ValueError("Use a private thread for a private post.")
-    if thread["state"] != "open":
-        raise ValueError("The thread is closed.")
-    if reply_to_post_id is not None:
-        await _require_posts(conn, reader, [reply_to_post_id], thread["id"])
-    if thread["consecutive_agent_posts"] >= workspace.config.board.max_consecutive_agent_posts:
+    thread, private, task_id, ticket_url = await _post_thread(conn, workspace, reader, request, lock=True)
+    if _at_turn_cap(workspace, thread):
         if thread["stalled_reason"] is None:
             await conn.execute("""UPDATE board_threads SET stalled_reason='turn_cap',
                 stalled_at=statement_timestamp(),updated_at=statement_timestamp()
@@ -337,17 +426,18 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
             await _record_mutation(conn, reader)
         return TurnCapReached(thread["id"])
 
+    if prepared is not None:
+        blocks, files = prepared
+    elif any(block["kind"] == "image" for block in blocks):
+        raise ValueError("The thread changed. Try the post again.")
+    else:
+        files = ()
     if thread_id is None:
         await _attach_links(conn, thread, task_id, ticket_url)
     recipients = await _recipients(conn, workspace, reader, mentions, private=private)
     ask = None
-    if kind == "decision_needed":
-        people = [person for target, person in recipients.items() if target.startswith("person:")]
-        if len(people) != 1 or not question or not 1 <= len(question) <= 240:
-            raise ValueError("Give one person mention and a question of up to 240 characters.")
-        if not options or not 2 <= len(options) <= 5 or not recommended:
-            raise ValueError("Give two to five options and a recommended option ID.")
-        ask = await asks.create(conn, owner_person_id=people[0], question=question, options=options,
+    if (owner := _decision_fields(request, recipients)) is not None:
+        ask = await asks.create(conn, owner_person_id=owner, question=question, options=options,
                                 recommended_option=recommended, requester_token_id=reader.token_id,
                                 requester_person_id=reader.person_id, allow_rule=False)
     provenance = {"agent_key": reader.agent, "person_key": reader.person, "token_label": reader.label}
@@ -375,6 +465,8 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
         WHERE id=%s""", (thread["id"],))
     await enqueue_for_post(conn, workspace, thread=thread, post=row)
     await _record_mutation(conn, reader)
+    if files:
+        await outside.replace(conn, files, board_post_id=row["id"])
     return _receipt(row)
 
 
@@ -402,6 +494,26 @@ async def _recent(conn, workspace, reader, *, state, task_id=None, ticket_url=No
     return [await _thread_result_with_episode(conn, row, workspace) for row in rows]
 
 
+_IMAGE_FIELDS = {"image", "image_link", "repo", "path", "ref", "sha", "mirror", "mirror_path", "bytes", "data"}
+
+
+def _redact_blocks(value):
+    if isinstance(value, list):
+        return [_redact_blocks(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_blocks(item) for key, item in value.items() if key not in _IMAGE_FIELDS}
+    return value
+
+
+def _read_block(block, stored):
+    if block["kind"] != "image":
+        return _redact_blocks(block)
+    result = {"kind": "image", "alt": block.get("alt", ""), "caption": block.get("caption", ""), "stored": stored}
+    if block.get("image_link") and (link := block.get("image", {}).get("url")) and safe_url(link) and link.startswith("https://"):
+        result["link"] = link
+    return result
+
+
 async def read(conn, *, workspace, token, thread_id=None, after_post_id=0, state="open",
                task_id=None, ticket_url=None, query=None, group_key=None, limit=50):
     reader = await _reader(conn, workspace, token)
@@ -413,7 +525,8 @@ async def read(conn, *, workspace, token, thread_id=None, after_post_id=0, state
     row = await one(conn, f"""SELECT b.*,ARRAY({_OPEN_DECISIONS} ORDER BY d.id) AS open_decision_ids,
         ARRAY(SELECT row_to_json(page) FROM (
             SELECT p.id,p.thread_id,p.at,p.actor,p.is_human,p.provenance,p.kind,p.text,
-                p.blocks,p.mentions,p.reply_to_post_id,p.ask_id
+                p.blocks,p.mentions,p.reply_to_post_id,p.ask_id,
+                ARRAY(SELECT f.position FROM page_files f WHERE f.board_post_id=p.id) AS file_positions
             FROM board_posts p WHERE p.thread_id=b.id AND p.id>%(after)s
             ORDER BY p.id LIMIT %(limit)s
         ) page) AS posts
@@ -424,6 +537,9 @@ async def read(conn, *, workspace, token, thread_id=None, after_post_id=0, state
 
     people = {p["key"]: p for p in await all_rows(conn, "SELECT key,name FROM people")}
     for post in row["posts"]:
+        positions = set(post.pop("file_positions"))
+        post["blocks"] = [_read_block(block, position in positions)
+                          for position, block in enumerate(post["blocks"])]
         post["actor_label"] = asdict(actor_label(workspace, people, post))
     return {"thread": await _thread_result_with_episode(conn, row, workspace), "posts": row["posts"],
             "open_decision_ids": row["open_decision_ids"]}

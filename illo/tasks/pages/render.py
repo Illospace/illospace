@@ -79,31 +79,27 @@ async def block_html(ctx, file_base, position, block, person, *, files=(), repo_
     kind = block['kind']
     heading = '<h2>' + e(block['title']) + '</h2>' if block.get('title') else ''
     image = ''
-    if picture := block.get('image'):
-        available = False
-        if 'url' in picture:
-            if position in files:
-                available = True
-            elif block.get('image_link'):
-                from illo.asks import proof
+    available = position in files
+    picture = block.get('image')
+    if not available and picture:
+        if 'url' in picture and block.get('image_link'):
+            from illo.asks import proof
 
-                address = str(normalize_url(picture['url']))
-                _, name = proof.address(address) or (address, address)
-                if not name.startswith('Picture: '):
-                    name = 'Picture: ' + unquote(urlsplit(address).path.rsplit('/', 1)[-1])
-                image = markdown.link(address, name)
-        elif not repo_images:
-            available = position in files
-        else:
+            address = str(normalize_url(picture['url']))
+            _, name = proof.address(address) or (address, address)
+            if not name.startswith('Picture: '):
+                name = 'Picture: ' + unquote(urlsplit(address).path.rsplit('/', 1)[-1])
+            image = markdown.link(address, name)
+        elif 'url' not in picture and repo_images:
             try:
                 await images.read(ctx, picture, data=False)
                 available = True
             except ValueError:
                 pass
-        if available:
-            image = f'<img src="{e(file_base)}/{position}" alt="{e(block.get("alt", ""))}">'
-        elif not image:
-            image = '<div class="missing">The picture is not available.</div>'
+    if available and (kind == 'image' or picture):
+        image = f'<img src="{e(file_base)}/{position}" alt="{e(block.get("alt", ""))}">'
+    elif not image and (kind == 'image' or picture):
+        image = '<div class="missing">The picture is not available.</div>'
     if kind == 'image':
         caption = '<figcaption>' + e(block['caption']) + '</figcaption>' if block.get('caption') else ''
         return '<figure class="block image">' + heading + image + caption + '</figure>'
@@ -125,6 +121,11 @@ async def block_html(ctx, file_base, position, block, person, *, files=(), repo_
                      + {'yes': '✓', 'no': '!', 'open': '?'}[state] + '</span><div>'
                      + e(item['claim']) + '<small>' + source + e(checked) + '</small></div></li>')
         body += '</ul>'
+    elif kind == 'links':
+        body = '<ul class="links">' + ''.join(
+            '<li>' + markdown.link(item['url'], item.get('title') or item['url']) + '</li>'
+            for item in block['items']) + '</ul>'
+        return '<section class="block links">' + heading + body + '</section>'
     else:
         # A progress element needs no style attribute and no script, and its text stays readable on a phone.
         maximum = max((r['value'] for r in block['rows']), default=0) or 1

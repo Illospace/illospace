@@ -3,9 +3,10 @@
 from functools import partial
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from illo.ledger import board
+from illo.tasks.pages import outside
 
 from .schemas import Arguments, AskCreate, Option
 
@@ -48,13 +49,15 @@ class Post(Arguments):
     visibility: Literal["team", "private"] | None = None
     reply_to_post_id: Id | None = None
     source_ref: str | None = Field(default=None, min_length=1, max_length=128)
-    blocks: list[board.Block] = Field(default_factory=list)
+    blocks: list[board.Block] = Field(default_factory=list, max_length=6)
     mentions: list[str] = Field(default_factory=list, max_length=11)
     question: str | None = Field(default=None, min_length=1, max_length=240)
     options: list[Option] | None = Field(default=None, min_length=2, max_length=5)
     recommended: str | None = None
     client_name: str = ""
     model: str = ""
+
+    _preview_images = field_validator("blocks", mode="before")(board.reject_preview_image)
 
     @model_validator(mode="after")
     def decision_fields(self):
@@ -81,9 +84,35 @@ async def handle(action, ctx, args):
     return await action(ctx.conn, workspace=ctx.app.workspace, token=ctx.token, **args)
 
 
+async def post(ctx, args):
+    blocks = board._safe_blocks(args["blocks"])
+    prepared = None
+    if any(block["kind"] == "image" for block in blocks):
+        # The endpoint has performed a token lookup. End that read transaction before
+        # the rate reservation so that it can commit before any network or mirror I/O.
+        await ctx.conn.commit()
+        async with ctx.conn.transaction():
+            replay, allowed = await board.preflight_post_images(
+                ctx.conn, ctx.app.workspace, ctx.token, args, blocks)
+        if replay:
+            return replay
+        if allowed is False:
+            raise ValueError("This token has reached its limit of 20 picture fetch attempts per hour.")
+        if allowed:
+            files = await outside.prepare(ctx.app, blocks, store_refs=True)
+            for block in blocks:
+                if block["kind"] == "image" and not block.get("image_link"):
+                    del block["image"]
+            prepared = (blocks, files)
+    else:
+        prepared = (blocks, await outside.prepare(ctx.app, blocks))
+    async with ctx.conn.transaction():
+        return await board.post(ctx.conn, workspace=ctx.app.workspace, token=ctx.token, prepared=prepared, **args)
+
+
 def tools(factory):
     return [
-        factory(name, schema, partial(handle, action), risk, description)
+        factory(name, schema, post if name == "board_post" else partial(handle, action), risk, description)
         for name, schema, action, risk, description in (
             ("board_inbox", Inbox, board.inbox, "read",
              "Read your unread board mentions. Optionally include recent open threads you can see."),

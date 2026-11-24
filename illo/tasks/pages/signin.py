@@ -26,7 +26,7 @@ LINKS_PER_HOUR = 20
 
 def next_path(value):
     # Only local pages and board frame targets can follow sign-in.
-    return value if re.fullmatch(r"(?:/(?:t|web/a)/[1-9][0-9]*/?|/web/board(?:#[ta][1-9][0-9]*|/t/[1-9][0-9]{0,18})?)", value or "") else ""
+    return value if re.fullmatch(r"(?:/(?:t|web/a)/[1-9][0-9]*/?|/web/board(?:#(?:[ta][1-9][0-9]*|b[1-9][0-9]{0,18})|/t/[1-9][0-9]{0,18})?)", value or "") else ""
 
 
 def pairing_line(handle):
@@ -58,9 +58,12 @@ async def request(conn, handle, *, lock=False):
         WHERE browser_hash=%s""" + (" FOR UPDATE" if lock else ""), (digest(handle),))
 
 
-async def session(conn, token):
+async def session(conn, token, *, touch=True):
     if not token or len(token) > 100:
         return None
+    if not touch:
+        return await one(conn, """SELECT p.*,s.token_hash FROM web_sessions s JOIN people p ON p.id=s.person_id
+            WHERE s.token_hash=%s AND p.active AND s.expires_at>clock_timestamp()""", (digest(token),))
     row = await one(conn, """UPDATE web_sessions s SET last_seen_at=clock_timestamp()
         FROM people p WHERE s.token_hash=%s AND s.person_id=p.id AND p.active
         AND s.expires_at>clock_timestamp() RETURNING p.*,s.token_hash""", (digest(token),))
@@ -148,14 +151,14 @@ async def action(ctx, person, action):
             blocks=[{"type": "section", "text": {"type": "plain_text", "text": text}}])
 
 
-async def link(conn, ctx, person, task_id, *, ask=False, board=False):
+async def link(conn, ctx, person, task_id, *, ask=False, board_thread=False):
     """Make a key that signs in one browser as this person. The person asked for it in Slack."""
     if not await limit(conn, "web_link", str(person["id"]), LINKS_PER_HOUR):
         return None
     # The click in Slack is the approval, so the row starts as approved. The key works one time,
     # in the same exchange as the handle of a browser that got an approval. No pairing code matches it.
     key = secrets.token_urlsafe(32)
-    destination = (f"/web/board/t/{task_id}" if board
+    destination = (f"/web/board/t/{task_id}" if board_thread
                    else await person_path(conn, ctx.workspace, person, task_id, ask=ask))
     await conn.execute("""INSERT INTO web_signins(pairing_hash,browser_hash,next_path,person_id,paired_at,decision)
         VALUES (%s,%s,%s,%s,clock_timestamp(),'approved')""",
@@ -191,7 +194,7 @@ async def open_action(ctx, person, action):
                        else await tasks.get(conn, task_id, viewer=viewer))
         if not visible:
             return
-        key = await link(conn, ctx, person, task_id, ask=ask, board=board_page)
+        key = await link(conn, ctx, person, task_id, ask=ask, board_thread=board_page)
     address = base_url(ctx) + "/web/signin?" + urlencode({"key": key or ""})
     kind = "board thread" if board_page else "request" if ask else "task"
     label = f"Open board thread {task_id}" if board_page else f"Open the page of {kind} {task_id}"

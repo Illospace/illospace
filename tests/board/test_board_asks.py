@@ -191,3 +191,22 @@ async def test_card_m1_answer_web_reply_and_apply_share_one_lock_order(coordinat
             posts = await all_rows(conn, "SELECT kind FROM board_posts WHERE thread_id=%s AND is_human",
                                    (q["thread_id"],))
             assert posts
+
+
+async def test_answer_escalated_card_from_its_board_thread(coordinator_ctx, slack, client, http):
+    ctx = coordinator_ctx
+    question = await queue(ctx, client, "card", summary=True)
+    await escalate.send_due(ctx)
+    row = await escalation(ctx)
+    await login(ctx, http, "ada")
+    thread_id = question["thread_id"]
+    path = f"/web/board/t/{thread_id}"
+    page = await http.get(path)
+    assert page.status_code == 200
+    assert f'name="back" value="thread:{thread_id}"' in page.text
+    values = {**fields(page), "back": f"thread:{thread_id}", "text": "Use the faster option."}
+    response = await http.post(f"/web/a/{row['ask_id']}/answer", data=values)
+    assert response.status_code == 303
+    answered = await escalation(ctx)
+    assert answered["state"] == "answered"
+    assert response.headers["location"] == f"{path}#post-{answered['answer_post_id']}"

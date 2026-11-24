@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import httpx
 
 from illo.connectors.addresses import PublicTransport, public_address
+from illo.connectors.http import private_http_logs
 from illo.db import all_rows, one
 from illo.tasks.pages import images
 from illo.tools.registry import Refusal
@@ -14,6 +15,7 @@ from illo.tools.web import normalize_url
 
 MAX_BYTES = 5 * 1024 * 1024
 STORE_BYTES = 500 * 1024 * 1024
+BOARD_STORE_BYTES = 200 * 1024 * 1024
 TIMEOUT = 10
 FETCHES = asyncio.Semaphore(2)
 ADDRESS = 'The address is not a public HTTPS address.'
@@ -82,6 +84,11 @@ def dimensions(data, kind):
 
 
 async def fetch(value):
+    with private_http_logs():
+        return await _fetch(value)
+
+
+async def _fetch(value):
     async with FETCHES:
         try:
             async with asyncio.timeout(TIMEOUT):
@@ -151,33 +158,44 @@ async def prepare(ctx, blocks, *, store_refs=False, link_only=False):
                 block['image'], data, kind = await images.read(ctx, image)
                 if store_refs:
                     files.append((position, kind, data))
-        for item in block.get('items', []):
-            if item['state'] != 'open' and item['checked_at'] is None:
-                item['checked_at'] = datetime.now(UTC).isoformat()
+        if block['kind'] == 'checks':
+            for item in block['items']:
+                if item['state'] != 'open' and item['checked_at'] is None:
+                    item['checked_at'] = datetime.now(UTC).isoformat()
     return files
 
 
-async def replace(conn, files, *, task_id=None, ask_id=None):
-    await conn.execute('DELETE FROM page_files WHERE task_id=%s OR ask_id=%s', (task_id, ask_id))
+_OWNER = '(task_id=%s OR ask_id=%s OR board_post_id=%s)'
+
+
+async def replace(conn, files, *, task_id=None, ask_id=None, board_post_id=None):
+    owner = (task_id, ask_id, board_post_id)
     if files:
         # One lock for the store, so two writes cannot pass the limit together.
         await conn.execute('SELECT pg_advisory_xact_lock(%s)', (LOCK,))
-        used = await one(conn, 'SELECT COALESCE(sum(octet_length(data)),0) AS bytes FROM page_files')
-        if used['bytes'] + sum(len(data) for _, _, data in files) > STORE_BYTES:
+    await conn.execute('DELETE FROM page_files WHERE ' + _OWNER, owner)
+    if files:
+        used = await one(conn, """SELECT COALESCE(sum(octet_length(data)),0) AS bytes,
+            COALESCE(sum(octet_length(data)) FILTER (WHERE board_post_id IS NOT NULL),0) AS board_bytes
+            FROM page_files""")
+        size = sum(len(data) for _, _, data in files)
+        if used['bytes'] + size > STORE_BYTES or (
+            board_post_id is not None and used['board_bytes'] + size > BOARD_STORE_BYTES
+        ):
             raise refusal(files[0][0], FULL)
         for position, kind, data in files:
-            await conn.execute('INSERT INTO page_files(task_id,ask_id,position,media_type,data) VALUES (%s,%s,%s,%s,%s)',
-                               (task_id, ask_id, position, kind, data))
+            await conn.execute("""INSERT INTO page_files(task_id,ask_id,board_post_id,position,media_type,data)
+                VALUES (%s,%s,%s,%s,%s,%s)""", (*owner, position, kind, data))
 
 
-async def positions(conn, *, task_id=None, ask_id=None):
-    return {row['position'] for row in await all_rows(conn,
-            'SELECT position FROM page_files WHERE task_id=%s OR ask_id=%s', (task_id, ask_id))}
+async def positions(conn, *, task_id=None, ask_id=None, board_post_id=None):
+    return {row['position'] for row in await all_rows(conn, 'SELECT position FROM page_files WHERE ' + _OWNER,
+                                                     (task_id, ask_id, board_post_id))}
 
 
-async def read(conn, position, *, task_id=None, ask_id=None):
-    return await one(conn, 'SELECT data,media_type FROM page_files WHERE position=%s AND (task_id=%s OR ask_id=%s)',
-                     (position, task_id, ask_id))
+async def read(conn, position, *, task_id=None, ask_id=None, board_post_id=None):
+    return await one(conn, 'SELECT data,media_type FROM page_files WHERE position=%s AND ' + _OWNER,
+                     (position, task_id, ask_id, board_post_id))
 
 
 async def cleanup(ctx):
@@ -187,3 +205,12 @@ async def cleanup(ctx):
                     AND a.created_at<now()-interval '90 days') OR
             EXISTS (SELECT 1 FROM tasks t WHERE t.id=f.task_id AND t.state IN ('done','cancelled')
                     AND t.updated_at<now()-interval '90 days')""")
+        await conn.execute("""WITH expired AS MATERIALIZED (
+            SELECT b.id FROM board_threads b WHERE b.state IN ('resolved', 'archived')
+                AND b.closed_at < now()-interval '90 days'
+                AND EXISTS (SELECT 1 FROM board_posts p JOIN page_files f ON f.board_post_id=p.id
+                            WHERE p.thread_id=b.id)
+            ORDER BY b.id FOR UPDATE OF b SKIP LOCKED
+        )
+        DELETE FROM page_files f USING board_posts p, expired b
+        WHERE f.board_post_id=p.id AND p.thread_id=b.id""")

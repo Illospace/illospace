@@ -377,13 +377,12 @@ async def test_resolve_and_decision_post_serialize(client, monkeypatch, decision
 
 
 @pytest.mark.parametrize("blocks", [
-    [{"kind": "image", "image": {"url": "https://example.com/picture.png"}}],
     [{"kind": "preview", "name": "Picture", "text": "", "image": {"url": "https://example.com/p.png"}}],
     [{"kind": "preview", "name": "Picture", "text": "",
       "image": {"repo": "example/project", "ref": "main", "path": "picture.png"}}],
     [{"kind": "preview", "name": "Large", "text": "x" * 6000}] * 6,
 ])
-async def test_board_rejects_images_and_oversized_blocks(app, client, blocks):
+async def test_board_rejects_preview_images_and_oversized_blocks(app, client, blocks):
     ada = await client()
     await ada.call("board_post", {"title": "Rejected", "text": "Check the blocks", "blocks": blocks},
                    error=True)

@@ -9,8 +9,10 @@ from urllib.parse import urlencode
 
 from illo.asks import cards, proof, service
 from illo.channels.slack.tasks import _visible
+from illo.db import one
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import audit
+from illo.ledger import board as board_ledger
 from illo.tasks.list_page import safe_link
 from illo.tasks.pages import markdown, outside, render, signin
 
@@ -21,11 +23,12 @@ def seen(row):
     return hashlib.sha256(proof.compact(fields).encode()).hexdigest()
 
 
-def form(ask_id, csrf, stamp, *, option=None, label='', primary=False, board=False):
+def form(ask_id, csrf, stamp, *, option=None, label='', primary=False, board=False, back=''):
     return (f'<form method="post" action="/web/a/{ask_id}/answer">'
             f'<input type="hidden" name="csrf" value="{e(csrf)}">'
             f'<input type="hidden" name="seen" value="{e(stamp)}">'
             + ('<input type="hidden" name="from" value="board">' if board else '')
+            + (f'<input type="hidden" name="back" value="{e(back)}">' if back else '')
             + (f'<input type="hidden" name="option" value="{e(option)}">' if option is not None else
                '<textarea name="text" required maxlength="4000" placeholder="Your answer"></textarea>')
             + f'<button class="{"btn go" if primary else "btn"}">{e(label)}</button></form>')
@@ -95,6 +98,9 @@ def request_intro(row, data, person, *, board=False):
     body += '<li>' + e('From: ' + cards.who(data)[1]) + '</li>'
     if row['due_at']:
         body += '<li>' + e('Due: ' + render.time(row['due_at'], person)) + '</li>'
+    if board and row.get('board_thread_id'):
+        body += (f'<li><a href="/web/board/t/{row["board_thread_id"]}">Board: '
+                 + e(row['board_thread_title'][:40]) + '</a></li>')
     body += '</ul><h1>' + (f'<a href="/web/a/{row["id"]}">' + e(row['question']) + '</a>' if board else e(row['question'])) + '</h1><p class="ask">' + e(cards.first_line(data)) + '</p>'
     return body
 
@@ -203,7 +209,7 @@ async def route(ctx, request, ask_id, *, file_position=None):
             if file_position is not None:
                 return missing('The request was not found.')
             return redirect('/web/signin?' + urlencode({'next': f'/web/a/{ask_id}'}), 302)
-        values = await form_data(request) if request.method == 'POST' else {}
+        values = await form_data(request, limit=65_536) if request.method == 'POST' else {}
         if request.method == 'POST' and (not origin_ok(ctx, request) or not signin.valid_csrf(token, values.get('csrf', ''))):
             return html(render.document('<main><p>The form is invalid. Read the page again.</p></main>'), 403)
         row = await ledger.page_read(conn, ask_id, person['id'], lock=request.method == 'POST')
@@ -227,17 +233,29 @@ async def route(ctx, request, ask_id, *, file_position=None):
             return html(render.document('<main><p>This action is not available.</p></main>'), 403)
         if option is None and (not text.strip() or len(text) > 4000):
             return html(await page(ctx, conn, row, person, token, message='Give an answer of 1 to 4,000 characters.'))
-        from illo.ledger.board import BoardError
-
         try:
             answered = await service.answer(conn, ask_id, person['id'], option=option,
                                             text=text if option is None else None, workspace=ctx.workspace)
-        except BoardError as exc:
+        except board_ledger.BoardError as exc:
             return html(await page(ctx, conn, row, person, token, message=str(exc)))
         if not answered:
             row = await ledger.page_read(conn, ask_id, person['id'])
             return html(await page(ctx, conn, row, person, token, message='This question is closed. No answer is needed.'))
         await audit.write(conn, principal='person:' + person['key'], tool='ask_answer', args={'id': ask_id},
                           decision='allow', reason='The person answers on the request page.', target=f'ask {ask_id}')
+        destination = f'/web/board#a{ask_id}' if values.get('from') == 'board' else f'/web/a/{ask_id}'
+        from illo.tasks.pages.board_thread import bigint, path
+
+        back = values.get('back', '')
+        thread_id = bigint(back[7:]) if back.startswith('thread:') else None
+        if thread_id is not None and (post_id := answered.get('board_post_id')) is not None:
+            bound = await one(conn, f"""SELECT 1 FROM board_threads b
+                JOIN board_posts answered ON answered.thread_id=b.id AND answered.id=%(post_id)s
+                WHERE b.id=%(thread_id)s AND {board_ledger.VISIBLE} AND (
+                    EXISTS (SELECT 1 FROM board_posts p WHERE p.thread_id=b.id AND p.ask_id=%(ask_id)s)
+                    OR EXISTS (SELECT 1 FROM board_escalations es WHERE es.thread_id=b.id AND es.ask_id=%(ask_id)s)
+                )""", {'thread_id': thread_id, 'ask_id': ask_id, 'person_id': person['id'], 'post_id': post_id})
+            if bound:
+                destination = f'{path(thread_id)}#post-{post_id}'
     await service.refresh_ask(ctx, ask_id)
-    return redirect(f'/web/board#a{ask_id}' if values.get('from') == 'board' else f'/web/a/{ask_id}')
+    return redirect(destination)
