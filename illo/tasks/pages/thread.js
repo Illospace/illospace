@@ -69,8 +69,8 @@
       newMark?.remove();
     }
     // An open answer form may contain text. Keep it while the person uses it.
-    const active = status.querySelector('.answer:focus-within, .answer:has(details[open])');
-    if (active) next.querySelector('.answer')?.remove();
+    const active = status.querySelector('div.answer:focus-within, div.answer:has(details[open])');
+    if (active) next.querySelector('div.answer')?.remove();
     for (const child of [...status.childNodes]) if (child !== mark && child !== active) child.remove();
     status.prepend(next);
   }

@@ -43,10 +43,10 @@
     const v = view();
     return {x: (v.l + v.r) / 2, y: (v.t + v.b) / 2};
   }
-  // First view: zoom 1, the columns in the middle when they fit, else "Needs you" at the left.
+  // First view: the columns in the middle when they fit at zoom 1, or at a small zoom out; else "Needs you" at the left.
   function home() {
-    const v = view(), w = world.offsetWidth;
-    return {s: 1, x: w <= v.r - v.l ? (board.clientWidth - w) / 2 : v.l, y: v.t};
+    const v = view(), w = world.offsetWidth, s = clamp((v.r - v.l) / w, .85, 1);
+    return {s, x: w * s <= v.r - v.l ? (board.clientWidth - w * s) / 2 : v.l, y: v.t};
   }
   function fit() {
     const v = view(), w = world.offsetWidth, h = world.offsetHeight;
