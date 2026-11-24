@@ -73,21 +73,27 @@ async def describe(app, secret="service-test-secret"):
 async def test_providers_hold_no_secret(monkeypatch):
     monkeypatch.setenv("ILLO_PROVIDER_OPENAI_API_KEY", "fake-openai-secret")
     monkeypatch.setenv("ILLO_PROVIDER_ANTHROPIC_API_KEY", "fake-anthropic-secret")
+    monkeypatch.setenv("ILLO_PROVIDER_GEMINI_API_KEY", "fake-gemini-secret")
     monkeypatch.setenv("ILLO_PROVIDER_LOCAL_API_KEY", "fake-local-secret")
     monkeypatch.setenv("ILLO_PROVIDER_LOCAL_WIRE", "chat")
     monkeypatch.setenv("ILLO_PROVIDER_LOCAL_BASE_URL", "https://fake-private-host.example/v1")
-    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_CAPABILITIES", "effort:none")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_CAPABILITIES", "images,effort:none,stream_tools:false")
     app = create_app()
     assert (await describe(app, "wrong")).status_code == 401
     response = await describe(app)
     described = {item["name"]: item for item in response.json()["providers"]}
-    assert set(described) == {"chatgpt", "fake", "openai", "anthropic", "local"}
+    assert set(described) == {"chatgpt", "fake", "openai", "anthropic", "gemini", "local"}
     assert described["local"] == {"name": "local", "wire": "chat", "capabilities": {
-        "images": False, "web_search": False, "efforts": ["none"], "transcription": False}}
+        "images": True, "web_search": False, "efforts": ["none"], "transcription": False}}
+    assert described["gemini"] == {"name": "gemini", "wire": "chat", "capabilities": {
+        "images": True, "web_search": False,
+        "efforts": ["minimal", "low", "medium", "high", "xhigh"], "transcription": False}}
+    assert providers.load()["local"].stream_tools is False
     assert described["openai"]["capabilities"]["transcription"] is True
     assert described["chatgpt"]["wire"] == "responses"
     assert described["anthropic"]["capabilities"]["images"] is False
     for secret in ("fake-openai-secret", "fake-anthropic-secret", "fake-local-secret",
+                   "fake-gemini-secret", "generativelanguage.googleapis.com",
                    "fake-private-host", "chatgpt.com", "api.openai.com"):
         assert secret not in response.text
     assert (await http_get(app, "/healthz")).json() == {"status": "ok"}
@@ -127,11 +133,9 @@ def test_a_provider_without_a_key_is_not_in_the_table():
     ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
       "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1",
       "ILLO_PROVIDER_LOCAL_CAPABILITIES": "shell"}, "ILLO_PROVIDER_LOCAL_CAPABILITIES"),
-    # The Chat Completions wire sends text only and has no web search tool.
-    *(({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
-        "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1",
-        "ILLO_PROVIDER_LOCAL_CAPABILITIES": capability}, "ILLO_PROVIDER_LOCAL_CAPABILITIES")
-      for capability in ("images", "web_search")),
+    ({"ILLO_PROVIDER_LOCAL_API_KEY": "fake-key", "ILLO_PROVIDER_LOCAL_WIRE": "chat",
+      "ILLO_PROVIDER_LOCAL_BASE_URL": "https://models.example/v1",
+      "ILLO_PROVIDER_LOCAL_CAPABILITIES": "web_search"}, "ILLO_PROVIDER_LOCAL_CAPABILITIES"),
 ])
 def test_a_wrong_provider_variable_stops_the_service(environ, variable):
     with pytest.raises(ValueError, match=variable) as error:
@@ -144,7 +148,8 @@ def test_a_wrong_provider_variable_stops_the_service(environ, variable):
     ({"provider": "chatgpt"}, "ChatGPT sign-in"),
     ({"effort": "extreme"}, "effort"),
     ({"web_search": True, "provider": "local"}, "web search"),
-    ({"smoke": True}, "Responses wire"),
+    ({"smoke": True}, "model provider"),
+    ({"effort": "minimal", "provider": "openai"}, "effort"),
     ({"fallback_provider": "openai"}, "fallback"),
 ])
 async def test_a_route_that_does_not_fit_is_a_config_error(run_request, change, reason):

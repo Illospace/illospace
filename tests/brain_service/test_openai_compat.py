@@ -147,7 +147,7 @@ async def test_unknown_tool_cannot_execute(run_request, fake_mcp, monkeypatch, t
     assert fake_mcp.calls == []
 
 
-async def test_provider_auth_error_survives_mcp_task_group(run_request, fake_mcp, monkeypatch):
+async def test_provider_key_error_survives_mcp_task_group(run_request, fake_mcp):
     from fastapi.responses import JSONResponse
 
     from brain.errors import error_category
@@ -162,7 +162,7 @@ async def test_provider_auth_error_survives_mcp_task_group(run_request, fake_mcp
         run_request.mcp_url = fake_mcp.url
         with pytest.raises(ExceptionGroup) as error:
             _ = [item async for item in loop.run(Chat, run_request, chat(base + "/v1"), None)]
-    assert error_category(error.value) == "auth"
+    assert error_category(error.value) == "config"
 
 
 @pytest.mark.parametrize("effort", [None, "none"])

@@ -11,6 +11,7 @@ from illo.brain.client import BrainEvent, RunRequest
 from illo.brain.prompts import build_for_run
 from illo.brain.routes import (
     Payer,
+    Route,
     raises_failure,
     resolve_route,
     run_kind,
@@ -72,23 +73,30 @@ class RunManager:
     async def start_run(self, event, authority, event_id: int | None, on_event=None, *,
                         deep: DeepContext | None = None) -> str:
         """The channel can relay progress. Only final text leaves through the gateway."""
+        route = resolve_route(self.ctx.workspace, run_kind(event, authority, deep=deep is not None))
+        return await self._run(event, authority, event_id, on_event, route, deep=deep)
+
+    async def smoke(self, event, authority, route: Route, check, on_event) -> None:
+        """The operator CLI supplies the test route. Use the normal run lifecycle."""
+        await self._run(event, authority, None, on_event, route, smoke=check)
+
+    async def _run(self, event, authority, event_id, on_event, route, *, deep=None, smoke=None):
         async with self.capacity:
             await self.capacity.wait_for(
                 lambda: self.active < self.ctx.workspace.config.run_limits.max_concurrent
             )
             self.active += 1
         try:
-            return await self._start_run(event, authority, event_id, on_event, deep)
+            return await self._start_run(event, authority, event_id, on_event, route, deep, smoke)
         finally:
             async with self.capacity:
                 self.active -= 1
                 self.capacity.notify_all()
 
-    async def _start_run(self, event, authority, event_id, on_event, deep):
+    async def _start_run(self, event, authority, event_id, on_event, route, deep, smoke):
         ctx = self.ctx
         policy = ctx.workspace.config.brain.chatgpt
-        route = resolve_route(ctx.workspace, run_kind(event, authority, deep=deep is not None))
-        notify = sends_refresh_notice(route.kind)
+        notify = smoke is None and sends_refresh_notice(route.kind)
         async with ctx.pool.connection() as conn:
             if event.channel == "board":
                 from illo.board.coordinator import authorized_packet
@@ -109,6 +117,8 @@ class RunManager:
             if deep:
                 await conn.execute("UPDATE deep_runs SET run_id=%s WHERE id=%s", (run_id, deep.deep_run_id))
         status, error, usage, final = "failed", None, {}, None
+        if smoke:
+            usage["smoke"] = True
         payer = provider = request = None
         failure, detail = "internal", None
         try:
@@ -118,8 +128,8 @@ class RunManager:
                 payer = await select_payer(ctx, route, authority, notify=notify)
                 if payer is None:
                     detail, error = "no_payer", "No model sign-in is available"
-                    if raises_failure(route.kind):
-                        raise RunFailure("provider")
+                    if smoke or raises_failure(route.kind):
+                        raise RunFailure("provider", detail=detail)
                     if authority.tainted or authority.profile == "tainted":
                         usage["skipped"] = "no_model_credential"
                         return 'I did not answer this message. No model sign-in is allowed for messages from outside the team.'
@@ -134,15 +144,24 @@ class RunManager:
                 provider = ctx.providers[payer.provider]
                 async with ctx.pool.connection() as conn:
                     token = await runs.mint_token(conn, run_id, route.timeout_s)
-                    system_prompt = await build_for_run(conn, ctx.workspace, authority, event)
-                images, image_context = await for_run(ctx, event, authority, provider["capabilities"]["images"])
+                    system_prompt = (smoke.system_prompt if smoke else
+                                     await build_for_run(conn, ctx.workspace, authority, event))
+                shows_images = provider["capabilities"]["images"]
+                if smoke:
+                    images = [smoke.image] if shows_images else []
+                    user_message = smoke.question if images else event.text
+                else:
+                    images, image_context = await for_run(ctx, event, authority, shows_images)
+                    user_message = (data_text("inbound-message", event.text)
+                                    if authority.tainted or authority.profile in {"tainted", "outsider"}
+                                    or authority.principal == "outsider" else event.text)
+                    if image_context:
+                        user_message += "\n\n" + image_context
                 request = RunRequest(
                     images=images,
                     run_id=run_id,
                     system_prompt=system_prompt,
-                    user_message=(data_text("inbound-message", event.text)
-                                  if authority.tainted or authority.profile in {"tainted", "outsider"}
-                                  or authority.principal == "outsider" else event.text),
+                    user_message=user_message,
                     mcp_url=ctx.config.public_url.rstrip("/") + "/brain/mcp",
                     mcp_token=token,
                     **payer.request(),
@@ -152,9 +171,8 @@ class RunManager:
                     timeout_s=route.timeout_s,
                     max_output_tokens=route.max_output_tokens,
                     web_search=web_search_allowed(ctx.workspace, route, provider, deep),
+                    smoke=smoke is not None,
                 )
-                if image_context:
-                    request.user_message += "\n\n" + image_context
                 turns = 0
                 for attempt in range(2):
                     retry = False
@@ -168,6 +186,8 @@ class RunManager:
                                 # Keep the first payer in runs.payer/payer_person_id (S5); legacy
                                 # usage tracks the final payer so S5 marks fallback rows unsplit.
                                 usage_payer = Payer("api_key", payer.fallback)
+                                if smoke and on_event:
+                                    await on_event(item)
                                 continue
                             if item.type == "tool_call":
                                 turns += 1
@@ -196,7 +216,7 @@ class RunManager:
                                     retry = True
                                     break
                                 detail = "sign_in"
-                                if policy.person_credential == "team" and not authority.tainted:
+                                if not smoke and policy.person_credential == "team" and not authority.tainted:
                                     final = chatgpt.team_missing(ctx.workspace)
                                     error = "The team model sign-in is unavailable"
                                     failure = "provider"
@@ -204,6 +224,7 @@ class RunManager:
                             if on_event:
                                 await on_event(item)
                             if item.type == "error":
+                                # Preserve recognized categories, including transient, in the receipt.
                                 failure = item.category if item.category in FAILURE_TEXTS else "provider"
                                 error = "The board model run failed." if event.channel == "board" else item.failure_reason()
                                 # Keep the token counts of a failed run.
@@ -229,13 +250,16 @@ class RunManager:
                             if item.type == "final":
                                 if turns > route.max_tool_calls and item.usage.get("limited") is not True:
                                     raise RunFailure("limit")
-                                final, usage, status = item.text, {**usage, **item.usage}, "completed"
+                                usage.update(item.usage)
+                                if smoke:
+                                    smoke.verify(item, bool(request.images))
+                                final, status = item.text, "completed"
                                 break
                     if not retry:
                         break
                 if final is None:
                     raise RuntimeError("The brain service ended without a final answer")
-            if raises_failure(route.kind) and status != "completed":
+            if (smoke or raises_failure(route.kind)) and status != "completed":
                 raise RunFailure(failure)
             if event.channel in {"deep", "digest", "email", "routine", "slack", "team_digest"}:
                 from illo.brain.final_text import guard
@@ -245,7 +269,7 @@ class RunManager:
             return final
         except chatgpt.TemporaryRefresh:
             detail, error = "sign_in", "The model sign-in service is unavailable"
-            if raises_failure(route.kind):
+            if smoke or raises_failure(route.kind):
                 raise RunFailure("provider") from None
             return chatgpt.TEMPORARY
         except (TimeoutError, httpx.TimeoutException):

@@ -7,6 +7,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import get_args
 from urllib.parse import urlsplit
 
 import httpx
@@ -21,7 +22,7 @@ from illo.ledger import ask_workflow, people, sensors, tokens
 from illo.ledger.jobs import report_time, silent_jobs
 from illo.log import configure
 from illo.vault import Vault, delete, get_names
-from illo.workspace import load_workspace
+from illo.workspace import RunKind, load_workspace
 
 
 def parser() -> argparse.ArgumentParser:
@@ -71,10 +72,12 @@ def parser() -> argparse.ArgumentParser:
     status.add_parser("status")
     chatgpt = commands.add_parser("chatgpt").add_subparsers(dest="action", required=True)
     chatgpt.add_parser("status")
-    smoke = chatgpt.add_parser("smoke")
-    smoke.add_argument("--person", required=True)
-    # The smoke builds a person's own authority: the authority of these run kinds only.
-    smoke.add_argument("--route", choices=("person_dm", "routine", "digest"), default="person_dm")
+    brain = commands.add_parser("brain").add_subparsers(dest="action", required=True)
+    smoke = brain.add_parser("smoke")
+    smoke.add_argument("--route", choices=get_args(RunKind), required=True)
+    smoke.add_argument("--provider")
+    smoke.add_argument("--model")
+    smoke.add_argument("--as", dest="person_key")
     return result
 
 
@@ -185,10 +188,10 @@ async def execute(args, config: Config) -> int:
         from illo.channels.mcp.check import check
 
         return await check(args.url, args.token_file)
-    if args.command == "chatgpt" and args.action == "smoke":
-        from illo.connectors.chatgpt_smoke import smoke
+    if args.command == "brain" and args.action == "smoke":
+        from illo.brain.smoke import smoke
 
-        return await smoke(config, args.person, route=args.route)
+        return await smoke(config, args.route, args.provider, args.model, args.person_key)
     if args.command == "doctor":
         return await doctor(config)
     if args.command == "check-routes":

@@ -98,10 +98,12 @@ If Slack refuses the read, Illo answers without history. Check the `slack:dm-his
    The brain environment file holds the provider keys. See `deploy/brain.env.example`.
    `ILLO_PROVIDER_OPENAI_API_KEY` enables the `openai` provider (Responses, with `store: false`).
    `ILLO_PROVIDER_ANTHROPIC_API_KEY` enables the `anthropic` provider (the Claude Agent SDK).
+   `ILLO_PROVIDER_GEMINI_API_KEY` enables the `gemini` provider (Chat Completions, with images).
+   See [Set up Gemini](#set-up-gemini).
    `ILLO_PROVIDER_<NAME>_BASE_URL` changes the address of a provider.
    A custom provider also sets `ILLO_PROVIDER_<NAME>_WIRE` (`responses` or `chat`) and
    `ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,transcription,effort:low`.
-   The `chat` wire refuses `images` and `web_search`.
+   The `chat` wire supports `images` and refuses `web_search`.
    A provider with no key is not available. The `chatgpt` provider needs no key.
    `brain.routes` in `illo.yaml` selects the provider, the model, the effort, and the limits of each run kind.
    See [Workspace files](workspace.md#routes).
@@ -158,6 +160,22 @@ Set `ILLO_GITHUB_APP_PRIVATE_KEY_FILE` to its container path.
 The owner writes `connect Google` in a Slack DM to set up Google through a private form.
 The environment variables `ILLO_GOOGLE_CLIENT_ID` and `ILLO_GOOGLE_CLIENT_SECRET` remain an alternative.
 Do not put connector secrets in the workspace.
+
+### Set up Gemini
+
+1. Open **API Keys** in Google AI Studio. Select the Google Cloud project and click **Create API key**.
+   Enable billing on the project if the model needs a paid tier. [Google AI Studio](https://aistudio.google.com/api-keys)
+2. Open **Spend** in Google AI Studio. Select the project, then select **Monthly spend cap** and **Edit spend cap**.
+   Set a monthly limit for that project. Google says billing data can lag by about 10 minutes.
+   [Spend page](https://aistudio.google.com/spend) · [Google spend cap guide](https://ai.google.dev/gemini-api/docs/billing#project-spend-caps)
+3. Put the key in `ILLO_PROVIDER_GEMINI_API_KEY` in the brain environment file.
+   Recreate the brain service. In the app environment, run the route smoke check before you change `illo.yaml`.
+
+   ```sh
+   illo brain smoke --route person_dm --provider gemini --model gemini-4-neon
+   ```
+
+   See [Check a brain route](workspace.md#check-a-brain-route) for the output and payer rules.
 
 ## The public sign-in address
 

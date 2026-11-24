@@ -54,7 +54,8 @@ class RunRequest(BaseModel):
     mcp_token: str = Field(repr=False)
     provider: str
     model: str
-    effort: str | None = None
+    # The provider lists its effort names, including minimal when it supports it.
+    effort: str | None = Field(default=None, pattern=r"^[a-z]{1,16}$")
     max_tool_calls: int
     timeout_s: float
     max_output_tokens: int | None = Field(default=None, ge=1)
@@ -72,10 +73,10 @@ class RunRequest(BaseModel):
 
 class BrainEvent(BaseModel):
     model_config = ConfigDict(extra="allow")
-    type: Literal["started", "text", "tool_call", "web_search", "payer", "final", "error"]
+    type: Literal["started", "text", "tool_call", "web_search", "payer", "response", "final", "error"]
     text: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
-    category: Literal["auth", "timeout", "runtime", "limit", "config", "internal"] = "runtime"
+    category: Literal["auth", "timeout", "runtime", "limit", "config", "internal", "transient"] = "runtime"
     code: str = "unknown"
     resets_at: int | None = None
     fallback_failed: bool = False

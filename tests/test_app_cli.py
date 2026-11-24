@@ -112,12 +112,12 @@ async def test_n3_doctor_checks_the_routes_against_the_brain(app, monkeypatch, c
     from illo.cli import doctor
 
     ctx = app.state.ctx
-    ctx.workspace.config.brain.routes["default"].provider = "gemini"
+    ctx.workspace.config.brain.routes["default"].provider = "missing"
     ctx.config.database_url = ctx.pool.conninfo
     monkeypatch.setattr("illo.cli.load_workspace", lambda _: ctx.workspace)
     monkeypatch.setattr("illo.brain.client.BrainClient", lambda url: ctx.brain_client)
     assert await doctor(ctx.config) == 1
-    assert "The routes need a fix: brain.routes.person_dm: the brain has no provider gemini" in (
+    assert "The routes need a fix: brain.routes.person_dm: the brain has no provider missing" in (
         capsys.readouterr().out)
 
 

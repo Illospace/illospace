@@ -1538,7 +1538,7 @@
     },
     {
      "type": "error",
-     "category": "runtime",
+     "category": "transient",
      "message": "Provider error: HTTP 500 server_error server_error",
      "code": "server_error",
      "provider_type": "server_error",
@@ -1596,16 +1596,66 @@
       "effort": "medium"
      }
     }
+   },
+   {
+    "url": "https://provider.example/v1/responses",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "instructions": "Use the Acme tools.",
+     "input": [
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "tools": [
+      {
+       "type": "function",
+       "name": "lanes_search",
+       "description": "Search Acme lanes",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        }
+       },
+       "strict": false
+      },
+      {
+       "type": "function",
+       "name": "asks_list",
+       "description": "List Acme asks",
+       "parameters": {
+        "type": "object"
+       },
+       "strict": false
+      }
+     ],
+     "stream": true,
+     "store": false,
+     "include": [
+      "reasoning.encrypted_content"
+     ],
+     "max_output_tokens": 4096,
+     "parallel_tool_calls": true,
+     "reasoning": {
+      "effort": "medium"
+     }
+    }
    }
   ],
   "mcp_calls": [],
   "refreshes": 0,
   "run": {
    "status": "failed",
-   "error": "The brain run failed: runtime server_error",
+   "error": "The brain run failed: transient server_error",
    "usage": {
     "auth_kind": "api_key",
-    "failure_category": "provider"
+    "failure_category": "transient"
    }
   }
  },

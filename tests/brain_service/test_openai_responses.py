@@ -225,13 +225,13 @@ async def test_effort_retry_and_process_cache(run_request, fake_mcp, monkeypatch
 @pytest.mark.parametrize(
     "terminal,category",
     [
-        ({"type": "error", "code": "server_error", "message": "PRIVATE"}, "runtime"),
+        ({"type": "error", "code": "server_error", "message": "PRIVATE"}, "transient"),
         (
             {
                 "type": "response.failed",
                 "response": {"error": {"code": "server_error", "message": "PRIVATE"}},
             },
-            "runtime",
+            "transient",
         ),
         (
             {

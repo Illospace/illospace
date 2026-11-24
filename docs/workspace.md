@@ -48,9 +48,9 @@ Do not store secrets in this folder. Use the vault or boot environment.
 | `stale_minutes.email` | Default: 1440. |
 | `brain.routes.default` | The route of each run kind that has no route. Needs `provider` and `model`. |
 | `brain.routes.<run kind>` | Fields that replace the `default` fields for one run kind. Run kinds: `person_dm`, `team_channel`, `tainted`, `routine`, `digest`, `agent_request`, `board_coordinator`, `deep`. |
-| `<route>.provider` | A provider of the brain service, for example `chatgpt`, `openai`, `anthropic`, or a custom provider. |
+| `<route>.provider` | A provider of the brain service, for example `chatgpt`, `openai`, `anthropic`, `gemini`, or a custom provider. |
 | `<route>.model` | The model name that the provider accepts. |
-| `<route>.effort` | Optional. One of the provider's efforts, for example `low`, `medium`, `high`, `xhigh`. No effort: the brain sends none. |
+| `<route>.effort` | Optional. One of the provider's efforts, for example `minimal`, `low`, `medium`, `high`, `xhigh`. No effort: the brain sends none. |
 | `<route>.max_tool_calls` | Tool-call limit for each run. Default in `default`: 12. Range: 1–200. |
 | `<route>.timeout_s` | Run deadline in seconds. Default in `default`: 300. Maximum: 3600, and the brain's `ILLO_BRAIN_MAX_TIMEOUT_S`. |
 | `<route>.max_output_tokens` | Optional output cap for an API-key Responses provider. The ChatGPT backend ignores it. |
@@ -182,35 +182,25 @@ A fallback records `auth_kind: api_key`, the fallback provider, and no `credenti
 The brain sends a `payer` event when it changes to the fallback during a run. The app records the
 new payer at once, so a later failure or timeout keeps it.
 
-After sign-in, run this command in the main app environment:
+## Check a brain route
+
+Run this command in the app environment:
 
 ```sh
-illo chatgpt smoke --person ada
+illo brain smoke --route person_dm
 ```
 
-`--person` accepts an active person key or database ID.
-`--route` selects the route of a run kind: `person_dm` (default), `routine`, or `digest`.
-The check uses the person's own authority, the authority of these run kinds for one person.
-The command resolves the payer with the normal rules. The route's provider must use the Responses wire.
-The main app refreshes it when needed. It sends `provider_auth` to the brain for this check.
-The brain offers only `smoke_ping`, a test function with no team data or side effects.
-The check makes one tool call, then sends its result back to the model.
-It uses the configured model and can spend subscription usage or API credits.
-It prints the auth kind, model, tool result, token usage, and elapsed time.
-It never prints a token, account ID, prompt, or model answer.
-A failure prints the HTTP status when available and a short reason. It exits with status 1.
-With `brain.chatgpt.fallback: none`, a missing grant or subscription limit fails without an API retry.
-The brain service must run the same version as the main app.
+Use `--as ada` when the route uses the person's own ChatGPT grant.
+The command uses the team authority for a team run.
+It uses the normal payer rules and records the run in the ledger.
+Use `--provider gemini --model gemini-4-neon` to test a change before you edit the route.
 
-Example output with a fake provider:
-
-```text
-Auth kind: chatgpt
-Model: test-model
-Tool round trip: yes
-Token usage: input_tokens=4 output_tokens=2 total_tokens=6
-Latency: 0.025 s
-```
+The run has one tool, `smoke_step`. The model must pass each step's token to the next step.
+The check needs three dependent calls in three separate model responses.
+For a provider with images, the check also needs a correct answer about a small test image.
+The command prints the events, stop reasons, raw usage, and assistant field names.
+It omits prompts, model answers, tool tokens, and credentials.
+It can spend subscription usage or API credits. A failed check exits with status 1.
 
 ## Voice clips
 
@@ -514,7 +504,7 @@ Illo checks the file's first bytes. A failed read does not stop the answer.
 Illo names each image's author and place. It reports files that it cannot show, with the reason.
 Set `slack.images: off` to stop all image downloads.
 
-A provider with the `images` capability receives the images, for example `chatgpt` and `openai`.
+A provider with the `images` capability receives the images, for example `chatgpt`, `openai`, and `gemini`.
 If the model provider refuses the images, the brain sends the request again with text only. Illo then says that it could not see the images.
 For a provider without that capability, Illo downloads no image and the run gets a note that it skipped them.
 Image bytes and private Slack URLs stay in memory for the run.

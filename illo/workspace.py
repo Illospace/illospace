@@ -205,6 +205,7 @@ class RouteSettings(Model):
 
     provider: ProviderName | None = None
     model: str | None = Field(default=None, min_length=1, max_length=128)
+    # The provider's effort list decides which names the route can use.
     effort: str | None = Field(default=None, pattern=r"^[a-z]{1,16}$")
     max_tool_calls: int | None = Field(default=None, ge=1, le=200, strict=True)
     timeout_s: float | None = Field(default=None, gt=0, le=3600, allow_inf_nan=False)

@@ -1,6 +1,7 @@
 """The Illo MCP boundary. The model sees only the run's tools, and only checked calls reach MCP."""
 
 import json
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
-from mcp.types import Tool
+from mcp.types import CallToolResult, TextContent, Tool
 
 from brain.errors import RunError
 from brain.models import ChatGPTAuth, RunRequest
@@ -18,6 +19,50 @@ from brain.models import ChatGPTAuth, RunRequest
 # The Agent SDK names each MCP tool "mcp__<server>__<tool>". It gets only this server.
 SDK_SERVER = "illo"
 SDK_PREFIX = f"mcp__{SDK_SERVER}__"
+
+SMOKE_TOOL = Tool(
+    name="smoke_step",
+    description="Run step n. For steps 2 and 3, send the token from the previous step.",
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "n": {"type": "integer", "minimum": 1, "maximum": 3},
+            "token": {"type": "string"},
+        },
+        "required": ["n"],
+        "additionalProperties": False,
+    },
+)
+
+
+class SmokeSession:
+    """Run a private challenge without a connection to the team's MCP tools."""
+
+    def __init__(self):
+        self.steps = 0
+        self.token = None
+        self.responses = {}
+
+    def observe_response(self, call_ids, response_id=None):
+        if response_id is None:
+            response_id = len(self.responses)
+        calls = self.responses.setdefault(response_id, set())
+        calls.update(call_ids)
+        if len(calls) > 1:
+            raise RunError("runtime", "The smoke check needs one tool call in each response")
+
+    def completed_steps(self):
+        return min(self.steps, sum(bool(calls) for calls in self.responses.values()))
+
+    async def call_tool(self, name, arguments):
+        step = arguments.get("n")
+        if (name != SMOKE_TOOL.name or type(step) is not int or step != self.steps + 1
+                or step > 3 or arguments.get("token") != self.token
+                or arguments.keys() - {"n", "token"}):
+            raise RunError("runtime", "The smoke tool received the wrong step or token")
+        self.steps = step
+        self.token = secrets.token_urlsafe(24)
+        return CallToolResult(content=[TextContent(type="text", text=self.token)])
 
 
 @dataclass

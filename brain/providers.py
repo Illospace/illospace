@@ -18,8 +18,6 @@ SUFFIXES = ("API_KEY", "BASE_URL", "WIRE", "CAPABILITIES")
 EFFORTS = ("low", "medium", "high", "xhigh")
 NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 EFFORT = re.compile(r"[a-z]{1,16}")
-# The Chat Completions wire sends text only and has no web search tool.
-TEXT_ONLY = {"chat"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +30,7 @@ class Provider:
     web_search: bool = False
     efforts: tuple[str, ...] = ()
     transcription: bool = False
+    stream_tools: bool = True
 
     def describe(self) -> dict:
         """The public description. It never holds a key or a URL."""
@@ -50,6 +49,8 @@ BUILT_IN = {
     "openai": Provider("openai", "responses", "https://api.openai.com/v1",
                        images=True, web_search=True, efforts=EFFORTS, transcription=True),
     "anthropic": Provider("anthropic", "agent_sdk", efforts=EFFORTS),
+    "gemini": Provider("gemini", "chat", "https://generativelanguage.googleapis.com/v1beta/openai/",
+                       images=True, efforts=("minimal", *EFFORTS)),
     "fake": Provider("fake", "fake", images=True, web_search=True, efforts=EFFORTS,
                      transcription=True),
 }
@@ -72,11 +73,13 @@ def capabilities(name: str, wire: str, value: str) -> dict:
     """Read `images,web_search,transcription,effort:low,effort:high`."""
     result = {"images": False, "web_search": False, "transcription": False, "efforts": []}
     for item in filter(None, (part.strip() for part in value.split(","))):
-        if item in ("images", "web_search") and wire in TEXT_ONLY:
+        if item == "web_search" and wire == "chat":
             raise ValueError(f"{PREFIX}{name.upper()}_CAPABILITIES: the {wire} wire cannot "
                              f"send {item}")
         if item in ("images", "web_search", "transcription"):
             result[item] = True
+        elif item == "stream_tools:false" and wire == "chat":
+            result["stream_tools"] = False
         elif item.startswith("effort:") and EFFORT.fullmatch(item[7:]):
             result["efforts"].append(item[7:])
         else:
@@ -149,8 +152,8 @@ def problem(request, table: dict[str, Provider]) -> str | None:
         return "The brain has no provider with this name"
     if (provider.name == "chatgpt") != (request.provider_auth.kind == "chatgpt"):
         return "Only the chatgpt provider uses a ChatGPT sign-in, and it needs one"
-    if request.smoke and provider.wire != "responses":
-        return "The smoke check needs the Responses wire"
+    if request.smoke and provider.wire == "fake":
+        return "The smoke check needs a model provider"
     if request.fallback_provider is not None:
         fallback = table.get(request.fallback_provider)
         if provider.name != "chatgpt" or not fallback or fallback.wire != "responses" \

@@ -15,6 +15,7 @@ TEXTS = {
     "limit": "I could not finish this: I reached my step limit. Ask again, or ask for less.",
     "timeout": "I could not finish this in time. Ask again, or ask for less.",
     "provider": "I could not finish this: the model service failed. Ask again in a minute.",
+    "transient": "The model service is temporarily unavailable. Ask again in a minute.",
     "internal": "I could not finish this because of an internal error. Ask again in a minute.",
     # The brain sends `config` when its provider table cannot serve the route.
     "config": "Illo is not set up for this kind of request. An operator must fix the settings.",
@@ -33,8 +34,8 @@ async def test_failure_has_a_fixed_category_without_secret_text(
             if category == "internal":
                 raise ValueError("fake-credential-in-an-error")
             yield BrainEvent(type="error", category={
-                "provider": "runtime", "limit": "limit", "timeout": "timeout", "config": "config",
-            }[category], message="fake-credential-in-an-error")
+                "provider": "runtime",
+            }.get(category, category), message="fake-credential-in-an-error")
 
     ctx.brain_client = FailedBrain()
     event = InboundEvent(channel="slack", external_id="failure", kind="dm", sender="U_ACME_ADA",
@@ -63,8 +64,8 @@ async def test_agent_receipt_keeps_the_failure_category(app, http, category):
             if category == "internal":
                 raise ValueError("fake-credential-in-an-error")
             yield BrainEvent(type="error", category={
-                "provider": "auth", "limit": "limit", "timeout": "timeout", "config": "config",
-            }[category])
+                "provider": "auth",
+            }.get(category, category))
 
     app.state.ctx.brain_client = FailedBrain()
     agent = await AgentClient.create(app, http)

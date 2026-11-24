@@ -17,12 +17,13 @@ It never gives a key or an address.
 | `chatgpt` | Responses, at the ChatGPT backend | None. The app sends the person's tokens with each run. |
 | `openai` | Responses, default `https://api.openai.com/v1` | `ILLO_PROVIDER_OPENAI_API_KEY` |
 | `anthropic` | The Claude Agent SDK (`claude-agent-sdk==0.2.180` and its bundled Claude CLI) | `ILLO_PROVIDER_ANTHROPIC_API_KEY` |
+| `gemini` | Chat Completions, with images | `ILLO_PROVIDER_GEMINI_API_KEY` |
 | `fake` | Calls MCP `tools/list` and returns the tool names. No model request. | `ILLO_PROVIDER_FAKE=1` (tests and the deploy smoke) |
 
 `ILLO_PROVIDER_<NAME>_BASE_URL` changes the address of a provider.
 A custom provider also sets `ILLO_PROVIDER_<NAME>_WIRE` (`responses` or `chat`) and
 `ILLO_PROVIDER_<NAME>_CAPABILITIES`, for example `images,web_search,transcription,effort:low,effort:high`.
-The `chat` wire sends text only and has no web search: it refuses `images` and `web_search`.
+The `chat` wire supports `images` and refuses `web_search`.
 `transcription` means that the provider has `<base URL>/audio/transcriptions`. `openai` has it.
 A provider with no key is not in the table, except `chatgpt`.
 A wrong `ILLO_PROVIDER_` variable stops the service at start. The error names the variable, never its value.
@@ -267,7 +268,9 @@ Ollama (`http://ollama:11434/v1`) and vLLM (`http://vllm:8000/v1`) are untested 
 List an effort in `_CAPABILITIES` (for example `effort:none`) only when the provider needs `reasoning_effort`.
 Some models need `none` to accept tools through Chat Completions.
 The loop omits that parameter when the route has no effort.
-A compatible provider must accept `stream_options.include_usage`.
+Streaming Chat requests set `stream_options.include_usage`.
+Add `stream_tools:false` to a custom Chat provider's capabilities to use full JSON replies.
+The adapter preserves all assistant and tool-call fields for the next request in both modes.
 
 Set the same `ILLO_BRAIN_SECRET` on the gateway and the brain service.
 Generate a new secret in the secret manager. Keep it out of files in a checkout.
@@ -317,8 +320,9 @@ The first `started` event confirms admission. A later `started` event gives the 
 The Responses, Chat Completions, and fake wires use the MCP names without the Claude `mcp__illo__` prefix.
 A run ends with one `final` or `error` event.
 A `payer` event (`provider`, `auth_kind: api_key`) says that the loop changed to the fallback provider. It comes before the retry.
-An error has `message` and `category`: `auth`, `timeout`, `runtime`, `limit`, `config`, or `internal`.
+An error has `message` and `category`: `auth`, `timeout`, `runtime`, `limit`, `config`, `transient`, or `internal`.
 `config` means that the table cannot serve the request: an unknown provider, a missing capability, an effort that the provider does not accept, or a fallback that cannot serve the same request. No worker starts.
+A transient error gets one retry after two seconds if the request produced no text and no tool call.
 Provider failures also carry `code`, `provider_type`, and the HTTP status when available.
 Only short identifiers enter those fields. Invalid or absent identifiers become `unknown`.
 The event and service log omit provider message text, prompts, tool results, and keys.
@@ -393,17 +397,10 @@ It skips live requests unless `ILLO_LIVE_BRAIN=1`.
 
 The live test reads `ILLO_PROVIDER_ANTHROPIC_API_KEY` and, if set, `ILLO_PROVIDER_ANTHROPIC_BASE_URL`.
 
-### Subscription smoke check
+### Route smoke check
 
-Run `illo chatgpt smoke --person <key-or-id> [--route person_dm|routine|digest]` from the main app environment after sign-in.
-See [Workspace files](../docs/workspace.md#check-the-chatgpt-connection).
-The request sets `smoke: true` on the normal `/run` contract and passes per-run `provider_auth`.
-This check offers only the fixed `smoke_ping` function. It does not connect to the team MCP endpoint.
-The function reads and writes no team data. Normal runs keep their exact MCP catalog.
-The Responses loop accepts complete output from `response.output_item.done` when the terminal event omits it.
-When both forms exist, they must agree.
-
-Offline tests cover refresh, the app-to-brain wire, one function round trip, API fallback, and safe errors.
-No live subscription result is recorded yet. The deployment owner must run the check before the trial.
-Record the model, auth kind, tool result, token usage, latency, and date here after that check.
-Do not record a token, account ID, or real team data.
+Run `illo brain smoke --route person_dm` from the app environment.
+The command starts a normal run with the route's payer.
+The brain offers only `smoke_step`. The check needs three dependent calls in three responses.
+For an image provider, it also checks the answer to an image question.
+See [Check a brain route](../docs/workspace.md#check-a-brain-route).
