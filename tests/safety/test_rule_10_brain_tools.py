@@ -125,8 +125,8 @@ async def test_rule_10_gemini_gets_only_the_authorized_tools(app, replay, tmp_pa
 
     def respond(request):
         received.append(json.loads(request.content))
-        choice = {"delta": {"content": "Acme release ready."}, "finish_reason": "stop"}
-        return httpx.Response(200, text="data: " + json.dumps({"choices": [choice]}) + "\n\n")
+        choice = {"message": {"role": "assistant", "content": "Acme release ready."}, "finish_reason": "stop"}
+        return httpx.Response(200, json={"choices": [choice]})
 
     async def runner(request, selected, fallback):
         assert request.provider == "gemini" and not request.web_search

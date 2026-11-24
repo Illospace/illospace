@@ -17,7 +17,7 @@ from illo.brain.client import BrainClient
 from illo.cli import execute, parser
 from illo.db import one
 from illo.workspace import RunKind
-from tests.brain_service.test_gemini_chat import USAGE, call, choice, sse
+from tests.brain_service.test_gemini_chat import USAGE, call, choice
 from tests.conftest import ROOT
 
 
@@ -67,19 +67,19 @@ async def test_gemini_smoke_requires_dependent_rounds_and_the_image(
         step = len(prior) + 1
         if step == 4:
             answer = "blue" if outcome == "wrong_color" else "red"
-            return sse(choice("delta", {"content": answer}, "stop"), {"usage": USAGE})
+            return httpx.Response(200, json={**choice("message", {"role": "assistant", "content": answer}, "stop"), "usage": USAGE})
         args = {"n": step}
         if prior:
             args["token"] = "incorrect" if outcome == "wrong_token" else prior[-1]
-        tool_call = {"index": 0, **call(f"call_{step}")}
+        tool_call = call(f"call_{step}")
         tool_call["function"] = {"name": "smoke_step", "arguments": json.dumps(args)}
         tool_calls = [tool_call]
         if outcome == "batch":
-            tool_calls.append({**tool_call, "id": "call_2", "index": 1})
-        return sse(choice("delta", {
+            tool_calls.append({**tool_call, "id": "call_2"})
+        return httpx.Response(200, json={**choice("message", {
             "role": "assistant", "extra_content": {"opaque": "fake-private-value"},
             "tool_calls": tool_calls,
-        }, "tool_calls"), {"usage": USAGE})
+        }, "tool_calls"), "usage": USAGE})
 
     async def runner(request, selected, fallback):
         run_ids.append(request.run_id)
