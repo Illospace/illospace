@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
 
 type BrainEvent = dict[str, Any]
+type ErrorCategory = Literal["auth", "timeout", "runtime", "limit", "config", "internal", "transient"]
 
 
 class ApiKeyAuth(BaseModel):
@@ -44,6 +45,7 @@ class RunRequest(BaseModel):
     mcp_token: SecretStr
     provider: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
     model: str = Field(min_length=1, max_length=128)
+    # The provider lists its effort names, including minimal when it supports it.
     effort: str | None = Field(default=None, pattern=r"^[a-z]{1,16}$")
     max_tool_calls: int = Field(default=8, ge=1, le=200)
     timeout_s: float = Field(default=300, gt=0, le=3600)

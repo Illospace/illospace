@@ -99,3 +99,20 @@ async def person_authority(conn, principal):
         return None
     person = await people.get(conn, principal[7:])
     return Authority(principal, "person_dm", person["id"]) if person else None
+
+
+async def smoke_authority(conn, kind, person_key=None) -> Authority | None:
+    """Give the payer check the authority of the route. The smoke tool has no team access."""
+    person = await people.get(conn, person_key) if person_key else None
+    if person_key and person is None:
+        return None
+    if kind in {"person_dm", "agent_request"} or (
+        person and kind in {"digest", "routine", "deep", "board_coordinator"}
+    ):
+        profile = kind if kind in {"agent_request", "board_coordinator"} else "person_dm"
+        if person:
+            return Authority(f"person:{person_key}", profile, person["id"])
+        # Own-grant policy rejects this authority. Team-grant policy can use it.
+        return Authority("team", profile)
+    profile = {"digest": "routine", "deep": "team_channel"}.get(kind, kind)
+    return Authority("team", profile, tainted=kind == "tainted")

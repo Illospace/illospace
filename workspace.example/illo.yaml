@@ -34,11 +34,13 @@ stale_minutes:
   email: 1440
 brain:
   # Each run kind has a route: person_dm, team_channel, tainted, routine, digest,
-  # agent_request, deep. A route takes each field that it omits from default.
+  # agent_request, board_coordinator, deep. Omitted fields come from default.
   # The brain service owns the providers and their keys. See deploy/brain.env.example.
   routes:
     default: {provider: chatgpt, model: gpt-6.2-sol, effort: low, max_tool_calls: 12, timeout_s: 120}
     person_dm: {effort: medium}
+    # To use Gemini for direct messages, replace the person_dm line above.
+    # person_dm: {provider: gemini, model: gemini-4-neon, effort: minimal}
     team_channel: {effort: medium}
     agent_request: {effort: medium}
     deep: {effort: high, max_tool_calls: 80, timeout_s: 1200, max_output_tokens: 16000}

@@ -264,6 +264,24 @@ async def test_disabled_tainted_and_text_runtime_download_nothing(
     assert (await payload(app, result))["images_skipped"]
 
 
+@pytest.mark.parametrize("shows_images", [True, False])
+async def test_slack_uses_resolved_provider_image_capability(
+    intake, message, image_io, app, fake_brain, shows_images,
+):
+    ctx = app.state.ctx
+    ctx.workspace.config.brain.routes["team_channel"].provider = "gemini"
+    ctx.providers["gemini"]["capabilities"]["images"] = shows_images
+    image_io["files"]["F_ACME_IMAGE"] = image()
+    result = await intake.receive(mention(message, files=[image()]))
+    request = fake_brain.requests[-1]
+    assert request.provider == "gemini"
+    assert bool(request.images) is shows_images
+    assert bool(image_io["downloads"]) is shows_images
+    if not shows_images:
+        assert "this model provider cannot show images" in request.user_message
+        assert (await payload(app, result))["images_skipped"] == {"provider": 1}
+
+
 @pytest.mark.parametrize(
     "profile,channel,flags",
     [

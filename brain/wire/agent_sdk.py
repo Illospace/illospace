@@ -10,13 +10,22 @@ from contextlib import aclosing
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
 
-from brain.errors import RunError
-from brain.loop import self_looping
+from brain.errors import RunError, identifier
+from brain.loop import response_log, retry_transient, self_looping
 from brain.models import BrainEvent, RunRequest, event
 from brain.providers import Provider
-from brain.tools import SDK_PREFIX, SDK_SERVER, check_sdk_tool
+from brain.tools import SDK_PREFIX, SDK_SERVER, SMOKE_TOOL, SmokeSession, check_sdk_tool
+
+
+def smoke_server(session: SmokeSession):
+    async def step(args):
+        result = await session.call_tool(SMOKE_TOOL.name, args)
+        return result.model_dump(mode="json", exclude_none=True)
+
+    smoke_tool = tool(SMOKE_TOOL.name, SMOKE_TOOL.description, SMOKE_TOOL.inputSchema)(step)
+    return create_sdk_mcp_server(SDK_SERVER, tools=[smoke_tool])
 
 
 def options(request: RunRequest, provider: Provider, directory: Path) -> ClaudeAgentOptions:
@@ -72,7 +81,8 @@ def options(request: RunRequest, provider: Provider, directory: Path) -> ClaudeA
     )
 
 
-async def translate(client: ClaudeSDKClient, transcript=None) -> AsyncIterator[BrainEvent]:
+async def translate(client: ClaudeSDKClient, transcript=None, *,
+                    smoke: SmokeSession | None = None) -> AsyncIterator[BrainEvent]:
     seen = set()
     text_parts = []
     partial = False
@@ -106,8 +116,14 @@ async def translate(client: ClaudeSDKClient, transcript=None) -> AsyncIterator[B
                 yield event("text", text=data["delta"]["text"])
         elif name == "AssistantMessage":
             if message.error:
-                category = "auth" if message.error == "authentication_failed" else "runtime"
+                category = {"authentication_failed": "auth", "server_error": "transient"}.get(
+                    message.error, "runtime")
                 raise RunError(category, "The model provider rejected the request")
+            if smoke is not None:
+                if message.message_id is not None:
+                    calls = (block.id for block in message.content if type(block).__name__ == "ToolUseBlock")
+                    smoke.observe_response(calls, message.message_id)
+                yield response_log(message.stop_reason, asdict(message), message.usage)
             for block in message.content:
                 if type(block).__name__ == "ToolUseBlock" and block.id not in seen:
                     check_sdk_tool(block.name)
@@ -120,6 +136,9 @@ async def translate(client: ClaudeSDKClient, transcript=None) -> AsyncIterator[B
             partial = False
         elif name == "ResultMessage":
             if message.is_error:
+                if message.api_error_status in (500, 503, 529):
+                    raise RunError("transient", "The model run failed",
+                                   http_status=message.api_error_status)
                 category = "limit" if "max_turns" in message.subtype else "runtime"
                 if message.api_error_status in (401, 403):
                     category = "auth"
@@ -127,11 +146,16 @@ async def translate(client: ClaudeSDKClient, transcript=None) -> AsyncIterator[B
                     "error", category=category, message="The model run failed", usage=message.usage
                 )
             else:
+                diagnostics = {}
+                if smoke is not None:
+                    diagnostics = {"smoke_steps": smoke.completed_steps(),
+                                   "stop": identifier(message.stop_reason)}
                 yield event(
                     "final",
                     text=message.result or "\n".join(text_parts),
                     usage=message.usage or {},
                     turns=message.num_turns,
+                    **diagnostics,
                 )
             return
 
@@ -141,12 +165,17 @@ async def run(request: RunRequest, provider: Provider, directory: Path, *,
     transcript = []
 
     async def steps():
-        async with ClaudeSDKClient(options=options(request, provider, directory)) as client:
+        transcript.clear()
+        opts = options(request, provider, directory)
+        smoke = SmokeSession() if request.smoke else None
+        if smoke is not None:
+            opts = replace(opts, mcp_servers={SDK_SERVER: smoke_server(smoke)})
+        async with ClaudeSDKClient(options=opts) as client:
             await client.query(request.user_message)
-            async for item in translate(client, transcript):
+            async for item in translate(client, transcript, smoke=smoke):
                 yield item
 
-    async def without_tools(prompt):
+    async def final_step(prompt):
         # The SDK cannot remove MCP tools from an active client. Use one client with no tools.
         final = replace(options(request, provider, directory), mcp_servers={}, allowed_tools=[],
                         max_turns=1)
@@ -155,7 +184,10 @@ async def run(request: RunRequest, provider: Provider, directory: Path, *,
             async for item in translate(client):
                 yield item
 
-    events = self_looping(request, steps(), transcript, without_tools)
+    def without_tools(prompt):
+        return retry_transient(lambda: final_step(prompt))
+
+    events = self_looping(request, retry_transient(steps), transcript, without_tools)
     async with aclosing(events):
         async for item in events:
             yield item

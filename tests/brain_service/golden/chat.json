@@ -11,7 +11,7 @@
     },
     {
      "type": "error",
-     "category": "auth",
+     "category": "config",
      "message": "Provider error: HTTP 401 invalid_token invalid_request_error",
      "code": "invalid_token",
      "provider_type": "invalid_request_error",
@@ -74,9 +74,9 @@
   "refreshes": 0,
   "run": {
    "status": "failed",
-   "error": "The brain run failed: auth invalid_token",
+   "error": "The brain run failed: config invalid_token",
    "usage": {
-    "failure_category": "provider"
+    "failure_category": "config"
    }
   }
  },
@@ -284,40 +284,14 @@
     "run_id": 1
    },
    {
-    "type": "text",
-    "text": "[redacted]. A",
+    "type": "error",
+    "text": "",
     "usage": {},
     "category": "runtime",
     "code": "unknown",
     "resets_at": null,
     "fallback_failed": false,
-    "run_id": 1
-   },
-   {
-    "type": "text",
-    "text": "sk Ada for the key.",
-    "usage": {},
-    "category": "runtime",
-    "code": "unknown",
-    "resets_at": null,
-    "fallback_failed": false,
-    "run_id": 1
-   },
-   {
-    "type": "final",
-    "text": "[redacted]. Ask Ada for the key.",
-    "usage": {
-     "prompt_tokens": 110,
-     "prompt_tokens_details": {
-      "cached_tokens": 1
-     },
-     "completion_tokens": 15,
-     "total_tokens": 125
-    },
-    "category": "runtime",
-    "code": "unknown",
-    "resets_at": null,
-    "fallback_failed": false,
+    "message": "The provider returned a credential",
     "run_id": 1
    }
   ],
@@ -331,24 +305,9 @@
      ]
     },
     {
-     "type": "text",
-     "text": "fake-golden-key. A"
-    },
-    {
-     "type": "text",
-     "text": "sk Ada for the key."
-    },
-    {
-     "type": "final",
-     "text": "fake-golden-key. Ask Ada for the key.",
-     "usage": {
-      "prompt_tokens": 110,
-      "prompt_tokens_details": {
-       "cached_tokens": 1
-      },
-      "completion_tokens": 15,
-      "total_tokens": 125
-     }
+     "type": "error",
+     "category": "runtime",
+     "message": "The provider returned a credential"
     }
    ]
   ],
@@ -406,15 +365,10 @@
   "mcp_calls": [],
   "refreshes": 0,
   "run": {
-   "status": "completed",
-   "error": null,
+   "status": "failed",
+   "error": "The brain run failed: runtime unknown",
    "usage": {
-    "total_tokens": 125,
-    "prompt_tokens": 110,
-    "completion_tokens": 15,
-    "prompt_tokens_details": {
-     "cached_tokens": 1
-    }
+    "failure_category": "provider"
    }
   }
  },
@@ -641,7 +595,67 @@
       },
       {
        "role": "user",
-       "content": "Find the release"
+       "content": [
+        {
+         "type": "text",
+         "text": "Find the release"
+        },
+        {
+         "type": "image_url",
+         "image_url": {
+          "url": "data:image/png;base64,iVBORw0KGgpBY21lIGdvbGRlbiBpbWFnZQ=="
+         }
+        }
+       ]
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lanes_search",
+        "description": "Search Acme lanes",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "asks_list",
+        "description": "List Acme asks",
+        "parameters": {
+         "type": "object"
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "url": "https://provider.example/v1/chat/completions",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "messages": [
+      {
+       "role": "system",
+       "content": "Use the Acme tools."
+      },
+      {
+       "role": "user",
+       "content": "Find the release\n\nThe images could not be shown. The model provider refused them."
       }
      ],
      "stream": true,
@@ -1348,7 +1362,7 @@
     },
     {
      "type": "error",
-     "category": "runtime",
+     "category": "transient",
      "message": "Provider error: HTTP 500 server_error server_error",
      "code": "server_error",
      "provider_type": "server_error",
@@ -1405,15 +1419,64 @@
       }
      ]
     }
+   },
+   {
+    "url": "https://provider.example/v1/chat/completions",
+    "authorization": "Bearer fake-golden-key",
+    "account": null,
+    "body": {
+     "model": "golden-model",
+     "messages": [
+      {
+       "role": "system",
+       "content": "Use the Acme tools."
+      },
+      {
+       "role": "user",
+       "content": "Find the release"
+      }
+     ],
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lanes_search",
+        "description": "Search Acme lanes",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "asks_list",
+        "description": "List Acme asks",
+        "parameters": {
+         "type": "object"
+        }
+       }
+      }
+     ]
+    }
    }
   ],
   "mcp_calls": [],
   "refreshes": 0,
   "run": {
    "status": "failed",
-   "error": "The brain run failed: runtime server_error",
+   "error": "The brain run failed: transient server_error",
    "usage": {
-    "failure_category": "provider"
+    "failure_category": "transient"
    }
   }
  },
@@ -1514,7 +1577,7 @@
     },
     {
      "type": "error",
-     "category": "runtime",
+     "category": "limit",
      "message": "Provider error: HTTP 429 usage_limit_reached usage_limit_reached",
      "code": "usage_limit_reached",
      "provider_type": "usage_limit_reached",
@@ -1652,9 +1715,9 @@
   "refreshes": 0,
   "run": {
    "status": "failed",
-   "error": "The brain run failed: runtime usage_limit_reached",
+   "error": "The brain run failed: limit usage_limit_reached",
    "usage": {
-    "failure_category": "provider"
+    "failure_category": "limit"
    }
   }
  },

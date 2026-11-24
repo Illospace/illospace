@@ -5,18 +5,30 @@ import json
 import os
 import time
 from contextlib import aclosing
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 from mcp.types import Tool
 
 from brain import providers
+from brain.errors import failure_event
+from brain.loop import run
 from brain.models import RunRequest
 from brain.process import run_worker
 from brain.providers import BUILT_IN, Provider
+from brain.server import create_app as create_brain
 from brain.wire.agent_sdk import options
-from brain.wire.chat import function_tools
+from brain.wire.chat import Chat, function_tools
 from brain.wire.responses import build_request
+from illo.brain.client import BrainClient
+from illo.deep import ports, start
+from illo.deep.worker import tick
+from illo.gateway.principal import Authority
+from illo.ledger import people, runs
+from illo.tools.registry import ToolContext
+from illo.workspace import RouteSettings
 from tests.brain_service.conftest import TOOLS, FakeMCP, serve
 
 
@@ -98,6 +110,68 @@ def test_rule_10_responses_request_has_only_discovered_functions():
     ]
     assert payload["store"] is False
     assert "previous_response_id" not in payload
+
+
+@pytest.mark.parametrize("kind", ["person_dm", "deep"])
+async def test_rule_10_gemini_gets_only_the_authorized_tools(app, replay, tmp_path, monkeypatch, kind):
+    ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.config.brain.routes[kind] = RouteSettings(provider="gemini", model="gemini-4-neon")
+    ctx.workspace.config.web.search = "provider"
+    monkeypatch.setattr(ports, "refresh_repos", AsyncMock())
+    monkeypatch.setenv("ILLO_BRAIN_SECRET", "fake-brain-secret")
+    table = providers.load({"ILLO_PROVIDER_GEMINI_API_KEY": "fake-gemini-key"})
+    received = []
+
+    def respond(request):
+        received.append(json.loads(request.content))
+        choice = {"delta": {"content": "Acme release ready."}, "finish_reason": "stop"}
+        return httpx.Response(200, text="data: " + json.dumps({"choices": [choice]}) + "\n\n")
+
+    async def runner(request, selected, fallback):
+        assert request.provider == "gemini" and not request.web_search
+        try:
+            events = [item async for item in run(
+                Chat, request, selected, tmp_path, transport=httpx.MockTransport(respond),
+            )]
+        except Exception as error:
+            events = [failure_event(error)]
+        for item in events:
+            yield item
+
+    service = create_brain(runner=runner, table=table)
+    ctx.brain_client = BrainClient("http://brain", transport=httpx.ASGITransport(app=service))
+    ctx.providers = await ctx.brain_client.providers()
+    async with serve(app) as public_url:
+        ctx.config.public_url = public_url
+        if kind == "deep":
+            async with ctx.pool.connection() as conn:
+                person = await people.get(conn, "ada")
+                await start(ctx, conn, kind="request", job="Check the Acme release.",
+                            authority=Authority("team", "team_channel", person["id"]),
+                            deliver={"none": True})
+            row = await tick(ctx)
+            assert row["state"] == "done"
+            run_id = row["run_id"]
+        else:
+            result = await replay()
+            assert "error" not in result
+            async with ctx.pool.connection() as conn:
+                cursor = await conn.execute("SELECT id FROM runs WHERE event_id=%s", (result["event_id"],))
+                run_id = (await cursor.fetchone())["id"]
+    async with ctx.pool.connection() as conn:
+        stored = await runs.get(conn, run_id)
+        expected = await ctx.registry.list_tools_for(ToolContext(conn, stored, ctx))
+    assert stored["route"] == kind
+    body, = received
+    assert body["tools"] == [
+        {"type": "function", "function": {
+            "name": item["name"], "description": item["description"], "parameters": item["inputSchema"],
+        }} for item in expected
+    ]
+    assert not {
+        "google_search", "code_execution", "url_context", "web_search_options", "extra_body",
+    } & body.keys()
 
 
 @pytest.mark.skipif(

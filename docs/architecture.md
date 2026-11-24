@@ -61,6 +61,11 @@ Channels ──► Gateway ──► Ledger (Postgres)
 
 **Providers and routes.** The brain service owns the providers: the address, the wire format, the API key and the capabilities (`brain/providers.py`). It reads them once at start from its own environment file. `GET /providers` describes them to the app: the name, the wire and the capabilities, never a key or an address. The workspace owns the routes (`brain.routes` in `illo.yaml`): each run kind has a provider, a model, an effort and limits. The app checks the routes against `GET /providers` at start and at each reload. A route that can fall back to `brain.chatgpt.fallback` needs a fallback that accepts the same requests: the route's effort, images and web search. The voice provider needs the `transcription` capability. Before a migration, `deploy/update.sh` runs the same check with the new images (`python -m brain.providers` piped into `illo check-routes`), so an update that the new code would refuse changes nothing.
 
+The built-in `gemini` provider uses the Chat Completions wire.
+It reads `ILLO_PROVIDER_GEMINI_API_KEY` from the brain environment file.
+It accepts images and the efforts `minimal`, `low`, `medium`, `high`, and `xhigh`.
+It provides no search or transcription.
+
 The `chatgpt` provider uses each person's ChatGPT subscription. The main app keeps each ChatGPT grant encrypted in `connector_grants`, and refreshes it under a row lock.
 It sends only the access token and account ID to the brain for one run.
 `brain.chatgpt` is the payer policy of that provider. Person requests use that person's grant by default (`person_credential: own`).
@@ -270,14 +275,16 @@ A deep run is a normal run on the `deep` route. The worker calls `record_event` 
 - `web_search_allowed(workspace, route, provider, deep)` controls provider search at the start of a deep run. It checks the workspace setting, the deep kind and profile, the read flags, and the selected provider's `web_search` capability.
 - `check_routes(workspace, providers)` checks each route against `GET /providers`. At start, a failure stops the app; while the brain is not reachable, the app waits. At reload, a failure keeps the last valid workspace and logs the reason.
 
-The brain interface (`illo/brain/client.py`): `run(request)`, `providers()` and `transcribe(...)`. `RunRequest`: `run_id`, `system_prompt`, `images`, `user_message`, `mcp_url`, `mcp_token`, `provider`, `model`, `effort`, `max_tool_calls`, `timeout_s`, `max_output_tokens`, `web_search`, `provider_auth` (ChatGPT only), `fallback_provider`, `smoke`. The brain answers an unknown provider or a missing capability with the `config` category. The brain caps each run at `min(timeout_s, ILLO_BRAIN_MAX_TIMEOUT_S)`. The brain events are `started`, `text`, `tool_call`, `web_search`, `payer`, `final` and `error`. The `payer` event marks a switch to the fallback provider during the run. The run keeps the first payer in its payer fields and records the fallback in its usage. A fake brain in `illo/brain/fake.py` plays a script of tool calls. Each test uses it, with the provider description of the brain's built-in providers. The real wire adapters live in the `brain/` service.
+The brain interface (`illo/brain/client.py`): `run(request)`, `providers()` and `transcribe(...)`. `RunRequest`: `run_id`, `system_prompt`, `images`, `user_message`, `mcp_url`, `mcp_token`, `provider`, `model`, `effort`, `max_tool_calls`, `timeout_s`, `max_output_tokens`, `web_search`, `provider_auth` (ChatGPT only), `fallback_provider`, `smoke`. The brain answers an unknown provider or a missing capability with the `config` category. The brain caps each run at `min(timeout_s, ILLO_BRAIN_MAX_TIMEOUT_S)`. The brain events are `started`, `text`, `tool_call`, `web_search`, `payer`, `response`, `final` and `error`. The smoke check uses the `response` event. The `payer` event marks a switch to the fallback provider during the run. The run keeps the first payer in its payer fields and records the fallback in its usage. A fake brain in `illo/brain/fake.py` plays a script of tool calls. Each test uses it, with the provider description of the brain's built-in providers. The real wire adapters live in the `brain/` service.
 
 ### The brain loop
 
 The brain service has one agent loop, `brain/loop.py`. Each wire format has one small adapter in `brain/wire/`:
 
 - `responses.py`: the Responses wire, for the `chatgpt` and `openai` providers.
-- `chat.py`: the Chat Completions wire, for a custom provider.
+- `chat.py` uses Chat Completions for `gemini` and custom providers.
+  It keeps every assistant field when it replays a message, including fields on a tool call.
+  The adapter docstring gives the rules for combining stream deltas.
 - `agent_sdk.py`: the Claude Agent SDK, for the `anthropic` provider. It is the self-looping exception below.
 - `fake.py`: lists the tools of the run and makes no model request (the `fake` provider).
 
@@ -290,21 +297,33 @@ The loop owns the rules of a run:
 - **The usage sum.** The loop adds the raw usage of each response (`brain/usage.py`). It keeps each numeric field and each detail object.
 - **The subscription fallback.** When the ChatGPT limit stops a request and the request names a `fallback_provider` (from `brain.chatgpt.fallback`), the loop sends a `payer` event, then sends that request once again to that provider with its API key. It keeps the tool results of the run and does not run a tool again. The usage adds both parts. The brain refuses a request that the fallback cannot serve (`brain/providers.py` `unsupported`, the same rule as for the first provider).
 - **The sign-in refresh.** When the provider rejects the sign-in, the brain sends an `auth` error. The brain cannot refresh the grant. The app run manager refreshes it once, if no tool call happened, and starts the run again.
+- **The transient retry.** The loop waits two seconds and retries once after a `transient` error.
+  It retries only if that request produced no text and no tool call. This includes text still in the adapter buffer.
 - **The image retry.** When the provider refuses the images, the loop sends the request once again as text. The text tells the model that it could not see the images.
+
+The app uses the selected provider's `images` capability from `GET /providers` to decide whether to download Slack images.
+When the provider cannot show images, the model receives a note.
+The brain rejects images with `config` if the provider lacks that capability.
+The Chat wire writes images as `image_url` parts with data URLs.
 
 Other owners:
 
-- `brain/tools.py` is the Illo MCP boundary. It parses the tool arguments, maps an MCP failure to a tool result, and makes the result text. On the Responses wire, it refuses a provider chunk that echoes a credential or private image data. The Chat Completions wire has no such check today; the service redaction removes the credential from its events. On the Responses wire, it reads the run flags: a customer read, a personal read, or a result with no flag metadata closes web search for the rest of the run. The Chat Completions wire reads no run flags today, because it never sends web search. The app makes the run flags (`illo/brain/server.py`).
-- `brain/errors.py` has the error categories: `auth`, `timeout`, `runtime`, `limit`, `internal`. The server adds `config` for a request that the provider table cannot serve. The app maps it to `RunFailure("config")` and the reply "Illo is not set up for this kind of request. An operator must fix the settings." A provider message never enters an event or a log.
+- `brain/tools.py` is the Illo MCP boundary. It parses the tool arguments, maps an MCP failure to a tool result, and makes the result text. It refuses an echo of a credential or private image data before a tool call can reach MCP. The Chat adapter also checks the assembled message because an echo can span multiple deltas. On the Responses wire, it reads the run flags: a customer read, a personal read, or a result with no flag metadata closes web search for the rest of the run. The Chat Completions wire reads no run flags today, because it never sends web search. The app makes the run flags (`illo/brain/server.py`).
+- `brain/errors.py` has the error categories: `auth`, `timeout`, `runtime`, `limit`, `transient`, `internal`. The server adds `config` for a request that the provider table cannot serve. The app maps it to `RunFailure("config")` and the reply "Illo is not set up for this kind of request. An operator must fix the settings." The Chat wire maps HTTP 500 and 503 to `transient`. A provider error message never enters an event or a log.
 - `brain/server.py` (`redact`) removes credentials from each event line before the line leaves the service.
 
 **The self-looping exception.** The Agent SDK runs the tools itself, so the Claude adapter cannot use the loop. The SDK starts the Claude Code CLI as a subprocess with its built-in tools off. It sees only the Illo MCP server (`tools.SDK_SERVER`), and `tests/safety/test_rule_10_brain_tools.py` checks this. The SDK counts its own turns, so the adapter gives it `max_tool_calls + 1` (the SDK parameter is `max_turns`). The adapter gives its events and one provider operation to `self_looping` in the loop: a function that sends one request with no tools (a new SDK client with no MCP server and `max_turns=1`). `self_looping` decides when the last request starts (at the SDK `limit` error), writes its prompt (the transcript as outside data and the instruction of the last request), adds its usage, marks the usage `limited` and chooses the answer (`last_answer`). The adapter maps its errors with `errors.py`.
 
-**One wire contract in two copies.** `brain/models.py` and `illo/brain/client.py` have the same request models. The brain image has only the `brain/` folder, so the two packages cannot share one module. `tests/brain_service/test_client_contract.py` compares the JSON schema of the two copies, field by field: the names, the types, the defaults, the required fields, the literal values, the bounds and the formats. It also compares the defaults that each model makes. The copies differ today in twelve named fields, for example the sign-in models and the bounds that only the service checks. The test pins the exact schema of each side for these fields and gives the reason. Any other difference fails. `tests/brain_service/test_wire_inputs.py` pins the payloads that each copy accepts.
+**One wire contract in two copies.** `brain/models.py` and `illo/brain/client.py` have the same request models. The brain image has only the `brain/` folder, so the two packages cannot share one module. `tests/brain_service/test_client_contract.py` compares the JSON schema of the two copies, field by field: the names, the types, the defaults, the required fields, the literal values, the bounds and the formats. It also compares the defaults that each model makes. The copies differ in named fields, for example the sign-in models and the bounds that only the service checks. The test pins the exact schema of each side for these fields and gives the reason. Any other difference fails. `tests/brain_service/test_wire_inputs.py` pins the payloads that each copy accepts.
 
 `tests/brain_service/test_golden.py` records the events, the provider requests and the `runs.usage` value of each wire for a fixed set of runs.
 
 ## 7. The tools that the brain sees
+
+The operator's `illo brain smoke` command uses the run manager and the normal payer rules.
+It offers only `smoke_step`, a tool that passes a random token from one response to the next.
+The smoke check needs three separate tool responses and a correct image answer if the provider accepts images.
+Its output includes response field names, stop reasons, and raw usage.
 
 Tool names use `family_verb`. Each family is one file in `illo/tools/`. The registry finds each file by itself, so two builders never edit the same file.
 
@@ -407,7 +426,7 @@ illo/
   migrations/
   ledger/        people lanes asks rules items audit drafts signals tokens runs
   gateway/       events principal dispatch replies
-  brain/         client routes run_manager prompts fake
+  brain/         client routes run_manager smoke prompts fake
   tools/         registry checks + one file for each family
   channels/      slack/ email/ mcp/ signals/
   sources/       search github slack_index drive archive

@@ -12,7 +12,7 @@ from illo.config import Config
 from tests.conftest import ROOT
 
 CHANGES = [
-    ({"routes": {"person_dm": {"provider": "gemini"}}}, "the brain has no provider gemini"),
+    ({"routes": {"person_dm": {"provider": "missing"}}}, "the brain has no provider missing"),
     ({"routes": {"deep": {"effort": "max"}}}, "does not accept the effort max"),
     ({"chatgpt": {"team_credential": "ada", "fallback": "anthropic"}}, "brain.chatgpt.fallback"),
     ({"chatgpt": {"team_credential": "ada", "fallback": "chatgpt"}}, "brain.chatgpt.fallback"),

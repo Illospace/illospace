@@ -374,6 +374,7 @@ def test_install_creates_both_environment_files_at_mode_600(install):
     assert app.stat().st_mode & 0o777 == 0o600 and brain.stat().st_mode & 0o777 == 0o600
     assert f"ILLO_BRAIN_ENV_FILE='{brain}'" in app.read_text()
     assert "ILLO_PROVIDER_OPENAI_API_KEY=" in brain.read_text()
+    assert "ILLO_PROVIDER_GEMINI_API_KEY=" in brain.read_text()
     assert "PROVIDER" not in app.read_text().replace("ILLO_BRAIN_ENV_FILE", "")
     # A second install recreates each service whose environment file changed.
     assert run(install, "install.sh").returncode == 0

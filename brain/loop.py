@@ -5,19 +5,29 @@ web search), `Usage` reports, and one `Turn` with the answer, the tool calls and
 """
 
 import json
+from asyncio import sleep
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from mcp.types import CallToolResult, TextContent, Tool
+from mcp.types import Tool
 
-from brain.errors import RunError, error_body, provider_error
+from brain.errors import RunError, error_body, identifier
 from brain.models import ApiKeyAuth, BrainEvent, RunRequest, event
 from brain.outside_data import data_text
 from brain.providers import Provider
-from brain.tools import Call, check_call, check_echo, connect, execute, list_tools
+from brain.tools import (
+    SMOKE_TOOL,
+    Call,
+    SmokeSession,
+    check_call,
+    check_echo,
+    connect,
+    execute,
+    list_tools,
+)
 from brain.usage import Usage, add_usage
 
 LIMIT_INSTRUCTION = (
@@ -27,9 +37,9 @@ LIMIT_INSTRUCTION = (
 LIMIT_RESULT = "The tool limit is reached. This tool did not run."
 NO_FINAL_ANSWER = 'I reached my step limit before I had an answer. Ask again with a narrower question.'
 IMAGES_REFUSED = "\n\nThe images could not be shown. The model provider refused them."
-# The smoke check has one fixed test function. It reads and writes no team data.
-SMOKE_TOOLS = [Tool(name="smoke_ping", description="Return Ready to test a function call.",
-                    inputSchema={"type": "object", "properties": {}, "additionalProperties": False})]
+# A wire can see output before it is safe to release it as an event.
+OUTPUT = object()
+IMAGES_DROPPED = object()
 
 
 @dataclass
@@ -39,17 +49,42 @@ class Turn:
     answer: str = ""
     calls: list[Call] = field(default_factory=list)
     stop: str = "done"
+    messages: list[dict] = field(default_factory=list)
 
 
-class SmokeSession:
-    def __init__(self):
-        self.calls = 0
+def response_log(stop, messages, usage) -> BrainEvent:
+    """Give field names and numeric usage for the smoke check."""
+    def fields(value, prefix=""):
+        if isinstance(value, dict):
+            for name, child in value.items():
+                path = prefix + name
+                yield path
+                yield from fields(child, path + ".")
+        elif isinstance(value, list):
+            for child in value:
+                yield from fields(child, prefix)
 
-    async def call_tool(self, name, arguments):
-        if name != "smoke_ping" or arguments:
-            raise RunError("runtime", "The smoke tool needs no arguments")
-        self.calls += 1
-        return CallToolResult(content=[TextContent(type="text", text="Ready.")])
+    counts = {}
+    add_usage(counts, usage or {})
+    return event("response", stop=identifier(stop), fields=sorted(set(fields(messages))), usage=counts)
+
+
+async def retry_transient(send):
+    """Repeat one request after 2 seconds if it failed before text or a tool call."""
+    for attempt in range(2):
+        output = False
+        try:
+            async with aclosing(send()) as parts:
+                async for part in parts:
+                    output |= part is OUTPUT or (
+                        isinstance(part, dict) and part.get("type") in {"text", "tool_call", "web_search"}
+                    )
+                    yield part
+            return
+        except RunError as error:
+            if error.category != "transient" or attempt or output:
+                raise
+            await sleep(2)
 
 
 def last_answer(text: str, usage: dict, *, asked_for_tools: bool = False) -> str:
@@ -101,10 +136,21 @@ async def chunks(response: httpx.Response) -> AsyncIterator[dict]:
         yield json.loads("\n".join(lines))
 
 
-def take(part, usage: dict):
+async def body_chunks(response: httpx.Response, *, streaming: bool) -> AsyncIterator[dict]:
+    if streaming:
+        async with aclosing(chunks(response)) as stream:
+            async for chunk in stream:
+                yield chunk
+    else:
+        await response.aread()
+        yield response.json()
+
+
+def take(part, usage: dict, turn_usage: dict):
     """Add a usage report to the run sum. Stop a response that its output limit cut."""
     if isinstance(part, Usage):
         add_usage(usage, part)
+        add_usage(turn_usage, part)
         return None
     if isinstance(part, Turn) and part.stop == "length":
         raise RunError("limit", "The model response did not complete", usage=usage)
@@ -114,27 +160,26 @@ def take(part, usage: dict):
 async def send(wire, request: RunRequest, http: httpx.AsyncClient, *, tools_disabled: bool):
     """Send one model request and give the parts of its stream."""
     payload = wire.payload(request, tools_disabled=tools_disabled)
-    images = True
     while True:
         async with http.stream(
             "POST", wire.url(request), json=payload, headers=wire.headers(request)
         ) as response:
             if response.is_error:
-                error = await error_body(response)
-                if wire.rejected(request, payload, response.status_code, error):
+                error = wire.error(request, payload, response.status_code, await error_body(response))
+                if error is None:
                     continue
-                if (response.status_code in (400, 413, 415, 422) and images
+                if (error.category == "runtime" and response.status_code in (400, 413, 415, 422)
                         and wire.drop_images(IMAGES_REFUSED)):
                     # The answer matters more than the images. The model tells the person.
-                    images = False
+                    yield IMAGES_DROPPED
                     continue
-                raise provider_error(error, response.status_code)
+                raise error
             response.raise_for_status()
-            async for chunk in chunks(response):
-                if wire.checks_echo:
+            async with aclosing(body_chunks(response, streaming=payload["stream"])) as stream:
+                async for chunk in stream:
                     check_echo(chunk, wire.provider.api_key, request, error=wire.failed(chunk))
-                for part in wire.read(request, chunk):
-                    yield part
+                    for part in wire.read(request, chunk):
+                        yield part
             return
 
 
@@ -150,18 +195,28 @@ async def conversation(
     subscription_limit = None
     tool_calls = 0
     limited = False
+    images_used = bool(request.images)
     while True:
+        turn_usage = {}
         for attempt in range(2):
             try:
-                async with aclosing(send(wire, request, http, tools_disabled=limited)) as parts:
+                async with aclosing(retry_transient(
+                    lambda: send(wire, request, http, tools_disabled=limited)
+                )) as parts:
                     async for part in parts:
-                        if (item := take(part, usage)) is not None:
+                        if part is IMAGES_DROPPED:
+                            images_used = False
+                        elif part is OUTPUT:
+                            continue
+                        elif (item := take(part, usage, turn_usage)) is not None:
                             yield item
                 break
             except Exception as error:
                 if subscription_limit is not None:
                     raise RunError("limit", str(subscription_limit) + " The API fallback failed.",
                                    **subscription_limit.details, fallback_failed=True) from None
+                if isinstance(error, RunError) and error.category == "transient":
+                    raise
                 if (
                     not isinstance(error, RunError)
                     or attempt
@@ -182,15 +237,23 @@ async def conversation(
                 yield event("payer", provider=fallback.name, auth_kind="api_key")
         turn = None
         for part in wire.finish(request):
-            if isinstance(part := take(part, usage), Turn):
+            if isinstance(part := take(part, usage, turn_usage), Turn):
                 turn = part
             elif part is not None:
                 yield part
+        if request.smoke:
+            yield response_log(turn.stop, turn.messages, turn_usage)
+            session.observe_response(call.id for call in turn.calls)
         if not turn.calls or limited:
             answer = turn.answer
             if limited:
                 answer = last_answer(answer, usage, asked_for_tools=bool(turn.calls))
-            yield event("final", text=fallback_notice + answer, usage=usage)
+            final = event("final", text=answer if request.smoke else fallback_notice + answer,
+                          usage=usage)
+            if request.smoke:
+                final.update(smoke_steps=session.completed_steps(), smoke_image_used=images_used,
+                             stop=identifier(turn.stop))
+            yield final
             return
         # The limit counts tool calls, not model turns. Each call of a batch counts.
         for call in turn.calls:
@@ -214,11 +277,9 @@ async def run(
         http = await stack.enter_async_context(httpx.AsyncClient(
             timeout=request.timeout_s, follow_redirects=False, transport=transport))
         if request.smoke:
-            session, tools = SmokeSession(), SMOKE_TOOLS
+            session, tools = SmokeSession(), [SMOKE_TOOL]
         else:
             session = await stack.enter_async_context(connect(request))
             tools = await list_tools(session)
         async for item in conversation(wire_type, request, provider, session, tools, http, fallback):
-            if request.smoke and item["type"] == "final":
-                item["tool_round_trip"] = session.calls == 1
             yield item

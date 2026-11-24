@@ -5,9 +5,11 @@ from typing import Any
 
 import httpx
 
+from brain.models import ErrorCategory
+
 
 class RunError(Exception):
-    def __init__(self, category: str, message: str, **details: Any) -> None:
+    def __init__(self, category: ErrorCategory, message: str, **details: Any) -> None:
         super().__init__(message)
         self.category = category
         self.details = details
@@ -19,12 +21,16 @@ def identifier(value) -> str:
     return "unknown"
 
 
-def provider_error(error, status: int | None = None) -> RunError:
+def provider_error(error, status: int | None = None, *, category: ErrorCategory | None = None) -> RunError:
     error = error if isinstance(error, dict) else {}
     code, kind = identifier(error.get("code")), identifier(error.get("type"))
-    category = "auth" if status in (401, 403) else "runtime"
-    if code in ("rate_limit_exceeded", "insufficient_quota"):
-        category = "limit"
+    if category is None:
+        category = {401: "auth", 403: "auth", 500: "transient", 503: "transient"}.get(
+            status, "runtime")
+        if code in ("rate_limit_exceeded", "insufficient_quota"):
+            category = "limit"
+        elif status is None and code in ("server_error", "service_unavailable"):
+            category = "transient"
     details = {"code": code, "provider_type": kind}
     if status is not None:
         details["http_status"] = status
@@ -35,6 +41,8 @@ async def error_body(response: httpx.Response) -> dict:
     await response.aread()
     try:
         body = response.json()
+        if isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict):
+            body = body[0]
         error = body.get("error", {}) if isinstance(body, dict) else {}
         return error if isinstance(error, dict) else {}
     except ValueError:
@@ -46,7 +54,8 @@ def error_category(error: BaseException) -> str:
         return error.category
     if isinstance(error, BaseExceptionGroup):
         categories = [error_category(child) for child in error.exceptions]
-        return next((c for c in ("auth", "timeout", "limit", "runtime") if c in categories), "internal")
+        return next((c for c in ("auth", "timeout", "limit", "config", "transient", "runtime")
+                     if c in categories), "internal")
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (401, 403):
         return "auth"
     if isinstance(error, (TimeoutError, httpx.TimeoutException)):

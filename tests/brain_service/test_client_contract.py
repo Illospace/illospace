@@ -51,6 +51,44 @@ async def test_foundation_client_wrong_secret(fake_mcp, monkeypatch):
     assert error.value.response.status_code == 401
 
 
+async def test_minimal_request_and_transient_event_round_trip(monkeypatch):
+    from brain.errors import RunError, failure_event
+    from brain.providers import load
+
+    monkeypatch.setenv("ILLO_BRAIN_SECRET", "fake-brain-secret")
+    request = RunRequest(
+        run_id=42, system_prompt="Acme", user_message="List the tools",
+        mcp_url="http://illo.example/mcp", mcp_token="fake-token", provider="gemini",
+        model="gemini-4-neon", effort="minimal", max_tool_calls=1, timeout_s=5,
+    )
+    table = load({"ILLO_PROVIDER_GEMINI_API_KEY": "fake-gemini-key"})
+
+    async def runner(received, provider, _fallback):
+        assert received.wire() == request.wire() | {"smoke": False}
+        assert received.effort == "minimal" and provider == table["gemini"]
+        yield failure_event(RunError("transient", "The model request failed", http_status=503))
+
+    async with serve(create_app(runner=runner, table=table)) as base:
+        events = [item async for item in BrainClient(base).run(request)]
+    assert events[-1].type == "error"
+    assert events[-1].category == "transient"
+    assert events[-1].http_status == 503
+
+
+def test_workspace_minimal_effort_requires_provider_support(workspace):
+    from illo.brain.routes import check_routes
+    from illo.workspace import RouteSettings
+    from tests.workspaces import provider_catalog
+
+    workspace = workspace.model_copy(deep=True)
+    route = RouteSettings(provider="gemini", model="gemini-4-neon", effort="minimal")
+    workspace.config.brain.routes["person_dm"] = route
+    check_routes(workspace, provider_catalog())
+    route.provider = "openai"
+    with pytest.raises(ValueError, match="openai does not accept the effort minimal"):
+        check_routes(workspace, provider_catalog())
+
+
 async def test_real_gateway_mcp_catalog(app, rpc_token, monkeypatch):
     import json
 
@@ -145,9 +183,6 @@ KNOWN = {
                  "The service checks the name. Its provider table checks the rest."),
     "model": (TEXT, {**TEXT, "maxLength": 128, "minLength": 1},
               "The service bounds the name."),
-    "effort": ({"anyOf": [TEXT, {"type": "null"}], "default": None},
-               {"anyOf": [{**TEXT, "pattern": "^[a-z]{1,16}$"}, {"type": "null"}], "default": None},
-               "The service checks the shape. The provider's efforts decide the value."),
     "fallback_provider": (
         {"anyOf": [TEXT, {"type": "null"}], "default": None},
         {"anyOf": [{**TEXT, "pattern": "^[a-z][a-z0-9_]{0,31}$"}, {"type": "null"}],

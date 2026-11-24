@@ -1,10 +1,12 @@
 """Check SDK message translation with the SDK's real message types."""
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock, ToolUseBlock
 
+from brain import loop
 from brain.errors import RunError
 from brain.providers import BUILT_IN, Provider
+from brain.tools import SmokeSession
 from brain.wire.agent_sdk import translate
 
 
@@ -64,6 +66,74 @@ async def test_sdk_result_error_categories(subtype, status, category):
     events = [item async for item in translate(ScriptedClient([message]))]
     assert events[-1]["category"] == category
     assert "private provider detail" not in events[-1]["message"]
+
+
+@pytest.mark.parametrize("after", [None, "text", "tool"])
+async def test_sdk_transient_retry_observes_output(monkeypatch, after):
+    opened, sleeps = [], []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(loop, "sleep", sleep)
+    output = {
+        None: [],
+        "text": [TextBlock(text="Partial answer.")],
+        "tool": [ToolUseBlock(id="call_1", name="mcp__illo__lanes_search", input={})],
+    }[after]
+
+    async def request():
+        opened.append(True)
+        failed = len(opened) == 1
+        messages = [
+            AssistantMessage(model="fake", content=output if failed else [TextBlock(text="Ready.")]),
+            ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=failed,
+                          num_turns=1, session_id="fake", api_error_status=503 if failed else None),
+        ]
+        async for item in translate(ScriptedClient(messages)):
+            yield item
+
+    if after is None:
+        events = [item async for item in loop.retry_transient(request)]
+        assert sleeps == [2] and len(opened) == 2 and events[-1]["text"] == "Ready."
+    else:
+        with pytest.raises(RunError) as error:
+            _ = [item async for item in loop.retry_transient(request)]
+        assert error.value.category == "transient" and not sleeps and len(opened) == 1
+
+
+async def test_sdk_smoke_rejects_two_tool_calls_with_the_same_message_id():
+    messages = [
+        AssistantMessage(
+            model="fake", message_id="message_1",
+            content=[ToolUseBlock(id=f"call_{n}", name="mcp__illo__smoke_step", input={"n": n})],
+        )
+        for n in (1, 2)
+    ]
+    with pytest.raises(RunError, match="one tool call in each response"):
+        _ = [item async for item in translate(ScriptedClient(messages), smoke=SmokeSession())]
+
+
+async def test_sdk_smoke_counts_three_separate_responses():
+    session = SmokeSession()
+    messages = []
+    args = {}
+    for step in range(1, 4):
+        args = {**args, "n": step}
+        messages.append(AssistantMessage(
+            model="fake", message_id=f"message_{step}",
+            content=[ToolUseBlock(id=f"call_{step}", name="mcp__illo__smoke_step", input=args)],
+        ))
+        result = await session.call_tool("smoke_step", args)
+        args = {"token": result.content[0].text}
+    messages.append(ResultMessage(
+        subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+        num_turns=4, session_id="fake", stop_reason="end_turn", result="Ready.",
+    ))
+    events = [item async for item in translate(ScriptedClient(messages), smoke=session)]
+    assert events[-1]["smoke_steps"] == 3
+    assert events[-1]["stop"] == "end_turn"
+    assert args["token"] not in str(events)
 
 
 async def test_tool_limit_uses_one_separate_client_without_tools(run_request, tmp_path, monkeypatch):

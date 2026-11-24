@@ -140,8 +140,7 @@ CASES = {
     "provider_500": {
         "turns": [failure(500, code="server_error", type="server_error", message="PRIVATE")]
     },
-    # The model text holds the API key. Responses stops the run. Chat Completions completes
-    # it, and the service redacts the key in the stream.
+    # Both wires stop the run before the API key can reach a caller.
     "credential_echo": {"delivered": True, "turns": [answer("fake-golden-key. Ask Ada for the key.")]},
     # The output limit cuts the response. Only the Responses error keeps the usage.
     "output_limit": {"turns": [{"length": True, **answer("Release rea")}]},
@@ -229,7 +228,7 @@ def chat_turn(turn, n):
     def choice(delta, finish=None):
         return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
 
-    chunks = [choice({"role": "assistant"})]
+    chunks = [choice({"role": "assistant", "content": None})]
     text = turn.get("text") or turn.get("search")
     chunks += [choice({"content": part}) for part in halves(text or "") if part]
     for i, (name, arguments) in enumerate(turn.get("calls", [])):
@@ -266,12 +265,14 @@ class Provider:
         if request.headers.get("authorization") in turn.get("reject", []):
             return httpx.Response(401, json={"error": {
                 "code": "invalid_token", "type": "invalid_request_error", "message": "PRIVATE"}})
-        if turn.get("refuse_images") and "input_image" in json.dumps(body):
+        if turn.get("refuse_images") and (
+            "input_image" in json.dumps(body) or "image_url" in json.dumps(body)
+        ):
             return httpx.Response(400, json={"error": {
                 "code": "invalid_image", "type": "invalid_request_error", "message": "PRIVATE"}})
-        self.index += 1
         if "status" in turn:
             return httpx.Response(turn["status"], json={"error": turn["error"]})
+        self.index += 1
         if self.wire == "responses":
             search = "search" in turn and {"type": "web_search"} in body.get("tools", [])
             return responses_turn(turn, self.index, search)
@@ -309,8 +310,14 @@ async def golden_run(app, replay, monkeypatch, wire, case):
     monkeypatch.setenv("ILLO_PROVIDER_OPENAI_BASE_URL", "https://provider.example/v1")
     monkeypatch.setenv("ILLO_PROVIDER_LOCAL_API_KEY", "fake-golden-key")
     monkeypatch.setenv("ILLO_PROVIDER_LOCAL_WIRE", "chat")
+    monkeypatch.setenv("ILLO_PROVIDER_LOCAL_CAPABILITIES", "images")
     monkeypatch.setenv("ILLO_PROVIDER_LOCAL_BASE_URL", "https://provider.example/v1")
     monkeypatch.setenv("ILLO_BRAIN_SECRET", "fake-golden-secret")
+    if case is CASES["provider_500"]:
+        async def sleep(_seconds):
+            pass
+
+        monkeypatch.setattr("brain.loop.sleep", sleep)
     ctx = app.state.ctx
     ctx.workspace = ctx.workspace.model_copy(deep=True)
     brain = ctx.workspace.config.brain

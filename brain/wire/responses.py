@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from mcp.types import Tool
 
 from brain.errors import RunError, provider_error
-from brain.loop import Turn
+from brain.loop import OUTPUT, Turn
 from brain.models import RunRequest, event
 from brain.providers import Provider
 from brain.tools import Call
@@ -92,6 +92,12 @@ def used_fields(item):
     return fields
 
 
+def has_output(item):
+    return item.get("type") in ("function_call", "web_search_call") or any(
+        part.get("text") or part.get("refusal") for part in item.get("content") or []
+    )
+
+
 def effort_rejected(error: dict) -> bool:
     param = error.get("param")
     # Read the message only to classify this rejection. Never emit or log it.
@@ -115,7 +121,6 @@ def arguments(call: dict):
 
 
 class Responses:
-    checks_echo = True
     reads_run_flags = True
     missing_id = "The model returned an invalid function call"
 
@@ -148,16 +153,16 @@ class Responses:
             payload["reasoning"] = {"effort": request.effort}
         return payload
 
-    def rejected(self, request, payload, status, error) -> bool:
-        """Raise a final rejection, or remove a rejected optional part and give True."""
+    def error(self, request, payload, status, error) -> RunError | None:
+        """Return an error, or remove a rejected optional part so the loop can resend."""
         if request.provider_auth.kind == "chatgpt" and (limit := subscription_limit(error, status)):
-            raise limit
+            return limit
         if (status == 400 and "effort" in self.retries and "reasoning" in payload
                 and effort_rejected(error)):
             self.retries.discard("effort")
             _without_effort.add((self.provider.base_url, request.model))
             del payload["reasoning"]
-            return True
+            return None
         if (400 <= status < 500 and "web_search" in self.retries and request.web_search
                 and web_search_rejected(error)):
             self.retries.discard("web_search")
@@ -168,8 +173,8 @@ class Responses:
                 content.append({"type": "input_text", "text": WEB_UNAVAILABLE})
             else:
                 self.items[0]["content"] += WEB_UNAVAILABLE
-            return True
-        return False
+            return None
+        return provider_error(error, status)
 
     def drop_images(self, notice) -> bool:
         """Change the first user turn to text only. The payload holds the same list."""
@@ -195,10 +200,17 @@ class Responses:
         kind = chunk.get("type")
         if kind == "response.output_text.delta":
             self.deltas.append(chunk["delta"])
+            if chunk["delta"]:
+                yield OUTPUT
+        elif kind == "response.output_text.done" and chunk.get("text"):
+            yield OUTPUT
         elif kind in ("response.output_item.added", "response.output_item.done"):
-            yield from self.searched(request, chunk["item"])
+            item = chunk["item"]
+            if has_output(item):
+                yield OUTPUT
+            yield from self.searched(request, item)
             if kind == "response.output_item.done":
-                self.done[chunk["output_index"]] = chunk["item"]
+                self.done[chunk["output_index"]] = item
         elif kind in ("error", "response.failed"):
             failed = chunk.get("response") or {}
             yield Usage(failed.get("usage") or {})
@@ -210,6 +222,8 @@ class Responses:
             yield Turn(stop="length")
         elif kind == "response.completed":
             self.completed = chunk["response"]
+            if any(has_output(item) for item in self.completed.get("output") or []):
+                yield OUTPUT
 
     def finish(self, request):
         completed = self.completed
@@ -246,7 +260,8 @@ class Responses:
             for part in item.get("content", [])
             if part.get("type") in {"output_text", "refusal"}
         )
-        yield Turn(answer, [Call(c.get("call_id"), c["name"], arguments(c)) for c in calls])
+        yield Turn(answer, [Call(c.get("call_id"), c["name"], arguments(c)) for c in calls],
+                   stop="completed", messages=output)
 
     def add_result(self, call: Call, text: str) -> None:
         self.items.append({"type": "function_call_output", "call_id": call.id, "output": text})

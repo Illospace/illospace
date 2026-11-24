@@ -6,6 +6,7 @@ FAILURE_TEXTS = {
     "limit": 'I could not finish this: I reached my step limit. Ask again, or ask for less.',
     "timeout": 'I could not finish this in time. Ask again, or ask for less.',
     "provider": 'I could not finish this: the model service failed. Ask again in a minute.',
+    "transient": "The model service is temporarily unavailable. Ask again in a minute.",
     "config": "Illo is not set up for this kind of request. An operator must fix the settings.",
     "internal": 'I could not finish this because of an internal error. Ask again in a minute.',
 }

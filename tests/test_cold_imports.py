@@ -9,7 +9,7 @@ import pytest
 @pytest.mark.parametrize(
     "module",
     [
-        "illo.connectors.chatgpt_smoke",
+        "illo.brain.smoke",
         "illo.brain.run_manager",
         "illo.gateway.replies",
         "illo.gateway",
