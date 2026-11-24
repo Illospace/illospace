@@ -73,14 +73,14 @@ class RunManager:
     async def start_run(self, event, authority, event_id: int | None, on_event=None, *,
                         deep: DeepContext | None = None) -> str:
         """The channel can relay progress. Only final text leaves through the gateway."""
-        route = resolve_route(self.ctx.workspace, run_kind(event, authority, deep=deep is not None))
-        return await self._run(event, authority, event_id, on_event, route, deep=deep)
+        return await self._run(event, authority, event_id, on_event, deep=deep)
 
     async def smoke(self, event, authority, route: Route, check, on_event) -> None:
         """The operator CLI supplies the test route. Use the normal run lifecycle."""
-        await self._run(event, authority, None, on_event, route, smoke=check)
+        await self._run(event, authority, None, on_event, route=route, smoke=check)
 
-    async def _run(self, event, authority, event_id, on_event, route, *, deep=None, smoke=None):
+    async def _run(self, event, authority, event_id, on_event, *,
+                   route: Route | None = None, deep=None, smoke=None):
         async with self.capacity:
             await self.capacity.wait_for(
                 lambda: self.active < self.ctx.workspace.config.run_limits.max_concurrent
@@ -96,6 +96,8 @@ class RunManager:
     async def _start_run(self, event, authority, event_id, on_event, route, deep, smoke):
         ctx = self.ctx
         policy = ctx.workspace.config.brain.chatgpt
+        if route is None:
+            route = resolve_route(ctx.workspace, run_kind(event, authority, deep=deep is not None))
         notify = smoke is None and sends_refresh_notice(route.kind)
         async with ctx.pool.connection() as conn:
             if event.channel == "board":
