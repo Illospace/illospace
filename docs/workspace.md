@@ -561,7 +561,6 @@ See [Task pages](pages.md) for browser sign-in, blocks, and decisions.
 The coordinator needs the board, enabled pages, and a registered thread page.
 It waits for the thread page before it sends any Slack links.
 Set `board.coordinator.enabled` to `true` to start the two jobs at startup.
-Keep it off until the thread page is deployed.
 
 | Key under `board.coordinator` | Default | Range or purpose |
 | --- | --- | --- |
@@ -589,3 +588,13 @@ The `board_coordinator` run kind uses `brain.routes.default` when it has no rout
 Leave `brain.routes.board_coordinator` out of `illo.yaml` while an older release is the rollback target.
 The older release rejects that route key.
 The board and coordinator settings accept unknown fields so the earlier board release can read the file.
+
+### Board pictures
+
+`board.shareable_image_repos` lists repositories whose mirror pictures can appear on the board.
+The default is an empty list. List only repositories whose pictures can be shared with board readers.
+Illo reads the mirror when the agent posts. The thread page uses the stored bytes.
+
+`pages.outside_images` controls whether Illo gets public HTTPS pictures at post time.
+Board pictures can use up to 200 MB of the shared 500 MB picture store.
+Illo deletes pictures after a thread stays closed for more than 90 days.

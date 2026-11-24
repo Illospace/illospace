@@ -43,10 +43,10 @@
     const v = view();
     return {x: (v.l + v.r) / 2, y: (v.t + v.b) / 2};
   }
-  // First view: zoom 1, the columns in the middle when they fit, else "Needs you" at the left.
+  // First view: the columns in the middle when they fit at zoom 1, or at a small zoom out; else "Needs you" at the left.
   function home() {
-    const v = view(), w = world.offsetWidth;
-    return {s: 1, x: w <= v.r - v.l ? (board.clientWidth - w) / 2 : v.l, y: v.t};
+    const v = view(), w = world.offsetWidth, s = clamp((v.r - v.l) / w, .85, 1);
+    return {s, x: w * s <= v.r - v.l ? (board.clientWidth - w * s) / 2 : v.l, y: v.t};
   }
   function fit() {
     const v = view(), w = world.offsetWidth, h = world.offsetHeight;
@@ -108,22 +108,44 @@
     board.style.removeProperty('background-position');
     pointers.clear(); drag = pinch = null;
   }
-  if (small.matches) { small.addEventListener('change', () => location.reload(), {once: true}); return; }
-  start();
+  if (!small.matches) start();
   small.addEventListener('change', () => (small.matches ? stop() : start()));
   addEventListener('resize', () => { if (!small.matches) draw(); });
   addEventListener('hashchange', () => { const el = frame(); if (el && !small.matches) show(el, true); });
 
   // The browser scrolls a box to show a focused element or a target. The script moves the world in place of that.
-  board.addEventListener('scroll', () => { board.scrollTop = board.scrollLeft = 0; });
+  board.addEventListener('scroll', () => { if (!small.matches) board.scrollTop = board.scrollLeft = 0; });
   board.addEventListener('focusin', event => {
     if (small.matches) return;
     board.scrollTop = board.scrollLeft = 0;
     reveal(event.target.closest('summary,button,a,textarea') || event.target);
   });
+  const needs = document.getElementById('needs');
+  const draftKey = id => `illo-draft:${board.dataset.viewer}:${id}`;
+  try {
+    if (needs.dataset.sentThread && needs.dataset.sent) {
+      const key = draftKey(needs.dataset.sentThread), stored = JSON.parse(localStorage.getItem(key));
+      if (stored?.draft === needs.dataset.sent) localStorage.removeItem(key);
+    }
+  } catch (_) { /* Storage is optional. */ }
+  for (const form of needs.querySelectorAll('article[id^="b"] form[action$="/reply"]')) {
+    const key = draftKey(form.closest('article').id.slice(1));
+    const text = form.elements.text, draft = form.elements.draft;
+    const backup = () => {
+      try { localStorage.setItem(key, JSON.stringify({draft: draft.value, text: text.value})); }
+      catch (_) { /* Storage is optional. */ }
+    };
+    try {
+      const stored = JSON.parse(localStorage.getItem(key));
+      if (!text.value && typeof stored?.text === 'string') { text.value = stored.text; backup(); }
+    } catch (_) { /* Storage is optional. */ }
+    text.addEventListener('input', backup);
+    form.addEventListener('submit', backup);
+  }
   board.addEventListener('submit', event => {
-    const match = (event.target.getAttribute('action') || '').match(/^\/(t|web\/a)\/(\d+)\//);
-    if (match) save(`#${match[1] === 't' ? 't' : 'a'}${match[2]}`);
+    const match = (event.target.getAttribute('action') || '').match(/^\/(t|web\/a|web\/board\/t)\/(\d+)\//);
+    const prefix = {'t': 't', 'web/a': 'a', 'web/board/t': 'b'};
+    if (match && !small.matches) save(`#${prefix[match[1]]}${match[2]}`);
   });
   top.querySelectorAll('[data-zoom]').forEach(button => button.addEventListener('click', () => {
     moved = true;
@@ -150,10 +172,13 @@
 
   // Safari sends a trackpad pinch as gesture events, not as a wheel.
   let gesture = null;
-  board.addEventListener('gesturestart', event => { event.preventDefault(); gesture = cam.s; });
+  board.addEventListener('gesturestart', event => {
+    if (!small.matches) { event.preventDefault(); gesture = cam.s; }
+  });
   board.addEventListener('gesturechange', event => {
+    if (small.matches) return;
     event.preventDefault();
-    if (gesture && !small.matches) { moved = true; zoom(gesture * event.scale, event.clientX, event.clientY); }
+    if (gesture) { moved = true; zoom(gesture * event.scale, event.clientX, event.clientY); }
   });
   board.addEventListener('gestureend', event => { event.preventDefault(); gesture = null; });
 
@@ -211,25 +236,29 @@
     draw(true);
   });
 
-  // Each 30 seconds: new "In work" and "Done today". "Needs you" stays, because a person can type there.
+  // Refresh the read-only columns while the person writes in Needs you.
   function editing() {
-    return board.contains(document.activeElement) && document.activeElement.matches('input,textarea,select,button') ||
-      [...board.querySelectorAll('textarea,input:not([type="hidden"])')].some(i => i.value !== i.defaultValue);
+    return needs.contains(document.activeElement) && document.activeElement.matches('input,textarea,select,button') ||
+      [...needs.querySelectorAll('textarea,input:not([type="hidden"])')].some(i => i.value !== i.defaultValue);
   }
-  setInterval(async () => {
-    if (small.matches || document.hidden || editing() || busy) return;
+  async function refresh() {
+    if (document.hidden || busy) return;
     busy = true;
     try {
-      const response = await fetch('/web/board', {cache: 'no-store'});
-      if (!response.ok || response.redirected || document.hidden || editing()) return;
+      const response = await fetch('/web/board', {cache: 'no-store', credentials: 'same-origin'});
+      if (response.status !== 200 || response.redirected || new URL(response.url).origin !== location.origin ||
+          !response.headers.get('content-type')?.startsWith('text/html') || document.hidden) return;
       const next = new DOMParser().parseFromString(await response.text(), 'text/html');
-      if (document.hidden || editing()) return;
-      for (const id of ['work', 'done']) {
-        const column = next.getElementById(id);
-        if (column) document.getElementById(id).replaceChildren(...column.childNodes);
+      if (document.hidden || next.querySelector('.board')?.dataset.viewer !== board.dataset.viewer) return;
+      for (const id of ['work', 'threads', 'done']) {
+        const column = next.querySelector('.world > section.column#' + id);
+        if (column && !column.querySelector('form')) {
+          document.getElementById(id).replaceChildren(...[...column.childNodes].map(node => document.importNode(node, true)));
+        }
       }
-      const ids = doc => [...doc.querySelectorAll('#needs .f')].map(f => f.id).sort().join(',');
-      if (next.getElementById('needs') && ids(next) !== ids(document) && !document.getElementById('board-changed')) {
+      const ids = doc => [...doc.querySelectorAll('#needs > .f')].map(f => f.id).sort().join(',');
+      if (!editing() && next.getElementById('needs') && ids(next) !== ids(document) &&
+          !document.getElementById('board-changed')) {
         const link = document.createElement('a');
         link.id = 'board-changed'; link.className = 'btn go'; link.href = '/web/board';
         link.textContent = 'The list changed. Read the board again.';
@@ -237,5 +266,12 @@
       }
     } catch (_) { /* The current board and its forms stay available. */ }
     finally { busy = false; }
-  }, 30000);
+  }
+  let refreshTimer;
+  function refreshInterval() {
+    clearInterval(refreshTimer);
+    refreshTimer = setInterval(refresh, small.matches ? 60000 : 30000);
+  }
+  refreshInterval();
+  small.addEventListener('change', refreshInterval);
 })();

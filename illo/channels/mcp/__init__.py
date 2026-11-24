@@ -233,8 +233,11 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
             validated = tool.arguments.model_validate(args)
             # Reports are snapshots: omitted fields must not reset a stored lane.
             clean = validated.model_dump(exclude_unset=name == "lane_report")
-            async with ctx.conn.transaction():
+            if name == "board_post":
                 value = await tool.handler(ctx, clean)
+            else:
+                async with ctx.conn.transaction():
+                    value = await tool.handler(ctx, clean)
             if isinstance(value, board_ledger.TurnCapReached):
                 decision, reason = "deny", "The thread needs a human decision to reset its turn limit."
                 result = tool_result({

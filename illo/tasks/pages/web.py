@@ -14,7 +14,7 @@ from illo.db import one
 from illo.ledger import audit, tasks
 from illo.ledger.tokens import digest
 from illo.tasks import pages
-from illo.tasks.pages import ask_page, board, images, outside, render, signin
+from illo.tasks.pages import ask_page, board, board_thread, images, outside, render, signin
 
 
 def html(body, status=200, headers=render.HEADERS):
@@ -43,23 +43,24 @@ def origin_ok(ctx, request):
     # A browser sets Sec-Fetch-Site by itself, and a page cannot change it. It is correct also when the
     # browser hides the origin ("Origin: null"), which a strict referrer policy or a privacy setting causes.
     site = request.headers.get('sec-fetch-site')
-    if site:
-        return site == 'same-origin'
-    if 'origin' not in request.headers:
+    if site and site != 'same-origin':
+        return False
+    origin = request.headers.get('origin')
+    if origin is None or (origin == 'null' and site == 'same-origin'):
         return True
     base = urlsplit(pages.base_url(ctx))
-    return request.headers['origin'] == f'{base.scheme}://{base.netloc}'
+    return origin == f'{base.scheme}://{base.netloc}'
 
 
-async def form_data(request):
+async def form_data(request, *, limit=32_000):
     # Do not need a multipart parser or a new dependency for a small form.
     if request.headers.get('content-type', '').split(';')[0] != 'application/x-www-form-urlencoded':
         return {}
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > 32_000:
+        if len(body) + len(chunk) > limit:
             return {}
+        body.extend(chunk)
     try:
         fields = parse_qs(body.decode('utf-8'), keep_blank_values=True, max_num_fields=10)
         return {k: v[0] for k, v in fields.items() if len(v) == 1}
@@ -265,6 +266,8 @@ async def setup(ctx):
     async def route(request: Request):
         path = request.url.path
         if not pages.enabled(ctx):
+            if path.startswith('/web/board') or path == '/web/thread.js':
+                return missing(board_thread.MISSING)
             if path.startswith('/web/a/'):
                 return missing('The request was not found.')
             # The address of a sign-in link holds its key, also when pages are off.
@@ -273,12 +276,18 @@ async def setup(ctx):
         if path == '/web/board':
             token = request.cookies.get(signin.SESSION_COOKIE, '')
             async with ctx.pool.connection() as conn:
-                person = await signin.session(conn, token)
+                await conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+                person = await signin.session(conn, token, touch=False)
                 if not person:
                     return redirect(signin_path('/web/board'), 302)
-                return html(await board.page(ctx, conn, person, token), headers=board.HEADERS)
-        if path == '/web/board.js':
-            return Response(Path(__file__).with_name('board.js').read_text(),
+                return html(await board.page(ctx, conn, person, token, markers=request.query_params),
+                            headers=board.HEADERS)
+        if 'id' in request.path_params:
+            action = ('file' if 'position' in request.path_params else
+                      (path.rsplit('/', 1)[1] if path.count('/') > 4 else 'page'))
+            return await board_thread.route(ctx, request, action)
+        if path in {'/web/board.js', '/web/thread.js'}:
+            return Response(Path(__file__).with_name(path.rsplit('/', 1)[1]).read_text(),
                             media_type='text/javascript', headers=render.HEADERS)
         if path == '/web/app.css':
             return Response(Path(__file__).with_name('app.css').read_text(), media_type='text/css', headers=render.HEADERS)
@@ -316,6 +325,10 @@ async def setup(ctx):
 
     for path, methods in [('/web/signin', ['GET', 'POST']), ('/web/signout', ['POST']),
                           ('/web/app.css', ['GET']), ('/web/board', ['GET']), ('/web/board.js', ['GET']), ('/web/a/{ask_id}', ['GET']),
-                          ('/web/a/{ask_id}/answer', ['POST']), ('/web/a/{ask_id}/file/{position}', ['GET']), ('/t/{task_id}', ['GET']),
+                          ('/web/board/t/{id}', ['GET']), ('/web/board/t/{id}/posts', ['GET']),
+                          ('/web/board/t/{id}/seen', ['POST']), ('/web/board/t/{id}/reply', ['POST']),
+                          ('/web/board/t/{id}/reopen', ['POST']), ('/web/board/t/{id}/file/{post_id}/{position}', ['GET']),
+                          ('/web/thread.js', ['GET']), ('/web/a/{ask_id}/answer', ['POST']), ('/web/a/{ask_id}/file/{position}', ['GET']), ('/t/{task_id}', ['GET']),
                           ('/t/{task_id}/progress', ['GET']), ('/t/{task_id}/file/{position}', ['GET']), ('/t/{task_id}/decide', ['POST'])]:
         ctx.app.add_api_route(path, route, methods=methods)
+    ctx.board_thread_pages = True
