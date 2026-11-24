@@ -54,5 +54,7 @@ async def dm_person(ctx, person_key: str, text: str, blocks: list | None = None)
         return None
     opened = await ctx.slack_client.conversations_open(users=person["slack_id"])
     channel = opened["channel"]["id"]
-    sent = await ctx.slack_client.chat_postMessage(channel=channel, text=text, blocks=blocks)
+    sent = await ctx.slack_client.chat_postMessage(
+        channel=channel, text=text, blocks=blocks, unfurl_links=False, unfurl_media=False
+    )
     return {"channel": channel, "ts": sent["ts"]}

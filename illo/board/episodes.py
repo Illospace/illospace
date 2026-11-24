@@ -13,6 +13,7 @@ async def pending_items(conn, thread_id):
     )
     SELECT 'question' AS reason,p.id AS post_id,NULL::text AS mention_target,NULL::timestamptz AS stalled_at
     FROM posts p WHERE NOT p.is_human AND p.actor<>'illo' AND p.kind='question'
+    AND NOT EXISTS (SELECT 1 FROM board_mentions m WHERE m.post_id=p.id AND starts_with(m.target,'person:'))
     AND NOT EXISTS (SELECT 1 FROM posts r WHERE (r.is_human AND r.id>p.id)
         OR (r.kind IN ('answer','decision') AND r.reply_to_post_id=p.id))
     UNION ALL

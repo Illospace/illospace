@@ -73,3 +73,41 @@ async def test_slack_registered_draft_performer_sends_once(app, rpc, rpc_token, 
     assert len(posts) == 1 and posts[0]["text"] == "Acme approved update"
     async with ctx.pool.connection() as conn:
         assert (await one(conn, "SELECT state FROM drafts"))["state"] == "sent"
+
+
+async def test_slack_ask_thread_help_question_routes_to_brain(app, seed, fake_brain):
+    from illo.asks.actions import looks_like_help_question
+
+    assert looks_like_help_question("I have no idea, what's the recommendation?")
+    assert looks_like_help_question("Can you explain the tradeoff")
+    assert looks_like_help_question("Tu recommandes quelle option")
+    assert not looks_like_help_question("Use the second Acme plan.")
+    assert not looks_like_help_question("Approved")
+
+    ctx = app.state.ctx
+    intake = SlackIntake(ctx, "U_ACME_ILLO")
+    row = await seed()
+    await service.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        row = await ledger.lock_ask(conn, row["id"])
+    result = await intake.receive(
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "channel": row["slack_channel"],
+                "channel_type": "im",
+                "user": "U_ACME_ADA",
+                "ts": "1700000000.002",
+                "thread_ts": row["slack_ts"],
+                "text": "I have no idea, whats the recommendation?",
+            },
+        }
+    )
+    assert result["decision"] != "claimed"
+    assert len(fake_brain.requests) == 1
+    async with ctx.pool.connection() as conn:
+        row = await ledger.lock_ask(conn, row["id"])
+        assert row["state"] == "open"
+        assert row["answer_text"] is None
+

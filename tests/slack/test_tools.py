@@ -18,6 +18,8 @@ async def test_send_dm_and_unlisted_member_channel(app, rpc, rpc_token, slack_cl
     )
     assert result["decision"] == "allow"
     assert slack_client.calls[0] == {"method": "conversations_open", "users": "U_ACME_BEN"}
+    assert slack_client.calls[1]["unfurl_links"] is False
+    assert slack_client.calls[1]["unfurl_media"] is False
     assert result["result"]["channel"] == "D_EXAMPLE"
     result = await call(rpc, token, "slack_post_channel", {"channel": "C_OTHER", "text": "Hello"})
     assert result["decision"] == "allow"
