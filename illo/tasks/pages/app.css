@@ -22,9 +22,9 @@ a:hover{text-decoration-color:currentColor}
 .top{display:flex; gap:.6rem; align-items:center; padding:.5rem 1rem; border-bottom:1px solid var(--line); font-size:.85rem; color:var(--soft); background:var(--bg)}
 .top .mark{width:1.5rem; height:1.5rem; flex:none; color:var(--ink)}
 .top b{color:var(--ink); font-weight:600}
-/* on a phone a long title gives way first; a link or a name never breaks */
-.top>b{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.top>:not(b,.grow){flex:none; white-space:nowrap}
+/* on a phone a long title or account name truncates cleanly so Board and Sign out stay visible */
+.top>b,.top>span:not(.grow,.zoom){min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.top>:not(b,span),.top>.zoom{flex:none; white-space:nowrap}
 .top .grow{flex:1}
 .top form{margin:0} .top form button{all:unset; cursor:pointer; text-decoration:underline; text-decoration-color:var(--soft); text-underline-offset:.15em}
 .top button:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
@@ -179,12 +179,12 @@ div.answer details>summary::-webkit-details-marker{display:none}
 div.answer details[open]>summary{border-color:var(--ink)}
 div.answer details form{display:grid; justify-items:start}
 div.answer textarea{margin:.55rem 0 .5rem; min-height:4rem}
-.live{margin:0}
-.live:empty{display:none}
-.live:not(:empty){position:fixed; bottom:calc(4.4rem + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%); z-index:4}
-body:has(.decide details[open]) .live:not(:empty){bottom:calc(12.5rem + env(safe-area-inset-bottom))}
-.live .btn{box-shadow:var(--shadow)}
-.live a{display:inline-block; background:var(--card); border:1px solid var(--line); border-radius:99px; padding:.4rem 1rem; font-size:.88rem; box-shadow:var(--shadow)}
+p.live{margin:0}
+p.live:empty{display:none}
+p.live:not(:empty){position:fixed; bottom:calc(4.4rem + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%); z-index:4}
+body:has(.decide details[open]) p.live:not(:empty){bottom:calc(12.5rem + env(safe-area-inset-bottom))}
+p.live .btn{box-shadow:var(--shadow)}
+p.live a{display:inline-block; background:var(--card); border:1px solid var(--line); border-radius:99px; padding:.4rem 1rem; font-size:.88rem; box-shadow:var(--shadow)}
 .thread .related{margin:1.4rem 0 0}
 .thread .related .links{padding:0 .95rem .85rem; margin:.45rem 0 0; flex-direction:column; gap:.3rem}
 /* the reply form: who it answers, the words, then Send */
