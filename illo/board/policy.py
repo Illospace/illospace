@@ -77,6 +77,13 @@ async def reserve(conn, workspace, thread, episode, person, *, choice=None, run_
         now - thread["escalated_at"] < timedelta(minutes=cfg.thread_cooldown_minutes)
     ):
         return "budget"
+    if episode["post_id"] is not None and await one(
+        conn,
+        """SELECT 1 FROM board_escalations
+        WHERE post_id=%s AND person_id=%s AND state IN ('pending','sending','sent')""",
+        (episode["post_id"], person["id"]),
+    ):
+        return "already_escalated"
     due = next_window(workspace, person, now)
     text = choice.text if choice and choice.text else await notice(conn, workspace, episode)
     card = (Jsonb({"question": choice.question, "options": [o.model_dump() for o in choice.options],

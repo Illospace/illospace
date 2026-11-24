@@ -300,3 +300,17 @@ def test_agent_request_uses_the_token_owners_access():
         "person's decision or approval: a decision comes from the person or from one of their standing rules."
     )
     assert PROFILE_TEXTS["agent_request"].split("\n\n", 1)[0].split("\n", 1)[1] == paragraph
+
+
+def test_board_coordinator_loads_opt_in_rules(example):
+    from illo.workspace import RuleFile
+
+    changed = example.model_copy(deep=True)
+    changed.rules = [
+        RuleFile(name="general", body="general team rule"),
+        RuleFile(name="voice", profiles=["board_coordinator"], body="concise chief of staff voice"),
+    ]
+    text = build(changed, "team", "board_coordinator", now=NOW)
+    assert "concise chief of staff voice" in text
+    assert "general team rule" not in text
+

@@ -59,7 +59,15 @@ def build(
     """Return base text, profile text, run facts, matching rules, and the skill list."""
     key = prompt_profile(principal, profile, event_channel)
     if key == "board_coordinator":
-        return PROFILE_TEXTS[key]
+        text = PROFILE_TEXTS[key]
+        rules = [r for r in workspace.matching_rules(principal, key, channel_id) if key in r.profiles]
+        for rule in rules:
+            text += f"\n\n### {rule.name}\n{rule.body}"
+            if len(text) > MAX_PROMPT_CHARS:
+                raise WorkspaceError(
+                    f"{workspace.root / rule.path}: the system prompt exceeds {MAX_PROMPT_CHARS:,} characters"
+                )
+        return text
     deep = event_channel == "deep"
     parts = [BASE_PROMPT, PROFILE_TEXTS.get("deep" if deep else key, "")]
     if deep and brief_channel:

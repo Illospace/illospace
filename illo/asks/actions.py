@@ -1,5 +1,7 @@
 """Handle owner answers without a model run."""
 
+import re
+
 from illo.asks.cards import can_always
 from illo.asks.service import answer, is_live, refresh_ask
 from illo.ledger import ask_workflow as ledger
@@ -100,6 +102,22 @@ async def handle(ctx, person, action):
     await refresh_ask(ctx, ask_id)
 
 
+_HELP_CUES = re.compile(
+    r"(?:\b(?:what(?:'s|s| is| do you)?\s+(?:the\s+)?recommend|no idea|not sure|don't know|"
+    r"dont know|can you explain|help me decide|which one should|what would you|what do you think|"
+    r"tu recommandes|quelle recommandation|je ne sais pas|tu conseilles|peux[- ]tu expliquer)\b)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_help_question(text: str) -> bool:
+    """Return True when the reply asks Illo for help instead of giving a final answer."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return stripped.endswith("?") or bool(_HELP_CUES.search(stripped))
+
+
 async def claim_thread(ctx, event, authority):
     if event.channel != "slack" or authority.profile != "person_dm" or authority.tainted:
         return None
@@ -117,6 +135,8 @@ async def claim_thread(ctx, event, authority):
             from illo.board.escalate import WRITE_TEXT
 
             text = WRITE_TEXT if board.is_coordinator_ask(ask) else "Reply in this thread with your answer."
+        elif looks_like_help_question(typed):
+            return None
         else:
             try:
                 async with conn.transaction():

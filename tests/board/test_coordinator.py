@@ -378,7 +378,7 @@ async def test_person_budget_serializes_concurrent_applies(coordinator_ctx, clie
 async def test_apply_quiet_hours_and_thread_cooldown(coordinator_ctx, client, monkeypatch):
     ctx = coordinator_ctx
     ctx.workspace.config.board.coordinator.thread_cooldown_minutes = 60
-    q = await question(client, mentions=["person:ben"])
+    q = await question(client, mentions=["person:ben", "person:ada"])
     event = await admission(ctx)
     monkeypatch.setattr(policy, "next_window", lambda ws, person, now: now + timedelta(hours=3))
     await coordinator.apply(ctx, event, action(event, "escalate", escalate={"person": "person:ben", "format": "link"}))
@@ -465,3 +465,66 @@ async def test_public_intake_cannot_create_a_board_run(coordinator_ctx, slack, c
         assert not await one(conn, "SELECT id FROM events WHERE channel='board'")
         assert not await one(conn, "SELECT id FROM runs WHERE profile='board_coordinator'")
         assert not await one(conn, "SELECT id FROM board_posts WHERE is_human")
+
+
+async def test_question_with_person_mention_creates_one_episode(coordinator_ctx, client):
+    ctx = coordinator_ctx
+    q = await question(client, mentions=["person:ada"])
+    await admission(ctx)
+    async with ctx.pool.connection() as conn:
+        rows = await all_rows(
+            conn,
+            "SELECT reason, mention_target FROM board_episodes WHERE thread_id=%s ORDER BY id",
+            (q["thread_id"],),
+        )
+    assert rows == [{"reason": "mention", "mention_target": "person:ada"}]
+
+
+async def test_fallback_skips_duplicate_escalation_for_same_post_and_person(coordinator_ctx, client):
+    from illo.board import acl
+
+    ctx = coordinator_ctx
+    q = await question(client)
+    event1 = await admission(ctx)
+    await coordinator.apply(
+        ctx, event1, action(event1, "escalate", escalate={"person": "person:ada", "format": "link"})
+    )
+    async with ctx.pool.connection() as conn:
+        thread = await acl.thread_access(conn, q["thread_id"])
+        first = await one(conn, "SELECT * FROM board_episodes WHERE thread_id=%s", (q["thread_id"],))
+        ada = await people.get(conn, "ada")
+        second = await one(
+            conn,
+            "INSERT INTO board_episodes (thread_id, post_id, reason, mention_target, state, next_check_at) "
+            "VALUES (%s, %s, 'mention', 'person:ada', 'open', now()) RETURNING *",
+            (q["thread_id"], first["post_id"]),
+        )
+        assert await policy.reserve(conn, ctx.workspace, thread, second, ada) == "already_escalated"
+        count = (await one(conn, "SELECT count(*) AS n FROM board_escalations"))["n"]
+    assert count == 1
+
+
+def test_parse_decision_accepts_plain_fence_and_null_optional_fields():
+    from illo.board.decision import parse
+
+    raw = (
+        "```\n"
+        '{"item": 7, "action": "escalate", "escalate": '
+        '{"person": "person:ada", "format": "dm", "text": "Rotate the secret.", '
+        '"question": null, "options": null, "recommended": null}, '
+        '"group_key": null, "group_clear": null}\n'
+        "```"
+    )
+    snapshot = {
+        "episode_id": 7,
+        "candidates": ["person:ada"],
+        "targets": [],
+        "allowed": {"formats": ["dm", "card", "link"], "headstart": False, "max_headstart_minutes": 60},
+    }
+    decision = parse(raw, snapshot)
+    assert decision.item == 7
+    assert decision.action == "escalate"
+    assert decision.escalate is not None
+    assert decision.escalate.format == "dm"
+    assert decision.escalate.text == "Rotate the secret."
+
