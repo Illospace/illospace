@@ -43,6 +43,7 @@ ALTER TABLE runs ADD CONSTRAINT runs_profile_check CHECK (profile IN
     ('person_dm', 'team_channel', 'tainted', 'routine', 'agent_request', 'board_coordinator')) NOT VALID;
 
 -- An older image can still read and display the delivered card.
+ALTER TABLE asks DROP CONSTRAINT IF EXISTS asks_board_answer_via_check;
 ALTER TABLE asks ADD CONSTRAINT asks_board_answer_via_check CHECK (
     allow_rule OR NOT COALESCE(starts_with(source_ref, 'board:'), false)
     OR COALESCE(answered_via, 'person') = 'person'

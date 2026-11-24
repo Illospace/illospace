@@ -59,7 +59,8 @@ async def notice(conn, workspace, episode):
         person = await one(conn, "SELECT key,name FROM people WHERE key=%s", (key,))
         name = actor_label(workspace, {key: person}, author).name if author else "An agent"
         action = "has a question for you" if episode["reason"] == "question" else "mentioned you"
-        text = f"{clean_slack(name, 100) or "An agent"} {action} on board thread {thread_id}."
+        name = clean_slack(name, 100, escaped_limit=100) or "An agent"
+        text = f"{name} {action} on board thread {thread_id}."
     return text + " Open the thread to read it and reply, or reply in this Slack thread."
 
 

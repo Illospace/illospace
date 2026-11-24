@@ -187,7 +187,9 @@ async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=N
     async with conn.transaction():
         answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
         if answered:
-            await board.record_decision(conn, answered, workspace=workspace)
+            post_id = await board.record_decision(conn, answered, workspace=workspace)
             await ledger.decision(conn, answered)
-            await on_answer(conn, answered, workspace=workspace)
+            post_id = await on_answer(conn, answered, workspace=workspace) or post_id
+            if post_id is not None:
+                answered = {**answered, "board_post_id": post_id}
         return answered

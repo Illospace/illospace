@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from illo.asks import actions, service
 from illo.board import coordinator, escalate
@@ -83,6 +84,31 @@ async def test_slack_formats_are_private_and_card_commits_with_ts(coordinator_ct
     assert len(slack.roots()) == 1
 
 
+@pytest.mark.parametrize("change", ["picture", "summaries_off"])
+async def test_queued_private_summary_downgrades_to_notice(coordinator_ctx, slack, client, change):
+    ctx = coordinator_ctx
+    q = await queue(ctx, client, "card", summary=True, visibility="private")
+    queued = await escalation(ctx)
+    if change == "picture":
+        async with ctx.pool.connection() as conn:
+            await conn.execute("UPDATE board_posts SET blocks=%s WHERE id=%s",
+                               (Jsonb([{"kind": "image"}]), q["post_id"]))
+    else:
+        ctx.workspace.config.board.coordinator.slack_summaries = False
+    await escalate.send_due(ctx)
+    [root] = slack.roots()
+    sent = await escalation(ctx)
+    assert sent["id"] == queued["id"] and sent["state"] == "sent"
+    assert sent["content_mode"] == "notice" and sent["format"] == "link"
+    assert sent["card"] is None and sent["card_ask_id"] is None
+    assert sent["text"] == root["text"] and queued["text"] not in root["text"]
+    assert f"has a question for you on board thread {q['thread_id']}." in root["text"]
+    assert root["blocks"][1]["elements"][0]["action_id"] == f"web-open-board:{q['thread_id']}"
+    async with ctx.pool.connection() as conn:
+        assert not await one(conn, "SELECT 1 FROM asks")
+        assert (await one(conn, "SELECT state FROM board_episodes"))["state"] == "escalated"
+
+
 @pytest.mark.parametrize("format", ["link", "card"])
 async def test_timeout_after_slack_accepts_reconciles_without_second_post(coordinator_ctx, slack, client, format):
     ctx = coordinator_ctx
@@ -104,10 +130,9 @@ async def test_timeout_after_slack_accepts_reconciles_without_second_post(coordi
             assert (await one(conn, "SELECT slack_ts FROM asks"))["slack_ts"] == slack.roots()[0]["ts"]
 
 
-async def test_early_reply_and_transient_verification_release_dedupe(coordinator_ctx, slack, client, monkeypatch):
+async def test_early_reply_and_transient_verification_release_dedupe(coordinator_ctx, slack, client):
     ctx = coordinator_ctx
     question = await queue(ctx, client)
-    monkeypatch.setattr(escalate, "ROOT_POLL_SECONDS", 0)
     slack.lose_history = True
     calls = []
 
@@ -137,6 +162,26 @@ async def test_early_reply_and_transient_verification_release_dedupe(coordinator
         assert answer["text"] == "Use cache B & restart."
         assert not await one(conn, "SELECT 1 FROM runs")
         assert (await one(conn, "SELECT consecutive_agent_posts FROM board_threads"))["consecutive_agent_posts"] == 0
+
+
+@pytest.mark.parametrize("offset", [-60, 90])
+async def test_unrelated_dm_root_outside_send_window_needs_no_lookup(
+    coordinator_ctx, slack, client, fake_brain, offset
+):
+    ctx = coordinator_ctx
+    await queue(ctx, client)
+
+    async def while_sending(fields, ts):
+        unrelated = f"{float(ts) + offset:.6f}"
+        slack.lose_history = True
+        result = await ctx.gateway.receive(reply({**fields, "ts": unrelated}))
+        assert result["decision"] == "run"
+        assert slack.lose_history
+
+    slack.on_send = while_sending
+    await escalate.send_due(ctx)
+    assert len(fake_brain.requests) == 1
+    assert (await escalation(ctx))["state"] == "sent"
 
 
 async def test_raw_slack_text_survives_clip_preparer(coordinator_ctx, slack, client, monkeypatch):
@@ -299,6 +344,40 @@ async def test_card_replies_and_sweep(coordinator_ctx, slack, client, answer_kin
         post = await one(conn, "SELECT * FROM board_posts WHERE id=%s", (row["answer_post_id"],))
     assert post["is_human"] and post["kind"] == "answer" and post["reply_to_post_id"] == q["post_id"]
     assert post["text"] == ("Plan C." if answer_kind == "other" else "Plan A. Quick")
+
+
+async def test_sweep_skips_missing_and_broken_rows_then_delivers(coordinator_ctx, slack, client, monkeypatch, caplog):
+    ctx = coordinator_ctx
+    ctx.workspace.config.board.coordinator.max_escalations_per_person_per_day = 5
+    rows = []
+    for _ in range(3):
+        await queue(ctx, client, "card", summary=True)
+        await escalate.send_due(ctx)
+        rows.append(await escalation(ctx))
+    await queue(ctx, client)
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE asks SET state='expired'")
+    original = board.lock_for_ask
+
+    async def lock(conn, ask_id):
+        if ask_id == rows[0]["ask_id"]:
+            return None
+        if ask_id == rows[1]["ask_id"]:
+            raise RuntimeError
+        return await original(conn, ask_id)
+
+    monkeypatch.setattr(board, "lock_for_ask", lock)
+    await escalate.send_due(ctx)
+    assert f"Could not reconcile board escalation {rows[1]['id']} (RuntimeError)." in caplog.text
+    async with ctx.pool.connection() as conn:
+        states = await all_rows(conn, "SELECT state,closed_reason FROM board_escalations ORDER BY id")
+    assert states == [
+        {"state": "sent", "closed_reason": None},
+        {"state": "sent", "closed_reason": None},
+        {"state": "closed", "closed_reason": "ask_expired"},
+        {"state": "sent", "closed_reason": None},
+    ]
+    assert len(slack.roots()) == 4
 
 
 async def test_open_thread_button_creates_a_private_signin(coordinator_ctx, slack, client):

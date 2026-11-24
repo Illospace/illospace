@@ -89,7 +89,7 @@ async def endpoint(request: Request):
                         run_id=run["id"],
                         principal=run["principal"],
                         tool=name if isinstance(name, str) else "<invalid>",
-                        args=params,
+                        args={} if run["profile"] == "board_coordinator" else params,
                         decision="deny",
                         reason="The tool request is invalid",
                     )

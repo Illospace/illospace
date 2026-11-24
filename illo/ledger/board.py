@@ -514,18 +514,18 @@ async def resolve(conn, *, workspace, token, thread_id, state="resolved", summar
     return await _thread_result_with_episode(conn, row, workspace)
 
 
-async def record_decision(conn, ask, *, workspace=None):
+async def record_decision(conn, ask, *, workspace=None) -> int | None:
     """Append the answer while the authenticated ask service still holds its lock."""
     from illo.board.episodes import close_items
     from illo.board.wake import enqueue_for_post
 
     if (ask["answered_via"] != "person" or ask["answered_by_person_id"] != ask["owner_person_id"]):
-        return
+        return None
     linked = await one(conn, """SELECT p.id,p.thread_id,owner.key FROM board_posts p
         JOIN people owner ON owner.id=%s AND owner.active
         WHERE p.ask_id=%s AND p.kind='decision_needed'""", (ask["owner_person_id"], ask["id"]))
     if not linked:
-        return
+        return None
     params = {"person_id": ask["owner_person_id"], "thread_id": linked["thread_id"]}
     thread = await _thread(conn, params, lock=True)
     option = next((o["label"] for o in ask["options"] if o["id"] == ask["answer_option"]), "")
@@ -545,6 +545,7 @@ async def record_decision(conn, ask, *, workspace=None):
     person = {"id": ask["owner_person_id"], "key": linked["key"]}
     await _reset_after_human(conn, linked["thread_id"], person, post["id"])
     await close_items(conn, thread, reason="answered", person_id=person["id"], post_id=post["id"])
+    return post["id"]
 
 
 def canonical_task_ticket(workspace, value):
@@ -670,6 +671,8 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
 
     if via not in {"slack_thread", "slack_card", "web"} or not source_ref:
         raise ValueError("Use a verified reply source.")
+    if not person or not person.get("active", True):
+        raise BoardError("Your account is inactive.")
     actor = "person:" + person["key"]
     await _human_thread(conn, person, thread_id)
     if row := await _human_replay(conn, actor, source_ref, thread_id):

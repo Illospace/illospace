@@ -36,6 +36,8 @@ async def test_upgrade_from_m2_and_validate_in_separate_transaction(pool, tmp_pa
             await conn.commit()
             add.symlink_to(MIGRATIONS / ADD)
             assert await migrate(conn, initial) == [ADD]
+            await conn.execute((MIGRATIONS / ADD).read_text())
+            await conn.commit()
             constraint = "SELECT convalidated FROM pg_constraint WHERE conname=%s AND conrelid=%s::regclass"
             assert (await one(conn, constraint, ("runs_profile_check", "runs")))["convalidated"] is False
             assert (await one(conn, "SELECT closed_at FROM board_threads"))["closed_at"]

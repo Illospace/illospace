@@ -17,15 +17,15 @@ async def can_answer(conn, ask, person_id):
     return not row or row["state"] == "sent"
 
 
-async def on_answer(conn, answered, *, workspace):
+async def on_answer(conn, answered, *, workspace) -> int | None:
     """Use the locks already taken by lock_for_ask."""
     from illo.board.decision import unescape_slack
 
     escalation = await one(conn, "SELECT * FROM board_escalations WHERE ask_id=%s", (answered["id"],))
     if not escalation or escalation["answer_post_id"] or answered["answered_via"] != "person":
-        return
+        return None
     if not await can_answer(conn, answered, answered["answered_by_person_id"]):
-        return
+        return None
     person = await one(conn, "SELECT * FROM people WHERE id=%s AND active",
                        (answered["answered_by_person_id"],))
     option = next((o for o in answered["options"] if o["id"] == answered["answer_option"]), {})
@@ -40,3 +40,4 @@ async def on_answer(conn, answered, *, workspace):
     )
     await episodes.close_escalation(conn, escalation, "other_answer",
                                     person_id=person["id"], post_id=receipt["post_id"])
+    return receipt["post_id"]

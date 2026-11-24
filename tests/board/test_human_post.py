@@ -109,6 +109,18 @@ async def test_human_hourly_cap_and_unicode_length(app, client):
     assert (await human(ctx, thread_id, source="0"))["replayed"]
 
 
+async def test_inactive_person_cannot_post_on_a_team_thread(app, client):
+    ctx = app.state.ctx
+    row = await (await client()).call("board_post", {"title": "Work", "text": "Ready"})
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE people SET active=false WHERE key='ada'")
+        ada = await one(conn, "SELECT * FROM people WHERE key='ada'")
+        with pytest.raises(board.BoardError, match="account is inactive"):
+            await board.human_post(conn, workspace=ctx.workspace, person=ada, thread_id=row["thread_id"],
+                                   text="A reply.", reply_to_post_id=None, source_ref="web:inactive", via="web")
+        assert not await one(conn, "SELECT 1 FROM board_posts WHERE is_human")
+
+
 def test_actor_labels_use_stored_provenance_and_config(app):
     w = app.state.ctx.workspace
     by_key = {"ada": {"name": "Ada Example"}, "ben": {"name": "Ben Example"}}

@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from illo.channels.slack import catchup, connection
 from illo.db import all_rows, one
+from illo.gateway.dispatch import ClaimRetry
 from illo.ledger import kv
 
 NOW = 1700000000
@@ -131,6 +132,32 @@ async def test_skips_a_message_that_arrived(
     async with ctx.pool.connection() as conn:
         assert (await one(conn, "SELECT count(*) FROM events"))["count"] == 1
         assert (await one(conn, "SELECT count(*) FROM runs"))["count"] == 1
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_retries_a_gateway_claim_before_finishing_catchup(app, intake, history, monkeypatch, persistent):
+    ctx = app.state.ctx
+    msg = post(30, "U_ACME_ADA", thread_ts=post(90)["ts"])
+    history[ADA_DM] = [msg]
+    external_id = f"{ADA_DM}:{msg['ts']}"
+    attempts = []
+
+    async def claim(ctx, event, authority):
+        attempts.append(event.external_id)
+        if persistent or len(attempts) == 1:
+            raise ClaimRetry
+        return "Answer saved."
+
+    ctx.gateway.register_claim(claim)
+    monkeypatch.setattr("illo.channels.slack.intake.RETRY_DELAY_S", 0)
+    result = await catchup.catch_up(ctx, intake, NOW - 60, NOW)
+
+    assert attempts == [external_id] * (4 if persistent else 2)
+    assert result.recent == 1
+    assert result.answered == int(not persistent) and result.intake_failures == int(persistent)
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT status FROM events WHERE external_id=%s", (external_id,))
+    assert row == (None if persistent else {"status": "handled"})
 
 
 async def test_notifies_the_author_of_an_old_message_once(app, intake, slack_client, history):

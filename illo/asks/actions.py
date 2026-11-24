@@ -55,11 +55,17 @@ async def handle(ctx, person, action):
             option = next((o for o in ask["options"] if o["id"] == parts[3]), None)
             if option is None or (operation == "always" and not can_always(ask)):
                 return
-            answered = await answer(conn, ask_id, person["id"], option=option["id"],
-                                    workspace=ctx.workspace)
-            if not answered:
-                return
-            if operation == "always":
+            try:
+                async with conn.transaction():
+                    answered = await answer(conn, ask_id, person["id"], option=option["id"],
+                                            workspace=ctx.workspace)
+            except board.BoardError as exc:
+                answered = None
+                notice = str(exc)
+            else:
+                if not answered:
+                    return
+            if answered and operation == "always":
                 data = await ledger.card_data(conn, ask)
                 lane = data["lane"] or {}
                 match = {

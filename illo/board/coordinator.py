@@ -18,6 +18,19 @@ from illo.ledger import audit, board, people, sensors
 log = logging.getLogger(__name__)
 board_pages_ready = policy.board_pages_ready
 
+_NEEDS_SCAN = """((b.state='open' AND (
+    (SELECT max(id) FROM board_posts WHERE thread_id=b.id)
+        IS DISTINCT FROM b.coordinator_scanned_post_id
+    OR b.reopened_at>b.coordinator_scanned_at
+    OR (b.stalled_reason='turn_cap' AND (b.coordinator_scanned_at IS NULL
+        OR b.stalled_at IS NULL OR b.stalled_at>b.coordinator_scanned_at))))
+    OR (b.state<>'open' AND EXISTS (SELECT 1 FROM board_episodes e WHERE
+        e.thread_id=b.id AND e.state=ANY(%(states)s))))"""
+
+_EPISODE_READY = """e.state=ANY(%s) AND e.next_check_at<=clock_timestamp()
+    AND NOT EXISTS (SELECT 1 FROM board_escalations x WHERE x.episode_id=e.id
+        AND x.state IN ('pending','sending') AND x.due_at>clock_timestamp())"""
+
 
 async def _tick_lock(conn):
     return (await one(conn, "SELECT pg_try_advisory_xact_lock(12000010) AS acquired"))["acquired"]
@@ -25,22 +38,19 @@ async def _tick_lock(conn):
 
 async def scan(ctx):
     cfg = ctx.workspace.config.board.coordinator
+    states = list(episodes.ACTIVE)
     async with ctx.pool.connection() as conn:
-        if not await _tick_lock(conn):
-            return
-        threads = await all_rows(conn, """SELECT b.* FROM board_threads b WHERE
-            (b.state='open' AND (
-                (SELECT max(id) FROM board_posts WHERE thread_id=b.id)
-                    IS DISTINCT FROM b.coordinator_scanned_post_id
-                OR b.reopened_at>b.coordinator_scanned_at
-                OR (b.stalled_reason='turn_cap' AND (b.coordinator_scanned_at IS NULL
-                    OR b.stalled_at IS NULL OR b.stalled_at>b.coordinator_scanned_at))))
-            OR (b.state<>'open' AND EXISTS (SELECT 1 FROM board_episodes e WHERE
-                e.thread_id=b.id AND e.state=ANY(%s)))
-            ORDER BY b.coordinator_scanned_at NULLS FIRST,b.id LIMIT 100
-            FOR UPDATE OF b SKIP LOCKED""", (list(episodes.ACTIVE),))
-        for thread in threads:
-            await _scan_thread(conn, thread, cfg.settle_seconds)
+        refs = await all_rows(conn, f"""SELECT b.id FROM board_threads b WHERE {_NEEDS_SCAN}
+            ORDER BY b.coordinator_scanned_at NULLS FIRST,b.id LIMIT 100""", {"states": states})
+    for ref in refs:
+        async with ctx.pool.connection() as conn:
+            if not await _tick_lock(conn):
+                return
+            thread = await one(conn, f"""SELECT b.* FROM board_threads b
+                WHERE b.id=%(id)s AND {_NEEDS_SCAN} FOR UPDATE OF b SKIP LOCKED""",
+                {"id": ref["id"], "states": states})
+            if thread:
+                await _scan_thread(conn, thread, cfg.settle_seconds)
 
 
 async def _scan_thread(conn, thread, settle):
@@ -84,12 +94,11 @@ async def _claim(ctx):
     async with ctx.pool.connection() as conn:
         if not await _tick_lock(conn):
             return None
-        row = await one(conn, """SELECT t.id FROM board_threads t WHERE t.state='open'
+        row = await one(conn, f"""SELECT t.id FROM board_threads t WHERE t.state='open'
             AND (t.coordinator_lease_until IS NULL OR t.coordinator_lease_until<clock_timestamp())
-            AND EXISTS (SELECT 1 FROM board_episodes e WHERE e.thread_id=t.id AND e.state=ANY(%s)
-                AND e.next_check_at<=clock_timestamp())
+            AND EXISTS (SELECT 1 FROM board_episodes e WHERE e.thread_id=t.id AND {_EPISODE_READY})
             ORDER BY (SELECT min(e.next_check_at) FROM board_episodes e WHERE e.thread_id=t.id
-                AND e.state=ANY(%s)),t.id LIMIT 1 FOR UPDATE OF t SKIP LOCKED""",
+                AND {_EPISODE_READY}),t.id LIMIT 1 FOR UPDATE OF t SKIP LOCKED""",
             (list(episodes.ACTIVE), list(episodes.ACTIVE)))
         if not row:
             return None
@@ -197,9 +206,9 @@ async def _admit(ctx, thread_id, lease):
             await episodes.close_items(conn, thread, reason="thread_closed" if thread["state"] != "open" else "acl_lost")
             return None
         await episodes.close_items(conn, thread, reason="no_longer_pending")
-        episode = await one(conn, """SELECT * FROM board_episodes WHERE thread_id=%s
-            AND state=ANY(%s) AND next_check_at<=clock_timestamp()
-            ORDER BY next_check_at,id LIMIT 1""", (thread_id, list(episodes.ACTIVE)))
+        episode = await one(conn, f"""SELECT e.* FROM board_episodes e WHERE e.thread_id=%s
+            AND {_EPISODE_READY} ORDER BY e.next_check_at,e.id LIMIT 1""",
+            (thread_id, list(episodes.ACTIVE)))
         if not episode:
             return None
         trigger = await _fallback_trigger(conn, cfg, episode)

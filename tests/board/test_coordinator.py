@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from illo.board import acl, coordinator, escalate, packet, policy
+from illo.board import acl, coordinator, decision, escalate, packet, policy
 from illo.brain.routes import check_routes, resolve_route
 from illo.db import all_rows, one
 from illo.gateway.events import InboundEvent
@@ -68,6 +68,32 @@ def test_route_follows_default_and_validates_override(coordinator_ctx):
     routes["board_coordinator"] = RouteSettings(provider="absent")
     with pytest.raises(ValueError, match="board_coordinator"):
         check_routes(ctx.workspace, ctx.providers)
+
+
+async def test_scan_locks_and_commits_one_thread_at_a_time(coordinator_ctx, client, monkeypatch):
+    ctx = coordinator_ctx
+    first = (await question(client))["thread_id"]
+    second = (await question(client))["thread_id"]
+    original = coordinator._scan_thread
+    scanned = []
+
+    async def scan_thread(conn, thread, settle):
+        async with ctx.pool.connection() as check:
+            if thread["id"] == first:
+                await check.execute("SELECT id FROM board_threads WHERE id=%s FOR UPDATE NOWAIT", (second,))
+            else:
+                assert await one(check, "SELECT id FROM board_episodes WHERE thread_id=%s", (first,))
+        await original(conn, thread, settle)
+        scanned.append(thread["id"])
+
+    monkeypatch.setattr(coordinator, "_scan_thread", scan_thread)
+    await coordinator.scan(ctx)
+    assert scanned == [first, second]
+
+
+def test_clean_slack_limits_text_without_splitting_entities():
+    assert decision.clean_slack("One &amp; two", 5) == "One &amp;"
+    assert decision.clean_slack("&" * 400, 400, escaped_limit=600) == "&amp;" * 120
 
 
 async def test_private_packet_insert_and_untrusted_data(coordinator_ctx, client, fake_brain):
@@ -359,6 +385,22 @@ async def test_apply_quiet_hours_and_thread_cooldown(coordinator_ctx, client, mo
     event = await admission(ctx)
     await coordinator.apply(ctx, event, action(event, "escalate", escalate={"person": "person:ada", "format": "link"}))
     assert (await last_run(ctx))["error_code"] == "budget"
+
+
+@pytest.mark.parametrize("state", ["pending", "sending"])
+async def test_coordinator_skips_quiet_escalations_until_due(coordinator_ctx, client, monkeypatch, state):
+    ctx = coordinator_ctx
+    await question(client)
+    event = await admission(ctx)
+    monkeypatch.setattr(policy, "next_window", lambda ws, person, now: now + timedelta(hours=3))
+    await coordinator.apply(ctx, event, action(event, "escalate", escalate={"person": "person:ada", "format": "link"}))
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE board_escalations SET state=%s", (state,))
+    await due(ctx)
+    assert await coordinator._claim(ctx) is None
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE board_escalations SET due_at=clock_timestamp()-interval '1 second'")
+    assert (await coordinator._claim(ctx))[0] == event.payload["thread_id"]
 
 
 async def test_new_group_is_refused_at_scope_limit(coordinator_ctx, client):

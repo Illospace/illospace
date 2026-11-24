@@ -227,6 +227,7 @@ class Registry:
         decision, reason, result = "deny", "The tool is not registered", None
         if effective_profile(ctx.run) == "board_coordinator":
             tool, reason = None, BOARD_DENY
+            args = {}
         if tool and name in RUN_LIMITS:
             calls = await one(
                 ctx.conn,

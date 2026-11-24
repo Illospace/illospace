@@ -17,7 +17,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
 from illo.channels.slack.catchup import MIN_GAP_S, catch_up
-from illo.channels.slack.intake import SlackIntake
+from illo.channels.slack.intake import SlackIntake, receive_with_retry
 from illo.db import one
 from illo.ledger import kv, sensors
 
@@ -116,11 +116,7 @@ class SlackConnection:
     async def handle(self, payload: dict) -> None:
         try:
             # Socket Mode already acknowledged the envelope. Retry the released event here.
-            for _ in range(4):
-                result = await self.intake.receive(payload)
-                if not result or not result.get("retryable"):
-                    break
-                await asyncio.sleep(1)
+            await receive_with_retry(self.intake, payload)
         except Exception:
             log.error("Slack could not handle an event")
             await self.report(False)

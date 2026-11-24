@@ -21,7 +21,7 @@ from illo.ledger import agent_oauth, board, sensors
 from illo.tasks import pages
 
 log = logging.getLogger(__name__)
-ROOT_POLL_SECONDS = 1
+ROOT_CLOCK_SKEW_SECONDS = 5
 EVENT_TYPE = "illo_board_escalation"
 FOOTER_DM = ("_Reply in this thread and I put your answer on the board. "
              "You can also open board thread {id} on the web._")
@@ -47,7 +47,7 @@ async def _locked(conn, thread_id, escalation_id):
     return row, escalation
 
 
-async def _check(conn, workspace, thread, row):
+async def _check(conn, thread, row):
     live = await acl.thread_ok(conn, thread["id"], row["acl_snapshot"])
     person = await one(conn, "SELECT * FROM people WHERE id=%s", (row["person_id"],))
     episode = await one(conn, "SELECT * FROM board_episodes WHERE id=%s", (row["episode_id"],))
@@ -59,12 +59,6 @@ async def _check(conn, workspace, thread, row):
         return person, episode, "acl_lost"
     if episode["state"] not in episodes.ACTIVE or not await episodes.is_pending(conn, episode):
         return person, episode, "no_longer_pending"
-    if row["content_mode"] == "summary":
-        cfg = workspace.config.board.coordinator
-        posts = await all_rows(conn, "SELECT blocks FROM board_posts WHERE thread_id=%s ORDER BY id DESC LIMIT 12",
-                               (thread["id"],))
-        if not cfg.slack_summaries or any(packet.has_picture(post) for post in posts):
-            return person, episode, "acl_lost"
     return person, episode, None
 
 
@@ -85,7 +79,7 @@ async def _claim(ctx, seen):
             row["lease_until"] and row["lease_until"] > datetime.now(UTC)
         ):
             return ref, None
-        person, episode, reason = await _check(conn, ctx.workspace, thread, row)
+        person, episode, reason = await _check(conn, thread, row)
         if reason and row["state"] in {"pending", "sending"}:
             if not person or not person.get("slack_id"):
                 await _fail(conn, row)
@@ -149,7 +143,7 @@ async def _history(ctx, channel, **kwargs):
 
 async def _reconcile(ctx, row, channel):
     bot = await ctx.slack_client.auth_test()
-    oldest = str(row["send_started_at"].timestamp() - 5)
+    oldest = str(row["send_started_at"].timestamp() - ROOT_CLOCK_SKEW_SECONDS)
     cursor = None
     while True:
         data = await _history(ctx, channel, oldest=oldest, **({"cursor": cursor} if cursor else {}))
@@ -178,23 +172,31 @@ async def _remember_channel(ctx, row, channel):
     async with ctx.pool.connection() as conn:
         thread, live = await _locked(conn, row["thread_id"], row["id"])
         if live["lease_id"] != row["lease_id"] or live["lease_until"] <= datetime.now(UTC):
-            return False
+            return None
         if live["state"] != "sending" or not policy.board_pages_ready(ctx):
-            return False
-        person, episode, reason = await _check(conn, ctx.workspace, thread, live)
+            return None
+        person, episode, reason = await _check(conn, thread, live)
         if reason:
             await episodes.close_escalation(conn, live, reason)
             await _due_now(conn, episode)
-            return False
+            return None
         now = datetime.now(UTC)
         due = policy.next_window(ctx.workspace, person, now)
         if due > now:
             await conn.execute("UPDATE board_escalations SET due_at=%s,lease_until=%s WHERE id=%s",
                                (due, due, row["id"]))
-            return False
-        await conn.execute("UPDATE board_escalations SET sending_channel=%s WHERE id=%s",
-                           (channel, row["id"]))
-        return True
+            return None
+        if live["content_mode"] == "summary":
+            cfg = ctx.workspace.config.board.coordinator
+            posts = await all_rows(conn, """SELECT blocks FROM board_posts WHERE thread_id=%s
+                ORDER BY id DESC LIMIT 12""", (thread["id"],)) if cfg.slack_summaries else []
+            if not cfg.slack_summaries or any(packet.has_picture(post) for post in posts):
+                text = await policy.notice(conn, ctx.workspace, episode)
+                return await one(conn, """UPDATE board_escalations SET
+                    content_mode='notice',format='link',text=%s,card=NULL,card_ask_id=NULL,sending_channel=%s
+                    WHERE id=%s RETURNING *""", (text, channel, row["id"]))
+        return await one(conn, """UPDATE board_escalations SET sending_channel=%s WHERE id=%s
+            RETURNING *""", (channel, row["id"]))
 
 
 async def _send(ctx, row, person):
@@ -211,7 +213,8 @@ async def _send(ctx, row, person):
         channel = opened["channel"]["id"]
     if not channel.startswith("D"):
         raise DeliveryRefused
-    if not await _remember_channel(ctx, row, channel):
+    row = await _remember_channel(ctx, row, channel)
+    if not row:
         return None
     if row["format"] == "card":
         ask = _card(ctx, row, person)
@@ -253,7 +256,7 @@ async def _record_send(conn, ctx, thread, row, person, channel, ts):
         return
     card = row["format"] == "card"
     if row["state"] == "sending":
-        _, episode, reason = await _check(conn, ctx.workspace, thread, row)
+        _, episode, reason = await _check(conn, thread, row)
         if reason:
             await episodes.close_escalation(conn, row, reason)
             await _due_now(conn, episode)
@@ -320,25 +323,25 @@ async def _sweep_cards(ctx):
             JOIN asks a ON a.id=e.ask_id WHERE e.state IN ('sending','sent')
             AND a.state IN ('cancelled','expired','answered') ORDER BY e.id LIMIT 20""")
     for ref in rows:
-        async with ctx.pool.connection() as conn:
-            ask = await board.lock_for_ask(conn, ref["ask_id"])
-            row = await one(conn, "SELECT * FROM board_escalations WHERE id=%s", (ref["id"],))
-            if row["state"] not in {"sending", "sent"}:
-                continue
-            if ask["state"] in {"expired", "cancelled"}:
-                await episodes.close_escalation(conn, row, "ask_" + ask["state"])
-                await _due_now(conn, {"id": row["episode_id"]})
-            elif ask["state"] == "answered":
-                try:
-                    async with conn.transaction():
-                        await on_answer(conn, ask, workspace=ctx.workspace)
-                except board.BoardError:
-                    # The answer is already committed. Reconcile again when it can be posted.
+        try:
+            async with ctx.pool.connection() as conn:
+                ask = await board.lock_for_ask(conn, ref["ask_id"])
+                if not ask:
                     continue
-                current = await one(conn, "SELECT state FROM board_escalations WHERE id=%s", (row["id"],))
-                if current["state"] == "sent":
-                    await episodes.close_escalation(conn, row, "acl_lost")
+                row = await one(conn, "SELECT * FROM board_escalations WHERE id=%s", (ref["id"],))
+                if not row or row["state"] not in {"sending", "sent"}:
+                    continue
+                if ask["state"] in {"expired", "cancelled"}:
+                    await episodes.close_escalation(conn, row, "ask_" + ask["state"])
                     await _due_now(conn, {"id": row["episode_id"]})
+                elif ask["state"] == "answered":
+                    await on_answer(conn, ask, workspace=ctx.workspace)
+                    current = await one(conn, "SELECT state FROM board_escalations WHERE id=%s", (row["id"],))
+                    if current["state"] == "sent":
+                        await episodes.close_escalation(conn, row, "acl_lost")
+                        await _due_now(conn, {"id": row["episode_id"]})
+        except Exception as exc:
+            log.error("Could not reconcile board escalation %s (%s).", ref["id"], type(exc).__name__)
 
 
 async def _notices(ctx):
@@ -419,16 +422,13 @@ async def typed_text(conn, event):
     return _visible(re.sub(r"<([^<>\n]+)>", replace, value)).strip()
 
 
-async def _known_root(conn, person_id, channel, root):
-    return await one(conn, """SELECT id,thread_id FROM board_escalations
-        WHERE person_id=%s AND slack_channel=%s AND slack_ts=%s""", (person_id, channel, root))
-
-
 async def _verified_root(ctx, channel, root):
-    bot = await ctx.slack_client.auth_test()
     history = await _history(ctx, channel, latest=root, inclusive=True, limit=1)
-    return next((_root_id(message, bot) for message in history.get("messages", [])
-                 if message.get("ts") == root), None)
+    for message in history.get("messages", []):
+        if message.get("ts") == root and (message.get("metadata") or {}).get("event_type") == EVENT_TYPE:
+            bot = await ctx.slack_client.auth_test()
+            return _root_id(message, bot)
+    return None
 
 
 async def _recover_root(ctx, person_id, sender, channel, root, *, card_ask_id=None):
@@ -467,28 +467,20 @@ async def recover_card(ctx, person, ask_id, action):
 
 
 async def _find_root(ctx, person_id, sender, channel, root):
+    stamp = float(root)
     async with ctx.pool.connection() as conn:
-        ref = await _known_root(conn, person_id, channel, root)
-        if ref:
-            return ref
-        pending = await one(conn, """SELECT 1 FROM board_escalations WHERE person_id=%s
-            AND recipient_slack_user=%s AND sending_channel=%s AND state IN ('sending','closed','answered')
-            AND send_started_at>now()-interval '2 minutes' AND slack_ts IS NULL AND ask_id IS NULL""",
-            (person_id, sender, channel))
-    if not ctx.slack_client:
-        return None
-    if not pending:
-        async with ctx.pool.connection() as conn:
-            sending = await one(conn, """SELECT 1 FROM board_escalations
-                WHERE person_id=%s AND recipient_slack_user=%s AND sending_channel=%s
-                  AND state='sending' AND slack_ts IS NULL AND ask_id IS NULL""",
-                (person_id, sender, channel))
-        return await _recover_root(ctx, person_id, sender, channel, root) if sending else None
-    for _ in range(5):
-        await asyncio.sleep(ROOT_POLL_SECONDS)
-        async with ctx.pool.connection() as conn:
-            if ref := await _known_root(conn, person_id, channel, root):
-                return ref
+        # Only look in Slack when the root falls in a possible send window.
+        ref = await one(conn, """SELECT id,thread_id,slack_ts FROM board_escalations WHERE person_id=%s AND (
+            (slack_channel=%s AND slack_ts=%s) OR (
+                %s AND recipient_slack_user=%s AND sending_channel=%s
+                AND state IN ('sending','closed','answered') AND slack_ts IS NULL AND ask_id IS NULL
+                AND extract(epoch FROM send_started_at)<=%s AND extract(epoch FROM lease_until)>=%s
+                AND (state='sending' OR send_started_at>now()-interval '2 minutes')))
+            ORDER BY slack_ts NULLS LAST LIMIT 1""",
+            (person_id, channel, root, ctx.slack_client is not None, sender, channel,
+             stamp + ROOT_CLOCK_SKEW_SECONDS, stamp - ROOT_CLOCK_SKEW_SECONDS))
+    if not ref or ref["slack_ts"]:
+        return ref
     return await _recover_root(ctx, person_id, sender, channel, root)
 
 

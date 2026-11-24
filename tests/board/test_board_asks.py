@@ -1,6 +1,7 @@
 """Keep every board answer behind an authenticated channel action."""
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -98,6 +99,57 @@ async def test_every_ask_answer_uses_the_same_lock_order(coordinator_ctx, slack,
             await service.answer(conn, ask_id, ada["id"], option="o1", workspace=ctx.workspace)
     assert seen[:4] == ["board_threads", "board_episodes", "board_escalations", "asks"]
     assert (await escalation(ctx))["state"] == "answered"
+
+
+async def test_card_button_reports_board_error_and_refreshes(coordinator_ctx, slack, client, monkeypatch):
+    ctx = coordinator_ctx
+    await queue(ctx, client, "card", summary=True)
+    await escalate.send_due(ctx)
+    pending = await escalation(ctx)
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM asks WHERE id=%s", (pending["ask_id"],))
+        ada = await people.get(conn, "ada")
+        await conn.execute("INSERT INTO agent_oauth_limits (kind,key,attempts) VALUES ('board_human',%s,30)",
+                           (str(ada["id"]),))
+    refresh = AsyncMock(wraps=actions.refresh_ask)
+    monkeypatch.setattr(actions, "refresh_ask", refresh)
+
+    await actions.handle(ctx, ada, click(row, "opt:o1"))
+
+    refresh.assert_awaited_once_with(ctx, row["id"])
+    [notice] = [m for m in slack.messages.values() if m.get("thread_ts") == row["slack_ts"]]
+    assert "30 board changes" in notice["text"]
+    async with ctx.pool.connection() as conn:
+        assert (await one(conn, "SELECT state FROM asks WHERE id=%s", (row["id"],)))["state"] == "open"
+        assert not await one(conn, "SELECT 1 FROM board_posts WHERE is_human")
+
+
+@pytest.mark.parametrize("kind", ["decision", "card", "regular"])
+async def test_answer_returns_the_exact_board_post_id(coordinator_ctx, slack, client, kind):
+    ctx = coordinator_ctx
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+    if kind == "card":
+        thread = await queue(ctx, client, "card", summary=True)
+        await escalate.send_due(ctx)
+        ask_id = (await escalation(ctx))["ask_id"]
+    elif kind == "decision":
+        thread = await (await client()).call("board_post", {"title": "Work", "text": "Choose.", **DECISION})
+        ask_id = thread["ask_id"]
+    else:
+        async with ctx.pool.connection() as conn:
+            ask_id = (await asks.create(conn, owner_person_id=ada["id"], question="How?", options=[]))["id"]
+    async with ctx.pool.connection() as conn:
+        ask = await one(conn, "SELECT owner_person_id,options FROM asks WHERE id=%s", (ask_id,))
+        answer = {"option": ask["options"][0]["id"]} if ask["options"] else {"text": "Done."}
+        answered = await service.answer(conn, ask_id, ask["owner_person_id"], workspace=ctx.workspace, **answer)
+    if kind == "regular":
+        assert answered["state"] == "answered" and "board_post_id" not in answered
+        return
+    async with ctx.pool.connection() as conn:
+        post = await one(conn, "SELECT thread_id,reply_to_post_id,is_human FROM board_posts WHERE id=%s",
+                         (answered["board_post_id"],))
+    assert post == {"thread_id": thread["thread_id"], "reply_to_post_id": thread["post_id"], "is_human": True}
 
 
 async def test_card_m1_answer_web_reply_and_apply_share_one_lock_order(coordinator_ctx, slack, client):

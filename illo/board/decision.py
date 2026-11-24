@@ -56,14 +56,21 @@ def unescape_slack(value):
     return value.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def clean_slack(value, limit):
+def clean_slack(value, limit, *, escaped_limit=None):
     value = unescape_slack(value)
     value = "".join(c for c in value if not unicodedata.category(c).startswith("C"))
     value = value.replace("`", "")
     value = _SLACK_FORM.sub("", value)
     value = _URL.sub("[link removed]", value)
     value = _BROADCAST.sub("", value)
-    return escape(" ".join(value.split()))[:limit]
+    value = " ".join(value.split())[:limit]
+    if escaped_limit is not None:
+        for index, char in enumerate(value):
+            escaped_limit -= len(escape(char))
+            if escaped_limit < 0:
+                value = value[:index]
+                break
+    return escape(value)
 
 
 def _escalation(value, snapshot):
@@ -73,7 +80,7 @@ def _escalation(value, snapshot):
         if value.text or value.question or value.options or value.recommended is not None:
             raise InvalidDecision("notice_content")
         return value
-    value.text = clean_slack(value.text, 400)
+    value.text = clean_slack(value.text, 400, escaped_limit=600)
     if not value.text:
         raise InvalidDecision("summary_text")
     if value.format != "card":
