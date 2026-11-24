@@ -38,8 +38,10 @@ If nothing matters today, save nothing and answer "No finding today."
 Your final answer is a short log for the owner: where you looked, and what you rejected."""
 
 PERSON_JOB = """You are this person's scout. Find what will hurt them or the team in the next 30 days and is on no list yet.
-Read their recent mail, calendar, and files with your tools, if they are connected. Look for notices with a date: a service that stops, a payment that failed, a renewal, a deadline, a rule change.
-Then check in the repositories if the notice touches our code or our work.
+Read their recent mail, upcoming calendar (next 48 hours), and files with your tools, if they are connected. Look for:
+• Notices with a date: a service that stops, a payment that failed, a renewal, an OAuth/security alert, a deadline, or a rule change.
+• Urgent unanswered emails, missed invitations, or upcoming meetings in the next 48 hours that need concrete preparation.
+Then check in the repositories if a technical notice touches our code or our work.
 Private text stays with this person. Do the web reading first: after you read private data, code refuses the web.
 
 First call `findings_list` and `task_list`. Do not repeat a finding or an open task.
@@ -128,13 +130,16 @@ async def manual(ctx, event, authority):
     if event.channel != "slack" or event.kind not in {"dm", "message.im"} or authority.tainted:
         return None
     phrase = re.sub(r"[.!?]+$", "", event.text.strip()).casefold()
-    if phrase not in {"run the scout", "run the scout now"}:
+    personal = phrase in {"run my scout", "run my scout now"}
+    if not personal and phrase not in {"run the scout", "run the scout now"}:
         return None
     if event.payload.get("contains_outside_text"):
         return None
     async with ctx.pool.connection() as conn:
         person = await people.by_slack_id(conn, event.sender)
-        if not person or person["role"] != "owner":
+        if not person:
+            return None
+        if not personal and person["role"] != "owner":
             return "Only an owner can start the team scout."
         origin = await one(
             conn,
@@ -142,10 +147,17 @@ async def manual(ctx, event, authority):
             (event.external_id,),
         )
         try:
-            await queue(ctx, conn, origin_event_id=origin["id"] if origin else None)
-            target = await scout_destination(ctx, conn)
+            await queue(
+                ctx,
+                conn,
+                person_key=person["key"] if personal else None,
+                origin_event_id=origin["id"] if origin else None,
+            )
+            target = await scout_destination(ctx, conn, person if personal else None)
         except Refusal as exc:
             return str(exc)
+    if personal:
+        return "Your personal scout starts now. Findings come to your Slack DM."
     return "The scout starts now. Findings come to " + place(target) + "."
 
 

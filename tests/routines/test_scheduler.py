@@ -274,3 +274,24 @@ async def test_start_forgets_the_sensors_of_removed_jobs(app):
     # A silent sensor of a removed job is a false fault in each brief.
     assert "job:illo.removed.old_job" not in keys
     assert {f"job:{present.__module__}.present", "github"} <= keys
+
+
+async def test_silent_reply_suppresses_routine_delivery(app, fake_brain, slack_client):
+    from illo.routines.scheduler import is_silent_reply
+
+    assert is_silent_reply("NO_ACTION")
+    assert is_silent_reply("  nothing_to_report. ")
+    assert is_silent_reply("```\nNO_ACTION\n```")
+    assert is_silent_reply("")
+    assert not is_silent_reply("Two billing notices need review.")
+
+    ctx = app.state.ctx
+    configure(ctx, principal="person:ada", destination="dm:ada")
+    fake_brain.final_text = "NO_ACTION"
+    await tick_routines(ctx, datetime(2026, 1, 1, 9, tzinfo=UTC))
+    posts = [c for c in slack_client.calls if c["method"] == "chat_postMessage"]
+    assert posts == []
+    async with ctx.pool.connection() as conn:
+        state = await one(conn, "SELECT * FROM routine_state WHERE key='test-routine'")
+        assert state["last_status"] == "completed"
+

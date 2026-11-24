@@ -128,6 +128,21 @@ def next_due(schedule: str, after: datetime, timezone: str) -> datetime:
     )
 
 
+_SILENT_MARKERS = frozenset({"no_action", "nothing_to_report", "no_update", "silent"})
+
+
+def is_silent_reply(text: str | None) -> bool:
+    """Return True when a routine intentionally chooses not to message anyone."""
+    if not text:
+        return True
+    cleaned = text.strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(lines[1:-1]).strip() if len(lines) >= 2 else ""
+    cleaned = cleaned.strip("` \t\r\n.!?").casefold()
+    return not cleaned or cleaned in _SILENT_MARKERS
+
+
 class RoutineAdapter:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -137,7 +152,7 @@ class RoutineAdapter:
 
     async def deliver_final(self, event, text):
         destination = event.payload["destination"]
-        if destination == "none":
+        if destination == "none" or is_silent_reply(text):
             return
         async with self.ctx.pool.connection() as conn:
             row = await one(
