@@ -109,8 +109,8 @@ def test_a_tainted_authority_is_tainted_on_every_channel():
 
 @pytest.mark.parametrize("kind", get_args(RunKind))
 def test_refresh_notice_and_failure_decisions(kind):
-    assert sends_refresh_notice(kind) is (kind not in {"digest", "deep"})
-    assert raises_failure(kind) is (kind in {"digest", "deep"})
+    assert sends_refresh_notice(kind) is (kind not in {"digest", "deep", "board_coordinator"})
+    assert raises_failure(kind) is (kind in {"digest", "deep", "board_coordinator"})
 
 
 @pytest.mark.parametrize("channel,profile", [("slack", "routine"), ("chat", "person_dm"),

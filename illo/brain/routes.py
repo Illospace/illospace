@@ -22,6 +22,8 @@ def run_kind(event, authority, *, deep: bool) -> RunKind:
     """A personal routine and a personal digest have the person_dm profile, not its route."""
     if deep:
         return "deep"
+    if event.channel == "board":
+        return "board_coordinator"
     if authority.tainted:
         return "tainted"
     channel, profile = event.channel, authority.profile
@@ -59,11 +61,11 @@ def resolve_route(workspace, kind: RunKind) -> Route:
 
 
 def sends_refresh_notice(kind: RunKind) -> bool:
-    return kind not in {"digest", "deep"}
+    return kind not in {"digest", "deep", "board_coordinator"}
 
 
 def raises_failure(kind: RunKind) -> bool:
-    return kind in {"digest", "deep"}
+    return kind in {"digest", "deep", "board_coordinator"}
 
 
 def web_search_allowed(workspace, route: Route, provider: dict, deep) -> bool:
@@ -142,7 +144,7 @@ async def select_payer(ctx, route: Route, authority, *, force=False, rejected_to
             )
         if pending:
             raise chatgpt.TemporaryRefresh(chatgpt.TEMPORARY)
-    if not own:
+    if not own and route.kind != "board_coordinator":
         await chatgpt.notify_team_missing(ctx)
     return None
 

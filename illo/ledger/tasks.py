@@ -332,7 +332,7 @@ async def create(conn, *, workspace, viewer, list_key, title, brief="", holder=N
         RETURNING *""", (list_key, title, brief, holder, holder, viewer.actor if holder else None,
                             holder, due_at, parent_id, Jsonb(links or []), viewer.actor,
                             owner["id"] if owner else None, "private" if owner else "team"))
-    await _ticket_links(conn, row)
+    await _ticket_links(conn, row, workspace)
     await _event(conn, row, viewer.actor, "created", title)
     if holder:
         await _event(conn, row, viewer.actor, "handed", "The task has a holder.", {"holder": holder})
@@ -375,7 +375,7 @@ async def hand(conn, task_id, *, workspace, viewer, holder, links=None):
     connectors.validate_handover(workspace, holder, merged)
     row = await one(conn, """UPDATE tasks SET links=%s,holder=%s,holder_since=CASE WHEN %s::text IS NOT NULL
         THEN now() END,handed_by=%s,alive_at=NULL,stopped_at=NULL WHERE id=%s RETURNING *""", (Jsonb(merged), holder, holder, viewer.actor, task_id))
-    await _ticket_links(conn, row)
+    await _ticket_links(conn, row, workspace)
     return await _state(conn, workspace, row, "todo", viewer.actor, "handed",
                         "The task has a new holder.", {"holder": holder})
 
@@ -389,7 +389,7 @@ async def add_link(conn, task_id, *, workspace, viewer, links, ctx=None, _defer=
     if merged == row["links"]:
         return row
     row = await one(conn, "UPDATE tasks SET links=%s WHERE id=%s RETURNING *", (Jsonb(merged), task_id))
-    await _ticket_links(conn, row)
+    await _ticket_links(conn, row, workspace)
     await _event(conn, row, viewer.actor, "link", "The proof links changed.", {"links": links})
     if _defer or row["state"] in {"done", "cancelled"}:
         return row
@@ -515,10 +515,17 @@ async def wake(conn, task_id, *, workspace, viewer, reason="A person requests a 
     return row
 
 
-async def _ticket_links(conn, row):
+async def _ticket_links(conn, row, workspace):
+    from illo.ledger.board import canonical_task_ticket
+
     for link in row["links"]:
         if link.get("kind") == "ticket":
-            existing = await one(conn, """INSERT INTO task_tickets(url,task_id) VALUES (%s,%s)
-                ON CONFLICT(url) DO UPDATE SET url=EXCLUDED.url RETURNING task_id""", (link["url"], row["id"]))
+            try:
+                canonical = canonical_task_ticket(workspace, link["url"])
+            except ValueError:
+                canonical = None
+            existing = await one(conn, """INSERT INTO task_tickets(url,task_id,canonical_url) VALUES (%s,%s,%s)
+                ON CONFLICT(url) DO UPDATE SET canonical_url=EXCLUDED.canonical_url RETURNING task_id""",
+                (link["url"], row["id"], canonical))
             if existing["task_id"] != row["id"]:
                 raise TaskError("The ticket already has a task.")

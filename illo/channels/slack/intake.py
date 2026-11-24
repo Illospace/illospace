@@ -1,5 +1,6 @@
 """Build gateway events from Socket Mode payloads, never from message instructions."""
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ from illo.ledger import items, kv, people, sensors
 from illo.tools._format import data_text
 
 log = logging.getLogger(__name__)
+RETRY_DELAY_S = 1
 JOIN_NOTICE = "I am here. Mention me to give me a task or to ask a question."
 MEMBERS_CONTEXT = (
     "This channel is private to its members. A task that you make here goes to the team list. "
@@ -32,6 +34,17 @@ MEMBERS_CONTEXT = (
 CLIP_ERROR = (
     "I could not read your voice clip. Slack gave no transcript. Write the question as text."
 )
+
+
+async def receive_with_retry(intake, envelope):
+    """Retry when the gateway releases the event for another attempt."""
+    for attempt in range(4):
+        if attempt:
+            await asyncio.sleep(RETRY_DELAY_S)
+        result = await intake.receive(envelope)
+        if not result or not result.get("retryable"):
+            break
+    return result
 
 
 class SlackIntake:
@@ -195,6 +208,8 @@ class SlackIntake:
                 ),
             },
         )
+        if dm:
+            event.payload["raw_slack_text"] = raw.get("text", "")
         if dm and text != raw.get("text", ""):
             # Claims use only what the person typed, before block or thread context.
             event.payload["slack_typed_text"] = raw.get("text", "")

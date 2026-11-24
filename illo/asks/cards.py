@@ -20,10 +20,10 @@ def section(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000] or " "}}
 
 
-def button(label: str, action: str, primary: bool = False) -> dict:
+def button(label: str, action: str, primary: bool = False, *, limit=30) -> dict:
     value = {
         "type": "button",
-        "text": {"type": "plain_text", "text": label[:30]},
+        "text": {"type": "plain_text", "text": label[:limit]},
         "action_id": action,
     }
     if primary:
@@ -111,6 +111,14 @@ def proof_sections(proof, saved, order=None):
 
 
 def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
+    if ask.get("page_action"):
+        from illo.board.decision import unescape_slack
+
+        proof = ask.get("proof") or {}
+        ask = {**ask, "question": unescape_slack(ask["question"]),
+               "options": [o | {"label": unescape_slack(o["label"]),
+                                "detail": unescape_slack(o.get("detail", ""))} for o in ask["options"]],
+               "proof": proof | {"text": unescape_slack(proof.get("text", ""))}}
     now = now or datetime.now(UTC)
     lane = ask.get("lane") or {}
     blocks = [
@@ -138,10 +146,13 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
             blocks.append(section("\n".join(details)))
         options = sorted(ask["options"], key=lambda o: o["id"] != ask["recommended_option"])
         option_buttons = [button(o["label"], f"ask:{ask['id']}:opt:{o['id']}",
-                                 o["id"] == ask["recommended_option"] and not ask.get("page_url"))
+                                 o["id"] == ask["recommended_option"] and not ask.get("page_url"),
+                                 limit=40 if ask.get("page_action") else 30)
                           for o in options]
         if ask.get("page_url"):
-            option_buttons.insert(0, button("Open the page", f"web-open-ask:{ask['id']}", True))
+            page_action = ask.get("page_action")
+            option_buttons.insert(0, button("Open the thread" if page_action else "Open the page",
+                                            page_action or f"web-open-ask:{ask['id']}", True))
         for offset in range(0, len(option_buttons), 5):
             blocks.append({"type": "actions", "elements": option_buttons[offset:offset + 5]})
         elements = []

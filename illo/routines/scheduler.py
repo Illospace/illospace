@@ -90,6 +90,7 @@ class Scheduler:
 
 async def setup(ctx) -> None:
     """Register persisted routines and run the startup catch-up once."""
+    from illo.board import coordinator, escalate
     from illo.board import wake as board_wake
     from illo.tasks import release, wake
 
@@ -101,6 +102,15 @@ async def setup(ctx) -> None:
             await board_wake.drain(ctx)
 
         ctx.every(2, check_board_wakes)
+    if board.enabled and board.coordinator.enabled:
+        async def coordinate_board():
+            await coordinator.run_coordinator(ctx)
+
+        async def deliver_board():
+            await escalate.send_due(ctx)
+
+        ctx.every(board.coordinator.tick_seconds, coordinate_board)
+        ctx.every(board.coordinator.send_tick_seconds, deliver_board)
     ctx.gateway.register("routine", RoutineAdapter(ctx))
     ctx.draft_performers["routine_delivery"] = perform_delivery
 

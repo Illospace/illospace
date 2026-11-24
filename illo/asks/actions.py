@@ -3,7 +3,7 @@
 from illo.asks.cards import can_always
 from illo.asks.service import answer, is_live, refresh_ask
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import rules
+from illo.ledger import board, rules
 
 
 def in_card_dm(person, action, row):
@@ -36,9 +36,14 @@ async def handle(ctx, person, action):
     if len(parts) < 3 or not parts[1].isdigit():
         return
     ask_id, operation = int(parts[1]), parts[2]
+    if not 0 < ask_id < 2**63:
+        return
+    from illo.board.escalate import recover_card
+
+    await recover_card(ctx, person, ask_id, action)
     notice = None
     async with ctx.pool.connection() as conn:
-        ask = await ledger.lock_ask(conn, ask_id)
+        ask = await board.lock_for_ask(conn, ask_id)
         if not ask or not in_card_dm(person, action, ask):
             return
         if not await is_live(conn, ask):
@@ -50,11 +55,17 @@ async def handle(ctx, person, action):
             option = next((o for o in ask["options"] if o["id"] == parts[3]), None)
             if option is None or (operation == "always" and not can_always(ask)):
                 return
-            answered = await answer(conn, ask_id, person["id"], option=option["id"],
-                                    workspace=ctx.workspace)
-            if not answered:
-                return
-            if operation == "always":
+            try:
+                async with conn.transaction():
+                    answered = await answer(conn, ask_id, person["id"], option=option["id"],
+                                            workspace=ctx.workspace)
+            except board.BoardError as exc:
+                answered = None
+                notice = str(exc)
+            else:
+                if not answered:
+                    return
+            if answered and operation == "always":
                 data = await ledger.card_data(conn, ask)
                 lane = data["lane"] or {}
                 match = {
@@ -92,23 +103,36 @@ async def handle(ctx, person, action):
 async def claim_thread(ctx, event, authority):
     if event.channel != "slack" or authority.profile != "person_dm" or authority.tainted:
         return None
-    if event.payload.get("clip_unreadable"):
-        return None
     thread = event.payload.get("thread_ts") or event.reply_to
     channel = event.payload.get("channel_id")
     if not thread or not channel or not channel.startswith("D"):
         return None
     async with ctx.pool.connection() as conn:
         ask = await ledger.thread_ask(conn, authority.person_id, channel, thread)
-        if not ask:
+        if not ask or (event.payload.get("clip_unreadable") and not board.is_coordinator_ask(ask)):
             return None
         if not await is_live(conn, ask):
             text = "This question is closed. No answer is needed."
-        elif not event.text.strip():
-            text = "Reply in this thread with your answer."
+        elif not (typed := await reply_text(conn, ask, event)).strip():
+            from illo.board.escalate import WRITE_TEXT
+
+            text = WRITE_TEXT if board.is_coordinator_ask(ask) else "Reply in this thread with your answer."
         else:
-            answered = await answer(conn, ask["id"], authority.person_id, text=event.text,
-                                    workspace=ctx.workspace)
-            text = "Answer saved." if answered else "This question is closed. No answer is needed."
+            try:
+                async with conn.transaction():
+                    answered = await answer(conn, ask["id"], authority.person_id, text=typed,
+                                            workspace=ctx.workspace)
+            except board.BoardError as exc:
+                text = str(exc)
+            else:
+                text = "Answer saved." if answered else "This question is closed. No answer is needed."
     await refresh_ask(ctx, ask["id"])
     return text
+
+
+async def reply_text(conn, ask, event):
+    if board.is_coordinator_ask(ask):
+        from illo.board.escalate import typed_text
+
+        return await typed_text(conn, event)
+    return event.text

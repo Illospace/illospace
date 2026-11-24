@@ -2,8 +2,10 @@
 
 import pytest
 
+from illo.db import all_rows
 from illo.ledger import people, runs
-from illo.tools.checks import GRANT_PROFILES
+from illo.tools.checks import GRANT_PROFILES, PROFILE_NAMES
+from illo.tools.registry import Arguments, Tool
 
 
 @pytest.mark.parametrize("profile", GRANT_PROFILES)
@@ -23,7 +25,25 @@ async def test_actual_http_tool_list_has_no_runtime_escape(app, rpc, profile):
     response = await rpc(token, "tools/list")
     names = {t["name"] for t in response.json()["result"]["tools"]}
     assert names <= app.state.ctx.registry.tools.keys()
-    assert names
+    if profile == "board_coordinator":
+        assert names == set()
+        registry = app.state.ctx.registry
+        registry.add(Tool("test_explicit_profile", "test", "read", lambda _: "ledger",
+                          False, lambda *_: pytest.fail("The tool handler ran."),
+                          "Read a test value.", Arguments, profiles=PROFILE_NAMES))
+        for name in ("board_read", "asks_create", "web_read_public_page", "test_explicit_profile", "shell"):
+            call = await rpc(token, "tools/call", {"name": name, "arguments": {"command": "Private test text"}})
+            result = call.json()["result"]
+            assert result["isError"]
+            assert result["structuredContent"]["reason"] == "A board coordinator run has no tools."
+        malformed = await rpc(token, "tools/call", {"name": "shell", "arguments": "Private test text"})
+        assert malformed.json()["error"]["code"] == -32602
+        async with app.state.ctx.pool.connection() as conn:
+            denied = await all_rows(conn, "SELECT args FROM audit WHERE run_id=%s AND decision='deny'", (run["id"],))
+        assert denied == [{"args": {}}] * 6
+        assert (await rpc(token, "tools/list")).json()["result"]["tools"] == []
+    else:
+        assert names
     forbidden = ("shell", "exec", "bash", "file", "fetch", "browse", "web")
     assert all(
         name == "web_read_public_page" or not any(part in name for part in forbidden)

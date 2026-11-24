@@ -433,3 +433,20 @@ Sign-in with a code uses the existing Slack pairing recognizer before any model 
 A sign-in link comes only from a button press that Slack proved, and only in a window that the person sees.
 The link works once, for 10 minutes, and its page sends no address to another request. No model sees a link.
 Separate request tables keep the agent OAuth behaviour unchanged.
+
+## Message board coordinator
+
+Only internal code can create a `board` event. The gateway reads its thread from the database.
+It sets `personal_read` when the thread has an owner for its private scope.
+A private task can restrict an existing team thread through a late ticket link.
+If the linked private tasks have different owners, the thread stays hidden from everyone.
+
+The model reads a bounded packet inside a data block. The tool list is empty, and direct tool calls fail.
+Provider web search stays off. The model returns one decision.
+Code checks the pending item, scope, recipient, and limits before it acts.
+The Slack delivery job checks the current scope and recipient again.
+
+Slack delivery uses a private DM. The default notice includes no board post text or thread title.
+When the workspace enables summaries, code removes links and Slack mentions from model text.
+A Slack thread reply uses only the person's typed text.
+An approved draft or a standing rule cannot answer a board ask.

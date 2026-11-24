@@ -26,7 +26,7 @@ LINKS_PER_HOUR = 20
 
 def next_path(value):
     # Only local pages and board frame targets can follow sign-in.
-    return value if re.fullmatch(r"(?:/(?:t|web/a)/[1-9][0-9]*/?|/web/board(?:#[ta][1-9][0-9]*)?)", value or "") else ""
+    return value if re.fullmatch(r"(?:/(?:t|web/a)/[1-9][0-9]*/?|/web/board(?:#[ta][1-9][0-9]*|/t/[1-9][0-9]{0,18})?)", value or "") else ""
 
 
 def pairing_line(handle):
@@ -148,14 +148,15 @@ async def action(ctx, person, action):
             blocks=[{"type": "section", "text": {"type": "plain_text", "text": text}}])
 
 
-async def link(conn, ctx, person, task_id, *, ask=False):
+async def link(conn, ctx, person, task_id, *, ask=False, board=False):
     """Make a key that signs in one browser as this person. The person asked for it in Slack."""
     if not await limit(conn, "web_link", str(person["id"]), LINKS_PER_HOUR):
         return None
     # The click in Slack is the approval, so the row starts as approved. The key works one time,
     # in the same exchange as the handle of a browser that got an approval. No pairing code matches it.
     key = secrets.token_urlsafe(32)
-    destination = await person_path(conn, ctx.workspace, person, task_id, ask=ask)
+    destination = (f"/web/board/t/{task_id}" if board
+                   else await person_path(conn, ctx.workspace, person, task_id, ask=ask))
     await conn.execute("""INSERT INTO web_signins(pairing_hash,browser_hash,next_path,person_id,paired_at,decision)
         VALUES (%s,%s,%s,%s,clock_timestamp(),'approved')""",
         (digest("link:" + key), digest(key), destination, person["id"]))
@@ -164,29 +165,45 @@ async def link(conn, ctx, person, task_id, *, ask=False):
 
 async def open_action(ctx, person, action):
     """Answer the button "Open the page" with a private link. Slack proved who pressed the button."""
-    match = re.fullmatch(r"web-open(-ask)?:([1-9][0-9]*)", action.get("action_id", ""))
+    match = re.fullmatch(r"web-open(-(ask|board))?:([1-9][0-9]{0,18})", action.get("action_id", ""))
     if not enabled(ctx) or not match or not action.get("trigger_id"):
         return
-    ask = bool(match[1])
-    task_id = int(match[2])
+    ask, board_page = match[2] == "ask", match[2] == "board"
+    task_id = int(match[3])
+    if task_id >= 2**63:
+        return
     async with ctx.pool.connection() as conn:
         viewer = tasks.Viewer(person["key"], "person:" + person["key"], human=True)
-        visible = (await ask_workflow.page_read(conn, task_id, person['id']) if ask
-                   else await tasks.get(conn, task_id, viewer=viewer))
+        if board_page:
+            from illo.board import acl, policy
+
+            channel, root = action.get("channel"), action.get("message_ts")
+            if not policy.board_pages_ready(ctx) or not channel or not channel.startswith("D") or not root:
+                return
+            thread = await acl.thread_access(conn, task_id)
+            visible = thread and await acl.recipient_ok(conn, thread, person) and await one(conn, """
+                SELECT 1 FROM board_escalations e LEFT JOIN asks a ON a.id=e.ask_id
+                WHERE e.thread_id=%s AND e.person_id=%s AND e.recipient_slack_user=%s
+                AND ((e.slack_channel=%s AND e.slack_ts=%s) OR (a.slack_channel=%s AND a.slack_ts=%s))""",
+                (task_id, person["id"], person["slack_id"], channel, root, channel, root))
+        else:
+            visible = (await ask_workflow.page_read(conn, task_id, person['id']) if ask
+                       else await tasks.get(conn, task_id, viewer=viewer))
         if not visible:
             return
-        key = await link(conn, ctx, person, task_id, ask=ask)
+        key = await link(conn, ctx, person, task_id, ask=ask, board=board_page)
     address = base_url(ctx) + "/web/signin?" + urlencode({"key": key or ""})
-    kind = "request" if ask else "task"
+    kind = "board thread" if board_page else "request" if ask else "task"
+    label = f"Open board thread {task_id}" if board_page else f"Open the page of {kind} {task_id}"
     text = ("You asked for too many links. Try again in one hour." if not key else
-            f"*<{escape(address)}|Open the page of {kind} {task_id}>*\n"
+            f"*<{escape(address)}|{label}>*\n"
             f"This link signs in one browser as {escape(person['name'])}. It works one time, for 10 minutes. "
             "Do not give it to another person.")
     try:
         # A modal is private to the person who pressed the button, and it leaves no message with a key.
         with private_http_logs():
             await ctx.slack_client.views_open(trigger_id=action["trigger_id"], view={
-                "type": "modal", "title": {"type": "plain_text", "text": "Request page" if ask else "Task page"},
+                "type": "modal", "title": {"type": "plain_text", "text": "Board thread" if board_page else "Request page" if ask else "Task page"},
                 "close": {"type": "plain_text", "text": "Close"}, "blocks": [section(text)]})
     except Exception:
         # Slack accepts a modal for only 3 seconds after the click. End the link that no person got.

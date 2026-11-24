@@ -41,6 +41,8 @@ def timestamp(value):
 
 
 async def create(ctx, args: dict) -> dict:
+    if (args["source_ref"] or "").startswith("board:"):
+        raise Refusal("This reply key is reserved for the board.")
     existing = await mcp.existing_ask(ctx.conn, ctx.token["id"], args["source_ref"])
     if existing:
         return await created_result(ctx, existing)

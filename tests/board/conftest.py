@@ -1,7 +1,11 @@
+from datetime import UTC, datetime
+
 import pytest
+from slack_sdk.errors import SlackApiError
 
 from illo.db import one
 from illo.ledger import people, tokens
+from tests.fakes import FakeSlackClient
 from tests.mcp.client import AgentClient
 
 
@@ -33,3 +37,65 @@ def task(app):
             return row["id"]
 
     return create
+
+
+@pytest.fixture
+def coordinator_ctx(app, fake_brain):
+    ctx = app.state.ctx
+    cfg = ctx.workspace.config.board.coordinator
+    cfg.enabled = True
+    cfg.quiet_hours = False
+    cfg.thread_cooldown_minutes = 0
+    cfg.settle_seconds = 0
+    ctx.workspace.config.pages.enabled = True
+
+    async def placeholder(id: int):
+        return {"id": id}
+
+    app.add_api_route("/web/board/t/{id}", placeholder, methods=["GET"])
+    fake_brain.script = []
+    return ctx
+
+
+class BoardSlack(FakeSlackClient):
+    on_send = None
+    refused = False
+    lose_receipt = False
+    lose_history = False
+
+    async def conversations_open(self, **fields):
+        await self._record("conversations_open", **fields)
+        return {"channel": {"id": "D" + fields["users"]}}
+
+    async def chat_postMessage(self, **fields):
+        if self.refused and fields.get("metadata"):
+            raise SlackApiError("Refused", {"error": "not_allowed"})
+        result = await self._record("chat_postMessage", **fields)
+        ts = f"{datetime.now(UTC).timestamp():.6f}"
+        self.messages[ts] = {**fields, "ts": ts, "user": "U_ACME_ILLO"}
+        if self.on_send and fields.get("metadata"):
+            await self.on_send(fields, ts)
+        if self.lose_receipt and fields.get("metadata"):
+            self.lose_receipt = False
+            raise TimeoutError
+        return result | {"ts": ts}
+
+    async def conversations_history(self, **fields):
+        if self.lose_history:
+            self.lose_history = False
+            raise TimeoutError
+        result = await super().conversations_history(**fields)
+        result["messages"] = [m for m in result["messages"] if m["channel"] == fields["channel"]
+                              and (not fields.get("latest") or m["ts"] == fields["latest"])]
+        return result
+
+    def roots(self):
+        return [x for x in self.messages.values() if x.get("metadata")]
+
+
+@pytest.fixture
+def slack(coordinator_ctx, channel):
+    ctx = coordinator_ctx
+    ctx.gateway.register("slack", channel)
+    ctx.slack_client = BoardSlack()
+    return ctx.slack_client

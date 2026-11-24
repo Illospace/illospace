@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from illo.db import one
 from illo.ledger import people, tokens
 
 
@@ -11,10 +12,26 @@ class Authority:
     profile: str
     person_id: int | None = None
     tainted: bool = False
+    personal_read: bool = False
 
 
 async def resolve(conn, event, workspace) -> Authority | None:
     """Only this gateway function creates authority for an inbound event."""
+    if event.channel == "board":
+        from illo.board.acl import thread_access
+
+        thread_id = event.payload.get("thread_id")
+        if type(thread_id) is not int or not 0 < thread_id < 2**63:
+            return None
+        thread = await thread_access(conn, thread_id)
+        if not thread or thread["state"] != "open":
+            return None
+        if thread["effective_owner"] is None:
+            return Authority("team", "board_coordinator")
+        owner = await one(conn, "SELECT id,key,active FROM people WHERE id=%s", (thread["effective_owner"],))
+        if owner and owner["active"]:
+            return Authority(f"person:{owner['key']}", "board_coordinator", owner["id"], personal_read=True)
+        return None
     if event.channel == "slack":
         person = (
             None if event.payload.get("outside_workspace")

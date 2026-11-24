@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from illo.db import Connection, one
 from illo.ledger import audit, drafts
 from illo.tools._format import Compact, json_text
-from illo.tools.checks import PROFILE_NAMES, Decision, check, scope
+from illo.tools.checks import BOARD_DENY, PROFILE_NAMES, Decision, check, effective_profile, scope
 
 MAX_RESULT_CHARS = 12_000
 
@@ -225,6 +225,9 @@ class Registry:
         """Call under the run row lock. The HTTP layer owns the transaction."""
         tool = self.tools.get(name)
         decision, reason, result = "deny", "The tool is not registered", None
+        if effective_profile(ctx.run) == "board_coordinator":
+            tool, reason = None, BOARD_DENY
+            args = {}
         if tool and name in RUN_LIMITS:
             calls = await one(
                 ctx.conn,

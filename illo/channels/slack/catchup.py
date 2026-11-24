@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from illo.channels.slack.channels import member_channels
 from illo.channels.slack.files import private_io, slack_call
+from illo.channels.slack.intake import receive_with_retry
 from illo.db import one
 from illo.ledger import people
 from illo.slackapi import dm_person
@@ -295,11 +296,11 @@ async def catch_up(ctx, intake, gap_start: float, gap_end: float) -> CatchupResu
                 continue
             result.recent += 1
             with private_io():
-                outcome = await intake.receive({"type": "event_callback", "event": event})
+                outcome = await receive_with_retry(intake, {"type": "event_callback", "event": event})
             if outcome and outcome.get("duplicate"):
                 # A live event can reach the gateway after the check above.
                 result.recent -= 1
-            elif outcome and outcome.get("error"):
+            elif outcome and (outcome.get("error") or outcome.get("retryable")):
                 result.intake_failures += 1
             elif outcome and outcome.get("text"):
                 result.answered += 1
