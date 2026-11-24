@@ -20,8 +20,8 @@ from pydantic import (
 from illo.connectors.config import Connector
 from illo.db import Connection
 
-Profile = Literal["board_coordinator", "person_dm", "team_channel", "tainted", "routine", "agent_request", "digest", "team_digest"]
-RunKind = Literal["board_coordinator", "person_dm", "team_channel", "tainted", "routine", "digest", "agent_request", "deep"]
+Profile = Literal["person_dm", "team_channel", "tainted", "routine", "agent_request", "digest", "team_digest", "board_coordinator"]
+RunKind = Literal["person_dm", "team_channel", "tainted", "routine", "digest", "agent_request", "deep", "board_coordinator"]
 ProviderName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")]
 Risk = Literal["read", "write_internal", "send_outside"]
 
