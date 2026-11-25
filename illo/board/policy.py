@@ -62,6 +62,28 @@ async def notice(conn, workspace, episode):
     return text + " Open the thread to read it and reply, or reply in this Slack thread."
 
 
+async def _ask_card_meta(conn, ask):
+    from illo.ledger import asks
+
+    requester = (
+        await one(
+            conn,
+            "SELECT t.label,p.id AS person_id,p.name AS person_name,p.key AS person_key "
+            "FROM tokens t JOIN people p ON p.id=t.person_id WHERE t.id=%s",
+            (ask["requester_token_id"],),
+        )
+        if ask.get("requester_token_id")
+        else None
+    )
+    links = (ask.get("proof") or {}).get("links")
+    return {
+        "kind": ask["kind"],
+        "use_ask_page": bool(ask.get("blocks") and not await asks.is_board_native(conn, ask)),
+        **({"requester": requester} if requester else {}),
+        **({"links": links} if isinstance(links, list) and links else {}),
+    }
+
+
 async def _fallback_payload(conn, workspace, thread, episode):
     """Build a verbatim fallback escalation so a model/limit error never leaves a person unnotified."""
     author = await packet.asker_post(conn, episode)
@@ -78,6 +100,7 @@ async def _fallback_payload(conn, workspace, thread, episode):
                 "recommended_id": ask["recommended_option"],
                 "source_ask_id": ask["id"],
                 "allow_rule": bool(ask["allow_rule"]),
+                **(await _ask_card_meta(conn, ask)),
             }
             return "card", "summary", summary, Jsonb(card), ask["id"]
     if author and author.get("text"):
@@ -117,18 +140,25 @@ async def reserve(conn, workspace, thread, episode, person, *, choice=None, run_
         fmt = choice.format
         content_mode = "summary" if choice.text else "notice"
         text = choice.text if choice.text else await notice(conn, workspace, episode)
-        card = (
-            Jsonb({
+        if choice.format == "card":
+            source_meta = {}
+            if choice.source_ask_id is not None:
+                source_ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (choice.source_ask_id,))
+                if source_ask:
+                    source_meta = await _ask_card_meta(conn, source_ask)
+            card = Jsonb({
                 "question": choice.question,
                 "options": [o.model_dump(exclude_none=True) for o in choice.options],
                 "recommended": choice.recommended,
                 **({"recommended_id": choice.recommended_id} if choice.recommended_id is not None else {}),
                 **({"source_ask_id": choice.source_ask_id} if choice.source_ask_id is not None else {}),
                 "allow_rule": bool(choice.allow_rule),
+                "kind": choice.kind,
+                "use_ask_page": bool(choice.use_ask_page),
+                **source_meta,
             })
-            if choice.format == "card"
-            else None
-        )
+        else:
+            card = None
         card_ask_id = choice.source_ask_id if choice.format == "card" else None
     else:
         fmt, content_mode, text, card, card_ask_id = await _fallback_payload(conn, workspace, thread, episode)

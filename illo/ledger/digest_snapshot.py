@@ -223,9 +223,12 @@ async def build(conn, person, now, workspace):
            and r["row"]["due_at"] <= now + timedelta(hours=24)
            and (r["row"]["holder"] == ref or r["reviewer"] == ref)]
     due.sort(key=lambda r: (r["due_at"], r["id"]))
-    asks = await all_rows(conn, """SELECT a.*,l.links AS lane_links FROM asks a
+    from illo.ledger import asks as ask_ledger
+
+    asks = await all_rows(conn, f"""SELECT a.*,l.links AS lane_links FROM asks a
         LEFT JOIN lanes l ON l.id=a.lane_id
-        WHERE a.owner_person_id=%s AND (a.state='open' OR a.delivery_state='failed')
+        WHERE a.owner_person_id=%s
+          AND (a.state='open' OR (a.delivery_state='failed' AND NOT {ask_ledger.BOARD_NATIVE_SQL}))
         AND (l.id IS NULL OR l.visibility='team' OR l.owner_person_id=%s)
         ORDER BY a.due_at NULLS LAST,a.id""", (person["id"], person["id"]))
     ask_links = {}

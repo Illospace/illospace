@@ -7,9 +7,11 @@ from pydantic import Field, model_validator
 
 from illo.asks import proof
 from illo.asks.service import is_live
+from illo.board import doors
 from illo.channels.mcp.schemas import check_ask_text
+from illo.db import one
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import asks, lanes, mcp, people
+from illo.ledger import asks, board, lanes, mcp, people
 from illo.tools._format import Compact, ask, body, data_text, json_text, rows
 from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Tool
@@ -102,14 +104,18 @@ async def asks_create(ctx, args):
     owner = await people.get(ctx.conn, args.pop("owner"))
     if not owner:
         raise ValueError("The owner is missing or inactive")
+    lane = None
     if args["lane_id"]:
         lane = await lanes.get(ctx.conn, args["lane_id"], principal=ctx.principal)
         if not lane or (lane["visibility"] == "private" and lane["owner_person_id"] != owner["id"]):
             raise ValueError("The lane is not visible to the owner")
     args["due_at"], args["expires_at"] = date(args["due_at"]), date(args["expires_at"])
     requester_token_id = None
+    token = None
     if ctx.run["profile"] == "agent_request":
         requester_token_id = await mcp.requester_token_for_run(ctx.conn, ctx.run["id"])
+        if requester_token_id:
+            token = await one(ctx.conn, "SELECT * FROM tokens WHERE id=%s", (requester_token_id,))
     ask = await asks.create(
         ctx.conn,
         owner_person_id=owner["id"],
@@ -117,12 +123,16 @@ async def asks_create(ctx, args):
         requester_token_id=requester_token_id,
         **args,
     )
+    if ctx.run["profile"] == "agent_request" and doors.coordinator_active(ctx.app.workspace):
+        await doors.attach_ask_to_board(
+            ctx.conn, ctx.app.workspace, ask, token=token, lane=lane, owner=owner, via="asks_create"
+        )
     return {"ask_id": ask["id"], "state": ask["state"]}
 
 
 async def answer_preflight(ctx, args):
     ask = await ledger.lock_ask(ctx.conn, args["id"])
-    if await asks.is_board_ask(ctx.conn, ask):
+    if await asks.is_board_native(ctx.conn, ask):
         return Decision("deny", "Answer this board question with its buttons or on the thread page.")
     if (
         not ask
@@ -141,10 +151,10 @@ async def answer_preflight(ctx, args):
 
 
 async def asks_answer(ctx, args):
-    ask = await ledger.lock_ask(ctx.conn, args["id"])
+    ask = await board.lock_for_ask(ctx.conn, args["id"])
     if (
         not ask
-        or await asks.is_board_ask(ctx.conn, ask)
+        or await asks.is_board_native(ctx.conn, ask)
         or ask["owner_person_id"] != ctx.run["person_id"]
         or not await is_live(ctx.conn, ask)
     ):
@@ -159,27 +169,35 @@ async def asks_answer(ctx, args):
     )
     if not answered:
         raise ValueError("The ask cannot accept this answer")
+    await board.record_decision(ctx.conn, answered, workspace=ctx.app.workspace)
     await ledger.decision(ctx.conn, answered)
     return {"answered": True}
 
 
 async def asks_answer_with_rule(ctx, args):
     ask = await asks.get(ctx.conn, args["id"], principal=ctx.principal)
-    if await asks.is_board_ask(ctx.conn, ask):
+    if await asks.is_board_native(ctx.conn, ask):
         raise ValueError("Answer this board question with its buttons or on the thread page.")
     if not ask or not await is_live(ctx.conn, ask):
         return {"answered": False}
+    locked = await board.lock_for_ask(ctx.conn, args["id"])
+    if not locked or not await is_live(ctx.conn, locked):
+        return {"answered": False}
     answered = await asks.answer_with_rule(ctx.conn, args["id"], args["rule_id"])
     if answered:
+        await board.record_decision(ctx.conn, answered, workspace=ctx.app.workspace)
         await ledger.decision(ctx.conn, answered)
     return {"answered": bool(answered), "answer": answered}
 
 
 async def asks_cancel_mine(ctx, args):
-    ask = await ledger.lock_ask(ctx.conn, args["id"])
+    ask = await board.lock_for_ask(ctx.conn, args["id"])
     if not ask or ctx.run["person_id"] not in {ask["owner_person_id"], ask["requester_person_id"]}:
         return {"cancelled": False}
-    return {"cancelled": await asks.cancel(ctx.conn, ask["id"])}
+    cancelled = await asks.cancel(ctx.conn, ask["id"])
+    if cancelled:
+        await doors.close_board_for_ask(ctx.conn, ask["id"])
+    return {"cancelled": cancelled}
 
 
 async def asks_digest(ctx, args):

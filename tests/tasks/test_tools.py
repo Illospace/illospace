@@ -119,11 +119,17 @@ async def test_private_list_and_token_identity(app, http):
     await build.call("task_mine", error=True)
 
 
-@pytest.mark.parametrize("profile,principal,tainted", [("tainted", "team", True), ("outsider", "outsider", False)])
-async def test_outside_runs_have_no_task_tools(app, profile, principal, tainted):
+@pytest.mark.parametrize(
+    "profile,principal,tainted,expected",
+    [
+        ("tainted", "team", True, {"lists", "task_list", "task_get"}),
+        ("outsider", "outsider", False, set()),
+    ],
+)
+async def test_outside_runs_have_no_task_tools(app, profile, principal, tainted, expected):
     names = {tool["name"] for tool in app.state.ctx.registry.list_tools({"principal": principal,
         "profile": profile, "tainted": tainted, "person_id": None, "personal_read": False})}
-    assert not any(name.startswith("task_") or name == "lists" for name in names)
+    assert {name for name in names if name.startswith("task_") or name == "lists"} == expected
 
 
 async def test_mcp_task_cap_and_scope(app, http):

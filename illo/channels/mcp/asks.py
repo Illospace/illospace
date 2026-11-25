@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from illo.asks import cards, proof
+from illo.board import doors
 from illo.ledger import ask_workflow as workflow
 from illo.ledger import asks, items, lanes, mcp
 from illo.tasks import pages
@@ -106,7 +107,12 @@ async def create(ctx, args: dict) -> dict:
         source_ref=args["source_ref"],
     )
     await outside.replace(ctx.conn, files, ask_id=row["id"])
-    await mcp.take_ask_card(ctx.conn, row)
+    if doors.coordinator_active(ctx.app.workspace):
+        await doors.attach_ask_to_board(
+            ctx.conn, ctx.app.workspace, row, token=ctx.token, lane=lane, owner=person
+        )
+    else:
+        await mcp.take_ask_card(ctx.conn, row)
     return await created_result(ctx, row)
 
 

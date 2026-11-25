@@ -673,7 +673,7 @@ async def record_decision(conn, ask, *, workspace=None) -> int | None:
     from illo.board.wake import enqueue_for_post
 
     via = ask["answered_via"]
-    if via == "person":
+    if via in {"person", "approved_draft"}:
         if ask["answered_by_person_id"] != ask["owner_person_id"]:
             return None
     elif via == "rule":
@@ -690,11 +690,11 @@ async def record_decision(conn, ask, *, workspace=None) -> int | None:
     thread = await _thread(conn, params, lock=True)
     option = next((o["label"] for o in ask["options"] if o["id"] == ask["answer_option"]), "")
     answer = "\n".join(value for value in (option, ask["answer_text"]) if value)[:16000]
-    if via == "person":
+    if via in {"person", "approved_draft"}:
         actor = f"person:{linked['key']}"
         is_human = True
         person_id = ask["owner_person_id"]
-        provenance = {"person_key": linked["key"]}
+        provenance = {"person_key": linked["key"], **({"via": via} if via != "person" else {})}
     else:
         actor = "illo"
         is_human = False
@@ -709,10 +709,11 @@ async def record_decision(conn, ask, *, workspace=None) -> int | None:
         VALUES (%s,%s,%s,%s,%s,'decision',%s,%s)
         RETURNING id,actor,is_human,kind,mentions,reply_to_post_id,provenance""",
         (linked["thread_id"], actor, is_human, person_id, Jsonb(provenance), answer, linked["id"]))
-    await conn.execute(
-        "UPDATE asks SET delivery_state='acked' WHERE id=%s AND delivery_state<>'acked'",
-        (ask["id"],),
-    )
+    if await asks.is_board_native(conn, ask):
+        await conn.execute(
+            "UPDATE asks SET delivery_state='acked' WHERE id=%s AND delivery_state<>'acked'",
+            (ask["id"],),
+        )
     if workspace is not None:
         stall_at = None
         if thread["stalled_reason"] == "turn_cap":
@@ -784,6 +785,12 @@ async def lock_for_ask(conn, ask_id):
         try:
             async with conn.transaction():
                 if thread_ids:
+                    if await one(
+                        conn,
+                        "SELECT 1 FROM board_threads WHERE id=ANY(%s) AND task_id IS NOT NULL LIMIT 1",
+                        (thread_ids,),
+                    ):
+                        await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
                     await conn.execute("""SELECT id FROM board_threads WHERE id=ANY(%s)
                         ORDER BY id FOR UPDATE""", (thread_ids,))
                     await conn.execute("""SELECT id FROM board_episodes WHERE thread_id=ANY(%s)
@@ -843,6 +850,7 @@ async def _reset_after_human(conn, thread_id, person, post_id):
 async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_id, source_ref, via,
                      ask_id=None):
     """Write the verified person's own words in the caller's transaction."""
+    from illo.board import doors
     from illo.board.episodes import close_items
     from illo.board.wake import enqueue_for_post
     from illo.channels.slack.tasks import _visible
@@ -852,9 +860,11 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
     if not person or not person.get("active", True):
         raise BoardError("Your account is inactive.")
     actor = "person:" + person["key"]
-    await _human_thread(conn, person, thread_id)
+    pre = await _human_thread(conn, person, thread_id)
     if row := await _human_replay(conn, actor, source_ref, thread_id):
         return await _human_receipt(conn, row, person, replayed=True)
+    if pre["task_id"]:
+        await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
     await lock_thread(conn, thread_id)
     thread = await _human_thread(conn, person, thread_id)
     if row := await _human_replay(conn, actor, source_ref, thread_id):
@@ -892,12 +902,14 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
             target = "person:" + provenance["person_key"]
     await lock_children(conn, thread_id)
     decision_ask_id = None
+    decision_delivery = "acked"
     if reply and reply["kind"] == "decision_needed" and reply.get("ask_id"):
-        linked_ask = await one(conn, "SELECT id,state,owner_person_id FROM asks WHERE id=%s FOR UPDATE",
+        linked_ask = await one(conn, "SELECT id,state,owner_person_id,source_ref FROM asks WHERE id=%s FOR UPDATE",
                                (reply["ask_id"],))
         if linked_ask and linked_ask["state"] == "open" and linked_ask["owner_person_id"] == person["id"]:
             kind = "decision"
             decision_ask_id = linked_ask["id"]
+            decision_delivery = "acked" if await asks.is_board_native(conn, linked_ask) else "pending"
     try:
         async with conn.transaction():
             await _human_limit(conn, person)
@@ -909,8 +921,8 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
             if decision_ask_id is not None:
                 await conn.execute("""UPDATE asks SET state='answered',answer_text=%s,
                     answered_by_person_id=%s,answered_via='person',answered_at=clock_timestamp(),
-                    delivery_state='acked',awaiting_text=false
-                    WHERE id=%s AND state='open'""", (text, person["id"], decision_ask_id))
+                    delivery_state=%s,awaiting_text=false
+                    WHERE id=%s AND state='open'""", (text, person["id"], decision_delivery, decision_ask_id))
     except UniqueViolation as exc:
         if exc.diag.constraint_name != "board_posts_untokened_source":
             raise
@@ -921,6 +933,11 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
             VALUES (%s,%s,%s,%s)""", (thread_id, row["id"], target, reply["person_id"]))
     await _reset_after_human(conn, thread_id, person, row["id"])
     await close_items(conn, thread, reason="answered", person_id=person["id"], post_id=row["id"])
+    if thread["task_id"]:
+        await doors.unblock_task_from_board(
+            conn, workspace, thread["task_id"], actor=actor, text=text,
+            board_post_id=row["id"], person_key=person["key"],
+        )
     await enqueue_for_post(conn, workspace, thread=thread, post=row, prior_turn_cap_at=stall_at,
                            prior_pending_post_id=prior["id"] if prior else None)
     await audit.write(conn, principal=actor, tool="board_human_post", args={"thread": thread_id, "via": via},

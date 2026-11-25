@@ -200,7 +200,12 @@ async def thread_ask(conn: Connection, person_id, channel, thread):
 async def due_asks(conn: Connection):
     return await all_rows(
         conn,
-        "SELECT id FROM asks WHERE state='open' AND due_at<=now() AND reminded_at IS NULL AND slack_ts IS NOT NULL ORDER BY id",
+        """SELECT id FROM asks WHERE state='open' AND due_at<=now() AND reminded_at IS NULL
+        AND slack_ts IS NOT NULL
+        AND NOT COALESCE(starts_with(source_ref,'board:'),false)
+        AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=asks.id)
+        AND NOT EXISTS (SELECT 1 FROM board_escalations WHERE ask_id=asks.id)
+        ORDER BY id""",
     )
 
 

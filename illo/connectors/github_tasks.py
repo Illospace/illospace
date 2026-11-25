@@ -308,12 +308,23 @@ async def signal(ctx, conn, repo, item):
     key = f"task:needs-input:{row['id']}"
     was_waiting = await kv.get(conn, key)
     if waiting and not was_waiting:
+        from illo.board import doors
+
         target = await tasks.reviewer(conn, ctx.workspace, row)
         await conn.execute("UPDATE tasks SET waits_for=%s WHERE id=%s", (target, row["id"]))
         comment = worker[-1] if worker else {}
-        await tasks._event(conn, row, row["holder"] or "code", "question",
+        event = await tasks._event(conn, row, row["holder"] or "code", "question",
             (comment.get("body") or "The ticket needs a person's answer.")[:1000],
             {"to": target, "url": comment.get("html_url", url), "source": "github"})
+        await doors.attach_task_question_to_board(
+            conn,
+            ctx.workspace,
+            row,
+            event,
+            target=target,
+            actor=row["holder"] or "agent:github",
+            provenance={"via": "github_needs_input", "url": comment.get("html_url", url)},
+        )
     elif was_waiting and not waiting and row["state"] in {"todo", "working"}:
         await conn.execute("UPDATE tasks SET waits_for=holder WHERE id=%s", (row["id"],))
         await tasks._event(conn, row, "code", "state", "The ticket no longer needs input.")
