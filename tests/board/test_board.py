@@ -127,7 +127,10 @@ async def test_only_explicit_human_answer_completes_each_decision(app, client):
     await ada.call("board_post", {"thread_id": thread_id, "text": "I decide", "kind": "decision"}, error=True)
     await ada.call("board_post", {"thread_id": thread_id, "text": "Spoof", "actor": "person:ben"}, error=True)
     await ada.call("board_resolve", {"thread_id": thread_id}, error=True)
-    await ada.call("ask_cancel", {"ask_id": first["ask_id"]}, error=True)
+    ben_agent = await client("ben")
+    ada_collector = await client("ada", scope="collector")
+    await ben_agent.call("ask_cancel", {"ask_id": first["ask_id"]}, error=True)
+    await ada_collector.call("ask_cancel", {"ask_id": first["ask_id"]}, error=True)
     async with ctx.pool.connection() as conn:
         ben = await people.get(conn, "ben")
         rule = await rules.create(conn, owner_person_id=ben["id"], text="Use the first date",
@@ -407,3 +410,68 @@ def test_board_config_allows_unknown_future_keys():
 
     cfg = BoardConfig.model_validate({"enabled": True, "coordinator": {"enabled": False}})
     assert cfg.enabled is True
+
+
+async def test_requester_can_cancel_board_decision_ask_and_resolve_thread(app, client, slack_client):
+    from illo.tools.asks import asks_cancel_mine
+
+    ctx = app.state.ctx
+    ctx.workspace.config.board.max_consecutive_agent_posts = 2
+    ada = await client("ada", agent="build")
+    ada_desk = await client("ada")
+    ben_agent = await client("ben")
+
+    first = await ada.call("board_post", {"title": "Off-board decision", **DECISION})
+    thread_id = first["thread_id"]
+    second = await ada.call("board_post", {"thread_id": thread_id, **DECISION})
+    # Reach turn cap so we can prove ask_cancel never resets turn_cap.
+    stalled = await ada.call("board_post", {"thread_id": thread_id, "text": "Extra"}, error=True)
+    assert stalled["stalled_reason"] == "turn_cap"
+
+    await service.tick(ctx)
+    # Another person cannot cancel Ada's board decision ask.
+    await ben_agent.call("ask_cancel", {"ask_id": first["ask_id"]}, error=True)
+
+    # A sibling agent token of the same person can withdraw the first open decision ask.
+    cancelled = await ada_desk.call("ask_cancel", {"ask_id": first["ask_id"]})
+    assert cancelled == {"ask_id": first["ask_id"], "state": "cancelled"}
+    # Cancelling again is idempotent.
+    assert await ada.call("ask_cancel", {"ask_id": first["ask_id"]}) == {"ask_id": first["ask_id"], "state": "cancelled"}
+
+    # Withdrawing does not forge a human decision post and does not clear turn_cap.
+    read = await ada.call("board_read", {"thread_id": thread_id})
+    assert read["open_decision_ids"] == [second["post_id"]]
+    assert not any(post["kind"] == "decision" for post in read["posts"])
+    assert read["thread"]["stalled_reason"] == "turn_cap"
+
+    # A late human click on the cancelled ask is refused, and Slack updates the card to closed.
+    async with ctx.pool.connection() as conn:
+        ben = await people.get(conn, "ben")
+        assert await service.answer(conn, first["ask_id"], ben["id"], option="first") is None
+    await service.tick(ctx)
+    updates = [c for c in slack_client.calls if c["method"] == "chat_update"]
+    assert any("This question is closed" in str(u["blocks"]) for u in updates)
+
+    # Second open decision still blocks resolve until cancelled (here via owner's asks_cancel_mine tool).
+    err = await ada.call("board_resolve", {"thread_id": thread_id}, error=True)
+    assert "ask_cancel" in err["error"]["message"]
+    async with ctx.pool.connection() as conn:
+        fake_ctx = type("Ctx", (), {"conn": conn, "run": {"person_id": ben["id"]}})()
+        assert await asks_cancel_mine(fake_ctx, {"id": second["ask_id"]}) == {"cancelled": True}
+
+    resolved = await ada.call("board_resolve", {"thread_id": thread_id, "summary": "Answered on GitHub."})
+    assert resolved["state"] == "resolved"
+
+    # Cancelling an already-answered board decision returns answered and never overwrites it.
+    third = await ada.call("board_post", {"title": "Answered decision", **DECISION})
+    async with ctx.pool.connection() as conn:
+        assert await service.answer(conn, third["ask_id"], ben["id"], option="first") is not None
+    assert await ada.call("ask_cancel", {"ask_id": third["ask_id"]}) == {"ask_id": third["ask_id"], "state": "answered"}
+
+    # An archived thread rejects cancelling an open board decision ask.
+    fourth = await ada.call("board_post", {"title": "Archived decision", **DECISION})
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE board_threads SET state='archived' WHERE id=%s", (fourth["thread_id"],))
+    archived_err = await ada.call("ask_cancel", {"ask_id": fourth["ask_id"]}, error=True)
+    assert "archived" in archived_err["error"]["message"].lower()
+

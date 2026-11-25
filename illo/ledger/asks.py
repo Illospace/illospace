@@ -195,16 +195,16 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
         return row
 
 
-async def cancel(conn: Connection, ask_id: int) -> bool:
+async def cancel(conn: Connection, ask_id: int, *, allow_board: bool = False) -> bool:
     """Cancel an open ask after its source closes it. Trusted channel code calls this."""
     return bool(
         await one(
             conn,
             """UPDATE asks a SET state='cancelled',cancelled_at=clock_timestamp()
             WHERE id=%s AND state='open'
-              AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)
+              AND (%s OR NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id))
             RETURNING id""",
-            (ask_id,),
+            (ask_id, allow_board),
         )
     )
 

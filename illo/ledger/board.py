@@ -44,7 +44,9 @@ def visible_to(person_id="%(person_id)s"):
 
 VISIBLE = visible_to()
 _OPEN_DECISIONS = """SELECT d.id FROM board_posts d
+    JOIN asks a ON a.id=d.ask_id
     WHERE d.thread_id=b.id AND d.kind='decision_needed'
+      AND a.state<>'cancelled'
       AND NOT EXISTS (
           SELECT 1 FROM board_posts r
           WHERE r.thread_id=b.id AND r.reply_to_post_id=d.id AND r.kind='decision'
@@ -606,7 +608,10 @@ async def resolve(conn, *, workspace, token, thread_id, state="resolved", summar
         raise ValueError("The thread is archived.")
     if state != "open" and await one(conn, f"""SELECT 1 FROM board_threads b
         WHERE b.id=%(thread_id)s AND {VISIBLE} AND EXISTS ({_OPEN_DECISIONS})""", params):
-        raise ValueError("A person must answer each open decision before you close this thread.")
+        raise ValueError(
+            "A person must answer each open decision before you close this thread. "
+            "Cancel its open ask with ask_cancel if it is no longer needed."
+        )
     if thread["state"] == state and thread["resolution_summary"] == summary:
         return await _thread_result_with_episode(conn, thread, workspace)
     await _check_limit(conn, reader)
@@ -804,6 +809,9 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
         raise BoardError("The thread is resolved. Reopen it to reply.")
     prior = await one(conn, """SELECT p.id FROM board_posts p WHERE p.thread_id=%s
         AND NOT p.is_human AND p.actor LIKE 'agent:%%' AND p.kind IN ('question','decision_needed')
+        AND (p.kind<>'decision_needed' OR EXISTS (
+            SELECT 1 FROM asks a WHERE a.id=p.ask_id AND a.state<>'cancelled'
+        ))
         AND NOT EXISTS (SELECT 1 FROM board_posts r WHERE r.thread_id=p.thread_id AND (
             (r.reply_to_post_id=p.id AND r.kind=CASE p.kind WHEN 'question' THEN 'answer' ELSE 'decision' END)
             OR (p.kind='question' AND r.is_human AND r.id>p.id)))

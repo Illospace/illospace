@@ -32,6 +32,9 @@ async def _pending_worker_post(conn, thread_id, post_id, reply_id, kind=None):
         SELECT p.id,p.kind,p.actor FROM board_posts p
         WHERE p.thread_id=%s AND p.id=%s AND p.id<%s
           AND p.kind IN ('question','decision_needed') AND (%s::text IS NULL OR p.kind=%s)
+          AND (p.kind<>'decision_needed' OR EXISTS (
+              SELECT 1 FROM asks a WHERE a.id=p.ask_id AND a.state<>'cancelled'
+          ))
           AND NOT p.is_human AND left(p.actor,6)='agent:'
           AND NOT EXISTS (
               SELECT 1 FROM board_posts r
