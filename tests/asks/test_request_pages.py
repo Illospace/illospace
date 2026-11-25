@@ -31,6 +31,7 @@ async def ctx(app):
     await ctx.scheduler.close()
     ctx.workspace = ctx.workspace.model_copy(deep=True)
     ctx.workspace.config.pages = PagesConfig(enabled=True, url=BASE)
+    ctx.workspace.config.board.coordinator.enabled = False
     async with ctx.pool.connection() as conn:
         await conn.execute("INSERT INTO people(key,name,role,timezone) VALUES ('david','David','owner','UTC')")
     return ctx

@@ -26,11 +26,13 @@ class Escalate(Arguments):
     format: Literal["dm", "card", "link"]
     text: str = ""
     question: str = ""
-    options: list[Option] = Field(default_factory=list, max_length=4)
+    options: list[Option] = Field(default_factory=list, max_length=25)
     recommended: int | None = Field(default=None, ge=0, le=3)
     recommended_id: str | None = None
     source_ask_id: int | None = None
     allow_rule: bool = False
+    kind: str = "decision"
+    use_ask_page: bool = False
 
 
 class Headstart(Arguments):

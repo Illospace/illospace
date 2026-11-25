@@ -84,6 +84,7 @@ async def counts(ctx):
 
 
 async def test_request_blocks_precede_proof(ctx, app, http, browser, slack_client):
+    ctx.workspace.config.board.coordinator.enabled = False
     agent = await AgentClient.create(app, http)
     blocks = [{'kind': 'text', 'title': 'Read this', 'text': 'The complete plan.'},
               {'kind': 'preview', 'title': 'Reply', 'name': 'Ada', 'text': 'We can send the pictures tomorrow.'},

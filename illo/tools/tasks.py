@@ -14,7 +14,7 @@ from illo.tools.registry import Arguments, Refusal, Tool
 
 _HAND_LINKS = "links" in inspect.signature(ledger.hand).parameters
 
-READ = frozenset({"person_dm", "team_channel", "routine", "agent_request", "board_coordinator"})
+READ = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request", "board_coordinator"})
 WRITE = frozenset({"person_dm", "team_channel"})
 CAPTURE = WRITE | {"agent_request"}
 
@@ -184,6 +184,26 @@ async def handle(ctx, name, args):
             if name == "task_hand" and not _HAND_LINKS:
                 values.pop("links", None)
             row = await fn(ctx.conn, args["id"], **common, **values, **({"ctx": ctx} if name in {"task_done", "task_return"} else {}))
+            if name == "task_post" and args.get("question") and not viewer.human:
+                from illo.board import doors
+                from illo.db import one
+
+                if doors.coordinator_active(ctx.app.workspace):
+                    event = await one(
+                        ctx.conn,
+                        "SELECT * FROM task_events WHERE task_id=%s AND kind='question' ORDER BY id DESC LIMIT 1",
+                        (row["id"],),
+                    )
+                    await doors.attach_task_question_to_board(
+                        ctx.conn,
+                        ctx.app.workspace,
+                        row,
+                        event,
+                        target=row["waits_for"],
+                        actor=viewer.actor,
+                        person_id=ctx.run.get("person_id"),
+                        provenance={"person_key": viewer.person, "via": "task_post"},
+                    )
         return await full(ctx.conn, ctx.app.workspace, row, viewer, limit=args.get("events", 20), ctx=ctx)
     except ledger.TaskError as exc:
         raise Refusal(str(exc)) from None

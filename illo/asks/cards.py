@@ -175,7 +175,8 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
             )
         elements.append(button("Other…", f"ask:{ask['id']}:other"))
         if is_board and ask.get("page_url") and ask.get("page_action"):
-            elements.append(button("Open the thread", ask["page_action"], False))
+            label = "Open the page" if ask["page_action"].startswith("web-open-ask:") else "Open the thread"
+            elements.append(button(label, ask["page_action"], False))
         blocks.append({"type": "actions", "elements": elements})
     elif ask["state"] == "answered":
         rule = ask.get("rule")

@@ -170,23 +170,34 @@ def _card(ctx, row, person):
     recommended = card.get("recommended_id")
     if recommended is None and card.get("recommended") is not None:
         recommended = f"o{card['recommended'] + 1}"
-    has_page = policy.board_pages_ready(ctx)
-    page_url = f"{pages.base_url(ctx)}/web/board/t/{row['thread_id']}" if has_page else None
-    proof = {"text": row["text"], **({"thread": page_url} if page_url else {})}
+    use_ask_page = bool(card.get("use_ask_page") and pages.enabled(ctx))
+    if use_ask_page:
+        page_url = f"{pages.base_url(ctx)}/web/a/{row['card_ask_id']}"
+        page_action = f"web-open-ask:{row['card_ask_id']}"
+    else:
+        has_page = policy.board_pages_ready(ctx)
+        page_url = f"{pages.base_url(ctx)}/web/board/t/{row['thread_id']}" if has_page else None
+        page_action = f"web-open-board:{row['thread_id']}" if has_page else None
+    proof = {
+        "text": row["text"],
+        **({"links": card["links"]} if card.get("links") else {}),
+        **({"thread": page_url} if page_url else {}),
+    }
     return {
         "id": row["card_ask_id"],
         "state": "open",
-        "kind": "decision",
+        "kind": card.get("kind") or "decision",
         "question": card["question"],
         "options": options,
         "recommended_option": recommended,
         "allow_rule": bool(card.get("allow_rule", False)),
         "source_ref": ref,
         "owner": person,
+        **({"requester": card["requester"]} if card.get("requester") else {}),
         "proof": proof,
         "board_card": True,
         "page_url": page_url,
-        "page_action": f"web-open-board:{row['thread_id']}" if has_page else None,
+        "page_action": page_action,
     }
 
 

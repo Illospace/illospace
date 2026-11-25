@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from psycopg.types.json import Jsonb
 
-from illo.board import acl, decision, episodes, packet, policy
+from illo.board import acl, decision, doors, episodes, packet, policy
 from illo.board.labels import actor_label
 from illo.brain.routes import resolve_route
 from illo.db import all_rows, one
@@ -84,6 +84,10 @@ async def _scan_thread(conn, thread, settle):
             continue
         now = datetime.now(UTC)
         immediate = item["reason"] in {"turn_cap", "decision_needed"}
+        if not immediate and item["post_id"] is not None:
+            post_meta = await one(conn, "SELECT provenance FROM board_posts WHERE id=%s", (item["post_id"],))
+            if post_meta and (post_meta["provenance"] or {}).get("via") in {"task_post", "github_needs_input"}:
+                immediate = True
         due = now if immediate else (latest["at"] or now) + timedelta(seconds=settle)
         await conn.execute("""INSERT INTO board_episodes
             (thread_id,reason,post_id,mention_target,stalled_at,next_check_at,episode_seq)
@@ -397,6 +401,10 @@ async def apply_tool_action(conn, ctx, run_row, action, args):
         raise Refusal("This tool can only be used during a board triage run.")
     if coord_run["outcome"] != "running":
         raise Refusal("An action was already recorded for this board item. Finish without calling another action tool.")
+    if action == "answer":
+        pre = await one(conn, "SELECT task_id FROM board_threads WHERE id=%s", (coord_run["thread_id"],))
+        if pre and pre["task_id"]:
+            await conn.execute("SELECT pg_advisory_xact_lock(12000001)")
     thread = await board.lock_thread(conn, coord_run["thread_id"])
     if not _leased(thread, coord_run["lease_id"]):
         await _finish(conn, coord_run, "stale", "lease")
@@ -439,6 +447,11 @@ async def apply_tool_action(conn, ctx, run_row, action, args):
             workspace=ctx.workspace, reply_to_post_id=episode["post_id"], sources=sources,
         )
         await episodes.close_items(conn, thread, reason="answered", post_id=post["id"])
+        if thread["task_id"]:
+            await doors.unblock_task_from_board(
+                conn, ctx.workspace, thread["task_id"], actor="illo",
+                text=answer_text, board_post_id=post["id"],
+            )
         await audit.write(
             conn, principal="illo", tool="board_coordinate", decision="allow", reason="answer",
             args={"thread": thread["id"], "episode": episode["id"], "action": "answer",
@@ -512,6 +525,8 @@ async def apply_tool_action(conn, ctx, run_row, action, args):
                 recommended_id=recommended_id,
                 source_ask_id=ask["id"],
                 allow_rule=bool(ask["allow_rule"]),
+                kind=ask["kind"],
+                use_ask_page=bool(ask.get("blocks") and not await asks.is_board_native(conn, ask)),
             )
         else:
             if fmt != "link" and not summary:

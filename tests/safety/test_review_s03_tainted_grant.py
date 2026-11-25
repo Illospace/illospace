@@ -6,6 +6,7 @@ from illo.ledger import lanes, people, runs
 SAFE = {
     "github_search_issues", "github_get_issue", "github_create_issue", "claims_take",
     "web_read_public_page", "connectors_list", "connectors_call", "skills_get",
+    "lists", "task_list", "task_get",
 }
 
 

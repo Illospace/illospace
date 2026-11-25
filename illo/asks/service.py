@@ -163,9 +163,13 @@ async def prepare_card(ctx, conn, data):
 
         thread_id = await board.ask_thread_id(conn, data["id"])
         data["board_card"] = True
-        has_page = board_pages_ready(ctx) and thread_id is not None
-        data["page_url"] = pages.base_url(ctx) + f"/web/board/t/{thread_id}" if has_page else None
-        data["page_action"] = f"web-open-board:{thread_id}" if has_page else None
+        use_ask_page = bool(data.get("blocks") and not await asks.is_board_native(conn, data) and pages.enabled(ctx))
+        if use_ask_page:
+            data["page_action"] = f"web-open-ask:{data['id']}"
+        else:
+            has_page = board_pages_ready(ctx) and thread_id is not None
+            data["page_url"] = pages.base_url(ctx) + f"/web/board/t/{thread_id}" if has_page else None
+            data["page_action"] = f"web-open-board:{thread_id}" if has_page else None
     requester = data.get('requester') or {}
     data['full_proof'] = not pages.enabled(ctx) and requester.get('scopes') == ['agent']
     if data['full_proof'] and data.get('owner'):

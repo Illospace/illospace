@@ -77,6 +77,30 @@ async def handle(ctx, name, args):
             ctx.conn, args["id"], **common, **{key: value for key, value in args.items() if key != "id"}, ctx=ctx)
     elif name == "task_post":
         row = await ledger.post(ctx.conn, args["id"], **common, text=args["text"], question=True, to=args["to"])
+        from illo.board import doors
+
+        if doors.coordinator_active(workspace):
+            event = await one(
+                ctx.conn,
+                "SELECT * FROM task_events WHERE task_id=%s AND kind='question' ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            )
+            await doors.attach_task_question_to_board(
+                ctx.conn,
+                workspace,
+                row,
+                event,
+                target=row["waits_for"],
+                actor=viewer.actor,
+                person_id=ctx.token["person_id"],
+                token_id=ctx.token["id"],
+                provenance={
+                    "agent_key": ctx.token.get("agent_key"),
+                    "person_key": viewer.person,
+                    "token_label": ctx.token["label"],
+                    "via": "task_post",
+                },
+            )
     return await full(ctx.conn, workspace, row, viewer, limit=args.get("events", 20), ctx=ctx)
 
 

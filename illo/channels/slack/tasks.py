@@ -208,7 +208,9 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
     # or a hand-over from someone else. A read never starts it.
     handed = [e for e in events if e["kind"] == "handed" and target
               and e["data"].get("holder") == target and e["actor"] != target]
-    needs_person = handed or reminder or any(e["kind"] in {"question", "returned"}
+    needs_person = handed or reminder or any(
+        (e["kind"] == "question" and not e["data"].get("routed_to_board"))
+        or e["kind"] == "returned"
         or (e["kind"] == "wake_failed" and e["data"].get("final"))
         or e["data"].get("escalated") or e["data"].get("notify") for e in events) or (
         row["state"] == "review" and target)
@@ -251,6 +253,8 @@ async def _send(ctx, conn, task_id, reminder_counts=None):
                 await ctx.slack_client.chat_postMessage(channel=direct, **notice(ctx, row, mention + f"Task {task_id}: " + escape(text)),
                     client_msg_id=message_id("notice-" + event["kind"], task_id, event["id"]))
         elif event["kind"] == "question":
+            if event["data"].get("routed_to_board"):
+                continue
             asked = await people.get(conn, event["data"].get("to", "")[7:])
             prefix = f"<@{asked['slack_id']}> " if asked and asked["slack_id"] else mention
             await ctx.slack_client.chat_postMessage(channel=row["slack_channel"], thread_ts=row["slack_ts"],

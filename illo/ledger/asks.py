@@ -113,9 +113,29 @@ async def list_open(
     )
 
 
+BOARD_NATIVE_SQL = """(COALESCE(starts_with(a.source_ref,'board:'),false)
+    OR EXISTS (SELECT 1 FROM board_posts p WHERE p.ask_id=a.id
+               AND COALESCE(p.provenance->>'via','') NOT IN ('ask_create','asks_create')))"""
+
+
+async def is_board_native(conn, ask) -> bool:
+    if not ask:
+        return False
+    if (ask.get("source_ref") or "").startswith("board:"):
+        return True
+    return bool(
+        await one(
+            conn,
+            """SELECT 1 FROM board_posts WHERE ask_id=%s
+            AND COALESCE(provenance->>'via','') NOT IN ('ask_create','asks_create') LIMIT 1""",
+            (ask["id"],),
+        )
+    )
+
+
 async def is_board_ask(conn, ask):
     return bool(ask and ((ask.get("source_ref") or "").startswith("board:")
-                        or await one(conn, "SELECT 1 FROM board_posts WHERE ask_id=%s", (ask["id"],))))
+                         or await one(conn, "SELECT 1 FROM board_posts WHERE ask_id=%s", (ask["id"],))))
 
 
 async def answer(
@@ -134,13 +154,12 @@ async def answer(
         raise ValueError("Choose an option or give an answer")
     return await one(
         conn,
-        """
+        f"""
         UPDATE asks a SET state='answered',answer_option=%s,answer_text=%s,answered_by_person_id=%s,
           answered_via=%s,answered_at=now(),delivery_state='pending'
         WHERE id=%s AND owner_person_id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now())
           AND (%s::text IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements(options) o WHERE o->>'id'=%s))
-          AND (%s='person' OR (NOT COALESCE(starts_with(a.source_ref,'board:'),false)
-            AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)))
+          AND (%s='person' OR NOT {BOARD_NATIVE_SQL})
         RETURNING *
     """,
         (option, text, person_id, via, ask_id, person_id, option, option, via),
@@ -155,7 +174,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int, *, allow
             "SELECT * FROM asks WHERE id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now()) FOR UPDATE",
             (ask_id,),
         )
-        if not allow_board and await is_board_ask(conn, ask):
+        if not allow_board and await is_board_native(conn, ask):
             return None
         rule = await one(
             conn, "SELECT * FROM rules WHERE id=%s AND removed_at IS NULL FOR UPDATE", (rule_id,)
@@ -200,9 +219,9 @@ async def cancel(conn: Connection, ask_id: int) -> bool:
     return bool(
         await one(
             conn,
-            """UPDATE asks a SET state='cancelled',cancelled_at=clock_timestamp()
+            f"""UPDATE asks a SET state='cancelled',cancelled_at=clock_timestamp()
             WHERE id=%s AND state='open'
-              AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)
+              AND NOT {BOARD_NATIVE_SQL}
             RETURNING id""",
             (ask_id,),
         )
@@ -214,10 +233,11 @@ async def expire(conn: Connection) -> int:
     cursor = await conn.execute(
         "UPDATE asks SET state='expired' WHERE state='open' AND expires_at<=now()"
     )
-    await conn.execute("""
-        UPDATE asks SET delivery_state='failed' WHERE state='answered'
+    await conn.execute(f"""
+        UPDATE asks a SET delivery_state='failed' WHERE state='answered'
           AND (expires_at<=now() OR answered_at<=now()-interval '30 minutes')
           AND delivery_state IN ('pending','delivered')
+          AND NOT {BOARD_NATIVE_SQL}
     """)
     return cursor.rowcount
 

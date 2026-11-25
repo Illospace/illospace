@@ -255,18 +255,26 @@ async def ack_answer(conn, token, ask_id) -> dict | None:
 
 async def cancel_ask(conn, token, ask_id, source_ref) -> dict | None:
     """Source refs belong to the calling token; IDs also permit owner token rotation."""
-    row = await one(
+    from illo.board import doors
+    from illo.ledger import asks, board
+
+    found = await one(
         conn,
-        """SELECT a.* FROM asks a JOIN tokens t ON t.id=a.requester_token_id
+        f"""SELECT a.id FROM asks a JOIN tokens t ON t.id=a.requester_token_id
         WHERE t.person_id=%s AND ((%s::bigint IS NOT NULL AND a.id=%s)
           OR (%s::text IS NOT NULL AND a.source_ref=%s AND a.requester_token_id=%s))
-          AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)
-        FOR UPDATE OF a""",
+          AND NOT {asks.BOARD_NATIVE_SQL}""",
         (token["person_id"], ask_id, ask_id, source_ref, source_ref, token["id"]),
     )
-    if row and row["state"] == "open":
+    if not found:
+        return None
+    row = await board.lock_for_ask(conn, found["id"])
+    if not row or await asks.is_board_native(conn, row):
+        return None
+    if row["state"] == "open":
         await conn.execute("UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s", (row["id"],))
         row["state"] = "cancelled"
+        await doors.close_board_for_ask(conn, row["id"], reason="no_longer_pending")
     return row
 
 

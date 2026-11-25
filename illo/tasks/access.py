@@ -15,8 +15,10 @@ async def token_viewer(conn, workspace, token):
 
 async def run_viewer(ctx):
     run = ctx.run
-    if run["tainted"] or run["principal"] == "outsider":
+    if run["principal"] == "outsider":
         raise TaskError("This run cannot read tasks.")
+    if run["tainted"]:
+        return Viewer(None, "code", team=True, team_only=True)
     if run["profile"] == "agent_request":
         token = await one(ctx.conn, """SELECT t.*,p.key AS person_key FROM tokens t
             JOIN people p ON p.id=t.person_id JOIN submissions s ON s.token_id=t.id

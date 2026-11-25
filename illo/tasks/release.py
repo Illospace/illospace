@@ -68,6 +68,16 @@ async def _person(ctx, conn, row, entry, now, counts, extra, pending, *, check=T
     person = await one(conn, "SELECT * FROM people WHERE 'person:'||key=%s AND active", (target,))
     if not person:
         return
+    if await one(
+        conn,
+        """SELECT 1 FROM board_episodes e
+        JOIN board_threads b ON b.id=e.thread_id
+        WHERE b.task_id=%s AND b.state='open'
+          AND e.state IN ('open','waiting','headstart','escalated')
+        LIMIT 1""",
+        (row["id"],),
+    ):
+        return
     period = await waits.current(conn, row)
     since = period["since"]
     limit = timedelta(hours=entry.silence.person_hours)

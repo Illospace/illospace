@@ -57,6 +57,7 @@ GRANT_PROFILES = {
     "tainted": frozenset({
         "github_search_issues", "github_get_issue", "github_create_issue", "claims_take",
         "web_read_public_page", "connectors_list", "connectors_call", "skills_get",
+        "lists", "task_list", "task_get",
     }),
     "routine": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_send_dm"},
     "agent_request": READ_TOOLS
