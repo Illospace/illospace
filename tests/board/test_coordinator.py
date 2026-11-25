@@ -528,3 +528,35 @@ def test_parse_decision_accepts_plain_fence_and_null_optional_fields():
     assert decision.escalate.format == "dm"
     assert decision.escalate.text == "Rotate the secret."
 
+
+async def test_thread_cooldown_defers_without_fallback_and_human_reply_clears_it(coordinator_ctx, client):
+    ctx = coordinator_ctx
+    ctx.workspace.config.board.coordinator.thread_cooldown_minutes = 60
+    ctx.workspace.config.board.coordinator.slack_summaries = True
+    worker = await client()
+    q1 = await worker.call("board_post", {"title": "Deploy", "kind": "question", "text": "Ready?",
+                                          "mentions": ["person:ada"]})
+    e1 = await admission(ctx)
+    await coordinator.apply(ctx, e1, action(e1, "escalate", escalate={
+        "person": "person:ada", "format": "dm", "text": "Builder asks if deploy is ready.",
+    }))
+    q2 = await worker.call("board_post", {"thread_id": q1["thread_id"], "kind": "question", "text": "Update?",
+                                          "mentions": ["person:ada"]})
+    e2 = await admission(ctx)
+    await coordinator.apply(ctx, e2, action(e2, "escalate", escalate={
+        "person": "person:ada", "format": "dm", "text": "Builder has a follow-up question.",
+    }))
+    assert (await last_run(ctx))["error_code"] == "budget"
+    async with ctx.pool.connection() as conn:
+        ep = await one(conn, "SELECT errors, next_check_at FROM board_episodes WHERE post_id=%s", (q2["post_id"],))
+        thread = await one(conn, "SELECT escalated_at FROM board_threads WHERE id=%s", (q1["thread_id"],))
+        assert ep["errors"] == 0
+        assert ep["next_check_at"] >= thread["escalated_at"] + timedelta(minutes=59)
+        assert await all_rows(conn, "SELECT origin FROM board_escalations WHERE origin='fallback'") == []
+        ada = await people.get(conn, "ada")
+        await board.human_post(conn, workspace=ctx.workspace, person=ada, thread_id=q1["thread_id"],
+                               text="Yes, ship it.", reply_to_post_id=q2["post_id"],
+                               source_ref="web:cooldown-clear", via="web")
+        cleared = await one(conn, "SELECT escalated_at FROM board_threads WHERE id=%s", (q1["thread_id"],))
+        assert cleared["escalated_at"] is None
+

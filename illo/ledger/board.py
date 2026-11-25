@@ -772,7 +772,8 @@ async def _human_limit(conn, person):
 
 async def _reset_after_human(conn, thread_id, person, post_id):
     await conn.execute("""UPDATE board_threads SET consecutive_agent_posts=0,stalled_reason=NULL,
-        stalled_at=NULL,last_post_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=%s""",
+        stalled_at=NULL,escalated_at=NULL,last_post_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE id=%s""",
         (thread_id,))
     await _ack(conn, PersonReader(person), "m.thread_id=%(thread)s AND m.post_id<=%(post)s",
                {"thread": thread_id, "post": post_id})

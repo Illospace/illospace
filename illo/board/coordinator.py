@@ -394,7 +394,24 @@ async def apply(ctx, event, text=None, *, error=None):
                 outcome, code = "invalid", str(exc)
             else:
                 outcome, code = await _action(conn, ctx.workspace, live, episode, run, choice)
-        if outcome in {"failed", "invalid"}:
+        if outcome == "invalid" and code == "budget":
+            cfg = ctx.workspace.config.board.coordinator
+            now = datetime.now(UTC)
+            cooldown_until = (
+                thread["escalated_at"] + timedelta(minutes=cfg.thread_cooldown_minutes)
+                if thread["escalated_at"]
+                else None
+            )
+            resume_at = (
+                cooldown_until
+                if cooldown_until and cooldown_until > now
+                else now + timedelta(minutes=60)
+            )
+            await conn.execute(
+                "UPDATE board_episodes SET version=version+1,next_check_at=%s WHERE id=%s",
+                (resume_at, episode["id"]),
+            )
+        elif outcome in {"failed", "invalid"}:
             await conn.execute("""UPDATE board_episodes SET errors=errors+1,waits=0,version=version+1,
                 next_check_at=clock_timestamp()+interval '10 minutes' WHERE id=%s""", (episode["id"],))
             await sensors.error(conn, "board:coordinator", "The board coordinator could not apply a decision.")
