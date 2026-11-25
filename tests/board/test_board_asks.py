@@ -6,14 +6,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from illo.asks import actions, service
-from illo.board import coordinator, escalate
+from illo.board import escalate
 from illo.db import all_rows, one
 from illo.ledger import asks, board, people
 from illo.tools import asks as tools
 from illo.tools.registry import ToolContext
 from tests.asks.test_request_pages import click, login
 from tests.board.test_board import DECISION
-from tests.board.test_coordinator import action, admission
+from tests.board.test_coordinator import admission, triage
 from tests.board.test_escalate import escalation, queue, reply
 from tests.tasks.test_pages import fields
 
@@ -27,7 +27,7 @@ async def test_ask_guards_block_approved_drafts_and_rules(coordinator_ctx, clien
     async with ctx.pool.connection() as conn:
         row = await one(conn, "SELECT * FROM asks WHERE id=%s", (ask_id,))
         assert row["source_ref"] == f"board:{q['thread_id']}:{q['post_id']}:decision"
-        assert not row["allow_rule"]
+        assert row["allow_rule"]
         if kind == "old_m1":
             await conn.execute("UPDATE asks SET source_ref=NULL WHERE id=%s", (ask_id,))
         if kind == "m3":
@@ -162,7 +162,10 @@ async def test_card_m1_answer_web_reply_and_apply_share_one_lock_order(coordinat
         await escalate.send_due(ctx)
         card = await escalation(ctx)
         d = await (await client()).call("board_post", {"thread_id": q["thread_id"], "text": "Choose.", **DECISION})
-        await service.tick(ctx)
+        d_event = await admission(ctx)
+        await triage(ctx, d_event, "need_ask_person", person="person:ben", format="card",
+                     summary="Choose a release date.")
+        await escalate.send_due(ctx)
         async with ctx.pool.connection() as conn:
             await conn.execute("UPDATE board_episodes SET next_check_at=now() WHERE id=%s", (card["episode_id"],))
             m1 = await one(conn, "SELECT * FROM asks WHERE id=%s", (d["ask_id"],))
@@ -185,7 +188,7 @@ async def test_card_m1_answer_web_reply_and_apply_share_one_lock_order(coordinat
             actions.handle(ctx, ada, click(m3, "opt:o1")),
             actions.handle(ctx, ben, click(m1, "opt:first")),
             web_reply(),
-            coordinator.apply(ctx, event, action(event, "wait")),
+            triage(ctx, event, "need_wait"),
         ), 8)
         async with ctx.pool.connection() as conn:
             posts = await all_rows(conn, "SELECT kind FROM board_posts WHERE thread_id=%s AND is_human",

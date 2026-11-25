@@ -32,21 +32,37 @@ async def _pending_worker_post(conn, thread_id, post_id, reply_id, kind=None):
         SELECT p.id,p.kind,p.actor FROM board_posts p
         WHERE p.thread_id=%s AND p.id=%s AND p.id<%s
           AND p.kind IN ('question','decision_needed') AND (%s::text IS NULL OR p.kind=%s)
+          AND (p.kind<>'decision_needed' OR EXISTS (
+              SELECT 1 FROM asks a WHERE a.id=p.ask_id AND a.state<>'cancelled'
+          ))
           AND NOT p.is_human AND left(p.actor,6)='agent:'
           AND NOT EXISTS (
               SELECT 1 FROM board_posts r
               WHERE r.thread_id=p.thread_id AND r.reply_to_post_id=p.id AND r.id<%s
                 AND r.actor<>p.actor
                 AND ((p.kind='question' AND r.kind='answer')
-                  OR (p.kind='decision_needed' AND r.kind='decision' AND r.is_human))
+                  OR (p.kind='decision_needed' AND r.kind='decision'
+                      AND (r.is_human OR (r.actor='illo' AND r.provenance->>'via'='rule'))))
           )
     """, (thread_id, reply_id, post_id, kind, kind, post_id))
+
+
+def _illo_resolution(post):
+    provenance = post.get("provenance") or {}
+    if not (post["actor"] == "illo" and not post.get("is_human")
+            and post.get("token_id") is None and post.get("person_id") is None):
+        return False
+    return (
+        (post["kind"] == "answer" and provenance.get("via") == "coordinator"
+         and provenance.get("purpose") == "answer")
+        or (post["kind"] == "decision" and provenance.get("via") == "rule")
+    )
 
 
 async def _episode(conn, thread_id, post, prior_pending_post_id, prior_turn_cap_at):
     reply_id = post["reply_to_post_id"]
     reply_kind = {"answer": "question", "decision": "decision_needed"}.get(post["kind"])
-    if reply_id and reply_kind and (post["kind"] == "answer" or post["is_human"]):
+    if reply_id and reply_kind and (post["kind"] == "answer" or post["is_human"] or _illo_resolution(post)):
         pending = await _pending_worker_post(conn, thread_id, post["id"], reply_id, reply_kind)
         if pending and pending["actor"] != post["actor"]:
             return f"post:{pending['id']}"
@@ -117,7 +133,7 @@ async def _webhook_post(conn, workspace, thread_id, post_id, target, agent, *, h
               EXISTS (
                   SELECT 1 FROM board_mentions m WHERE m.thread_id=b.id AND m.post_id=p.id
                     AND m.target=%(target)s AND m.recipient_person_id=owner.id
-              ) OR (%(holder)s AND p.actor<>'illo' AND EXISTS (
+              ) OR (%(holder)s AND (p.actor<>'illo' OR p.kind IN ('answer','decision')) AND EXISTS (
                   SELECT 1 FROM tasks t WHERE t.id=b.task_id AND t.holder=%(target)s
               ))
           )
@@ -125,6 +141,8 @@ async def _webhook_post(conn, workspace, thread_id, post_id, target, agent, *, h
     """, {"thread_id": thread_id, "post_id": post_id, "target": target,
           "owner": agent.owner, "agent": agent.key, "holder": holder, "owner_id": owner_id})
     if post and post["actor"] == "illo":
+        if _illo_resolution(post):
+            return post if post["agent_active"] else None
         from illo.board import acl, episodes, packet
 
         if not post["agent_active"] or not _headstart(post, target):
@@ -150,7 +168,7 @@ async def enqueue_for_post(conn, workspace, *, thread, post, prior_pending_post_
     if not config.enabled or thread["state"] != "open":
         return
     thread_id = thread["id"]
-    if config.wake_github and post["actor"] != "illo" and thread["visibility"] == "team":
+    if config.wake_github and (post["actor"] != "illo" or _illo_resolution(post)) and thread["visibility"] == "team":
         episode = await _episode(conn, thread_id, post, prior_pending_post_id, prior_turn_cap_at)
         if episode and (current := await _github_thread(conn, thread_id)):
             ticket = _ticket(workspace, current["ticket_url"])
@@ -163,11 +181,19 @@ async def enqueue_for_post(conn, workspace, *, thread, post, prior_pending_post_
         return
     targets = dict.fromkeys(post["mentions"], False)
     if post["actor"] == "illo":
-        mentions = post["mentions"]
-        if len(mentions) != 1 or (headstart_target is not None and mentions[0] != headstart_target):
-            return
-        if not _headstart(post, mentions[0]):
-            return
+        if _illo_resolution(post):
+            if thread["task_id"] is not None or thread["ticket_url"]:
+                task = await one(conn, """
+                    SELECT t.holder FROM board_threads b JOIN tasks t ON t.id=b.task_id WHERE b.id=%s
+                """, (thread_id,))
+                if task and task["holder"]:
+                    targets.setdefault(task["holder"], True)
+        else:
+            mentions = post["mentions"]
+            if len(mentions) != 1 or (headstart_target is not None and mentions[0] != headstart_target):
+                return
+            if not _headstart(post, mentions[0]):
+                return
     elif thread["task_id"] is not None or thread["ticket_url"]:
         task = await one(conn, """
             SELECT t.holder FROM board_threads b JOIN tasks t ON t.id=b.task_id WHERE b.id=%s

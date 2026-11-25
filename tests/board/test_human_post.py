@@ -71,8 +71,11 @@ async def test_human_refusals_and_reopen(app, client):
     ctx = app.state.ctx
     agent = await client()
     d = await agent.call("board_post", {"title": "Decision", "text": "Pick one.", **DECISION})
-    with pytest.raises(board.BoardError, match="with its buttons"):
-        await human(ctx, d["thread_id"], reply_to=d["post_id"])
+    owner_reply = await human(ctx, d["thread_id"], key="ben", reply_to=d["post_id"], text="Go with first.")
+    assert owner_reply["kind"] == "decision"
+    async with ctx.pool.connection() as conn:
+        ask_row = await one(conn, "SELECT state,delivery_state,answer_text FROM asks WHERE id=%s", (d["ask_id"],))
+        assert ask_row == {"state": "answered", "delivery_state": "acked", "answer_text": "Go with first."}
     p = await agent.call("board_post", {"title": "Personal", "text": "Private", "visibility": "private"})
     for thread_id in (p["thread_id"], 999_999):
         with pytest.raises(board.BoardError, match="The thread was not found."):

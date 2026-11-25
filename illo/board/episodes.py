@@ -24,6 +24,13 @@ async def pending_items(conn, thread_id):
             WHERE a.post_id=p.id AND a.target=m.target AND a.reader_key=m.target)
         AND NOT EXISTS (SELECT 1 FROM posts r WHERE r.id>p.id AND r.is_human
             AND r.person_id=m.recipient_person_id)
+        AND NOT EXISTS (SELECT 1 FROM posts r WHERE r.actor='illo' AND r.kind='answer'
+            AND r.reply_to_post_id=p.id)
+    UNION ALL
+    SELECT 'decision_needed',p.id,NULL,NULL FROM posts p JOIN asks a ON a.id=p.ask_id
+    WHERE NOT p.is_human AND p.actor<>'illo' AND p.kind='decision_needed'
+        AND a.state='open'
+        AND NOT EXISTS (SELECT 1 FROM posts r WHERE r.kind='decision' AND r.reply_to_post_id=p.id)
     UNION ALL
     SELECT 'turn_cap',NULL,NULL,stalled_at FROM board_threads
     WHERE id=%s AND stalled_reason='turn_cap' AND stalled_at IS NOT NULL""", (thread_id, thread_id))

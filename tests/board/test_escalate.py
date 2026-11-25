@@ -6,13 +6,13 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from illo.asks import actions, service
-from illo.board import coordinator, escalate
+from illo.board import escalate
 from illo.channels.slack.intake import SlackIntake
 from illo.db import all_rows, one
 from illo.gateway.events import InboundEvent
 from illo.ledger import board, people
 from illo.tasks.pages import signin
-from tests.board.test_coordinator import action, admission, last_run, question
+from tests.board.test_coordinator import admission, last_run, question, triage
 
 
 async def queue(ctx, client, fmt="link", *, person="ada", summary=False, **fields):
@@ -21,13 +21,13 @@ async def queue(ctx, client, fmt="link", *, person="ada", summary=False, **field
     event = await admission(ctx)
     choice = {"person": f"person:{person}", "format": fmt}
     if summary:
-        choice["text"] = 'Check <@U111> @here \x01 `https://example.com/x` www.example.org/a'
+        choice["summary"] = 'Check <@U111> @here \x01 `https://example.com/x` www.example.org/a'
     if fmt == "card":
         choice.update(question="Which <#C123|room> plan? https://example.com/x",
                       options=[{"label": "Plan A", "detail": "@everyone Quick"},
                                {"label": "Plan B", "detail": "mailto:me@example.com"}],
                       recommended=1)
-    await coordinator.apply(ctx, event, action(event, "escalate", escalate=choice))
+    await triage(ctx, event, "need_ask_person", **choice)
     assert (await last_run(ctx))["outcome"] == "applied"
     return q
 
@@ -63,12 +63,15 @@ async def test_slack_formats_are_private_and_card_commits_with_ts(coordinator_ct
     assert not root["unfurl_links"] and not root["unfurl_media"]
     assert "Cache latency" not in root["text"] and "Why is" not in root["text"]
     if summary:
-        for unsafe in ("https://example.com", "www.example.org", "mailto:", "@here", "@everyone", "<@U"):
+        for unsafe in ("www.example.org", "mailto:", "@here", "@everyone", "<@U"):
             assert unsafe not in str(root)
+        # Bare HTTPS links are preserved in summaries so people can inspect referenced PRs/issues.
+        assert "https://example.com/x" in str(root)
     else:
         assert "has a question for you" in root["text"]
     if fmt == "dm":
-        assert "blocks" not in root and "Reply in this thread" in root["text"]
+        assert "Reply in this thread" in root["text"]
+        assert root["blocks"][1]["elements"][0]["action_id"] == f"web-open-board:{q['thread_id']}"
     elif fmt == "link":
         assert root["blocks"][1]["elements"][0]["action_id"] == f"web-open-board:{q['thread_id']}"
     else:
@@ -84,28 +87,22 @@ async def test_slack_formats_are_private_and_card_commits_with_ts(coordinator_ct
     assert len(slack.roots()) == 1
 
 
-@pytest.mark.parametrize("change", ["picture", "summaries_off"])
-async def test_queued_private_summary_downgrades_to_notice(coordinator_ctx, slack, client, change):
+async def test_queued_private_card_keeps_summary_and_options_even_with_picture(coordinator_ctx, slack, client):
     ctx = coordinator_ctx
     q = await queue(ctx, client, "card", summary=True, visibility="private")
     queued = await escalation(ctx)
-    if change == "picture":
-        async with ctx.pool.connection() as conn:
-            await conn.execute("UPDATE board_posts SET blocks=%s WHERE id=%s",
-                               (Jsonb([{"kind": "image"}]), q["post_id"]))
-    else:
-        ctx.workspace.config.board.coordinator.slack_summaries = False
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE board_posts SET blocks=%s WHERE id=%s",
+                           (Jsonb([{"kind": "image"}]), q["post_id"]))
     await escalate.send_due(ctx)
     [root] = slack.roots()
     sent = await escalation(ctx)
     assert sent["id"] == queued["id"] and sent["state"] == "sent"
-    assert sent["content_mode"] == "notice" and sent["format"] == "link"
-    assert sent["card"] is None and sent["card_ask_id"] is None
-    assert sent["text"] == root["text"] and queued["text"] not in root["text"]
-    assert f"has a question for you on board thread {q['thread_id']}." in root["text"]
-    assert root["blocks"][1]["elements"][0]["action_id"] == f"web-open-board:{q['thread_id']}"
+    assert sent["content_mode"] == "summary" and sent["format"] == "card"
+    assert sent["ask_id"] == sent["card_ask_id"]
+    assert "Plan A" in str(root) and "Plan B" in str(root)
     async with ctx.pool.connection() as conn:
-        assert not await one(conn, "SELECT 1 FROM asks")
+        assert await one(conn, "SELECT id FROM asks WHERE id=%s", (sent["ask_id"],))
         assert (await one(conn, "SELECT state FROM board_episodes"))["state"] == "escalated"
 
 
@@ -160,7 +157,7 @@ async def test_early_reply_and_transient_verification_release_dedupe(coordinator
         answer = await one(conn, "SELECT * FROM board_posts WHERE id=%s", (row["answer_post_id"],))
         assert answer["kind"] == "answer" and answer["reply_to_post_id"] == question["post_id"]
         assert answer["text"] == "Use cache B & restart."
-        assert not await one(conn, "SELECT 1 FROM runs")
+        assert not await one(conn, "SELECT 1 FROM runs WHERE profile != 'board_coordinator'")
         assert (await one(conn, "SELECT consecutive_agent_posts FROM board_threads"))["consecutive_agent_posts"] == 0
 
 

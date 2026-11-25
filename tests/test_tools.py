@@ -32,7 +32,8 @@ def test_profile_lists_only_registered_tools(profile):
     names = {t["name"] for t in registry.list_tools(run)}
     assert names <= registry.tools.keys()
     if profile == "board_coordinator":
-        assert not names
+        assert {"people_list", "need_answer", "need_route", "need_ask_person", "need_wait"} <= names
+        assert "slack_send" not in names and "shell" not in names
     else:
         assert ("people_list" in names) == (profile != "tainted")
 

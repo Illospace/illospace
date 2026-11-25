@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
-from illo.asks import actions, service
+from illo.asks import actions
 from illo.board import wake
 from illo.connectors.github_client import GitHubAppRequired, GitHubClient
 from illo.db import all_rows, migrate, one
@@ -177,8 +177,12 @@ async def test_github_answer_is_opaque_and_matches_one_open_episode(wake_ctx, cl
     assert row["finished_at"] and row["attempts"] == 1 and row["last_error"] is None
 
 
-async def test_only_authenticated_decision_wakes_a_decision_needed_post(wake_ctx, client, github_app):
+async def test_only_authenticated_decision_wakes_a_decision_needed_post(wake_ctx, client, github_app, fake_brain):
+    from illo.board import coordinator, escalate
+
     wake_ctx.workspace.config.board.max_consecutive_agent_posts = 2
+    wake_ctx.workspace.config.board.coordinator.quiet_hours = False
+    wake_ctx.workspace.config.board.coordinator.thread_cooldown_minutes = 0
     worker, responder = await client(agent="build"), await client("ben")
     pending = await worker.call("board_post", {"ticket_url": TICKET, **DECISION})
     await responder.call("board_post", {
@@ -187,7 +191,13 @@ async def test_only_authenticated_decision_wakes_a_decision_needed_post(wake_ctx
     })
     await worker.call("board_post", {"thread_id": pending["thread_id"], "text": "Wait"}, error=True)
     assert await outbox(wake_ctx) == []
-    await service.tick(wake_ctx)
+    fake_brain.script = [{
+        "name": "need_ask_person",
+        "arguments": {"person": "person:ben", "format": "card",
+                      "summary": "Pick the release date to unblock the worker."},
+    }]
+    await coordinator.run_coordinator(wake_ctx)
+    await escalate.send_due(wake_ctx)
     async with wake_ctx.pool.connection() as conn:
         thread = await one(conn, "SELECT * FROM board_threads WHERE id=%s", (pending["thread_id"],))
         assert thread["stalled_reason"] == "turn_cap" and thread["stalled_at"] == thread["updated_at"]
@@ -661,6 +671,7 @@ async def test_m2_schema_accepts_m1_writes_after_rollback(pool, tmp_path):
             assert await migrate(conn) == [
                 "1901_board_wakes.sql", "1902_board_coordinator.sql", "1903_board_coordinator_validate.sql",
                 "1904_board_files.sql", "1905_board_files_validate.sql",
+                "1906_chief_of_staff.sql", "1907_chief_of_staff_validate.sql",
             ]
             assert await migrate(conn, m1) == []
             saved = await one(conn, "SELECT stalled_at FROM board_threads WHERE id=%s", (thread["id"],))

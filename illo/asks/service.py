@@ -44,11 +44,10 @@ async def sync_card(ctx, conn, ask, *, force=False):
         owner = await one(conn, "SELECT * FROM people WHERE id=%s", (ask["owner_person_id"],))
         if not thread or not await acl.recipient_ok(conn, thread, owner):
             return
-        if board.is_coordinator_ask(ask):
-            escalation = await one(conn, "SELECT recipient_slack_user FROM board_escalations WHERE ask_id=%s",
-                                   (ask["id"],))
-            if not ask["slack_ts"] or not escalation or escalation["recipient_slack_user"] != owner["slack_id"]:
-                return
+        escalation = await one(conn, "SELECT recipient_slack_user FROM board_escalations WHERE ask_id=%s",
+                               (ask["id"],))
+        if not ask["slack_ts"] or not escalation or escalation["recipient_slack_user"] != owner["slack_id"]:
+            return
     if not ctx.slack_client:
         await sensors.error(
             conn, "asks:slack", "Slack is not connected. Ask cards wait in the ledger."
@@ -107,7 +106,7 @@ async def tick(ctx, *, force=False):
         try:
             async with ctx.pool.connection() as conn:
                 ask = await ledger.lock_ask(conn, row["id"])
-                if ask["state"] == "open":
+                if ask["state"] == "open" and not await asks.is_board_ask(conn, ask):
                     ask = await ledger.route(conn, ask, ctx.workspace.config.default_owner)
                     rule = await rules.match_ask(conn, ask) if await is_live(conn, ask) else None
                     if rule:
@@ -159,12 +158,14 @@ async def prepare_card(ctx, conn, data):
         destination = (await pages.person_path(conn, ctx.workspace, data['owner'], data['id'], ask=True)
                        if data.get('owner') else f"/web/a/{data['id']}")
         data['page_url'] = pages.base_url(ctx) + destination
-    if board.is_coordinator_ask(data):
+    if await asks.is_board_ask(conn, data):
         from illo.board.policy import board_pages_ready
 
         thread_id = await board.ask_thread_id(conn, data["id"])
-        data["page_url"] = pages.base_url(ctx) + f"/web/board/t/{thread_id}" if board_pages_ready(ctx) else None
-        data["page_action"] = f"web-open-board:{thread_id}"
+        data["board_card"] = True
+        has_page = board_pages_ready(ctx) and thread_id is not None
+        data["page_url"] = pages.base_url(ctx) + f"/web/board/t/{thread_id}" if has_page else None
+        data["page_action"] = f"web-open-board:{thread_id}" if has_page else None
     requester = data.get('requester') or {}
     data['full_proof'] = not pages.enabled(ctx) and requester.get('scopes') == ['agent']
     if data['full_proof'] and data.get('owner'):

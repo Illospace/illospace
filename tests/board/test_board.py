@@ -115,9 +115,13 @@ async def test_free_topics_pagination_search_and_archive(client):
     await ada.call("board_resolve", {"thread_id": thread_id, "state": "open"}, error=True)
 
 
-async def test_only_explicit_human_answer_completes_each_decision(app, client):
+async def test_only_explicit_human_answer_completes_each_decision(app, client, fake_brain):
+    from illo.board import coordinator, escalate
+
     ctx = app.state.ctx
     ctx.workspace.config.board.max_consecutive_agent_posts = 2
+    ctx.workspace.config.board.coordinator.quiet_hours = False
+    ctx.workspace.config.board.coordinator.thread_cooldown_minutes = 0
     ada = await client()
     first = await ada.call("board_post", {"title": "Release dates", **DECISION})
     thread_id = first["thread_id"]
@@ -138,15 +142,27 @@ async def test_only_explicit_human_answer_completes_each_decision(app, client):
         assert await service.answer(conn, first["ask_id"], ada.person_id, option="first") is None
         assert not await asks.cancel(conn, first["ask_id"])
 
+    # The asks worker no longer sends unsolicited initial DMs or matches rules for board asks.
     await service.tick(ctx)
     async with ctx.pool.connection() as conn:
         rows = await all_rows(conn, "SELECT * FROM asks ORDER BY id")
+        await conn.execute("DELETE FROM rules WHERE id=%s", (rule["id"],))
     assert [row["id"] for row in rows] == [first["ask_id"], second["ask_id"]]
     for row in rows:
-        assert row["state"] == "open" and not row["allow_rule"]
-        assert row["owner_person_id"] == ben["id"] and row["slack_ts"]
+        assert row["state"] == "open" and row["allow_rule"]
+        assert row["owner_person_id"] == ben["id"] and row["slack_ts"] is None
 
-    row = rows[0]
+    fake_brain.script = [{
+        "name": "need_ask_person",
+        "arguments": {"person": "person:ben", "format": "card",
+                      "summary": "The release schedule needs a date choice before work can continue."},
+    }]
+    await coordinator.run_coordinator(ctx)
+    await escalate.send_due(ctx)
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM asks WHERE id=%s", (first["ask_id"],))
+    assert row["slack_ts"] and row["slack_channel"]
+
     click = {"action_id": f"ask:{row['id']}:opt:second", "channel": row["slack_channel"],
              "message_ts": row["slack_ts"]}
     await actions.handle(ctx, ben, click)

@@ -111,7 +111,8 @@ def proof_sections(proof, saved, order=None):
 
 
 def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
-    if ask.get("page_action"):
+    is_board = bool(ask.get("board_card") or ask.get("page_action"))
+    if is_board:
         from illo.board.decision import unescape_slack
 
         proof = ask.get("proof") or {}
@@ -121,38 +122,47 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
                "proof": proof | {"text": unescape_slack(proof.get("text", ""))}}
     now = now or datetime.now(UTC)
     lane = ask.get("lane") or {}
+    proof = ask.get("proof") or {}
     blocks = [
         section(f"{EMOJI[ask['kind']]} {escape(first_line(ask))}"
                 + ("\nAbout: " + escape(lane["title"]) if lane.get("title") else "")),
-        section(f"*{escape(ask['question'])}*"),
     ]
-    proof = ask.get("proof") or {}
-    if ask.get("full_proof"):
-        blocks.extend(proof_sections(proof, ask.get("saved_items", {}), ask.get("proof_order")))
-    else:
-        text = material.body(proof)
-        if text:
-            blocks.append(section(f"Why: {escape(str(text).splitlines()[0])}"))
+    if is_board:
+        summary = material.body(proof)
+        if summary:
+            blocks.extend(preview_sections(escape(str(summary))))
+        blocks.append(section(f"*{escape(ask['question'])}*"))
         links = links_text(proof.get("links", []))
         if links:
             blocks.append(section(links))
+    else:
+        blocks.append(section(f"*{escape(ask['question'])}*"))
+        if ask.get("full_proof"):
+            blocks.extend(proof_sections(proof, ask.get("saved_items", {}), ask.get("proof_order")))
+        else:
+            text = material.body(proof)
+            if text:
+                blocks.append(section(f"Why: {escape(str(text).splitlines()[0])}"))
+            links = links_text(proof.get("links", []))
+            if links:
+                blocks.append(section(links))
     if ask["state"] == "open":
         details = [
-            f"• {escape(o['label'])}: {escape(o.get('detail', ''))}"
+            (f"• {escape(o['label'])}"
+             + (" _(recommended)_" if is_board and o["id"] == ask.get("recommended_option") else "")
+             + (f": {escape(o.get('detail', ''))}" if o.get("detail") else ""))
             for o in ask["options"]
-            if o.get("detail") or len(o["label"]) > 30
+            if o.get("detail") or len(o["label"]) > 30 or (is_board and o["id"] == ask.get("recommended_option"))
         ]
         if details:
             blocks.append(section("\n".join(details)))
         options = sorted(ask["options"], key=lambda o: o["id"] != ask["recommended_option"])
         option_buttons = [button(o["label"], f"ask:{ask['id']}:opt:{o['id']}",
-                                 o["id"] == ask["recommended_option"] and not ask.get("page_url"),
-                                 limit=40 if ask.get("page_action") else 30)
+                                 o["id"] == ask["recommended_option"] and (is_board or not ask.get("page_url")),
+                                 limit=40 if is_board else 30)
                           for o in options]
-        if ask.get("page_url"):
-            page_action = ask.get("page_action")
-            option_buttons.insert(0, button("Open the thread" if page_action else "Open the page",
-                                            page_action or f"web-open-ask:{ask['id']}", True))
+        if ask.get("page_url") and not is_board:
+            option_buttons.insert(0, button("Open the page", f"web-open-ask:{ask['id']}", True))
         for offset in range(0, len(option_buttons), 5):
             blocks.append({"type": "actions", "elements": option_buttons[offset:offset + 5]})
         elements = []
@@ -164,6 +174,8 @@ def ask_card(ask: dict, now: datetime | None = None) -> list[dict]:
                 )
             )
         elements.append(button("Other…", f"ask:{ask['id']}:other"))
+        if is_board and ask.get("page_url") and ask.get("page_action"):
+            elements.append(button("Open the thread", ask["page_action"], False))
         blocks.append({"type": "actions", "elements": elements})
     elif ask["state"] == "answered":
         rule = ask.get("rule")

@@ -43,7 +43,7 @@ def register(registry) -> None:
             False,
             rules_list,
             "List the standing rules that answer asks without a person: the team's and those of the person you act for, each with its id, text, match, and answer. Use the id with `rules_remove_mine` or `asks_answer_with_rule`.",
-            profiles=frozenset({"person_dm", "team_channel", "routine", "agent_request"}),
+            profiles=frozenset({"person_dm", "team_channel", "routine", "agent_request", "board_coordinator"}),
         )
     )
     registry.add(

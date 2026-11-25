@@ -6,10 +6,9 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Jsonb
 
 from illo.board import acl, packet
-from illo.board.decision import clean_slack
+from illo.board.decision import clean_slack, clean_summary
 from illo.board.labels import actor_label
 from illo.db import one
-from illo.ledger import sensors
 from illo.tasks import pages
 from illo.tasks.release import in_window
 
@@ -24,13 +23,7 @@ def board_pages_ready(ctx):
 
 async def ready(ctx):
     cfg = ctx.workspace.config.board
-    if not (cfg.enabled and cfg.coordinator.enabled):
-        return False
-    if board_pages_ready(ctx):
-        return True
-    async with ctx.pool.connection() as conn:
-        await sensors.error(conn, "board:coordinator", "The board coordinator waits for the board thread page.")
-    return False
+    return bool(cfg.enabled and cfg.coordinator.enabled)
 
 
 async def lock_budget(conn):
@@ -58,10 +51,45 @@ async def notice(conn, workspace, episode):
         key = author["provenance"].get("person_key") if author else None
         person = await one(conn, "SELECT key,name FROM people WHERE key=%s", (key,))
         name = actor_label(workspace, {key: person}, author).name if author else "An agent"
-        action = "has a question for you" if episode["reason"] == "question" else "mentioned you"
+        if episode["reason"] == "decision_needed":
+            action = "needs a decision from you"
+        elif episode["reason"] == "question":
+            action = "has a question for you"
+        else:
+            action = "mentioned you"
         name = clean_slack(name, 100, escaped_limit=100) or "An agent"
         text = f"{name} {action} on board thread {thread_id}."
     return text + " Open the thread to read it and reply, or reply in this Slack thread."
+
+
+async def _fallback_payload(conn, workspace, thread, episode):
+    """Build a verbatim fallback escalation so a model/limit error never leaves a person unnotified."""
+    author = await packet.asker_post(conn, episode)
+    if episode["reason"] == "decision_needed" and author and author.get("ask_id"):
+        ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (author["ask_id"],))
+        if ask:
+            summary = clean_summary(author.get("text") or "", 1800, escaped_limit=2000)
+            if not summary:
+                summary = await notice(conn, workspace, episode)
+            card = {
+                "question": ask["question"],
+                "options": list(ask["options"]),
+                "recommended": None,
+                "recommended_id": ask["recommended_option"],
+                "source_ask_id": ask["id"],
+                "allow_rule": bool(ask["allow_rule"]),
+            }
+            return "card", "summary", summary, Jsonb(card), ask["id"]
+    if author and author.get("text"):
+        key = author["provenance"].get("person_key")
+        person = await one(conn, "SELECT key,name FROM people WHERE key=%s", (key,))
+        name = clean_slack(actor_label(workspace, {key: person}, author).name, 100, escaped_limit=100) or "An agent"
+        title = clean_slack(thread["title"], 120, escaped_limit=140)
+        excerpt = clean_summary(author["text"], 1500, escaped_limit=1700)
+        if excerpt:
+            prefix = f"{name} on {title} (thread {thread['id']}):" if title else f"{name} on board thread {thread['id']}:"
+            return "dm", "summary", f"{prefix}\n\n{excerpt}", None, None
+    return "link", "notice", await notice(conn, workspace, episode), None, None
 
 
 async def reserve(conn, workspace, thread, episode, person, *, choice=None, run_id=None):
@@ -85,17 +113,33 @@ async def reserve(conn, workspace, thread, episode, person, *, choice=None, run_
     ):
         return "already_escalated"
     due = next_window(workspace, person, now)
-    text = choice.text if choice and choice.text else await notice(conn, workspace, episode)
-    card = (Jsonb({"question": choice.question, "options": [o.model_dump() for o in choice.options],
-                   "recommended": choice.recommended}) if choice and choice.format == "card" else None)
+    if choice:
+        fmt = choice.format
+        content_mode = "summary" if choice.text else "notice"
+        text = choice.text if choice.text else await notice(conn, workspace, episode)
+        card = (
+            Jsonb({
+                "question": choice.question,
+                "options": [o.model_dump(exclude_none=True) for o in choice.options],
+                "recommended": choice.recommended,
+                **({"recommended_id": choice.recommended_id} if choice.recommended_id is not None else {}),
+                **({"source_ask_id": choice.source_ask_id} if choice.source_ask_id is not None else {}),
+                "allow_rule": bool(choice.allow_rule),
+            })
+            if choice.format == "card"
+            else None
+        )
+        card_ask_id = choice.source_ask_id if choice.format == "card" else None
+    else:
+        fmt, content_mode, text, card, card_ask_id = await _fallback_payload(conn, workspace, thread, episode)
     row = await one(conn, """INSERT INTO board_escalations
         (thread_id,episode_id,post_id,reason,origin,coordinator_run_id,person_id,
-         format,content_mode,text,card,due_at,acl_snapshot,recipient_slack_user)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         format,content_mode,text,card,card_ask_id,due_at,acl_snapshot,recipient_slack_user)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (episode_id,person_id) DO NOTHING RETURNING id""",
         (thread["id"], episode["id"], episode["post_id"], episode["reason"],
-         "model" if choice else "fallback", run_id, person["id"], choice.format if choice else "link",
-         "summary" if choice and choice.text else "notice", text, card, due,
+         "model" if choice else "fallback", run_id, person["id"], fmt,
+         content_mode, text, card, card_ask_id, due,
          Jsonb(acl.scope(thread)), person["slack_id"]))
     if not row:
         return "already_escalated"

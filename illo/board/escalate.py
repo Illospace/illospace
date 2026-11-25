@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 from slack_sdk.errors import SlackApiError, SlackRequestError
 
 from illo.asks import cards, service
-from illo.board import acl, episodes, packet, policy
+from illo.board import acl, episodes, policy
 from illo.board.decision import unescape_slack
 from illo.channels.slack.tasks import _visible
 from illo.connectors.http import private_http_logs
@@ -157,15 +157,37 @@ async def _reconcile(ctx, row, channel):
 
 def _card(ctx, row, person):
     card = row["card"]
-    ref = f"board:{row['thread_id']}:{row['post_id'] or 0}:esc:{row['id']}"
-    return {"id": row["card_ask_id"], "state": "open", "kind": "decision",
-            "question": card["question"], "options": [
-                opt | {"id": f"o{i}"} for i, opt in enumerate(card["options"], 1)],
-            "recommended_option": f"o{card['recommended'] + 1}" if card["recommended"] is not None else None,
-            "allow_rule": False, "source_ref": ref, "owner": person, "proof": {
-                "text": row["text"], "thread": f"{pages.base_url(ctx)}/web/board/t/{row['thread_id']}"},
-            "page_url": f"{pages.base_url(ctx)}/web/board/t/{row['thread_id']}",
-            "page_action": f"web-open-board:{row['thread_id']}"}
+    source_ask_id = card.get("source_ask_id")
+    ref = (
+        f"board:{row['thread_id']}:{row['post_id'] or 0}:decision"
+        if source_ask_id
+        else f"board:{row['thread_id']}:{row['post_id'] or 0}:esc:{row['id']}"
+    )
+    options = [
+        opt if opt.get("id") else opt | {"id": f"o{i}"}
+        for i, opt in enumerate(card["options"], 1)
+    ]
+    recommended = card.get("recommended_id")
+    if recommended is None and card.get("recommended") is not None:
+        recommended = f"o{card['recommended'] + 1}"
+    has_page = policy.board_pages_ready(ctx)
+    page_url = f"{pages.base_url(ctx)}/web/board/t/{row['thread_id']}" if has_page else None
+    proof = {"text": row["text"], **({"thread": page_url} if page_url else {})}
+    return {
+        "id": row["card_ask_id"],
+        "state": "open",
+        "kind": "decision",
+        "question": card["question"],
+        "options": options,
+        "recommended_option": recommended,
+        "allow_rule": bool(card.get("allow_rule", False)),
+        "source_ref": ref,
+        "owner": person,
+        "proof": proof,
+        "board_card": True,
+        "page_url": page_url,
+        "page_action": f"web-open-board:{row['thread_id']}" if has_page else None,
+    }
 
 
 async def _remember_channel(ctx, row, channel):
@@ -173,7 +195,7 @@ async def _remember_channel(ctx, row, channel):
         thread, live = await _locked(conn, row["thread_id"], row["id"])
         if live["lease_id"] != row["lease_id"] or live["lease_until"] <= datetime.now(UTC):
             return None
-        if live["state"] != "sending" or not policy.board_pages_ready(ctx):
+        if live["state"] != "sending":
             return None
         person, episode, reason = await _check(conn, thread, live)
         if reason:
@@ -186,15 +208,6 @@ async def _remember_channel(ctx, row, channel):
             await conn.execute("UPDATE board_escalations SET due_at=%s,lease_until=%s WHERE id=%s",
                                (due, due, row["id"]))
             return None
-        if live["content_mode"] == "summary":
-            cfg = ctx.workspace.config.board.coordinator
-            posts = await all_rows(conn, """SELECT blocks FROM board_posts WHERE thread_id=%s
-                ORDER BY id DESC LIMIT 12""", (thread["id"],)) if cfg.slack_summaries else []
-            if not cfg.slack_summaries or any(packet.has_picture(post) for post in posts):
-                text = await policy.notice(conn, ctx.workspace, episode)
-                return await one(conn, """UPDATE board_escalations SET
-                    content_mode='notice',format='link',text=%s,card=NULL,card_ask_id=NULL,sending_channel=%s
-                    WHERE id=%s RETURNING *""", (text, channel, row["id"]))
         return await one(conn, """UPDATE board_escalations SET sending_channel=%s WHERE id=%s
             RETURNING *""", (channel, row["id"]))
 
@@ -223,11 +236,17 @@ async def _send(ctx, row, person):
     else:
         blocks = None
         text = row["text"]
+        has_page = policy.board_pages_ready(ctx)
         if row["format"] == "link":
-            blocks = [cards.section(text), {"type": "actions", "elements": [
-                cards.button("Open the thread", f"web-open-board:{row['thread_id']}", True)]}]
+            if has_page:
+                blocks = [cards.section(text), {"type": "actions", "elements": [
+                    cards.button("Open the thread", f"web-open-board:{row['thread_id']}", True)]}]
         else:
-            text += "\n\n" + FOOTER_DM.format(id=row["thread_id"])
+            body = text + "\n\n" + FOOTER_DM.format(id=row["thread_id"])
+            text = body
+            if has_page:
+                blocks = [cards.section(body), {"type": "actions", "elements": [
+                    cards.button("Open the thread", f"web-open-board:{row['thread_id']}", False)]}]
         sent = await service.post_dm(ctx, person, text, blocks, "board-escalation", row["id"],
                                      metadata=_metadata(row), channel=channel)
     if not sent or not sent.get("ts"):
@@ -237,16 +256,24 @@ async def _send(ctx, row, person):
 
 async def _insert_card(conn, ctx, row, person, channel, ts, *, cancelled=False):
     ask = _card(ctx, row, person)
-    expires = datetime.now(UTC) + timedelta(hours=ctx.workspace.config.board.coordinator.escalation_timeout_hours)
     digest = cards.digest(cards.ask_card(ask))
+    if row["card"].get("source_ask_id"):
+        await conn.execute("""UPDATE asks SET recommended_option=%s,proof=COALESCE(proof,'{}'::jsonb)||%s,
+            proof_order=%s,slack_channel=%s,slack_ts=%s,card_sent_at=clock_timestamp(),
+            card_digest=%s,card_state=CASE WHEN state='open' THEN 'open' ELSE state END,
+            card_delivery_state='none' WHERE id=%s""",
+            (ask["recommended_option"], Jsonb(ask["proof"]), Jsonb(list(ask["proof"])), channel, ts, digest, ask["id"]))
+        await conn.execute("UPDATE board_escalations SET ask_id=%s WHERE id=%s", (ask["id"], row["id"]))
+        return
+    expires = datetime.now(UTC) + timedelta(hours=ctx.workspace.config.board.coordinator.escalation_timeout_hours)
     await conn.execute("""INSERT INTO asks
         (id,owner_person_id,question,kind,options,recommended_option,proof,proof_order,allow_rule,source_ref,
          slack_channel,slack_ts,card_sent_at,card_digest,card_state,card_delivery_state,state,cancelled_at,expires_at)
-        OVERRIDING SYSTEM VALUE VALUES (%s,%s,%s,'decision',%s,%s,%s,%s,false,%s,%s,%s,
+        OVERRIDING SYSTEM VALUE VALUES (%s,%s,%s,'decision',%s,%s,%s,%s,%s,%s,%s,%s,
           clock_timestamp(),%s,'open','none',%s,CASE WHEN %s THEN clock_timestamp() ELSE NULL END,%s)
         ON CONFLICT (id) DO NOTHING""",
         (ask["id"], row["person_id"], ask["question"], Jsonb(ask["options"]), ask["recommended_option"],
-         Jsonb(ask["proof"]), Jsonb(list(ask["proof"])), ask["source_ref"], channel, ts,
+         Jsonb(ask["proof"]), Jsonb(list(ask["proof"])), bool(ask["allow_rule"]), ask["source_ref"], channel, ts,
          digest, "cancelled" if cancelled else "open", cancelled, expires))
     await conn.execute("UPDATE board_escalations SET ask_id=%s WHERE id=%s", (ask["id"], row["id"]))
 
@@ -351,7 +378,7 @@ async def _notices(ctx):
         rows = await all_rows(conn, """SELECT id,thread_id FROM board_escalations
             WHERE state IN ('closed','answered') AND notice_at IS NULL
               AND (state='closed' AND (ask_id IS NOT NULL OR slack_ts IS NOT NULL)
-                OR state='answered' AND EXISTS (SELECT 1 FROM asks a WHERE a.id=ask_id AND a.state='cancelled'))
+                OR state='answered' AND EXISTS (SELECT 1 FROM asks a WHERE a.id=ask_id AND a.state IN ('cancelled','answered')))
             ORDER BY id LIMIT 20""")
     for ref in rows:
         async with ctx.pool.connection() as conn:
