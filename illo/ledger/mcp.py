@@ -255,14 +255,45 @@ async def ack_answer(conn, token, ask_id) -> dict | None:
 
 async def cancel_ask(conn, token, ask_id, source_ref) -> dict | None:
     """Source refs belong to the calling token; IDs also permit owner token rotation."""
+    from illo.ledger import board
+
+    found = await one(
+        conn,
+        """SELECT a.id,p.thread_id FROM asks a JOIN tokens t ON t.id=a.requester_token_id
+        LEFT JOIN board_posts p ON p.ask_id=a.id
+        WHERE t.person_id=%s AND ((%s::bigint IS NOT NULL AND a.id=%s)
+          OR (%s::text IS NOT NULL AND a.source_ref=%s AND a.requester_token_id=%s))""",
+        (token["person_id"], ask_id, ask_id, source_ref, source_ref, token["id"]),
+    )
+    if not found:
+        return None
+    if found["thread_id"] is not None:
+        if token["scopes"] != ["agent"]:
+            return None
+        row = await board.lock_for_ask(conn, found["id"])
+        if not row:
+            return None
+        thread = await one(
+            conn,
+            f"SELECT id,state FROM board_threads b WHERE b.id=%(thread_id)s AND {board.VISIBLE}",
+            {"thread_id": found["thread_id"], "person_id": token["person_id"]},
+        )
+        if not thread:
+            return None
+        if row["state"] == "open":
+            if thread["state"] == "archived":
+                raise ValueError("The thread is archived.")
+            await conn.execute("UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s", (row["id"],))
+            await conn.execute("UPDATE board_threads SET updated_at=clock_timestamp() WHERE id=%s", (thread["id"],))
+            row["state"] = "cancelled"
+        return row
     row = await one(
         conn,
         """SELECT a.* FROM asks a JOIN tokens t ON t.id=a.requester_token_id
-        WHERE t.person_id=%s AND ((%s::bigint IS NOT NULL AND a.id=%s)
-          OR (%s::text IS NOT NULL AND a.source_ref=%s AND a.requester_token_id=%s))
+        WHERE t.person_id=%s AND a.id=%s
           AND NOT EXISTS (SELECT 1 FROM board_posts WHERE ask_id=a.id)
         FOR UPDATE OF a""",
-        (token["person_id"], ask_id, ask_id, source_ref, source_ref, token["id"]),
+        (token["person_id"], found["id"]),
     )
     if row and row["state"] == "open":
         await conn.execute("UPDATE asks SET state='cancelled',cancelled_at=clock_timestamp() WHERE id=%s", (row["id"],))

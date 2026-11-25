@@ -176,10 +176,27 @@ async def asks_answer_with_rule(ctx, args):
 
 
 async def asks_cancel_mine(ctx, args):
-    ask = await ledger.lock_ask(ctx.conn, args["id"])
+    from illo.db import one
+    from illo.ledger import board
+
+    ask = await board.lock_for_ask(ctx.conn, args["id"])
     if not ask or ctx.run["person_id"] not in {ask["owner_person_id"], ask["requester_person_id"]}:
         return {"cancelled": False}
-    return {"cancelled": await asks.cancel(ctx.conn, ask["id"])}
+    if board.is_coordinator_ask(ask):
+        return {"cancelled": False}
+    thread_id = await board.ask_thread_id(ctx.conn, ask["id"])
+    if thread_id is not None:
+        thread = await one(
+            ctx.conn,
+            f"SELECT state FROM board_threads b WHERE b.id=%(id)s AND {board.VISIBLE}",
+            {"id": thread_id, "person_id": ctx.run["person_id"]},
+        )
+        if not thread or thread["state"] == "archived":
+            return {"cancelled": False}
+    cancelled = await asks.cancel(ctx.conn, ask["id"], allow_board=True)
+    if cancelled and thread_id is not None:
+        await ctx.conn.execute("UPDATE board_threads SET updated_at=clock_timestamp() WHERE id=%s", (thread_id,))
+    return {"cancelled": cancelled}
 
 
 async def asks_digest(ctx, args):
