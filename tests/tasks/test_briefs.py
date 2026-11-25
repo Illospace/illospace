@@ -307,3 +307,38 @@ def test_fallback_examples_match_task_sections(kind, render):
     root = Path(__file__).with_name("fixtures")
     data = json.loads((root / "briefs.json").read_text())[kind]
     assert render(data) + "\n" == (root / (kind + "-brief.txt")).read_text()
+
+
+async def test_team_stuck_marks_new_only_when_stuck_after_last_brief(conn, workspace):
+    from illo.routines.team_digest import DEFAULT_INSTRUCTIONS
+
+    cases = [
+        ("Old wake fail", "wake_failed", {"final": True}, 48, False),
+        ("New wake fail", "wake_failed", {"final": True}, 6, True),
+        ("Old silent", "state", {"escalated": True, "restarts": 2}, 60, False),
+    ]
+    expected = {}
+    for title, kind, values, age_hours, is_new in cases:
+        row = await make(conn, workspace, title, holder="agent:build")
+        await conn.execute("UPDATE tasks SET waits_for='person:ada' WHERE id=%s", (row["id"],))
+        await tasks._event(conn, row, "code", kind, "The wake endpoint did not answer.", values)
+        await stamp(conn, row, age_hours)
+        expected[title] = is_new
+    old_unheld = await make(conn, workspace, "Old unheld")
+    await stamp(conn, old_unheld, 60)
+    expected["Old unheld"] = False
+    new_unheld = await make(conn, workspace, "New unheld")
+    await stamp(conn, new_unheld, 25)
+    expected["New unheld"] = True
+    old_due = await make(conn, workspace, "Old overdue", holder="person:ben", due_at=NOW - timedelta(hours=48))
+    await stamp(conn, old_due, 72)
+    expected["Old overdue"] = False
+    new_due = await make(conn, workspace, "New overdue", holder="person:ben", due_at=NOW - timedelta(hours=2))
+    await stamp(conn, new_due, 30)
+    expected["New overdue"] = True
+
+    data = await digest_snapshot.team_snapshot(conn, workspace, NOW)
+    assert {i["title"]: i["new"] for i in data["stuck"]} == expected
+    assert "`stuck` where `new` is true" in DEFAULT_INSTRUCTIONS
+    assert "internal agent labels" in DEFAULT_INSTRUCTIONS
+

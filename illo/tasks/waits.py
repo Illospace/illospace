@@ -27,7 +27,7 @@ Then read the live state where the work is. The task text can be old: do not tru
 {page}Then call `wait_result` one time:
 • `complete`: the wanted result of the task is live where the problem was. A merge alone is not complete. Give the proof: each fact with its web address.
 • `restart`: an agent holds the task, its start failed or it stopped, and the cause is gone now.
-• `person`: a person must act. Write the one action. The person must be able to do it from your message alone. Say why an agent cannot do it. Give the facts that you verified, so the person does not check them again.
+• `person`: a person must act. Write the one real-world action (a decision, deploy, review, or confirmation to close or cancel). The person must be able to do it from your message alone. Say why an agent cannot do it. Give the facts that you verified, so the person does not check them again. Never ask a person to toggle internal agent labels, reassign a ticket just to wake an agent, or edit agent allowlist config unless the task is specifically about that config. If the work is already shipped, superseded, or obsolete and only needs closing or cancelling, say so in one short sentence so the person can confirm.
 
 If you cannot verify a fact that `complete` needs, choose `person` and name that fact.
 Write the message for a busy person: 90 words at most, the result first. Use plain web addresses, no markup.

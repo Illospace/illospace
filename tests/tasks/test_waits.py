@@ -344,3 +344,10 @@ async def test_wait_result_after_web_read(ctx, fake_brain, monkeypatch):
 def test_result_message_limits(message):
     with pytest.raises(ValidationError):
         Result(outcome="person", message=message)
+
+
+def test_wait_job_forbids_agent_plumbing_chores():
+    assert "Never ask a person to toggle internal agent labels" in waits.JOB
+    assert "reassign a ticket just to wake an agent" in waits.JOB
+    assert "edit agent allowlist config" in waits.JOB
+
