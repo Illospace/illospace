@@ -7,7 +7,7 @@ LINKED_TASKS = f"""SELECT t.* FROM tasks t WHERE t.id=b.task_id OR EXISTS (
     SELECT 1 FROM task_tickets tt WHERE tt.task_id=t.id AND b.ticket_url={board.TICKET_MATCH}
 )"""
 SCOPE_FIELDS = ("visibility", "owner_person_id", "task_id", "ticket_url",
-                "effective_owner", "task_visibility", "linked_task_ids")
+                "effective_owner", "task_visibility", "linked_task_ids", "guest_person_ids")
 
 
 async def thread_access(conn, thread_id):
@@ -16,18 +16,31 @@ async def thread_access(conn, thread_id):
         return None
     tasks = await all_rows(conn, f"""SELECT t.* FROM board_threads b
         CROSS JOIN LATERAL ({LINKED_TASKS}) t WHERE b.id=%s ORDER BY t.id""", (thread_id,))
-    owners = {t["owner_person_id"] for t in tasks if t["visibility"] == "private"}
+    guests = [
+        r["person_id"]
+        for r in await all_rows(
+            conn, "SELECT person_id FROM board_thread_guests WHERE thread_id=%s ORDER BY person_id", (thread_id,)
+        )
+    ]
+    private_task_owners = {t["owner_person_id"] for t in tasks if t["visibility"] == "private"}
+    if guests and private_task_owners:
+        return None
+    owners = set(private_task_owners)
     owner = row["owner_person_id"] if row["visibility"] == "private" else None
     if owner is not None:
         owners.add(owner)
     if None in owners or len(owners) > 1 or (row["task_id"] and not tasks):
         return None
     task = next((t for t in tasks if t["id"] == row["task_id"]), tasks[0] if tasks else None)
+    # A 2-person private thread (with guests) never gets single-owner personal_read authority,
+    # so the owner's private notes/DMs cannot leak to the guest.
+    effective_owner = None if guests else next(iter(owners), None)
     return row | {
-        "effective_owner": next(iter(owners), None),
+        "effective_owner": effective_owner,
         "task_visibility": "private" if any(t["visibility"] == "private" for t in tasks) else (
             "team" if tasks else None),
         "linked_task_ids": [t["id"] for t in tasks],
+        "guest_person_ids": guests,
         "task": task,
     }
 

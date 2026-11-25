@@ -104,7 +104,7 @@ def test_coordinator_settings_are_optional_and_forward_compatible(coordinator_ct
 
     assert BoardConfig(future_key=12).model_extra == {"future_key": 12}
     cfg = BoardCoordinatorConfig(future_key=12)
-    assert not cfg.enabled and not cfg.slack_summaries and cfg.model_extra == {"future_key": 12}
+    assert cfg.enabled and cfg.slack_summaries and cfg.model_extra == {"future_key": 12}
     previous = create_model("PreviousBrain", __base__=BrainConfig, routes=(
         dict[Literal["default", "person_dm", "team_channel", "tainted", "routine", "digest", "agent_request", "deep"],
              RouteSettings], ...))

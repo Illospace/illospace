@@ -7,7 +7,7 @@ from illo.tools._format import Compact, body, data_text, header, hit, iso_date, 
 from illo.tools.registry import Arguments, Tool
 
 # Only untainted profiles may search. SQL hides private rows from other principals.
-READ_PROFILES = frozenset({"person_dm", "team_channel", "routine", "agent_request"})
+READ_PROFILES = frozenset({"person_dm", "team_channel", "routine", "agent_request", "board_coordinator"})
 HINT = "Search again with other words if this is not enough."
 
 

@@ -18,6 +18,7 @@ class InvalidDecision(ValueError):
 class Option(Arguments):
     label: str = Field(min_length=1)
     detail: str = ""
+    id: str | None = None
 
 
 class Escalate(Arguments):
@@ -27,11 +28,15 @@ class Escalate(Arguments):
     question: str = ""
     options: list[Option] = Field(default_factory=list, max_length=4)
     recommended: int | None = Field(default=None, ge=0, le=3)
+    recommended_id: str | None = None
+    source_ask_id: int | None = None
+    allow_rule: bool = False
 
 
 class Headstart(Arguments):
     target: str = Field(pattern=r"^(agent|person):[a-z][a-z0-9_-]*$")
     minutes: int = Field(ge=5, le=240)
+    note: str = ""
 
 
 class Decision(Arguments):
@@ -50,6 +55,11 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _SLACK_FORM = re.compile(r"<[^<>]*>")
 _URL = re.compile(r"(?:[a-z][a-z0-9+.-]*://|www\.|mailto:)\S+", re.IGNORECASE)
 _BROADCAST = re.compile(r"@(?:here|channel|everyone)\b", re.IGNORECASE)
+
+
+def _scrub_unsafe_url(match: re.Match[str]) -> str:
+    text = match.group(0)
+    return text if text.lower().startswith("https://") else "[link removed]"
 
 
 def _strip_nulls(value):
@@ -73,14 +83,22 @@ def unescape_slack(value):
     return value.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def clean_slack(value, limit, *, escaped_limit=None):
+def clean_slack(value, limit, *, escaped_limit=None, allow_urls=False, multiline=False):
     value = unescape_slack(value)
-    value = "".join(c for c in value if not unicodedata.category(c).startswith("C"))
+    if multiline:
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        value = "".join(c for c in value if c == "\n" or not unicodedata.category(c).startswith("C"))
+    else:
+        value = "".join(c for c in value if not unicodedata.category(c).startswith("C"))
     value = value.replace("`", "")
     value = _SLACK_FORM.sub("", value)
-    value = _URL.sub("[link removed]", value)
+    value = _URL.sub(_scrub_unsafe_url if allow_urls else "[link removed]", value)
     value = _BROADCAST.sub("", value)
-    value = " ".join(value.split())[:limit]
+    if multiline:
+        lines = [" ".join(line.split()) for line in value.split("\n")]
+        value = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()[:limit]
+    else:
+        value = " ".join(value.split())[:limit]
     if escaped_limit is not None:
         for index, char in enumerate(value):
             escaped_limit -= len(escape(char))
@@ -90,6 +108,19 @@ def clean_slack(value, limit, *, escaped_limit=None):
     return escape(value)
 
 
+def clean_summary(value, limit=1800, *, escaped_limit=2000):
+    return clean_slack(value, limit, escaped_limit=escaped_limit, allow_urls=True, multiline=True)
+
+
+def clean_group_key(group_key, group_clear=False):
+    if group_key is None:
+        return None
+    key = re.sub(r"[^a-z0-9]+", "-", group_key.lower()).strip("-")
+    if group_clear or not 2 <= len(key) <= 48:
+        raise InvalidDecision("group_key")
+    return key
+
+
 def _escalation(value, snapshot):
     if value is None or value.person not in snapshot["candidates"] or value.format not in snapshot["allowed"]["formats"]:
         raise InvalidDecision("recipient_or_format")
@@ -97,7 +128,7 @@ def _escalation(value, snapshot):
         if value.text or value.question or value.options or value.recommended is not None:
             raise InvalidDecision("notice_content")
         return value
-    value.text = clean_slack(value.text, 400, escaped_limit=600)
+    value.text = clean_summary(value.text, 1800, escaped_limit=2000)
     if not value.text:
         raise InvalidDecision("summary_text")
     if value.format != "card":
@@ -143,9 +174,5 @@ def parse(text, snapshot):
             raise InvalidDecision("headstart")
     if decision.escalate:
         _escalation(decision.escalate, snapshot)
-    if decision.group_key is not None:
-        key = re.sub(r"[^a-z0-9]+", "-", decision.group_key.lower()).strip("-")
-        if decision.group_clear or not 2 <= len(key) <= 48:
-            raise InvalidDecision("group_key")
-        decision.group_key = key
+    decision.group_key = clean_group_key(decision.group_key, decision.group_clear)
     return decision

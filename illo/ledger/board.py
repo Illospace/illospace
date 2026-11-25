@@ -37,14 +37,18 @@ PRIVATE_TASKS = f"""SELECT 1 FROM tasks t WHERE t.visibility='private'
 
 def visible_to(person_id="%(person_id)s"):
     """Build the thread ACL for a SQL expression that identifies the viewer."""
-    return f"""(b.visibility='team' OR b.owner_person_id={person_id})
+    return f"""(b.visibility='team' OR b.owner_person_id={person_id}
+        OR EXISTS (SELECT 1 FROM board_thread_guests g
+            WHERE g.thread_id=b.id AND g.person_id={person_id}))
         AND NOT EXISTS ({PRIVATE_TASKS} AND (t.owner_person_id IS NULL
             OR t.owner_person_id IS DISTINCT FROM {person_id}))"""
 
 
 VISIBLE = visible_to()
 _OPEN_DECISIONS = """SELECT d.id FROM board_posts d
+    JOIN asks a ON a.id=d.ask_id
     WHERE d.thread_id=b.id AND d.kind='decision_needed'
+      AND a.state<>'cancelled'
       AND NOT EXISTS (
           SELECT 1 FROM board_posts r
           WHERE r.thread_id=b.id AND r.reply_to_post_id=d.id AND r.kind='decision'
@@ -238,15 +242,35 @@ async def _attach_links(conn, thread, task_id, ticket_url):
         pass
 
 
-async def _recipients(conn, workspace, reader, targets, *, private):
+async def add_guest(conn, thread_id: int, person_id: int) -> bool:
+    """Grant one cross-person guest access to a private thread that has no private task."""
+    thread = await lock_thread(conn, thread_id)
+    if not thread or thread["visibility"] != "private" or thread["owner_person_id"] == person_id:
+        return False
+    has_private_task = await one(
+        conn,
+        f"SELECT 1 FROM board_threads b WHERE b.id=%s AND EXISTS ({PRIVATE_TASKS})",
+        (thread_id,),
+    )
+    if has_private_task:
+        return False
+    await conn.execute(
+        "INSERT INTO board_thread_guests (thread_id, person_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (thread_id, person_id),
+    )
+    return True
+
+
+async def _recipients(conn, workspace, reader, targets, *, private, allowed_ids=None):
     owners = {"agent:" + a.key: a.owner for a in workspace.agents}
+    allowed = allowed_ids if allowed_ids is not None else {reader.person_id}
     recipients = {}
     for target in dict.fromkeys(targets):
         if target == reader.actor:
             continue
         key = target.removeprefix("person:") if target.startswith("person:") else owners.get(target)
         person = await one(conn, "SELECT id FROM people WHERE key=%s AND active", (key,))
-        if not person or (private and person["id"] != reader.person_id):
+        if not person or (private and person["id"] not in allowed):
             raise ValueError("A mention recipient was not found.")
         recipients[target] = person["id"]
     if len(recipients) > 10:
@@ -434,23 +458,36 @@ async def post(conn, *, workspace, token, text, kind="message", thread_id=None, 
         files = ()
     if thread_id is None:
         await _attach_links(conn, thread, task_id, ticket_url)
-    recipients = await _recipients(conn, workspace, reader, mentions, private=private)
+    guest_ids = {
+        r["person_id"]
+        for r in await all_rows(conn, "SELECT person_id FROM board_thread_guests WHERE thread_id=%s", (thread["id"],))
+    } if private else set()
+    allowed_ids = ({thread["owner_person_id"] or reader.person_id} | guest_ids) if private else None
+    recipients = await _recipients(conn, workspace, reader, mentions, private=private, allowed_ids=allowed_ids)
     ask = None
+    decision_spec = None
     if (owner := _decision_fields(request, recipients)) is not None:
         ask = await asks.create(conn, owner_person_id=owner, question=question, options=options,
                                 recommended_option=recommended, requester_token_id=reader.token_id,
-                                requester_person_id=reader.person_id, allow_rule=False)
+                                requester_person_id=reader.person_id, allow_rule=True)
+        decision_spec = {
+            "question": ask["question"],
+            "options": ask["options"],
+            "recommended": ask["recommended_option"],
+            "owner_person_id": owner,
+            "allow_rule": True,
+        }
     provenance = {"agent_key": reader.agent, "person_key": reader.person, "token_label": reader.label}
     provenance.update({key: clean for key, value in (("client_name", client_name), ("model", model))
                        if (clean := _clean_hint(value))})
     row = await one(conn, """INSERT INTO board_posts
         (thread_id,actor,at,person_id,token_id,provenance,kind,text,blocks,mentions,
-         reply_to_post_id,ask_id,source_ref,request_hash)
-        VALUES (%s,%s,clock_timestamp(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         reply_to_post_id,ask_id,decision_spec,source_ref,request_hash)
+        VALUES (%s,%s,clock_timestamp(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING id,thread_id,ask_id,actor,is_human,kind,mentions,reply_to_post_id""",
         (thread["id"], reader.actor, reader.person_id, reader.token_id, Jsonb(provenance), kind,
          text, Jsonb(blocks), list(recipients), reply_to_post_id, ask["id"] if ask else None,
-         source_ref, request_hash))
+         Jsonb(decision_spec) if decision_spec is not None else None, source_ref, request_hash))
     if ask:
         await conn.execute("UPDATE asks SET source_ref=%s WHERE id=%s AND source_ref IS NULL",
                            (f"board:{thread['id']}:{row['id']}:decision", ask["id"]))
@@ -635,7 +672,14 @@ async def record_decision(conn, ask, *, workspace=None) -> int | None:
     from illo.board.episodes import close_items
     from illo.board.wake import enqueue_for_post
 
-    if (ask["answered_via"] != "person" or ask["answered_by_person_id"] != ask["owner_person_id"]):
+    via = ask["answered_via"]
+    if via == "person":
+        if ask["answered_by_person_id"] != ask["owner_person_id"]:
+            return None
+    elif via == "rule":
+        if not ask.get("allow_rule") or not ask.get("rule_id"):
+            return None
+    else:
         return None
     linked = await one(conn, """SELECT p.id,p.thread_id,owner.key FROM board_posts p
         JOIN people owner ON owner.id=%s AND owner.active
@@ -646,12 +690,29 @@ async def record_decision(conn, ask, *, workspace=None) -> int | None:
     thread = await _thread(conn, params, lock=True)
     option = next((o["label"] for o in ask["options"] if o["id"] == ask["answer_option"]), "")
     answer = "\n".join(value for value in (option, ask["answer_text"]) if value)[:16000]
+    if via == "person":
+        actor = f"person:{linked['key']}"
+        is_human = True
+        person_id = ask["owner_person_id"]
+        provenance = {"person_key": linked["key"]}
+    else:
+        actor = "illo"
+        is_human = False
+        person_id = None
+        provenance = {
+            "via": "rule",
+            "rule_id": ask["rule_id"],
+            "owner_person_id": ask["owner_person_id"],
+        }
     post = await one(conn, """INSERT INTO board_posts
         (thread_id,actor,is_human,person_id,provenance,kind,text,reply_to_post_id)
-        VALUES (%s,%s,true,%s,%s,'decision',%s,%s)
-        RETURNING id,actor,is_human,kind,mentions,reply_to_post_id""",
-        (linked["thread_id"], f"person:{linked['key']}", ask["owner_person_id"],
-         Jsonb({"person_key": linked["key"]}), answer, linked["id"]))
+        VALUES (%s,%s,%s,%s,%s,'decision',%s,%s)
+        RETURNING id,actor,is_human,kind,mentions,reply_to_post_id,provenance""",
+        (linked["thread_id"], actor, is_human, person_id, Jsonb(provenance), answer, linked["id"]))
+    await conn.execute(
+        "UPDATE asks SET delivery_state='acked' WHERE id=%s AND delivery_state<>'acked'",
+        (ask["id"],),
+    )
     if workspace is not None:
         stall_at = None
         if thread["stalled_reason"] == "turn_cap":
@@ -804,6 +865,9 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
         raise BoardError("The thread is resolved. Reopen it to reply.")
     prior = await one(conn, """SELECT p.id FROM board_posts p WHERE p.thread_id=%s
         AND NOT p.is_human AND p.actor LIKE 'agent:%%' AND p.kind IN ('question','decision_needed')
+        AND (p.kind<>'decision_needed' OR EXISTS (
+            SELECT 1 FROM asks a WHERE a.id=p.ask_id AND a.state<>'cancelled'
+        ))
         AND NOT EXISTS (SELECT 1 FROM board_posts r WHERE r.thread_id=p.thread_id AND (
             (r.reply_to_post_id=p.id AND r.kind=CASE p.kind WHEN 'question' THEN 'answer' ELSE 'decision' END)
             OR (p.kind='question' AND r.is_human AND r.id>p.id)))
@@ -818,8 +882,6 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
                           (thread_id, reply_to_post_id))
         if not reply:
             raise BoardError("The board post was not found.")
-        if reply["kind"] == "decision_needed":
-            raise BoardError("Answer this decision with its buttons.")
     kind = "answer" if reply and reply["kind"] == "question" else "message"
     target = None
     if reply and reply["actor"].startswith("agent:") and reply["person_id"]:
@@ -829,6 +891,13 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
         elif provenance.get("person_key"):
             target = "person:" + provenance["person_key"]
     await lock_children(conn, thread_id)
+    decision_ask_id = None
+    if reply and reply["kind"] == "decision_needed" and reply.get("ask_id"):
+        linked_ask = await one(conn, "SELECT id,state,owner_person_id FROM asks WHERE id=%s FOR UPDATE",
+                               (reply["ask_id"],))
+        if linked_ask and linked_ask["state"] == "open" and linked_ask["owner_person_id"] == person["id"]:
+            kind = "decision"
+            decision_ask_id = linked_ask["id"]
     try:
         async with conn.transaction():
             await _human_limit(conn, person)
@@ -837,6 +906,11 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
                 VALUES (%s,%s,clock_timestamp(),true,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                 (thread_id, actor, person["id"], kind, text, reply_to_post_id, source_ref,
                  Jsonb({"via": via}), [target] if target else []))
+            if decision_ask_id is not None:
+                await conn.execute("""UPDATE asks SET state='answered',answer_text=%s,
+                    answered_by_person_id=%s,answered_via='person',answered_at=clock_timestamp(),
+                    delivery_state='acked',awaiting_text=false
+                    WHERE id=%s AND state='open'""", (text, person["id"], decision_ask_id))
     except UniqueViolation as exc:
         if exc.diag.constraint_name != "board_posts_untokened_source":
             raise
@@ -907,14 +981,20 @@ async def human_resolve(conn, *, workspace, person, thread_id, state="open", sum
 
 
 async def system_post(conn, thread_id, text, *, purpose, source_ref, episode_id,
-                      mentions=(), workspace=None, reply_to_post_id=None):
+                      mentions=(), workspace=None, reply_to_post_id=None,
+                      kind="message", sources=()):
     from illo.board.wake import enqueue_for_post
 
+    if kind not in {"message", "answer", "finding"}:
+        raise ValueError("A coordinator post can only be message, answer, or finding.")
     thread = await lock_thread(conn, thread_id)
+    provenance = {"via": "coordinator", "purpose": purpose, "episode_id": episode_id}
+    if sources:
+        provenance["sources"] = list(sources)
     row = await one(conn, """INSERT INTO board_posts
         (thread_id,actor,kind,text,provenance,source_ref,mentions,reply_to_post_id)
-        VALUES (%s,'illo','message',%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING *""",
-        (thread_id, text, Jsonb({"via": "coordinator", "purpose": purpose, "episode_id": episode_id}),
+        VALUES (%s,'illo',%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING *""",
+        (thread_id, kind, text, Jsonb(provenance),
          source_ref, list(dict(mentions)), reply_to_post_id))
     if not row:
         return None
@@ -922,7 +1002,7 @@ async def system_post(conn, thread_id, text, *, purpose, source_ref, episode_id,
         await conn.execute("""INSERT INTO board_mentions (thread_id,post_id,target,recipient_person_id)
             VALUES (%s,%s,%s,%s)""", (thread_id, row["id"], target, person_id))
     await conn.execute("UPDATE board_threads SET last_post_at=clock_timestamp() WHERE id=%s", (thread_id,))
-    if purpose == "headstart" and workspace:
+    if purpose in {"headstart", "answer"} and workspace:
         await enqueue_for_post(conn, workspace, thread=thread, post=row)
     return row
 

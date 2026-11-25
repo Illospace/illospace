@@ -1,4 +1,4 @@
-"""Schedule and apply one tool-free decision for a live board item."""
+"""Schedule and apply one Chief-of-Staff triage action for a live board item."""
 
 import asyncio
 import logging
@@ -13,7 +13,8 @@ from illo.brain.routes import resolve_route
 from illo.db import all_rows, one
 from illo.gateway.events import InboundEvent
 from illo.gateway.principal import resolve
-from illo.ledger import audit, board, people, sensors
+from illo.ledger import asks, audit, board, people, rules, sensors
+from illo.tools.registry import Refusal
 
 log = logging.getLogger(__name__)
 board_pages_ready = policy.board_pages_ready
@@ -82,7 +83,8 @@ async def _scan_thread(conn, thread, settle):
         ):
             continue
         now = datetime.now(UTC)
-        due = now if item["reason"] == "turn_cap" else (latest["at"] or now) + timedelta(seconds=settle)
+        immediate = item["reason"] in {"turn_cap", "decision_needed"}
+        due = now if immediate else (latest["at"] or now) + timedelta(seconds=settle)
         await conn.execute("""INSERT INTO board_episodes
             (thread_id,reason,post_id,mention_target,stalled_at,next_check_at,episode_seq)
             VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
@@ -132,6 +134,31 @@ async def _keep_lease(ctx, thread_id, lease):
                 return
 
 
+async def _stage0_rule(conn, workspace, episode):
+    """Stage 0 deterministic check: apply a matching standing rule before calling the model."""
+    if episode["reason"] != "decision_needed":
+        return False
+    author = await packet.asker_post(conn, episode)
+    if not author or not author.get("ask_id"):
+        return False
+    ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (author["ask_id"],))
+    if not ask or ask["state"] != "open" or not ask["allow_rule"]:
+        return False
+    rule = await rules.match_ask(conn, ask)
+    if not rule:
+        return False
+    answered = await asks.answer_with_rule(conn, ask["id"], rule["id"], allow_board=True)
+    if not answered:
+        return False
+    post_id = await board.record_decision(conn, answered, workspace=workspace)
+    await audit.write(
+        conn, principal="illo", tool="board_coordinate_rule", decision="allow", reason="rule",
+        args={"thread": episode["thread_id"], "episode": episode["id"], "ask_id": ask["id"],
+              "rule_id": rule["id"], "post_id": post_id},
+    )
+    return True
+
+
 async def _fallback_trigger(conn, cfg, episode):
     last = await one(conn, """SELECT state,origin FROM board_escalations
         WHERE episode_id=%s ORDER BY id DESC LIMIT 1""", (episode["id"],))
@@ -160,10 +187,19 @@ async def _fallback(conn, workspace, thread, episode, trigger):
     asker = (author or {}).get("provenance", {}).get("person_key")
     targets = [episode["mention_target"], task.get("holder"),
                f"person:{asker}", f"person:{workspace.config.default_owner}"]
-    owner = thread["effective_owner"]
-    if owner is not None:
-        person = await one(conn, "SELECT key FROM people WHERE id=%s", (owner,))
+    if episode["reason"] == "decision_needed" and author and author.get("ask_id"):
+        ask = await one(conn, "SELECT owner_person_id FROM asks WHERE id=%s", (author["ask_id"],))
+        owner_row = (await one(conn, "SELECT key FROM people WHERE id=%s", (ask["owner_person_id"],))
+                     if ask else None)
+        targets = [f"person:{owner_row['key']}"] if owner_row else []
+    elif thread["effective_owner"] is not None:
+        person = await one(conn, "SELECT key FROM people WHERE id=%s", (thread["effective_owner"],))
         targets = [f"person:{person['key']}"] if person else []
+    elif thread["visibility"] == "private":
+        ids = [thread["owner_person_id"], *thread.get("guest_person_ids", ())]
+        rows = await all_rows(conn, "SELECT id,key FROM people WHERE id=ANY(%s)", (ids,))
+        by_id = {r["id"]: r["key"] for r in rows}
+        targets = [f"person:{by_id[pid]}" for pid in dict.fromkeys(ids) if pid in by_id]
     if trigger != "second_failure":
         for target in dict.fromkeys(targets):
             if not target or not target.startswith("person:"):
@@ -211,6 +247,8 @@ async def _admit(ctx, thread_id, lease):
             (thread_id, list(episodes.ACTIVE)))
         if not episode:
             return None
+        if await _stage0_rule(conn, ctx.workspace, episode):
+            return None
         trigger = await _fallback_trigger(conn, cfg, episode)
         if trigger:
             if trigger != "defer":
@@ -246,8 +284,7 @@ async def _admit(ctx, thread_id, lease):
 
 async def authorized_packet(conn, ctx, event, authority):
     """Recheck the packet after the run queue grants capacity."""
-    if not board_pages_ready(ctx) or not (ctx.workspace.config.board.enabled
-                                          and ctx.workspace.config.board.coordinator.enabled):
+    if not (ctx.workspace.config.board.enabled and ctx.workspace.config.board.coordinator.enabled):
         return False
     run = await _run(conn, event)
     if not run or run["outcome"] != "running":
@@ -308,7 +345,8 @@ async def _headstart(conn, workspace, thread, episode, choice, target):
     minutes = packet.age_minutes(now, target["last_used_at"])
     was_active = minutes is not None and minutes <= workspace.config.board.coordinator.presence_minutes
     start = f" you were active {minutes} minutes ago. Can" if was_active else " can"
-    text = (f"{label}:{start} you answer post #{episode['post_id']} from {asker}? "
+    note = (" " + " ".join(choice.note.split())[:300]) if getattr(choice, "note", "") else ""
+    text = (f"{label}:{start} you answer post #{episode['post_id']} from {asker}?{note} "
             f"If no one answers by {due:%H:%M} UTC, I ask a person.")
     await board.system_post(conn, thread["id"], text, mentions=[(choice.target, target["id"])],
                             purpose="headstart", source_ref=f"coord:{episode['id']}:headstart",
@@ -318,55 +356,223 @@ async def _headstart(conn, workspace, thread, episode, choice, target):
         (choice.target, due, due, episode["id"]))
 
 
-async def _action(conn, workspace, thread, episode, run, choice):
-    person = target = None
-    if choice.escalate:
-        person = await people.get(conn, choice.escalate.person[7:])
-        if not await acl.recipient_ok(conn, thread, person):
-            return "stale", "recipient"
-        if choice.escalate.text and not workspace.config.board.coordinator.slack_summaries:
-            return "stale", "content_policy"
-    if choice.headstart:
-        target = await acl.target_ok(conn, workspace, thread, choice.headstart.target,
-                                     await packet.asker_post(conn, episode))
-        cfg = workspace.config.board.coordinator
-        if not target or not (packet.wakeable(workspace, choice.headstart.target) or
-                              (target["last_used_at"] and target["last_used_at"] >=
-                               datetime.now(UTC) - timedelta(minutes=cfg.presence_minutes))):
-            return "stale", "target"
-    if choice.group_key:
+async def _apply_group(conn, thread, run, group_key, group_clear):
+    try:
+        clean_key = decision.clean_group_key(group_key, group_clear)
+    except decision.InvalidDecision:
+        raise Refusal("group_key must be 2 to 48 lowercase letters, digits, or hyphens, and cannot be combined with group_clear.") from None
+    if clean_key:
         await policy.lock_budget(conn)
         groups = await packet.group_counts(conn, thread)
-        offered = choice.group_key in run["snapshot"]["groups"] and any(
-            g["key"] == choice.group_key for g in groups)
+        offered = clean_key in run["snapshot"]["groups"] and any(g["key"] == clean_key for g in groups)
         if not offered and sum(g["open_threads"] > 0 for g in groups) >= 50:
-            return "invalid", "group_limit"
-    if choice.escalate:
-        error = await policy.reserve(conn, workspace, thread, episode, person, choice=choice.escalate,
-                                     run_id=run["id"])
-        if error:
-            return "invalid", error
-    elif choice.headstart:
-        await _headstart(conn, workspace, thread, episode, choice.headstart, target)
-    else:
+            raise Refusal("The board already has 50 open groups. Reuse an existing group_key or omit it.")
+    if group_clear or clean_key:
+        await conn.execute("UPDATE board_threads SET group_key=%s WHERE id=%s", (clean_key, thread["id"]))
+
+
+async def _reschedule_budget(conn, workspace, thread, episode):
+    cfg = workspace.config.board.coordinator
+    now = datetime.now(UTC)
+    cooldown_until = (
+        thread["escalated_at"] + timedelta(minutes=cfg.thread_cooldown_minutes)
+        if thread["escalated_at"]
+        else None
+    )
+    resume_at = (
+        cooldown_until
+        if cooldown_until and cooldown_until > now
+        else now + timedelta(minutes=60)
+    )
+    await conn.execute(
+        "UPDATE board_episodes SET version=version+1,next_check_at=%s WHERE id=%s",
+        (resume_at, episode["id"]),
+    )
+
+
+async def apply_tool_action(conn, ctx, run_row, action, args):
+    """Validate and commit one Chief-of-Staff tool action inside the brain tool transaction."""
+    coord_run = await one(conn, "SELECT * FROM board_coordinator_runs WHERE run_id=%s", (run_row["id"],))
+    if not coord_run:
+        raise Refusal("This tool can only be used during a board triage run.")
+    if coord_run["outcome"] != "running":
+        raise Refusal("An action was already recorded for this board item. Finish without calling another action tool.")
+    thread = await board.lock_thread(conn, coord_run["thread_id"])
+    if not _leased(thread, coord_run["lease_id"]):
+        await _finish(conn, coord_run, "stale", "lease")
+        return {"status": "stale", "reason": "lease", "message": "The triage lease expired. Stop and finish."}
+    await board.lock_children(conn, thread["id"])
+    episode = await one(conn, "SELECT * FROM board_episodes WHERE id=%s", (coord_run["episode_id"],))
+    snapshot = coord_run["snapshot"]
+    live = await acl.thread_ok(conn, thread["id"], snapshot["acl"])
+    if (not live
+            or episode["state"] not in episodes.ACTIVE
+            or episode["version"] != snapshot["version"]
+            or not (ctx.workspace.config.board.enabled and ctx.workspace.config.board.coordinator.enabled)):
+        await _finish(conn, coord_run, "stale", "snapshot")
+        return {"status": "stale", "reason": "snapshot",
+                "message": "This board item changed while you were reviewing it. Stop and finish."}
+    if not await episodes.is_pending(conn, episode):
+        await episodes.close_items(conn, thread, reason="no_longer_pending")
+        await _finish(conn, coord_run, "stale", "no_longer_pending")
+        return {"status": "stale", "reason": "no_longer_pending",
+                "message": "This board item is no longer pending. Stop and finish."}
+
+    group_key = args.get("group_key")
+    group_clear = bool(args.get("group_clear", False))
+
+    if action == "answer":
+        if episode["reason"] == "decision_needed":
+            raise Refusal("A decision_needed item requires a person or a standing rule. Use need_ask_person instead.")
+        if episode["reason"] == "turn_cap":
+            raise Refusal("A turn_cap stall requires a person to continue. Use need_ask_person instead.")
+        answer_text = args["answer"].strip()
+        if not 1 <= len(answer_text) <= 4000 or "\x00" in answer_text:
+            raise Refusal("Provide an answer between 1 and 4,000 characters.")
+        sources = [" ".join(str(s).split())[:200] for s in args.get("sources", []) if str(s).strip()][:10]
+        if not sources:
+            raise Refusal("Cite at least one verified source you read during this run.")
+        await _apply_group(conn, live, coord_run, group_key, group_clear)
+        post = await board.system_post(
+            conn, thread["id"], answer_text, kind="answer", purpose="answer",
+            episode_id=episode["id"], source_ref=f"coord:{episode['id']}:answer:{coord_run['id']}",
+            workspace=ctx.workspace, reply_to_post_id=episode["post_id"], sources=sources,
+        )
+        await episodes.close_items(conn, thread, reason="answered", post_id=post["id"])
+        await audit.write(
+            conn, principal="illo", tool="board_coordinate", decision="allow", reason="answer",
+            args={"thread": thread["id"], "episode": episode["id"], "action": "answer",
+                  "post_id": post["id"], "sources": sources},
+        )
+        await _finish(conn, coord_run, "applied", None, "answer")
+        return {"status": "answered", "thread_id": thread["id"], "post_id": post["id"]}
+
+    if action == "route":
+        allowed = snapshot["allowed"]
+        if episode["reason"] in {"decision_needed", "turn_cap"} or not allowed.get("headstart"):
+            raise Refusal("Routing to another agent is not allowed for this item. Use need_ask_person or need_wait.")
+        target_key = args["target"]
+        minutes = args["minutes"]
+        if target_key not in snapshot["targets"] or minutes > allowed["max_headstart_minutes"]:
+            raise Refusal("Target agent is not an eligible online/wakeable candidate or minutes exceeds the limit.")
+        target = await acl.target_ok(conn, ctx.workspace, live, target_key, await packet.asker_post(conn, episode))
+        cfg = ctx.workspace.config.board.coordinator
+        if not target or not (packet.wakeable(ctx.workspace, target_key) or
+                              (target["last_used_at"] and target["last_used_at"] >=
+                               datetime.now(UTC) - timedelta(minutes=cfg.presence_minutes))):
+            raise Refusal("Target agent is no longer eligible. Use need_ask_person or need_wait.")
+        await _apply_group(conn, live, coord_run, group_key, group_clear)
+        await _headstart(conn, ctx.workspace, live, episode,
+                         decision.Headstart(target=target_key, minutes=minutes, note=args.get("note", "")),
+                         target)
+        await audit.write(
+            conn, principal="illo", tool="board_coordinate", decision="allow", reason="route",
+            args={"thread": thread["id"], "episode": episode["id"], "action": "route", "target": target_key},
+        )
+        await _finish(conn, coord_run, "applied", None, "route")
+        return {"status": "routed", "thread_id": thread["id"], "target": target_key, "minutes": minutes}
+
+    if action == "ask_person":
+        person_target = args["person"]
+        fmt = args["format"]
+        if person_target not in snapshot["candidates"]:
+            raise Refusal("Recipient is not an allowed candidate for this thread.")
+        if fmt not in snapshot["allowed"]["formats"]:
+            raise Refusal(f"Format {fmt!r} is not allowed for this item. Allowed: {snapshot['allowed']['formats']}.")
+        person = await people.get(conn, person_target[7:])
+        if not await acl.recipient_ok(conn, live, person):
+            await _finish(conn, coord_run, "stale", "recipient")
+            return {"status": "stale", "reason": "recipient",
+                    "message": "Recipient can no longer receive this escalation. Stop and finish."}
+        summary = decision.clean_summary(args.get("summary", ""), 1800, escaped_limit=2000)
+        if episode["reason"] == "decision_needed":
+            if not summary:
+                raise Refusal("Provide a clear human-readable summary explaining the context and trade-offs.")
+            ask_id = snapshot.get("decision_ask_id")
+            ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (ask_id,)) if ask_id else None
+            if not ask or ask["state"] != "open" or ask["owner_person_id"] != person["id"]:
+                await _finish(conn, coord_run, "stale", "no_longer_pending")
+                return {"status": "stale", "reason": "no_longer_pending",
+                        "message": "The underlying decision is no longer open for this person. Stop and finish."}
+            raw_opts = ask["options"]
+            rec_index = args.get("recommended")
+            if rec_index is not None:
+                if not 0 <= rec_index < len(raw_opts):
+                    raise Refusal(f"recommended index {rec_index} is out of range for {len(raw_opts)} options.")
+                recommended_id = raw_opts[rec_index]["id"]
+            else:
+                recommended_id = ask["recommended_option"]
+            esc = decision.Escalate(
+                person=person_target,
+                format="card",
+                text=summary,
+                question=ask["question"],
+                options=[decision.Option(id=o["id"], label=o["label"], detail=o.get("detail", "")) for o in raw_opts],
+                recommended=None,
+                recommended_id=recommended_id,
+                source_ask_id=ask["id"],
+                allow_rule=bool(ask["allow_rule"]),
+            )
+        else:
+            if fmt != "link" and not summary:
+                raise Refusal("Provide a clear human-readable summary explaining what is needed and why.")
+            if fmt == "card":
+                question = decision.clean_slack(args.get("question", ""), 150)
+                opts = []
+                for raw in args.get("options", []):
+                    opts.append(decision.Option(
+                        label=decision.clean_slack(raw["label"], 40),
+                        detail=decision.clean_slack(raw.get("detail", ""), 80),
+                    ))
+                labels = {o.label.casefold() for o in opts}
+                if not question or not 2 <= len(opts) <= 4 or "" in labels or len(labels) != len(opts):
+                    raise Refusal("A card requires a question and 2 to 4 options with distinct non-empty labels.")
+                rec = args.get("recommended")
+                if rec is not None and not 0 <= rec < len(opts):
+                    raise Refusal("recommended index is out of range.")
+                esc = decision.Escalate(person=person_target, format="card", text=summary,
+                                        question=question, options=opts, recommended=rec)
+            else:
+                esc = decision.Escalate(person=person_target, format=fmt, text=summary)
+        await _apply_group(conn, live, coord_run, group_key, group_clear)
+        err = await policy.reserve(conn, ctx.workspace, live, episode, person, choice=esc, run_id=coord_run["id"])
+        if err == "budget":
+            await _reschedule_budget(conn, ctx.workspace, thread, episode)
+            await _finish(conn, coord_run, "invalid", "budget", "ask_person")
+            return {"status": "deferred", "reason": "budget", "person": person_target}
+        if err:
+            raise Refusal(f"Could not queue escalation: {err}")
+        await audit.write(
+            conn, principal="illo", tool="board_coordinate", decision="allow", reason="ask_person",
+            args={"thread": thread["id"], "episode": episode["id"], "action": "ask_person",
+                  "format": fmt, "person": person_target},
+        )
+        await _finish(conn, coord_run, "applied", None, "ask_person")
+        return {"status": "queued", "thread_id": thread["id"], "person": person_target, "format": fmt}
+
+    if action == "wait":
+        minutes = args.get("recheck_minutes", 30)
+        await _apply_group(conn, live, coord_run, group_key, group_clear)
         await conn.execute("""UPDATE board_episodes SET state='waiting',waits=waits+1,
             next_check_at=clock_timestamp()+make_interval(mins=>%s),version=version+1 WHERE id=%s""",
-            (60 if choice.action == "nothing" else choice.recheck_minutes or 30, episode["id"]))
-    if choice.group_clear or choice.group_key:
-        await conn.execute("UPDATE board_threads SET group_key=%s WHERE id=%s",
-                           (choice.group_key, thread["id"]))
-    await audit.write(conn, principal="illo", tool="board_coordinate", decision="allow", reason=choice.action,
-                      args={"thread": thread["id"], "episode": episode["id"], "action": choice.action,
-                            "format": choice.escalate.format if choice.escalate else None,
-                            "person": choice.escalate.person if choice.escalate else None,
-                            "target": choice.headstart.target if choice.headstart else None})
-    return "applied", None
+            (minutes, episode["id"]))
+        await audit.write(
+            conn, principal="illo", tool="board_coordinate", decision="allow", reason="wait",
+            args={"thread": thread["id"], "episode": episode["id"], "action": "wait", "minutes": minutes},
+        )
+        await _finish(conn, coord_run, "applied", None, "wait")
+        return {"status": "waiting", "thread_id": thread["id"], "recheck_minutes": minutes}
+
+    raise Refusal(f"Unknown triage action: {action}")
 
 
 async def apply(ctx, event, text=None, *, error=None):
     async with ctx.pool.connection() as conn:
         run = await _run(conn, event)
-        if not run or run["outcome"] != "running":
+        if not run:
+            return
+        if run["outcome"] != "running":
+            await _release(conn, run["thread_id"], run["lease_id"])
             return
         thread = await board.lock_thread(conn, run["thread_id"])
         if not _leased(thread, run["lease_id"]):
@@ -375,10 +581,9 @@ async def apply(ctx, event, text=None, *, error=None):
         await board.lock_children(conn, thread["id"])
         episode = await one(conn, "SELECT * FROM board_episodes WHERE id=%s", (run["episode_id"],))
         live = await acl.thread_ok(conn, thread["id"], run["snapshot"]["acl"])
-        choice = None
         if (not live
                 or episode["state"] not in episodes.ACTIVE or episode["version"] != run["snapshot"]["version"]
-                or not board_pages_ready(ctx) or not ctx.workspace.config.board.coordinator.enabled):
+                or not (ctx.workspace.config.board.enabled and ctx.workspace.config.board.coordinator.enabled)):
             outcome, code = "stale", "snapshot"
         elif not await episodes.is_pending(conn, episode):
             await episodes.close_items(conn, thread, reason="no_longer_pending")
@@ -388,34 +593,14 @@ async def apply(ctx, event, text=None, *, error=None):
         elif error:
             outcome, code = "failed", error if error in {"provider", "timeout"} else "error"
         else:
-            try:
-                choice = decision.parse(text, run["snapshot"])
-            except decision.InvalidDecision as exc:
-                outcome, code = "invalid", str(exc)
-            else:
-                outcome, code = await _action(conn, ctx.workspace, live, episode, run, choice)
-        if outcome == "invalid" and code == "budget":
-            cfg = ctx.workspace.config.board.coordinator
-            now = datetime.now(UTC)
-            cooldown_until = (
-                thread["escalated_at"] + timedelta(minutes=cfg.thread_cooldown_minutes)
-                if thread["escalated_at"]
-                else None
-            )
-            resume_at = (
-                cooldown_until
-                if cooldown_until and cooldown_until > now
-                else now + timedelta(minutes=60)
-            )
-            await conn.execute(
-                "UPDATE board_episodes SET version=version+1,next_check_at=%s WHERE id=%s",
-                (resume_at, episode["id"]),
-            )
-        elif outcome in {"failed", "invalid"}:
-            await conn.execute("""UPDATE board_episodes SET errors=errors+1,waits=0,version=version+1,
-                next_check_at=clock_timestamp()+interval '10 minutes' WHERE id=%s""", (episode["id"],))
+            outcome, code = "invalid", "no_action"
+        if outcome in {"failed", "invalid"}:
+            next_errors = episode["errors"] + 1
+            delay = timedelta(0) if next_errors >= 2 else timedelta(minutes=10)
+            await conn.execute("""UPDATE board_episodes SET errors=%s,waits=0,version=version+1,
+                next_check_at=clock_timestamp()+%s WHERE id=%s""", (next_errors, delay, episode["id"]))
             await sensors.error(conn, "board:coordinator", "The board coordinator could not apply a decision.")
-        await _finish(conn, run, outcome, code, choice.action if choice else None)
+        await _finish(conn, run, outcome, code, None)
         await _release(conn, thread["id"], run["lease_id"])
 
 

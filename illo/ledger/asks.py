@@ -147,7 +147,7 @@ async def answer(
     )
 
 
-async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict | None:
+async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int, *, allow_board: bool = False) -> dict | None:
     """Use only a matching owner rule and an option the agent proposed."""
     async with conn.transaction():
         ask = await one(
@@ -155,7 +155,7 @@ async def answer_with_rule(conn: Connection, ask_id: int, rule_id: int) -> dict 
             "SELECT * FROM asks WHERE id=%s AND state='open' AND (expires_at IS NULL OR expires_at>now()) FOR UPDATE",
             (ask_id,),
         )
-        if await is_board_ask(conn, ask):
+        if not allow_board and await is_board_ask(conn, ask):
             return None
         rule = await one(
             conn, "SELECT * FROM rules WHERE id=%s AND removed_at IS NULL FOR UPDATE", (rule_id,)

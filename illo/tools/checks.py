@@ -50,10 +50,8 @@ INTERNAL_TOOLS = frozenset(
         "email_draft",
     }
 )
-BOARD_DENY = "A board coordinator run has no tools."
-
 GRANT_PROFILES = {
-    "board_coordinator": frozenset(),
+    "board_coordinator": (READ_TOOLS - {"web_read_public_page"}) | {"slack_read_thread"},
     "person_dm": (READ_TOOLS | TICKET_TOOLS | PERSONAL_TOOLS | INTERNAL_TOOLS) - {"notes_propose"},
     "team_channel": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_read_thread", "note_save", "list_save", "note_forget"},
     "tainted": frozenset({
@@ -97,8 +95,6 @@ def in_grant(run: dict, tool) -> bool:
 
     A tool family states `profiles` on its own tools, so two builders never edit one list.
     """
-    if effective_profile(run) == "board_coordinator":
-        return False
     if run.get("deep_kind"):
         if tool.name == "page_write" and run["deep_kind"] == "check":
             return True
@@ -131,8 +127,6 @@ def in_grant(run: dict, tool) -> bool:
 
 def scope(run: dict, tool) -> Decision:
     """Check 1: a registered tool must be in the run grant."""
-    if effective_profile(run) == "board_coordinator":
-        return Decision("deny", BOARD_DENY)
     deep = run.get("deep_kind")
     if tool.name in {"web_fetch", "web_read_public_page"} and run.get("customer_read"):
         return Decision("deny", "This run read customer data. The web is closed for this run.")

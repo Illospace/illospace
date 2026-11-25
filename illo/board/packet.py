@@ -35,9 +35,16 @@ def age_minutes(now, at):
     return max(0, int((now - at).total_seconds() / 60)) if at else None
 
 
-def _people_keys(workspace, thread, author, people):
+def _people_keys(workspace, thread, author, people, *, decision_owner_id=None):
+    if decision_owner_id is not None:
+        return [p["key"] for p in people.values() if p["id"] == decision_owner_id]
     if thread["effective_owner"] is not None:
         return [p["key"] for p in people.values() if p["id"] == thread["effective_owner"]]
+    if thread["visibility"] == "private":
+        allowed_ids = {thread["owner_person_id"], *thread.get("guest_person_ids", ())}
+        ordered = [thread["owner_person_id"], *thread.get("guest_person_ids", ())]
+        by_id = {p["id"]: p["key"] for p in people.values() if p["id"] in allowed_ids}
+        return [by_id[pid] for pid in dict.fromkeys(ordered) if pid in by_id]
     task = thread["task"] or {}
     owners = {f"agent:{a.key}": f"person:{a.owner}" for a in workspace.agents}
     author = author or {}
@@ -77,11 +84,11 @@ async def _agents(conn, workspace, thread, person, author, now, posted):
     return result[:5]
 
 
-async def _candidates(conn, workspace, thread, author, people, posts, now):
+async def _candidates(conn, workspace, thread, author, people, posts, now, *, decision_owner_id=None):
     posted = {p["actor"] if p["provenance"].get("agent_key")
               else "person:" + p["provenance"].get("person_key", "") for p in posts if not p["is_human"]}
     result = []
-    for key in _people_keys(workspace, thread, author, people):
+    for key in _people_keys(workspace, thread, author, people, decision_owner_id=decision_owner_id):
         person = people.get(key)
         if not await acl.recipient_ok(conn, thread, person):
             continue
@@ -103,14 +110,17 @@ def has_picture(post):
 
 def _encode(packet, limit):
     def encode():
-        return "Decide the next step for this board item.\n" + data_text(
+        return "Triage this board item and call one action tool.\n" + data_text(
             "board-thread", json.dumps(packet, ensure_ascii=True, separators=(",", ":")))
 
     text = encode()
     pending_id = packet["pending"][0]["post_id"]
     while len(text) > limit and packet["posts"]:
         if len(packet["posts"]) == 1 and packet["posts"][0]["id"] == pending_id:
-            packet["posts"][0]["text"] = ""
+            excess = len(text) - limit
+            current = packet["posts"][0]["text"]
+            packet["posts"][0]["text"] = current[: max(0, len(current) - excess - 16)] if current else ""
+            text = encode()
             break
         index = int(packet["posts"][0]["id"] == pending_id)
         packet["posts"].pop(index)
@@ -127,46 +137,76 @@ async def build(conn, workspace, thread, episode):
     now = datetime.now(UTC)
     cfg = workspace.config.board.coordinator
     author = await asker_post(conn, episode)
+    decision_ask = None
+    if episode["reason"] == "decision_needed" and author and author.get("ask_id"):
+        decision_ask = await one(conn, "SELECT * FROM asks WHERE id=%s", (author["ask_id"],))
     posts = await all_rows(conn, """SELECT * FROM (
         (SELECT * FROM board_posts WHERE thread_id=%s ORDER BY id DESC LIMIT 12)
         UNION SELECT * FROM board_posts WHERE id=%s
         ) p ORDER BY id""", (thread["id"], episode["post_id"]))
     people = {p["key"]: p for p in await all_rows(conn, "SELECT * FROM people ORDER BY key")}
-    candidates = await _candidates(conn, workspace, thread, author, people, posts, now)
-    notice = (not cfg.slack_summaries or any(has_picture(p) for p in posts[-12:]) or
-              any(b["kind"] == "preview" for b in (author or {}).get("blocks", [])))
-    allowed = {"formats": ["link"] if notice else ["dm", "card", "link"],
-               "headstart": episode["reason"] != "turn_cap" and not episode["headstart_target"]
-               and any(a["online"] or a["wakeable"] for c in candidates for a in c["agents"]),
-               "max_headstart_minutes": cfg.max_headstart_minutes}
+    by_id = {p["id"]: p for p in people.values()}
+    decision_owner_id = decision_ask["owner_person_id"] if decision_ask else None
+    candidates = await _candidates(conn, workspace, thread, author, people, posts, now,
+                                   decision_owner_id=decision_owner_id)
+    is_decision = episode["reason"] == "decision_needed"
+    is_turn_cap = episode["reason"] == "turn_cap"
+    allowed = {
+        "formats": ["card"] if is_decision else ["dm", "card", "link"],
+        "answer": not is_decision and not is_turn_cap,
+        "headstart": (not is_decision and not is_turn_cap and not episode["headstart_target"]
+                      and any(a["online"] or a["wakeable"] for c in candidates for a in c["agents"])),
+        "max_headstart_minutes": cfg.max_headstart_minutes,
+    }
     groups = (await group_counts(conn, thread))[:30]
     task = thread["task"]
     n = await one(conn, "SELECT count(*) AS n,max(id) AS last FROM board_posts WHERE thread_id=%s",
                   (thread["id"],))
+    pending_entry = {
+        "item": episode["id"], "reason": episode["reason"], "post_id": episode["post_id"],
+        "age_minutes": age_minutes(now, episode["stalled_at"] or (author or {}).get("at")),
+        "from": actor_label(workspace, people, author).name[:100] if author else "Agent",
+        "mentions": (author or {}).get("mentions", []), "attempt": episode["attempts"] + 1,
+        "state": episode["state"],
+    }
+    if decision_ask:
+        owner = by_id.get(decision_ask["owner_person_id"])
+        pending_entry["decision"] = {
+            "ask_id": decision_ask["id"],
+            "owner": f"person:{owner['key']}" if owner else None,
+            "question": decision_ask["question"],
+            "options": decision_ask["options"],
+            "recommended": decision_ask["recommended_option"],
+            "allow_rule": bool(decision_ask["allow_rule"]),
+        }
     packet = {
         "now_utc": now.isoformat(),
         "thread": {**{key: thread[key] for key in ("id", "title", "state", "stalled_reason")},
-                   "visibility": "private" if thread["effective_owner"] is not None else "team",
+                   "visibility": "private" if thread["visibility"] == "private" else "team",
                    "group_key": thread["group_key"], "posts_total": n["n"],
                    "task": {"id": task["id"], "title": task["title"][:200]} if task else None,
                    "ticket": (thread["ticket_url"] or "").removeprefix("https://github.com/").replace("/issues/", "#"),
                    "headstart_tried": [episode["headstart_target"]] if episode["headstart_target"] else []},
-        "pending": [{"item": episode["id"], "reason": episode["reason"], "post_id": episode["post_id"],
-                     "age_minutes": age_minutes(now, episode["stalled_at"] or (author or {}).get("at")),
-                     "from": actor_label(workspace, people, author).name[:100] if author else "Agent",
-                     "mentions": (author or {}).get("mentions", []), "attempt": episode["attempts"] + 1,
-                     "state": episode["state"]}],
+        "pending": [pending_entry],
         "posts": [{"id": p["id"], "from": label.name[:100], "from_kind": label.kind,
                    "kind": p["kind"], "reply_to": p["reply_to_post_id"],
-                   "age_minutes": age_minutes(now, p["at"]), "text": p["text"][:600],
-                   "has_pictures": has_picture(p)}
+                   "age_minutes": age_minutes(now, p["at"]), "text": p["text"][:1200],
+                   "has_pictures": has_picture(p),
+                   **({"decision_spec": p["decision_spec"]} if p.get("decision_spec") else {})}
                   for p in posts for label in (actor_label(workspace, people, p),)],
         "candidates": candidates, "allowed": allowed, "groups": groups,
     }
     text = _encode(packet, min(12000, workspace.config.run_limits.max_message_chars))
     targets = {a["target"]: {k: a[k] for k in ("online", "wakeable", "last_seen_minutes")}
                for c in candidates for a in c["agents"] if a["online"] or a["wakeable"]}
-    return text, {"acl": acl.scope(thread), "episode_id": episode["id"], "version": episode["version"],
-                  "reason": episode["reason"], "candidates": [c["target"] for c in candidates],
-                  "targets": targets, "allowed": allowed, "groups": [g["key"] for g in groups],
-                  "max_post_id": n["last"]}
+    snapshot = {
+        "acl": acl.scope(thread), "episode_id": episode["id"], "version": episode["version"],
+        "reason": episode["reason"], "candidates": [c["target"] for c in candidates],
+        "targets": targets, "allowed": allowed, "groups": [g["key"] for g in groups],
+        "max_post_id": n["last"],
+    }
+    if decision_ask:
+        owner = by_id.get(decision_ask["owner_person_id"])
+        snapshot["decision_ask_id"] = decision_ask["id"]
+        snapshot["decision_owner"] = f"person:{owner['key']}" if owner else None
+    return text, snapshot

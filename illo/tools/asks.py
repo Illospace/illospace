@@ -14,7 +14,7 @@ from illo.tools._format import Compact, ask, body, data_text, json_text, rows
 from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Tool
 
-READ_PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request"})
+READ_PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request", "board_coordinator"})
 PERSON_PROFILES = frozenset({"person_dm"})
 RULE_PROFILES = frozenset({"person_dm", "agent_request"})
 

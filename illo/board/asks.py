@@ -22,7 +22,15 @@ async def on_answer(conn, answered, *, workspace) -> int | None:
     from illo.board.decision import unescape_slack
 
     escalation = await one(conn, "SELECT * FROM board_escalations WHERE ask_id=%s", (answered["id"],))
-    if not escalation or escalation["answer_post_id"] or answered["answered_via"] != "person":
+    if not escalation or escalation["answer_post_id"]:
+        return None
+    if escalation["reason"] == "decision_needed":
+        post_id = await board.record_decision(conn, answered, workspace=workspace)
+        if post_id is not None:
+            await episodes.close_escalation(conn, escalation, "other_answer",
+                                            person_id=answered.get("answered_by_person_id"), post_id=post_id)
+        return post_id
+    if answered["answered_via"] != "person":
         return None
     if not await can_answer(conn, answered, answered["answered_by_person_id"]):
         return None

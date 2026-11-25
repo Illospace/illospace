@@ -388,21 +388,21 @@ class MemoryConfig(Model):
 class BoardCoordinatorConfig(Model):
     model_config = ConfigDict(extra="allow")
 
-    enabled: bool = False
-    tick_seconds: int = Field(default=30, ge=10, le=300)
-    send_tick_seconds: int = Field(default=10, ge=5, le=120)
-    settle_seconds: int = Field(default=120, ge=0, le=3600)
+    enabled: bool = True
+    tick_seconds: int = Field(default=10, ge=5, le=300)
+    send_tick_seconds: int = Field(default=5, ge=2, le=120)
+    settle_seconds: int = Field(default=30, ge=0, le=3600)
     presence_minutes: int = Field(default=15, ge=1, le=240)
     max_headstart_minutes: int = Field(default=60, ge=5, le=240)
-    max_runs_per_hour: int = Field(default=20, ge=1, le=500)
-    max_runs_per_thread_per_day: int = Field(default=6, ge=1, le=50)
+    max_runs_per_hour: int = Field(default=60, ge=1, le=500)
+    max_runs_per_thread_per_day: int = Field(default=20, ge=1, le=50)
     max_attempts_per_episode: int = Field(default=4, ge=1, le=10)
-    max_escalations_per_person_per_day: int = Field(default=8, ge=1, le=100)
+    max_escalations_per_person_per_day: int = Field(default=20, ge=1, le=100)
     thread_cooldown_minutes: int = Field(default=240, ge=0, le=10080)
     escalation_timeout_hours: int = Field(default=24, ge=1, le=168)
     stall_fallback_minutes: int = Field(default=30, ge=5, le=1440)
     quiet_hours: bool = True
-    slack_summaries: bool = False
+    slack_summaries: bool = True
 
 
 class BoardConfig(Model):

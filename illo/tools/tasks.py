@@ -14,7 +14,7 @@ from illo.tools.registry import Arguments, Refusal, Tool
 
 _HAND_LINKS = "links" in inspect.signature(ledger.hand).parameters
 
-READ = frozenset({"person_dm", "team_channel", "routine", "agent_request"})
+READ = frozenset({"person_dm", "team_channel", "routine", "agent_request", "board_coordinator"})
 WRITE = frozenset({"person_dm", "team_channel"})
 CAPTURE = WRITE | {"agent_request"}
 

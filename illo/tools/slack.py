@@ -183,6 +183,6 @@ def register(registry: Registry) -> None:
             read_handler,
             "Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.",
             ReadThread,
-            profiles=frozenset({"person_dm", "team_channel"}),
+            profiles=frozenset({"person_dm", "team_channel", "board_coordinator"}),
         )
     )

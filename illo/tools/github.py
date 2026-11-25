@@ -291,9 +291,11 @@ def register(registry) -> None:
                 description=DESCRIPTIONS[name],
                 arguments=model,
                 profiles=(
-                    PROFILES
-                    if name in {"github_search_issues", "github_get_issue", "github_create_issue"}
-                    else PROFILES - {"tainted"}
+                    (PROFILES | {"board_coordinator"})
+                    if name in {"github_search_issues", "github_get_issue"}
+                    else PROFILES
+                    if name == "github_create_issue"
+                    else (PROFILES - {"tainted"}) | ({"board_coordinator"} if risk == "read" else set())
                 ),
                 preflight=write_preflight if risk != "read" else None,
             )
