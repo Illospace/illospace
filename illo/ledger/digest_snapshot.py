@@ -274,6 +274,7 @@ async def team_snapshot(conn, workspace, now):
                 entry.update(oldest_hours=item["age_hours"], oldest=oldest)
         facts = []
         check_text = None
+        stuck_at = None
         for event in r["period"]:
             if event["kind"] == "wake_failed" and event["data"].get("final"):
                 fact = "the wake failed: " + event["text"]
@@ -284,17 +285,22 @@ async def team_snapshot(conn, workspace, now):
                     check_text = event["text"][:600]
                 continue
             facts.append(check_text if check_text is not None else fact)
+            stuck_at = event["at"]
             break
         if not row["holder"]:
             unheld = next((e["at"] for e in reversed(r["events"])
                            if e["kind"] == "handed" and not e["data"].get("holder")), row["created_at"])
             if now - unheld > timedelta(hours=24):
                 facts.append("no holder for more than 24 hours")
+                became_stuck = unheld + timedelta(hours=24)
+                stuck_at = max(stuck_at, became_stuck) if stuck_at else became_stuck
         if row["due_at"] and row["due_at"] < now:
             facts.append("past the due time")
+            stuck_at = max(stuck_at, row["due_at"]) if stuck_at else row["due_at"]
         if facts:
             stuck.append({k: item[k] for k in ("id", "title", "link")} | {
-                "fact": "; ".join(facts), "action_by": names.get(target or r["reviewer"], "the list reviewer")})
+                "fact": "; ".join(facts), "action_by": names.get(target or r["reviewer"], "the list reviewer"),
+                "new": bool(stuck_at and stuck_at > since)})
         agents += (row["holder"] or "").startswith("agent:")
         people_count += (row["holder"] or "").startswith("person:")
     return {"team": workspace.config.team_name, "finished_total": len(finished),
