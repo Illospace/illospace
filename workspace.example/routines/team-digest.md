@@ -7,6 +7,7 @@ Use these parts in this order. Omit an empty part.
   Example of the shape: "#12, Ada: test the export on staging and report the result. The agent cannot sign in."
 - Still waiting: one line. Give each person's count from `waiting`, the oldest wait, and the action of the oldest task. Do not list these tasks again.
 - In work: one line.
+- If `handled_without_you` is greater than 0, add one short audit line: "Handled without you: N."
 
 Before you write a line in "New", read the task, its ticket, and the live state with your read tools. A task in the snapshot can be done by now.
 Do not ask a person to check a fact that your tools can read. Read it, and give the result.

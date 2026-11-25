@@ -67,6 +67,7 @@ async def test_schedule_slot_dedupe(app):
 async def test_save_delivery_links_buttons_and_scope(app, fake_brain, slack_client, personal):
     ctx = app.state.ctx
     ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.config.board.coordinator.enabled = False
     ctx.workspace.config.scout.destination = "C_ACME_TEAM"
     row = await finding(ctx, fake_brain, personal=personal)
     assert row["state"] == "sent" and row["scope"] == ("person" if personal else "team")
@@ -90,6 +91,8 @@ async def test_save_delivery_links_buttons_and_scope(app, fake_brain, slack_clie
 @pytest.mark.parametrize("choice", ["task", "dismiss"])
 async def test_buttons(app, fake_brain, slack_client, choice):
     ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.config.board.coordinator.enabled = False
     row = await finding(ctx, fake_brain)
     async with ctx.pool.connection() as conn:
         person = await one(conn, "SELECT * FROM people WHERE key='ben'")
@@ -126,6 +129,8 @@ async def test_buttons(app, fake_brain, slack_client, choice):
 
 async def test_expiry_and_private_button_owner(app, fake_brain, slack_client):
     ctx = app.state.ctx
+    ctx.workspace = ctx.workspace.model_copy(deep=True)
+    ctx.workspace.config.board.coordinator.enabled = False
     row = await finding(ctx, fake_brain, personal=True)
     async with ctx.pool.connection() as conn:
         ben = await one(conn, "SELECT * FROM people WHERE key='ben'")

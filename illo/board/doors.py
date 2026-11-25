@@ -336,3 +336,120 @@ async def close_board_for_ask(conn, ask_id: int, *, reason: str = "no_longer_pen
     thread = await board.lock_thread(conn, thread_id)
     if thread:
         await close_items(conn, thread, reason=reason)
+
+
+SCOUT_OPTIONS = [
+    {"id": "task", "label": "Make a task"},
+    {"id": "dismiss", "label": "Not useful"},
+]
+
+
+async def attach_scout_finding_to_board(conn, workspace, row: dict) -> dict | None:
+    """Route a scout finding into the single Chief-of-Staff board pipeline."""
+    from illo.ledger import asks
+
+    if not coordinator_active(workspace):
+        return None
+    source_ref = f"board:scout:{row['id']}"
+    existing_ask = await one(conn, "SELECT id FROM asks WHERE source_ref=%s", (source_ref,))
+    if existing_ask:
+        await conn.execute(
+            "UPDATE scout_findings SET state='sent' WHERE id=%s AND state='new'",
+            (row["id"],),
+        )
+        post = await one(conn, "SELECT id, thread_id FROM board_posts WHERE ask_id=%s LIMIT 1", (existing_ask["id"],))
+        return {
+            "thread_id": post["thread_id"] if post else None,
+            "post_id": post["id"] if post else None,
+            "ask_id": existing_ask["id"],
+        }
+
+    owner = None
+    if row["scope"] == "person" and row.get("person_id"):
+        owner = await one(conn, "SELECT * FROM people WHERE id=%s AND active", (row["person_id"],))
+    else:
+        for key in (row.get("for_person"), workspace.config.default_owner):
+            if key:
+                owner = await one(conn, "SELECT * FROM people WHERE key=%s AND active", (key,))
+                if owner:
+                    break
+    if not owner:
+        return None
+
+    visibility = "private" if row["scope"] == "person" else "team"
+    thread_owner = owner["id"] if visibility == "private" else None
+    thread = await one(
+        conn,
+        """INSERT INTO board_threads (title,visibility,owner_person_id,created_by)
+        VALUES (%s,%s,%s,'agent:scout') RETURNING *""",
+        (row["title"][:200], visibility, thread_owner),
+    )
+    proof = {"text": row["message"], "links": row.get("links") or []}
+    ask = await asks.create(
+        conn,
+        owner_person_id=owner["id"],
+        question=row["title"][:240],
+        kind="review",
+        options=SCOUT_OPTIONS,
+        proof=proof,
+        source_ref=source_ref,
+        allow_rule=False,
+    )
+    target = f"person:{owner['key']}"
+    decision_spec = {
+        "question": ask["question"],
+        "options": ask["options"],
+        "recommended": None,
+        "owner_person_id": owner["id"],
+        "allow_rule": False,
+    }
+    provenance = {
+        "agent_key": None,
+        "person_key": owner["key"],
+        "token_label": "scout",
+        "via": "scout_finding",
+        "finding_id": row["id"],
+        "scope": row["scope"],
+    }
+    post = await one(
+        conn,
+        """INSERT INTO board_posts
+        (thread_id,actor,at,person_id,token_id,provenance,kind,text,blocks,mentions,
+         reply_to_post_id,ask_id,decision_spec,source_ref,request_hash)
+        VALUES (%s,'agent:scout',clock_timestamp(),NULL,NULL,%s,'decision_needed',%s,'[]'::jsonb,%s,NULL,%s,%s,NULL,NULL)
+        RETURNING id,thread_id,ask_id""",
+        (
+            thread["id"],
+            Jsonb(provenance),
+            proof_text(row["message"], {"links": row.get("links") or []}),
+            [target],
+            ask["id"],
+            Jsonb(decision_spec),
+        ),
+    )
+    await conn.execute(
+        "UPDATE board_threads SET last_post_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=%s",
+        (thread["id"],),
+    )
+    await conn.execute(
+        "UPDATE scout_findings SET state='sent' WHERE id=%s AND state='new'",
+        (row["id"],),
+    )
+    return {"thread_id": thread["id"], "post_id": post["id"], "ask_id": ask["id"]}
+
+
+async def sync_scout_finding_answer(conn, answered: dict) -> dict | None:
+    """Update scout_findings when a board-routed scout ask is answered; return row if task should be created."""
+    source_ref = answered.get("source_ref") or ""
+    if not source_ref.startswith("board:scout:") or not source_ref[12:].isdigit():
+        return None
+    finding_id = int(source_ref[12:])
+    choice = "task" if answered.get("answer_option") == "task" else "dismissed"
+    updated = await one(
+        conn,
+        """UPDATE scout_findings SET state=%s,decided_by=%s,decided_at=now()
+        WHERE id=%s AND state IN ('new','sent') RETURNING *""",
+        (choice, answered.get("answered_by_person_id"), finding_id),
+    )
+    return updated if (updated and choice == "task") else None
+

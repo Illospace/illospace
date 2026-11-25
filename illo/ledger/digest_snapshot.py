@@ -248,9 +248,44 @@ async def build(conn, person, now, workspace):
         "due": due, "asks": [{"title": a["question"], "link": ask_links.get(a["id"], card_link(a)),
             "reason": "The answer did not reach its agent." if a["delivery_state"] == "failed" else "Please answer.",
             "age_hours": hours(now, a["created_at"])} for a in asks],
+        "handled_without_you": await handled_without_you(conn, since, person=person),
         "faults": await read_faults(conn, now, since, person["key"]) if person["role"] == "owner" else [],
         "recent_openings": await recent_openings(conn, "digest", person["id"]),
     }
+
+
+async def handled_without_you(conn, since, *, person=None) -> int:
+    """Count Chief-of-Staff board answers and standing-rule decisions since the last brief."""
+    if person is None:
+        row = await one(
+            conn,
+            """SELECT count(*) AS n
+            FROM board_posts a
+            JOIN board_threads t ON t.id = a.thread_id
+            WHERE a.actor = 'illo' AND NOT a.is_human
+              AND a.kind IN ('answer', 'decision')
+              AND a.at > %s AND t.visibility = 'team'""",
+            (since,),
+        )
+    else:
+        row = await one(
+            conn,
+            """SELECT count(*) AS n
+            FROM board_posts a
+            JOIN board_threads t ON t.id = a.thread_id
+            LEFT JOIN board_posts q ON q.id = a.reply_to_post_id
+            WHERE a.actor = 'illo' AND NOT a.is_human
+              AND a.kind IN ('answer', 'decision')
+              AND a.at > %s
+              AND (
+                (t.visibility = 'team' AND (%s = ANY(COALESCE(q.mentions, '{}')) OR COALESCE(cardinality(q.mentions), 0) = 0))
+                OR (t.visibility = 'private' AND (t.owner_person_id = %s OR EXISTS (
+                    SELECT 1 FROM board_thread_guests g WHERE g.thread_id = t.id AND g.person_id = %s
+                )))
+              )""",
+            (since, f"person:{person['key']}", person["id"], person["id"]),
+        )
+    return int(row["n"]) if row else 0
 
 
 async def team_snapshot(conn, workspace, now):
@@ -310,6 +345,7 @@ async def team_snapshot(conn, workspace, now):
             "finished": [done_item(r, names) for r in finished[:7]],
             "waiting": sorted(waiting.values(), key=lambda r: -r["oldest_hours"]),
             "new_waits": new_waits, "stuck": stuck, "in_work": {"agents": agents, "people": people_count},
+            "handled_without_you": await handled_without_you(conn, since),
             "recent_openings": await recent_openings(conn, "team_digest")}
 
 

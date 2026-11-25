@@ -258,4 +258,10 @@ async def route(ctx, request, ask_id, *, file_position=None):
             if bound:
                 destination = f'{path(thread_id)}#post-{post_id}'
     await service.refresh_ask(ctx, ask_id)
+    if scout_finding := answered.get('scout_task_finding'):
+        from illo.deep import findings
+
+        await findings.trigger_task_from_finding(
+            ctx, person, scout_finding, channel=row.get('slack_channel'), ts=row.get('slack_ts')
+        )
     return redirect(destination)
