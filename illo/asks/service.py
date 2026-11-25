@@ -192,9 +192,14 @@ async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=N
     async with conn.transaction():
         answered = await asks.answer(conn, ask_id, person_id=person_id, option=option, text=text)
         if answered:
+            from illo.board import doors
+
             post_id = await board.record_decision(conn, answered, workspace=workspace)
             await ledger.decision(conn, answered)
             post_id = await on_answer(conn, answered, workspace=workspace) or post_id
+            scout_finding = await doors.sync_scout_finding_answer(conn, answered)
             if post_id is not None:
                 answered = {**answered, "board_post_id": post_id}
+            if scout_finding is not None:
+                answered = {**answered, "scout_task_finding": scout_finding}
         return answered

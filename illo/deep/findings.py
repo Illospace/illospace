@@ -73,6 +73,12 @@ async def message(ctx, conn, row, channel):
 
 
 async def deliver(ctx, conn, row):
+    from illo.board import doors
+
+    if doors.coordinator_active(ctx.workspace):
+        attached = await doors.attach_scout_finding_to_board(conn, ctx.workspace, row)
+        if attached is not None:
+            return attached
     deep = await one(conn, "SELECT * FROM deep_runs WHERE id=%s", (row["deep_run_id"],))
     target = deep["context"].get("scout_destination")
     if row["scope"] == "person":
@@ -174,6 +180,8 @@ async def action(ctx, person, action):
             not row
             or not active
             or active["id"] != person["id"]
+            or not row["slack_channel"]
+            or not row["slack_ts"]
             or row["slack_channel"] != action.get("channel")
             or row["slack_ts"] != action.get("message_ts")
             or row["state"] not in {"new", "sent"}
@@ -206,21 +214,35 @@ async def action(ctx, person, action):
         blocks=blocks(row, text, controls=False),
     )
     if choice == "task":
-        text = f"Make a task from this finding: {row['title']}. {row['message']} " + links_text(row)
-        event = InboundEvent(
-            channel="slack",
-            external_id=f"scout-task:{row['id']}",
-            kind="dm" if row["slack_channel"].startswith("D") else "message",
-            sender=active["slack_id"],
-            text=text,
-            reply_to=row["slack_ts"],
-            payload={
-                "channel_id": row["slack_channel"],
-                "thread_ts": row["slack_ts"],
-                "mentioned": True,
-            },
+        await trigger_task_from_finding(
+            ctx, active, row, channel=row["slack_channel"], ts=row["slack_ts"]
         )
-        await ctx.gateway.receive(event, SlackAdapter(ctx))
+
+
+async def trigger_task_from_finding(ctx, person: dict, row: dict, *, channel: str | None = None, ts: str | None = None):
+    """Run the person's normal gateway turn to turn an accepted scout finding into a task."""
+    if not person or not person.get("slack_id"):
+        return
+    if not channel and ctx.slack_client:
+        opened = await ctx.slack_client.conversations_open(users=person["slack_id"])
+        channel = opened["channel"]["id"]
+    if not channel or not ctx.slack_client:
+        return
+    text = f"Make a task from this finding: {row['title']}. {row['message']} " + links_text(row)
+    event = InboundEvent(
+        channel="slack",
+        external_id=f"scout-task:{row['id']}",
+        kind="dm" if channel.startswith("D") else "message",
+        sender=person["slack_id"],
+        text=text,
+        reply_to=ts,
+        payload={
+            "channel_id": channel,
+            **({"thread_ts": ts} if ts else {}),
+            "mentioned": True,
+        },
+    )
+    await ctx.gateway.receive(event, SlackAdapter(ctx))
 
 
 async def retry(ctx):

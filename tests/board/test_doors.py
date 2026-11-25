@@ -577,3 +577,197 @@ async def test_board_native_and_legacy_board_asks_never_fail_delivery_or_pollute
         assert DECISION["question"] not in failed_titles
         assert "Legacy M1 board decision?" not in failed_titles
         assert "Should we rotate the staging key?" in failed_titles
+
+
+async def test_scout_finding_routes_through_chief_of_staff_and_buttons_create_task_or_dismiss(
+    coordinator_ctx, slack, fake_brain
+):
+    from illo.deep import findings
+    from illo.deep.worker import tick as deep_tick
+    from illo.routines import scout
+
+    ctx = coordinator_ctx
+    finding_payload = {
+        "key": "cos-api-retirement",
+        "title": "Check deprecated API version",
+        "message": "The upstream API retires next month. Verify whether our staging client still uses v1.",
+        "links": [
+            {"title": "Deprecation notice", "url": "https://example.com/deprecation"},
+        ],
+        "person": "ada",
+    }
+
+    async with ctx.pool.connection() as conn:
+        await scout.queue(ctx, conn, person_key=None)
+    fake_brain.script = [
+        {"name": "findings_list", "arguments": {}},
+        {"name": "finding_add", "arguments": finding_payload},
+    ]
+    await deep_tick(ctx)
+
+    # Zero direct Slack posts from finding_add, findings.retry, or legacy asks/service.
+    assert slack.calls == []
+    await findings.retry(ctx)
+    await service.tick(ctx)
+    assert slack.calls == []
+
+    async with ctx.pool.connection() as conn:
+        sf = await one(conn, "SELECT * FROM scout_findings WHERE key='cos-api-retirement'")
+        assert sf["state"] == "sent"
+        assert sf["slack_ts"] is None
+        ask = await one(conn, "SELECT * FROM asks WHERE source_ref=%s", (f"board:scout:{sf['id']}",))
+        assert ask is not None
+        assert ask["kind"] == "review"
+        assert ask["allow_rule"] is False
+        post = await one(conn, "SELECT * FROM board_posts WHERE ask_id=%s", (ask["id"],))
+        assert post["kind"] == "decision_needed"
+        assert post["provenance"]["via"] == "scout_finding"
+        thread = await one(conn, "SELECT visibility FROM board_threads WHERE id=%s", (post["thread_id"],))
+        assert thread["visibility"] == "team"
+        ada = await people.get(conn, "ada")
+
+    # Chief of Staff delivers ONE card with Make a task / Not useful buttons.
+    event = await admission(ctx)
+    res = await triage(
+        ctx,
+        event,
+        "need_ask_person",
+        person="person:ada",
+        format="card",
+        summary="Scout spotted an upstream API retirement affecting v1. Turn this into a task or dismiss?",
+    )
+    assert res["decision"] == "allow"
+    await escalate.send_due(ctx)
+    [root] = slack.roots()
+    rendered = str(root)
+    assert "Make a task" in rendered
+    assert "Not useful" in rendered
+
+    # Clicking "Make a task" updates scout_findings, acks the board-native ask, and runs gateway to create a task.
+    fake_brain.script = [
+        {"name": "task_create", "arguments": {"title": "Check deprecated API version", "list": "bugs"}}
+    ]
+    await actions.handle(
+        ctx,
+        ada,
+        {"action_id": f"ask:{ask['id']}:opt:task", "channel": root["channel"], "message_ts": root["ts"]},
+    )
+    async with ctx.pool.connection() as conn:
+        sf_after = await one(conn, "SELECT state, decided_by, decided_at FROM scout_findings WHERE id=%s", (sf["id"],))
+        ask_after = await one(conn, "SELECT state, delivery_state FROM asks WHERE id=%s", (ask["id"],))
+        created_task = await one(conn, "SELECT id, title FROM tasks WHERE title='Check deprecated API version'")
+    assert sf_after["state"] == "task"
+    assert sf_after["decided_by"] == ada["id"] and sf_after["decided_at"] is not None
+    assert ask_after == {"state": "answered", "delivery_state": "acked"}
+    assert created_task is not None
+
+    # Personal scout finding stays in a private board thread and "Not useful" marks it dismissed with zero tasks.
+    personal_payload = {**finding_payload, "key": "cos-personal-finding", "title": "Personal API note"}
+    async with ctx.pool.connection() as conn:
+        await scout.queue(ctx, conn, person_key="ada")
+    fake_brain.script = [{"name": "finding_add", "arguments": personal_payload}]
+    await deep_tick(ctx)
+    async with ctx.pool.connection() as conn:
+        sf2 = await one(conn, "SELECT * FROM scout_findings WHERE key='cos-personal-finding'")
+        ask2 = await one(conn, "SELECT * FROM asks WHERE source_ref=%s", (f"board:scout:{sf2['id']}",))
+        post2 = await one(conn, "SELECT thread_id FROM board_posts WHERE ask_id=%s", (ask2["id"],))
+        thread2 = await one(conn, "SELECT visibility, owner_person_id FROM board_threads WHERE id=%s", (post2["thread_id"],))
+    assert thread2 == {"visibility": "private", "owner_person_id": ada["id"]}
+
+    event2 = await admission(ctx)
+    assert (await triage(ctx, event2, "need_ask_person", person="person:ada", format="card", summary="Dismiss?"))["decision"] == "allow"
+    await escalate.send_due(ctx)
+    root2 = [r for r in slack.roots() if r["ts"] != root["ts"]][0]
+    await actions.handle(
+        ctx,
+        ada,
+        {"action_id": f"ask:{ask2['id']}:opt:dismiss", "channel": root2["channel"], "message_ts": root2["ts"]},
+    )
+    async with ctx.pool.connection() as conn:
+        sf2_after = await one(conn, "SELECT state, decided_by FROM scout_findings WHERE id=%s", (sf2["id"],))
+        task_count = await one(conn, "SELECT count(*) AS n FROM tasks")
+    assert sf2_after == {"state": "dismissed", "decided_by": ada["id"]}
+    assert task_count["n"] == 1
+
+
+async def test_digest_and_team_digest_report_handled_without_you_with_privacy_isolation(
+    coordinator_ctx, client
+):
+    from illo.routines.digest import fallback_text as personal_fallback
+    from illo.routines.team_digest import fallback_text as team_fallback
+
+    ctx = coordinator_ctx
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        ben = await people.get(conn, "ben")
+        # 1) Team factual question mentioning Ada, answered by Chief of Staff ('illo').
+        t_team_ada = await one(
+            conn,
+            "INSERT INTO board_threads (title,visibility,created_by) VALUES ('Team Q Ada','team','agent:build') RETURNING id",
+        )
+        q_team_ada = await one(
+            conn,
+            """INSERT INTO board_posts (thread_id,actor,at,kind,text,mentions)
+            VALUES (%s,'agent:build',now(),'question','What port?',%s) RETURNING id""",
+            (t_team_ada["id"], ["person:ada"]),
+        )
+        await conn.execute(
+            """INSERT INTO board_posts (thread_id,actor,at,is_human,kind,text,reply_to_post_id)
+            VALUES (%s,'illo',now(),false,'answer','Port 8080.',%s)""",
+            (t_team_ada["id"], q_team_ada["id"]),
+        )
+
+        # 2) Team decision_needed mentioning Ben, resolved by Stage 0 rule ('illo').
+        t_team_ben = await one(
+            conn,
+            "INSERT INTO board_threads (title,visibility,created_by) VALUES ('Team D Ben','team','agent:build') RETURNING id",
+        )
+        rule_ask = await asks.create(
+            conn,
+            owner_person_id=ben["id"],
+            question="Ship?",
+            options=[{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        )
+        q_team_ben = await one(
+            conn,
+            """INSERT INTO board_posts (thread_id,actor,at,kind,text,mentions,ask_id)
+            VALUES (%s,'agent:build',now(),'decision_needed','Ship?',%s,%s) RETURNING id""",
+            (t_team_ben["id"], ["person:ben"], rule_ask["id"]),
+        )
+        await conn.execute(
+            """INSERT INTO board_posts (thread_id,actor,at,is_human,provenance,kind,text,reply_to_post_id)
+            VALUES (%s,'illo',now(),false,'{"via":"rule"}'::jsonb,'decision','Yes',%s)""",
+            (t_team_ben["id"], q_team_ben["id"]),
+        )
+
+        # 3) Private thread owned by Ada, answered by Chief of Staff ('illo').
+        t_priv_ada = await one(
+            conn,
+            """INSERT INTO board_threads (title,visibility,owner_person_id,created_by)
+            VALUES ('Private Ada','private',%s,'agent:build') RETURNING id""",
+            (ada["id"],),
+        )
+        q_priv_ada = await one(
+            conn,
+            """INSERT INTO board_posts (thread_id,actor,at,kind,text,mentions)
+            VALUES (%s,'agent:build',now(),'question','Private question?',%s) RETURNING id""",
+            (t_priv_ada["id"], ["person:ada"]),
+        )
+        await conn.execute(
+            """INSERT INTO board_posts (thread_id,actor,at,is_human,kind,text,reply_to_post_id)
+            VALUES (%s,'illo',now(),false,'answer','Private answer.',%s)""",
+            (t_priv_ada["id"], q_priv_ada["id"]),
+        )
+
+        now = datetime.now(UTC)
+        ada_snap = await digest_snapshot.build(conn, ada, now, ctx.workspace)
+        ben_snap = await digest_snapshot.build(conn, ben, now, ctx.workspace)
+        team_snap = await digest_snapshot.team_snapshot(conn, ctx.workspace, now)
+
+    assert ada_snap["handled_without_you"] == 2
+    assert ben_snap["handled_without_you"] == 1
+    assert team_snap["handled_without_you"] == 2
+    assert "Handled without you: 2." in personal_fallback(ada_snap)
+    assert "Handled without you: 1." in personal_fallback(ben_snap)
+    assert "Handled without you: 2." in team_fallback(team_snap)
+

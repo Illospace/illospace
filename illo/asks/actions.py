@@ -44,6 +44,7 @@ async def handle(ctx, person, action):
 
     await recover_card(ctx, person, ask_id, action)
     notice = None
+    scout_finding = None
     async with ctx.pool.connection() as conn:
         ask = await board.lock_for_ask(conn, ask_id)
         if not ask or not in_card_dm(person, action, ask):
@@ -67,6 +68,7 @@ async def handle(ctx, person, action):
             else:
                 if not answered:
                     return
+                scout_finding = answered.get("scout_task_finding")
             if answered and operation == "always":
                 data = await ledger.card_data(conn, ask)
                 lane = data["lane"] or {}
@@ -100,6 +102,12 @@ async def handle(ctx, person, action):
     if notice:
         await thread_notice(ctx, ask, notice)
     await refresh_ask(ctx, ask_id)
+    if scout_finding:
+        from illo.deep import findings
+
+        await findings.trigger_task_from_finding(
+            ctx, person, scout_finding, channel=ask.get("slack_channel"), ts=ask.get("slack_ts")
+        )
 
 
 _HELP_CUES = re.compile(
