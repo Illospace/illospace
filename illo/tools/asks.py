@@ -5,11 +5,11 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from illo.asks import proof
-from illo.asks.service import is_live
+from illo.asks import cards, proof
+from illo.asks.service import is_live, sync_card
 from illo.board import doors
 from illo.channels.mcp.schemas import check_ask_text
-from illo.db import one
+from illo.db import all_rows, one
 from illo.ledger import ask_workflow as ledger
 from illo.ledger import asks, board, items, lanes, mcp, people
 from illo.tasks import pages
@@ -74,6 +74,10 @@ class AnswerArgs(GetArgs):
 
 class RuleAnswerArgs(GetArgs):
     rule_id: int = Field(gt=0)
+
+
+class ReassignArgs(GetArgs):
+    owner: str = Field(min_length=1)
 
 
 async def asks_list(ctx, args):
@@ -274,6 +278,105 @@ async def asks_answer_with_rule(ctx, args):
     return {"answered": bool(answered), "answer": answered}
 
 
+async def _resolve_active_person(conn, value: str) -> dict | None:
+    raw = value.strip()
+    if raw.startswith("person:"):
+        raw = raw[7:]
+    person = await people.get(conn, raw)
+    if person and person.get("active"):
+        return person
+    lower = raw.lower()
+    if not lower:
+        return None
+    members = await all_rows(conn, "SELECT * FROM people WHERE active")
+    matches = [
+        m
+        for m in members
+        if lower
+        in {
+            m["key"].lower(),
+            m["name"].lower(),
+            (m.get("github_login") or "").lower(),
+        }
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+async def asks_reassign(ctx, args):
+    ask = await board.lock_for_ask(ctx.conn, args["id"])
+    if not ask or not await is_live(ctx.conn, ask):
+        raise ValueError("The ask is no longer open.")
+    if ctx.run["person_id"] not in {ask["owner_person_id"], ask["requester_person_id"]}:
+        raise Refusal("Only the current owner or requester can reassign this ask.")
+    caller = await one(ctx.conn, "SELECT * FROM people WHERE id=%s AND active", (ctx.run["person_id"],))
+    if not caller:
+        raise Refusal("Caller is inactive.")
+    new_owner = await _resolve_active_person(ctx.conn, args["owner"])
+    if not new_owner:
+        raise ValueError("The new owner is missing or inactive.")
+    if new_owner["id"] == ask["owner_person_id"]:
+        return {
+            "reassigned": False,
+            "ask_id": ask["id"],
+            "owner": new_owner["key"],
+            "reason": "already_owner",
+        }
+    if ask["lane_id"]:
+        lane = await lanes.get(ctx.conn, ask["lane_id"], principal=ctx.principal)
+        if not lane or (lane["visibility"] == "private" and lane["owner_person_id"] != new_owner["id"]):
+            raise ValueError("The lane is not visible to the new owner.")
+    await _ensure_saved_visible(
+        ctx.conn,
+        ask.get("proof") or {},
+        principal=ctx.principal,
+        requester_person_id=ctx.run["person_id"],
+        targets=[new_owner],
+        share_saved=False,
+    )
+    old_owner_id = ask["owner_person_id"]
+    old_channel, old_ts = ask.get("slack_channel"), ask.get("slack_ts")
+    is_board = await asks.is_board_ask(ctx.conn, ask)
+    board_info = None
+    async with ctx.conn.transaction():
+        if is_board:
+            board_info = await doors.reassign_board_ask(
+                ctx.conn,
+                ctx.app.workspace,
+                ask,
+                old_owner_id=old_owner_id,
+                new_owner=new_owner,
+                caller=caller,
+                slack_connected=bool(ctx.app.slack_client),
+            )
+        updated = await asks.reassign(ctx.conn, ask["id"], new_owner_id=new_owner["id"])
+        if not updated:
+            raise ValueError("The ask is no longer open.")
+    if ctx.app.slack_client and old_channel and old_ts:
+        notice = f"Reassigned to {new_owner['name']}."
+        try:
+            await ctx.app.slack_client.chat_update(
+                channel=old_channel,
+                ts=old_ts,
+                text=notice,
+                blocks=[cards.section(f"Reassigned to *{cards.escape(new_owner['name'])}*.")],
+            )
+        except Exception:
+            pass
+    if not is_board and ctx.app.slack_client:
+        try:
+            await sync_card(ctx.app, ctx.conn, updated)
+        except Exception:
+            pass
+    result = {
+        "reassigned": True,
+        "ask_id": updated["id"],
+        "owner": new_owner["key"],
+    }
+    if board_info:
+        result["thread_id"] = board_info["thread_id"]
+    return result
+
+
 async def asks_cancel_mine(ctx, args):
     ask = await board.lock_for_ask(ctx.conn, args["id"])
     if not ask or ctx.run["person_id"] not in {ask["owner_person_id"], ask["requester_person_id"]}:
@@ -296,7 +399,8 @@ DESCRIPTIONS = {
     "asks_create": "Ask one teammate (`owner`) or several teammates (`owners`, up to 20) for a decision, an action, a review, or a reminder; each gets their own card. Then tell the requester whom you asked and what. Pass person keys from `people_list`; put context or `saved:<id>` refs in `proof` (set `share_saved: true` to publish your own private saved item for recipients), full reading material in `blocks`, and `options` when the answer is a choice. At most 10 calls per run.",
     "asks_answer": "Answer an open ask of this person with an option id in `option`, or with `text`. Always a draft card: the answer goes out only when the person taps Send. An ask of another person is refused.",
     "asks_answer_with_rule": "Answer an open ask with a standing rule of its owner: the ask `id` and the `rule_id` from `rules_list`. Code answers only when the rule matches one of the ask's options; else the result is `answered: false`. Never use it to decide yourself.",
-    "asks_cancel_mine": "Cancel an open ask that this person owns or asked, when they say it is no longer needed. Returns `cancelled: true` or `false`.",
+    "asks_reassign": "Reassign an open ask (including board decisions) from its current owner to another teammate (`id`: ask id, `owner`: person key or name). Preserves the board thread link so the new owner's answer wakes the waiting agent.",
+    "asks_cancel_mine": "Cancel an open ask that this person owns or asked, when they say it is no longer needed. To hand an ask over to another teammate instead, use `asks_reassign`. Returns `cancelled: true` or `false`.",
     "asks_digest": "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
 }
 
@@ -335,6 +439,14 @@ def register(registry):
             "asks_answer_with_rule",
             asks_answer_with_rule,
             RuleAnswerArgs,
+            "write_internal",
+            RULE_PROFILES,
+            lambda a: "ledger",
+        ),
+        (
+            "asks_reassign",
+            asks_reassign,
+            ReassignArgs,
             "write_internal",
             RULE_PROFILES,
             lambda a: "ledger",

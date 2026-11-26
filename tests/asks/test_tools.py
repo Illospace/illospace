@@ -133,3 +133,56 @@ async def test_create_rejects_unknown_owner_and_invalid_recommendation(rpc, rpc_
         {"owner": "ada", "question": "Continue?", "recommended_option": "missing"},
     )
     assert result["decision"] == "deny"
+
+
+async def test_asks_reassign_transfers_standalone_ask_even_after_personal_read(app, rpc, rpc_token):
+    from illo.asks.actions import looks_like_help_question
+    from illo.db import one
+
+    run, token = rpc_token
+    ctx = app.state.ctx
+    created = await call(
+        rpc,
+        token,
+        "asks_create",
+        {
+            "owner": "ada",
+            "question": "Approve staging flag?",
+            "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        },
+    )
+    ask_id = created["result"]["ask_id"]
+
+    # Even after personal_read=True, reassigning an existing ask does not trigger a draft gate.
+    async with ctx.pool.connection() as conn:
+        await conn.execute("UPDATE runs SET personal_read=true WHERE id=%s", (run["id"],))
+    reassigned = await call(rpc, token, "asks_reassign", {"id": ask_id, "owner": "Ben"})
+    assert reassigned["decision"] == "allow"
+    assert reassigned["result"] == {"reassigned": True, "ask_id": ask_id, "owner": "ben"}
+
+    async with ctx.pool.connection() as conn:
+        ben = await people.get(conn, "ben")
+        row = await one(conn, "SELECT owner_person_id, state FROM asks WHERE id=%s", (ask_id,))
+    assert row == {"owner_person_id": ben["id"], "state": "open"}
+
+    # Reassignment cues in ask thread replies route to the model instead of saving as final answers.
+    assert looks_like_help_question("ask ben instead")
+    assert looks_like_help_question("if Ben opened this you should ask him not me")
+    assert looks_like_help_question("reassign this to Ben")
+    assert not looks_like_help_question("Yes, approve it.")
+
+
+async def test_asks_reassign_refuses_unrelated_caller(app, rpc, rpc_token):
+    ctx = app.state.ctx
+    _, token = rpc_token
+    async with ctx.pool.connection() as conn:
+        ben = await people.get(conn, "ben")
+        row = await asks.create(
+            conn,
+            owner_person_id=ben["id"],
+            requester_person_id=ben["id"],
+            question="Ben private decision",
+        )
+    denied = await call(rpc, token, "asks_reassign", {"id": row["id"], "owner": "ada"})
+    assert denied["decision"] == "deny"
+

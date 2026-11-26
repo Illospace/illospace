@@ -7,7 +7,12 @@ from pydantic import Field
 
 from illo.channels.slack.access import channel_private, require_member
 from illo.channels.slack.blocks import message_text
-from illo.channels.slack.channels import ChannelLookupError, resolve_channel
+from illo.channels.slack.channels import (
+    ChannelLookupError,
+    cached_public_member_channels,
+    public_member_channels,
+    resolve_channel,
+)
 
 if TYPE_CHECKING:
     from illo.app import AppContext
@@ -104,6 +109,25 @@ async def dm_handler(ctx: ToolContext, args: dict) -> dict:
     return sent
 
 
+def _configured_public_names(app: "AppContext") -> list[str]:
+    return [
+        f"#{entry.name}"
+        for entry in app.workspace.config.slack.channels
+        if entry.mode != "off" and entry.visibility != "private"
+    ]
+
+
+def _unconfigured_reason(app: "AppContext") -> str:
+    names = _configured_public_names(app)
+    if names:
+        return (
+            "The channel is not configured. Configured channels: "
+            + ", ".join(names)
+            + ". Call slack_list_channels to see available team channels."
+        )
+    return "The channel is not configured. Call slack_list_channels to see available team channels."
+
+
 async def _resolve_channel_id(ctx: ToolContext, channel: str, *, allow_api: bool) -> str | None:
     raw = channel.strip()
     name = raw.removeprefix("#")
@@ -114,6 +138,10 @@ async def _resolve_channel_id(ctx: ToolContext, channel: str, *, allow_api: bool
     if re.fullmatch(r"[CG][A-Z0-9_]+", raw):
         return raw
     if not allow_api:
+        cached = await cached_public_member_channels(ctx.app, conn=ctx.conn)
+        for ch_id, ch_name in cached.items():
+            if name_lower == ch_name.lower() and configured(ctx.app, ch_id):
+                return ch_id
         return None
     try:
         resolved = await resolve_channel(ctx.app, name_lower, conn=ctx.conn)
@@ -127,12 +155,12 @@ async def post_preflight(ctx: ToolContext, args: dict) -> Decision:
     if ctx.run.get("personal_read"):
         channel_id = await _resolve_channel_id(ctx, args["channel"], allow_api=False)
         if not channel_id:
-            return Decision("deny", "The channel is not configured")
+            return Decision("deny", _unconfigured_reason(ctx.app))
         args["channel"] = channel_id
         return Decision("allow", "The approved send checks channel visibility")
     channel_id = await _resolve_channel_id(ctx, args["channel"], allow_api=bool(ctx.app.slack_client))
     if not channel_id or not configured(ctx.app, channel_id) or not ctx.app.slack_client:
-        return Decision("deny", "The channel is not configured")
+        return Decision("deny", _unconfigured_reason(ctx.app))
     args["channel"] = channel_id
     if await channel_private(ctx.app, channel_id, conn=ctx.conn):
         return Decision("deny", "The channel is private")
@@ -159,6 +187,44 @@ async def post_handler(ctx: ToolContext, args: dict) -> dict:
         ctx, tool_name="slack_post_channel", target=f"channel:{args['channel']}", text=args["text"]
     )
     return sent
+
+
+async def list_channels_handler(ctx: ToolContext, args: dict) -> dict:
+    entries: dict[str, dict] = {}
+    for entry in ctx.app.workspace.config.slack.channels:
+        if entry.mode == "off" or entry.visibility == "private":
+            continue
+        if ctx.app.slack_client and entry.team_members_only:
+            try:
+                if await channel_private(ctx.app, entry.id, conn=ctx.conn):
+                    continue
+            except ValueError:
+                continue
+        entries[entry.id] = {"id": entry.id, "name": entry.name, "configured": True}
+    if ctx.app.slack_client and not ctx.run.get("personal_read"):
+        try:
+            public = await public_member_channels(ctx.app, conn=ctx.conn)
+        except ValueError:
+            public = {}
+    else:
+        public = await cached_public_member_channels(ctx.app, conn=ctx.conn)
+    for ch_id, ch_name in sorted(public.items(), key=lambda item: item[1].lower()):
+        if ch_id not in entries and configured(ctx.app, ch_id):
+            entries[ch_id] = {"id": ch_id, "name": ch_name, "configured": False}
+    channels = list(entries.values())
+    if channels:
+        lines = [
+            f"#{c['name']} ({c['id']}, {'configured' if c['configured'] else 'public'})"
+            for c in channels
+        ]
+        summary = "\n".join(lines)
+    else:
+        summary = "No team Slack channels are available."
+    return {
+        "channels": channels,
+        "text": data_text("slack", summary),
+        "visibility": "team",
+    }
 
 
 async def read_handler(ctx: ToolContext, args: dict) -> dict:
@@ -244,13 +310,26 @@ def register(registry: Registry) -> None:
     )
     registry.add(
         Tool(
+            "slack_list_channels",
+            "slack",
+            "read",
+            lambda a: "ledger",
+            False,
+            list_channels_handler,
+            "List configured and public team Slack channels where Illo can post (returns channel ids and #names). Call this before `slack_post_channel` when the channel is not specified.",
+            Arguments,
+            profiles=frozenset({"person_dm", "team_channel", "routine", "agent_request"}),
+        )
+    )
+    registry.add(
+        Tool(
             "slack_post_channel",
             "slack",
             "write_internal",
             lambda a: f"channel:{a['channel']}",
             False,
             post_handler,
-            "Post in a configured team channel (`channel`: its id or #name; `thread_ts` to answer in a thread). Routine updates in agent requests post automatically after safety review; risky messages or posts after a personal or private read become a draft card.",
+            "Post in a configured team channel (`channel`: its id or #name; `thread_ts` to answer in a thread). Call `slack_list_channels` first if the channel is not specified. Routine updates in agent requests post automatically after safety review; risky messages or posts after a personal or private read become a draft card.",
             PostChannel,
             profiles=frozenset({"person_dm", "agent_request"}),
             preflight=post_preflight,

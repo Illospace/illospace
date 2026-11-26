@@ -453,3 +453,143 @@ async def sync_scout_finding_answer(conn, answered: dict) -> dict | None:
     )
     return updated if (updated and choice == "task") else None
 
+
+async def reassign_board_ask(
+    conn,
+    workspace,
+    ask: dict,
+    *,
+    old_owner_id: int | None,
+    new_owner: dict,
+    caller: dict,
+    slack_connected: bool = False,
+) -> dict | None:
+    """Reassign a board-linked ask while preserving its thread link and delivery pipeline."""
+    from illo.board import acl, episodes
+
+    thread_id = await board.ask_thread_id(conn, ask["id"])
+    if thread_id is None:
+        return None
+    await board.lock_children(conn, thread_id)
+    thread = await acl.thread_access(conn, thread_id)
+    if not thread or thread["state"] != "open":
+        raise ValueError("The board thread is no longer open.")
+    if thread["visibility"] == "private" and not await acl.recipient_ok(
+        conn, thread, new_owner, slack=False
+    ):
+        await board.add_guest(conn, thread_id, new_owner["id"])
+        thread = await acl.thread_access(conn, thread_id)
+    if not await acl.recipient_ok(conn, thread, new_owner, slack=slack_connected):
+        raise ValueError("The new owner cannot receive this board ask.")
+
+    old_owner = (
+        await one(conn, "SELECT id,key,name FROM people WHERE id=%s", (old_owner_id,))
+        if old_owner_id is not None
+        else None
+    )
+    old_target = f"person:{old_owner['key']}" if old_owner else None
+    new_target = f"person:{new_owner['key']}"
+
+    post = await one(
+        conn,
+        "SELECT id,mentions,decision_spec FROM board_posts WHERE ask_id=%s AND kind='decision_needed'",
+        (ask["id"],),
+    )
+    if post:
+        spec = dict(post["decision_spec"]) if post.get("decision_spec") else None
+        if spec is not None:
+            spec["owner_person_id"] = new_owner["id"]
+        mentions = [m for m in (post.get("mentions") or []) if m != old_target]
+        if new_target not in mentions:
+            mentions.append(new_target)
+        await conn.execute(
+            "UPDATE board_posts SET mentions=%s,decision_spec=%s WHERE id=%s",
+            (mentions, Jsonb(spec) if spec is not None else None, post["id"]),
+        )
+        if old_target and old_target != new_target:
+            await conn.execute(
+                "DELETE FROM board_mention_acks WHERE post_id=%s AND target=%s",
+                (post["id"], old_target),
+            )
+            await conn.execute(
+                "DELETE FROM board_mentions WHERE post_id=%s AND target=%s",
+                (post["id"], old_target),
+            )
+        await conn.execute(
+            """INSERT INTO board_mentions (thread_id,post_id,target,recipient_person_id)
+            VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (thread_id, post["id"], new_target, new_owner["id"]),
+        )
+
+    esc = await one(
+        conn,
+        "SELECT * FROM board_escalations WHERE ask_id=%s ORDER BY id DESC LIMIT 1",
+        (ask["id"],),
+    )
+    queued_escalation = False
+    if esc:
+        card = dict(esc["card"] or {})
+        card["source_ask_id"] = ask["id"]
+        await conn.execute(
+            """UPDATE board_escalations
+            SET state='closed',closed_reason='no_longer_pending',closed_at=clock_timestamp(),
+                closed_by_person_id=%s,ask_id=NULL,notice_at=clock_timestamp(),
+                lease_id=NULL,lease_until=NULL
+            WHERE id=%s""",
+            (caller["id"], esc["id"]),
+        )
+        await conn.execute(
+            """INSERT INTO board_escalations
+            (thread_id,episode_id,post_id,reason,origin,coordinator_run_id,person_id,
+             format,content_mode,text,card,card_ask_id,due_at,acl_snapshot,recipient_slack_user)
+            VALUES (%s,%s,%s,%s,'model',%s,%s,'card','summary',%s,%s,%s,clock_timestamp(),%s,%s)
+            ON CONFLICT (episode_id,person_id) DO UPDATE SET
+                state='pending',closed_reason=NULL,closed_at=NULL,closed_by_person_id=NULL,
+                answer_post_id=NULL,ask_id=NULL,card_ask_id=EXCLUDED.card_ask_id,
+                text=EXCLUDED.text,card=EXCLUDED.card,due_at=clock_timestamp(),
+                attempts=0,send_started_at=NULL,sending_channel=NULL,
+                slack_channel=NULL,slack_ts=NULL,sent_at=NULL,notice_at=NULL,
+                lease_id=NULL,lease_until=NULL,acl_snapshot=EXCLUDED.acl_snapshot,
+                recipient_slack_user=EXCLUDED.recipient_slack_user""",
+            (
+                thread_id,
+                esc["episode_id"],
+                esc["post_id"],
+                esc["reason"],
+                esc["coordinator_run_id"],
+                new_owner["id"],
+                esc["text"],
+                Jsonb(card),
+                ask["id"],
+                Jsonb(acl.scope(thread)),
+                new_owner.get("slack_id"),
+            ),
+        )
+        timeout_hours = workspace.config.board.coordinator.escalation_timeout_hours
+        await conn.execute(
+            """UPDATE board_episodes
+            SET state='escalated',version=version+1,
+                next_check_at=clock_timestamp()+make_interval(hours=>%s)
+            WHERE id=%s""",
+            (timeout_hours, esc["episode_id"]),
+        )
+        queued_escalation = True
+    elif post:
+        await conn.execute(
+            """UPDATE board_episodes
+            SET version=version+1,next_check_at=clock_timestamp()
+            WHERE thread_id=%s AND post_id=%s AND state=ANY(%s)""",
+            (thread_id, post["id"], list(episodes.ACTIVE)),
+        )
+
+    await board.system_post(
+        conn,
+        thread_id,
+        f"{caller['name']} reassigned this question to {new_owner['name']}.",
+        purpose="reassigned",
+        source_ref=None,
+        episode_id=esc["episode_id"] if esc else None,
+    )
+    return {"thread_id": thread_id, "queued_escalation": queued_escalation}
+
+

@@ -228,3 +228,57 @@ async def test_tools_without_client_fail_without_external_calls(app):
             ToolContext(conn, run, ctx), "slack_send_dm", {"person": "ben", "text": "Hello"}
         )
     assert result["decision"] == "deny"
+
+
+async def test_slack_list_channels_and_unconfigured_hints(app, rpc, rpc_token, slack_client):
+    run, token = rpc_token
+    slack_client.conversations = [
+        {"id": "C_GENERAL", "name": "general", "is_member": True, "is_private": False},
+        {"id": "G_SECRET", "name": "secret-room", "is_member": True, "is_private": True},
+    ]
+
+    async def fake_users_conversations(**kwargs):
+        slack_client.calls.append({"method": "users_conversations", **kwargs})
+        types = kwargs.get("types", "")
+        items = [
+            c
+            for c in slack_client.conversations
+            if (not c["is_private"] and "public_channel" in types)
+            or (c["is_private"] and "private_channel" in types)
+        ]
+        return {"ok": True, "channels": items}
+
+    slack_client.users_conversations = fake_users_conversations
+
+    listed = await call(rpc, token, "slack_list_channels", {})
+    assert listed["decision"] == "allow"
+    assert listed["result"]["visibility"] == "team"
+    names = {c["name"] for c in listed["result"]["channels"]}
+    assert "team" in names
+    assert "general" in names
+    assert "secret-room" not in names
+
+    # Reading public channel directory must not flip personal_read.
+    async with app.state.ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT personal_read FROM runs WHERE id=%s", (run["id"],))
+    assert row["personal_read"] is False
+
+    # Unknown channel denial lists configured channels and hints slack_list_channels.
+    denied = await call(
+        rpc, token, "slack_post_channel", {"channel": "#does-not-exist", "text": "Hi"}
+    )
+    assert denied["decision"] == "deny"
+    assert "Configured channels:" in denied["reason"]
+    assert "#team" in denied["reason"]
+    assert "slack_list_channels" in denied["reason"]
+
+    # After personal_read, a cached public member channel resolves offline into a draft without Slack API calls.
+    calls_before = len(slack_client.calls)
+    async with app.state.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE runs SET personal_read=true WHERE id=%s", (run["id"],))
+    drafted = await call(
+        rpc, token, "slack_post_channel", {"channel": "#general", "text": "Update"}
+    )
+    assert drafted["decision"] == "draft"
+    assert len(slack_client.calls) == calls_before
+

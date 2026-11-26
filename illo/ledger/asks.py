@@ -228,6 +228,26 @@ async def cancel(conn: Connection, ask_id: int) -> bool:
     )
 
 
+async def reassign(conn: Connection, ask_id: int, *, new_owner_id: int) -> dict | None:
+    """Transfer an open ask (including board-native asks) to another active owner."""
+    return await one(
+        conn,
+        """UPDATE asks
+        SET owner_person_id=%s,
+            slack_channel=NULL,
+            slack_ts=NULL,
+            card_sent_at=NULL,
+            card_digest=NULL,
+            card_state='open',
+            card_delivery_state='none',
+            awaiting_text=false,
+            reminded_at=NULL
+        WHERE id=%s AND state='open'
+        RETURNING *""",
+        (new_owner_id, ask_id),
+    )
+
+
 async def expire(conn: Connection) -> int:
     """Expire open asks and stop delivery after the answer's end date."""
     cursor = await conn.execute(

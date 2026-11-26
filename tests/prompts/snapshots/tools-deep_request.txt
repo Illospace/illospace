@@ -26,6 +26,7 @@ search_all: Search everything this run can see, ranked by match and recency. Opt
 search_get: Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.
 shell: Run a shell command in the sandbox. The sandbox has no network. Repositories are read-only under /repos. Use rg, git, jq, and python3. A command has 120 seconds at most.
 skills_get: Read the steps of one team skill by its name
+slack_list_channels: List configured and public team Slack channels where Illo can post (returns channel ids and #names). Call this before `slack_post_channel` when the channel is not specified.
 slack_read_thread: Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.
 sweep_seen_list: List item keys already surfaced in this person's proactive personal sweep over the last 30 days, so you do not repeat them.
 task_cancel: Cancel a task with a reason. It has no next move. The task and its full record stay in the ledger for later reads.

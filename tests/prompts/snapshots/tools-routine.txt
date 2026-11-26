@@ -25,6 +25,7 @@ rules_list: List the standing rules that answer asks without a person: the team'
 search_all: Search everything this run can see, ranked by match and recency. Optional `kinds`: saved, decision, note, lane_summary, archive, slack, github, doc, lane, and mail (this person's mail, DM only). Read one result in full with `search_get` and its `source_ref`.
 search_get: Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.
 skills_get: Read the steps of one team skill by its name
+slack_list_channels: List configured and public team Slack channels where Illo can post (returns channel ids and #names). Call this before `slack_post_channel` when the channel is not specified.
 slack_send_dm: Send a Slack DM to one team member (`person`: a person key or name). For a question that needs an answer, use `asks_create` instead. Routine updates in agent requests send automatically after safety review; risky messages or posts after a personal read become a draft card. At most 3 per run.
 task_get: Read the task brief, result, links, pieces, checks, events, silent_hours, and last wake result before you answer.
 task_list: Read filtered tasks with the holder, state, waits_for, silent_hours, and open piece count. Use mine=true for tasks that wait for you, tasks you hold, and tasks your agents hold.

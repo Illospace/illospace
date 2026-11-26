@@ -317,3 +317,135 @@ async def test_private_thread_with_guest_isolates_owner_private_data(
     await escalate.send_due(ctx)
     [root] = slack.roots()
     assert root["channel"] == "DU_ACME_BEN"
+
+
+async def test_reassigning_board_decision_ask_preserves_thread_link_and_wakes_agent(
+    coordinator_ctx, slack, client, fake_brain
+):
+    from illo.ledger import runs
+    from illo.tools.registry import ToolContext
+
+    ctx = coordinator_ctx
+    worker = await client(agent="build")
+    decision_for_ada = {**DECISION, "mentions": ["person:ada"]}
+    d = await worker.call("board_post", {"ticket_url": TICKET, **decision_for_ada})
+
+    # Coordinator escalates the board-native decision card to Ada.
+    fake_brain.script = [
+        {
+            "name": "need_ask_person",
+            "arguments": {
+                "person": "person:ada",
+                "format": "card",
+                "summary": "Build needs a release date decision for ticket #12.",
+            },
+        }
+    ]
+    await coordinator.run_coordinator(ctx)
+    await escalate.send_due(ctx)
+    [ada_root] = slack.roots()
+    assert ada_root["channel"] == "DU_ACME_ADA"
+
+    # Ada reassigns the board-native decision ask to Ben (even after personal_read=true).
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        run = await runs.create(
+            conn,
+            principal="person:ada",
+            person_id=ada["id"],
+            profile="person_dm",
+            provider="fake",
+            tool_limit=12,
+            model="fake",
+        )
+        await conn.execute("UPDATE runs SET personal_read=true WHERE id=%s", (run["id"],))
+        run["personal_read"] = True
+        res = await ctx.registry.call(
+            ToolContext(conn, run, ctx),
+            "asks_reassign",
+            {"id": d["ask_id"], "owner": "ben"},
+        )
+    assert res["decision"] == "allow"
+    assert res["result"] == {"reassigned": True, "ask_id": d["ask_id"], "owner": "ben", "thread_id": d["thread_id"]}
+
+    # Old card in Ada's DM was updated; escalate.send_due delivers the card to Ben's DM.
+    await escalate.send_due(ctx)
+    roots = slack.roots()
+    assert len(roots) == 2
+    ben_root = roots[-1]
+    assert ben_root["channel"] == "DU_ACME_BEN"
+
+    # Ben clicks an option on the reassigned card -> decision posts to the original board thread & wakes worker.
+    async with ctx.pool.connection() as conn:
+        ben = await people.get(conn, "ben")
+    await actions.handle(
+        ctx,
+        ben,
+        {
+            "action_id": f"ask:{d['ask_id']}:opt:first",
+            "channel": ben_root["channel"],
+            "message_ts": ben_root["ts"],
+        },
+    )
+    async with ctx.pool.connection() as conn:
+        ask = await one(conn, "SELECT state, owner_person_id, answer_option FROM asks WHERE id=%s", (d["ask_id"],))
+        post = await one(
+            conn,
+            "SELECT actor, kind, reply_to_post_id, text FROM board_posts WHERE thread_id=%s AND kind='decision'",
+            (d["thread_id"],),
+        )
+        wakes = await all_rows(conn, "SELECT target_ref FROM board_wakes WHERE thread_id=%s", (d["thread_id"],))
+    assert ask == {"state": "answered", "owner_person_id": ben["id"], "answer_option": "first"}
+    assert post == {
+        "actor": "person:ben",
+        "kind": "decision",
+        "reply_to_post_id": d["post_id"],
+        "text": "First date",
+    }
+    assert len(wakes) >= 1
+
+
+async def test_ticket_requester_and_their_agent_prioritized_in_board_routing(
+    coordinator_ctx, client
+):
+    from illo.board import packet
+    from illo.ledger import github as github_ledger
+
+    ctx = coordinator_ctx
+    async with ctx.pool.connection() as conn:
+        ben = await people.get(conn, "ben")
+        # Sync the GitHub issue authored by Ben (assigned to Ada).
+        await github_ledger.sync_item(
+            conn,
+            "acme-example/engine",
+            {
+                "number": 12,
+                "title": "Export timeout fix",
+                "state": "open",
+                "body": "Please fix export timeout.",
+                "html_url": TICKET,
+                "user": {"login": ben["github_login"]},
+                "assignees": [{"login": "ada-gh"}],
+            },
+            {},
+        )
+    # Ben has an online personal agent token; Ada's build worker asks an unmentioned question on TICKET.
+    ben_agent = await client("ben")
+    await ben_agent.call("board_inbox", {})
+    worker = await client(agent="build")
+    q = await worker.call(
+        "board_post",
+        {"ticket_url": TICKET, "kind": "question", "text": "Should export retry on 504 or fail fast?"},
+    )
+    await coordinator.scan(ctx)
+    async with ctx.pool.connection() as conn:
+        thread = await acl.thread_ok(conn, q["thread_id"])
+        ep = await one(conn, "SELECT * FROM board_episodes WHERE post_id=%s", (q["post_id"],))
+        text, snap = await packet.build(conn, ctx.workspace, thread, ep)
+
+    # Ticket requester (Ben) comes first ahead of worker owner (Ada), and Ben's online agent is routable.
+    assert snap["candidates"][0] == "person:ben"
+    assert snap["allowed"]["headstart"] is True
+    assert "person:ben" in snap["targets"]
+    assert '"requester":"person:ben"' in text
+

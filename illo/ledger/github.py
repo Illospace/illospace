@@ -36,10 +36,12 @@ async def sync_item(conn: Connection, repo: str, item: dict, label_map: dict[str
     summary = "\n".join((item.get("body") or "").splitlines()[:4])
     if last_line:
         summary += "\n" + last_line
+    author_login = (item.get("user") or {}).get("login") if isinstance(item.get("user"), dict) else None
     links = [
         {
             "url": item.get("html_url", f"https://github.com/{repo}/issues/{item['number']}"),
             "kind": "github",
+            **({"author_login": author_login} if author_login else {}),
         }
     ]
     if "pull_request" in item or "merged" in item:

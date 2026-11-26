@@ -185,12 +185,14 @@ async def _fallback_trigger(conn, cfg, episode):
     return None
 
 
-async def _fallback(conn, workspace, thread, episode, trigger):
+async def _fallback(conn, workspace, thread, episode, trigger, *, requester=None):
     task = thread["task"] or {}
     author = await packet.asker_post(conn, episode)
     asker = (author or {}).get("provenance", {}).get("person_key")
-    targets = [episode["mention_target"], task.get("holder"),
-               f"person:{asker}", f"person:{workspace.config.default_owner}"]
+    people_map = {p["key"]: p for p in await all_rows(conn, "SELECT * FROM people ORDER BY key")}
+    resolved_requester = requester or await packet.ticket_requester(conn, thread, people_map)
+    targets = [episode["mention_target"], resolved_requester, task.get("created_by"),
+               task.get("holder"), f"person:{asker}", f"person:{workspace.config.default_owner}"]
     if episode["reason"] == "decision_needed" and author and author.get("ask_id"):
         ask = await one(conn, "SELECT owner_person_id FROM asks WHERE id=%s", (author["ask_id"],))
         owner_row = (await one(conn, "SELECT key FROM people WHERE id=%s", (ask["owner_person_id"],))
@@ -234,8 +236,41 @@ async def _delay(conn, episode_id, minutes):
         WHERE id=%s""", (minutes, episode_id))
 
 
+async def _resolve_ticket_requester(ctx, thread_id) -> str | None:
+    """Resolve the GitHub issue author outside the thread lock when lanes lack it yet."""
+    if not getattr(ctx, "github_client", None):
+        return None
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT ticket_url,task_id FROM board_threads WHERE id=%s", (thread_id,))
+        if not row or not row.get("ticket_url"):
+            return None
+        external_id = packet.parse_ticket_external_id(row["ticket_url"])
+        if not external_id:
+            return None
+        people_rows = await all_rows(conn, "SELECT * FROM people ORDER BY key")
+        people_map = {p["key"]: p for p in people_rows}
+        cached = await packet.ticket_requester(conn, {"ticket_url": row["ticket_url"]}, people_map)
+        if cached:
+            return cached
+    repo, number_str = external_id.rsplit("#", 1)
+    try:
+        async with asyncio.timeout(3):
+            issue = await ctx.github_client.get_issue(repo, int(number_str))
+    except Exception:
+        return None
+    login = (issue.get("user") or {}).get("login") if isinstance(issue, dict) else None
+    if not login:
+        return None
+    matched = next(
+        (p["key"] for p in people_map.values() if (p.get("github_login") or "").lower() == login.lower()),
+        None,
+    )
+    return f"person:{matched}" if matched else None
+
+
 async def _admit(ctx, thread_id, lease):
     cfg = ctx.workspace.config.board.coordinator
+    ticket_req = await _resolve_ticket_requester(ctx, thread_id)
     async with ctx.pool.connection() as conn:
         thread = await board.lock_thread(conn, thread_id)
         if not _leased(thread, lease):
@@ -256,11 +291,11 @@ async def _admit(ctx, thread_id, lease):
         trigger = await _fallback_trigger(conn, cfg, episode)
         if trigger:
             if trigger != "defer":
-                await _fallback(conn, ctx.workspace, live, episode, trigger)
+                await _fallback(conn, ctx.workspace, live, episode, trigger, requester=ticket_req)
             return None
-        text, snapshot = await packet.build(conn, ctx.workspace, live, episode)
+        text, snapshot = await packet.build(conn, ctx.workspace, live, episode, requester=ticket_req)
         if not text:
-            await _fallback(conn, ctx.workspace, live, episode, "packet_limit")
+            await _fallback(conn, ctx.workspace, live, episode, "packet_limit", requester=ticket_req)
             return None
         await policy.lock_budget(conn)
         stats = await one(conn, """SELECT count(*) FILTER (WHERE created_at>now()-interval '1 hour') AS hourly,
