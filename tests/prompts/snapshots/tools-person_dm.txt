@@ -49,7 +49,7 @@ rules_remove_mine: Remove one of this person's standing rules by `id` from `rule
 search_all: Search everything this run can see, ranked by match and recency. Optional `kinds`: saved, decision, note, lane_summary, archive, slack, github, doc, lane, and mail (this person's mail, DM only). Read one result in full with `search_get` and its `source_ref`.
 search_get: Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.
 skills_get: Read the steps of one team skill by its name
-slack_post_channel: Post in a configured team channel (`channel`: its id; `thread_ts` to answer in a thread). It becomes a draft card after a personal or private read.
+slack_post_channel: Post in a configured team channel (`channel`: its id or #name; `thread_ts` to answer in a thread). Always a draft card in agent requests or after a personal or private read.
 slack_read_thread: Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.
 slack_send_dm: Send a Slack DM to one team member (`person`: a person key). For a question that needs an answer, use `asks_create` instead. It becomes a draft card after a personal or private read. At most 3 per run.
 sweep_mark_seen: Record item keys (such as `gmail:<id>` or `cal:<id>`) surfaced in this person's proactive personal sweep so future sweeps do not repeat them.

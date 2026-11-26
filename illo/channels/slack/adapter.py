@@ -68,11 +68,16 @@ class SlackAdapter:
         )
 
     async def deliver_final(self, event: InboundEvent, text: str) -> None:
+        from psycopg.types.json import Jsonb
+
+        from illo.asks import cards
+
         client, channel = self.ctx.slack_client, event.payload["channel_id"]
         ts = self.working.get(event.external_id)
+        outside_draft = None
         async with self.ctx.pool.connection() as conn:
             row = await one(
-                conn, "SELECT tainted FROM events WHERE channel='slack' AND external_id=%s",
+                conn, "SELECT id, tainted FROM events WHERE channel='slack' AND external_id=%s",
                 (event.external_id,),
             )
             tainted = bool(row and row["tainted"])
@@ -80,21 +85,43 @@ class SlackAdapter:
                 await kv.set(
                     conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
                 )
+            if row and event.kind != "dm" and event.payload.get("channel_class") != "members":
+                outside_draft = await one(
+                    conn,
+                    """SELECT d.* FROM drafts d
+                    JOIN runs r ON r.id = d.run_id
+                    WHERE r.event_id = %s
+                      AND d.kind = 'github_assign_issue'
+                      AND d.state = 'pending'
+                      AND d.content ? 'outside_ticket'
+                    ORDER BY d.id DESC LIMIT 1""",
+                    (row["id"],),
+                )
         parts = chunks(text)
+        channel_blocks = (
+            cards.outside_ticket_channel_blocks(outside_draft, parts[0])
+            if outside_draft and len(parts) == 1 and len(parts[0]) <= 2900
+            else None
+        )
+
         def delivery_id(index):
             if not event.payload.get("delivery_key"):
                 return {}
             from illo.asks.service import message_id
 
             return {"client_msg_id": message_id("deep", f"{event.payload['delivery_key']}:{index}")}
+
         try:
             if ts:
-                await client.chat_update(channel=channel, ts=ts, text=parts[0])
+                kwargs = {"blocks": channel_blocks} if channel_blocks else {}
+                await client.chat_update(channel=channel, ts=ts, text=parts[0], **kwargs)
             else:
+                kwargs = {"blocks": channel_blocks} if channel_blocks else {}
                 sent = await client.chat_postMessage(
                     channel=channel,
                     text=parts[0],
                     **delivery_id(0),
+                    **kwargs,
                     thread_ts=event.reply_to,
                     unfurl_links=False,
                     unfurl_media=False,
@@ -104,6 +131,25 @@ class SlackAdapter:
                     async with self.ctx.pool.connection() as conn:
                         await kv.set(
                             conn, f"slack:thread-tainted:{channel}:{event.reply_to or ts}", True
+                        )
+            if outside_draft and channel_blocks and ts:
+                async with self.ctx.pool.connection() as conn:
+                    locked = await one(
+                        conn, "SELECT content FROM drafts WHERE id=%s FOR UPDATE", (outside_draft["id"],)
+                    )
+                    if locked and locked["content"].get("outside_ticket"):
+                        content = dict(locked["content"])
+                        notice = dict(content["outside_ticket"])
+                        notice["channel_card"] = {
+                            "channel": channel,
+                            "ts": ts,
+                            "text": parts[0],
+                            "digest": cards.digest(channel_blocks),
+                        }
+                        content["outside_ticket"] = notice
+                        await conn.execute(
+                            "UPDATE drafts SET content=%s WHERE id=%s",
+                            (Jsonb(content), outside_draft["id"]),
                         )
             for index, part in enumerate(parts[1:], 1):
                 await client.chat_postMessage(

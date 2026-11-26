@@ -221,6 +221,8 @@ def draft_preview(draft: dict) -> str | None:
             return None
         blocks = github_sections(text)
         return text if blocks is not None and len(blocks) <= 49 else None
+    if draft.get("kind") == "slack_post_channel":
+        return slack_post_preview(draft)
     if draft.get("kind") == "asks_answer":
         content = draft.get("answer_preview")
         if content is None:
@@ -314,6 +316,98 @@ def preview_sections(text):
     return blocks
 
 
+def slack_post_preview(draft: dict) -> str | None:
+    """Format a Slack channel post draft cleanly with visible escaping."""
+    args = draft["content"].get("arguments") or {}
+    channel = args.get("channel", "")
+    text = args.get("text", "")
+    if not channel or not text:
+        return None
+    where = (
+        f"<#{visible_escape(channel)}>"
+        if channel.startswith(("C", "G"))
+        else visible_escape(channel)
+    )
+    heading = f"Post in {where} (thread reply):" if args.get("thread_ts") else f"Post in {where}:"
+    body = "> " + visible_escape(text).replace("\n", "\n> ")
+    full = f"{heading}\n{body}"
+    if len(full) > 120000:
+        return None
+    blocks = github_sections(full)
+    return full if blocks is not None and len(blocks) <= 49 else None
+
+
+def slack_post_card(draft: dict, text: str) -> list[dict]:
+    blocks = github_sections(text)
+    if draft["state"] == "pending":
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    button("Send", f"draft:{draft['id']}:approve", True),
+                    button("Do not send", f"draft:{draft['id']}:reject"),
+                ],
+            }
+        )
+    elif draft["state"] == "sent":
+        blocks.append(section(f"Sent — {draft['decided_at'].isoformat(timespec='minutes')}"))
+    elif draft["state"] == "approved":
+        blocks.append(
+            section(
+                "Delivery could not be confirmed. Check the destination."
+                if draft.get("send_error")
+                else "Send approved. Delivery waits for confirmation."
+            )
+        )
+    else:
+        blocks.append(section("Not sent"))
+    return blocks
+
+
+def outside_ticket_channel_blocks(draft: dict, body_text: str) -> list[dict]:
+    """Compact inline actions attached to a channel reply for a code-proposed assignment."""
+    notice = draft["content"].get("outside_ticket") or {}
+    owner = visible_escape(notice.get("owner") or "owner")
+    blocks = [section(body_text)]
+    if draft["state"] == "pending":
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    button(f"Assign to {owner}", f"outside-assign:{draft['id']}:approve", True),
+                    button("Leave it", f"outside-assign:{draft['id']}:reject"),
+                ],
+            }
+        )
+    elif draft["state"] == "sent":
+        assignee = visible_escape(draft["content"]["arguments"]["assignee"])
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"Assigned to `{assignee}`."}],
+            }
+        )
+    elif draft["state"] == "approved":
+        status = (
+            "Delivery could not be confirmed. Check the destination."
+            if draft.get("send_error")
+            else "Assignment approved. Delivery waits for confirmation."
+        )
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": status}]})
+    elif draft["state"] == "rejected":
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "Left unassigned."}]})
+    else:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": "Assignment card expired. The ticket stays unassigned."}
+                ],
+            }
+        )
+    return blocks
+
+
 def draft_fallback(draft):
     if draft.get("kind") in {"connect_propose_mcp", "connect_allow_tools", "connect_remove", "connect_data_policy"}:
         return draft_preview(draft)
@@ -321,6 +415,9 @@ def draft_fallback(draft):
         args = draft["content"]["arguments"]
         verb = "Assign" if draft["kind"] == "github_assign_issue" else "Comment on"
         return f"{verb} {args['repo'].split('/')[-1]}#{args['number']}?"
+    if draft.get("kind") == "slack_post_channel":
+        channel = (draft["content"].get("arguments") or {}).get("channel", draft["destination"])
+        return f"Post in <#{channel}>?" if channel.startswith(("C", "G")) else f"Post in {channel}?"
     return f"Draft for {draft['destination']}"
 
 
@@ -376,6 +473,8 @@ def draft_card(draft: dict) -> list[dict]:
         return blocks
     if text is not None and draft.get("kind") in {"github_assign_issue", "github_comment_issue"}:
         return github_card(draft, text)
+    if text is not None and draft.get("kind") == "slack_post_channel":
+        return slack_post_card(draft, text)
     blocks = [section(f"Draft for {escape(draft['destination'])}")]
     if text is None:
         blocks.append(section("This draft is too long to review in Slack. It stays unsent."))

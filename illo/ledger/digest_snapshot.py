@@ -241,6 +241,17 @@ async def build(conn, person, now, workspace):
         frames, _ = await board_needs(conn, person)
         ids = {row['id'] for _, kind, row in frames if kind == 'a'}
         ask_links = {a['id']: base + path(workspace, a['id'], ask=True, on_board=a['id'] in ids) for a in asks}
+    pending_draft_rows = await all_rows(
+        conn,
+        """SELECT id, kind, destination, content, slack_channel, slack_ts, created_at
+        FROM drafts
+        WHERE approver_person_id=%s
+          AND state='pending'
+          AND created_at > %s - interval '24 hours'
+        ORDER BY created_at, id""",
+        (person["id"], now),
+    )
+    pending_drafts = [_draft_summary(d, workspace, now) for d in pending_draft_rows]
     return {
         "name": person["name"], "needs_you": [r["item"] for r in needs[:7]],
         "needs_you_total": len(needs), "your_agents": agents,
@@ -248,9 +259,43 @@ async def build(conn, person, now, workspace):
         "due": due, "asks": [{"title": a["question"], "link": ask_links.get(a["id"], card_link(a)),
             "reason": "The answer did not reach its agent." if a["delivery_state"] == "failed" else "Please answer.",
             "age_hours": hours(now, a["created_at"])} for a in asks],
+        "pending_drafts": pending_drafts,
         "handled_without_you": await handled_without_you(conn, since, person=person),
         "faults": await read_faults(conn, now, since, person["key"]) if person["role"] == "owner" else [],
         "recent_openings": await recent_openings(conn, "digest", person["id"]),
+    }
+
+
+def _draft_summary(row, workspace, now):
+    content = row.get("content") or {}
+    args = content.get("arguments") or {}
+    kind = row["kind"]
+    link = card_link(row)
+    if kind == "github_assign_issue":
+        repo_short = str(args.get("repo", "")).split("/")[-1]
+        issue = content.get("github_issue") or {}
+        title = f"Assign {repo_short}#{args.get('number')} to {args.get('assignee')}"
+        if issue.get("title"):
+            title += f": {issue['title']}"
+        link = link or issue.get("link", "")
+    elif kind == "github_comment_issue":
+        repo_short = str(args.get("repo", "")).split("/")[-1]
+        issue = content.get("github_issue") or {}
+        title = f"Comment on {repo_short}#{args.get('number')}"
+        link = link or issue.get("link", "")
+    elif kind == "slack_post_channel":
+        channel_id = args.get("channel", "")
+        configured = workspace.config.slack.channel(channel_id) if channel_id else None
+        where = f"#{configured.name}" if configured and configured.listed else (channel_id or row["destination"])
+        title = f"Post in {where}"
+    else:
+        title = f"Approve draft for {row['destination']}"
+    return {
+        "id": row["id"],
+        "kind": kind,
+        "title": title,
+        "link": link,
+        "age_hours": hours(now, row["created_at"]),
     }
 
 

@@ -7,7 +7,7 @@ You may:
 • Read the team ledger, the person's private lanes, and the team tickets, and search.
 • Make a task in the list for that work.
 • Create an ask when the agent needs a decision from a person, or answer an open ask with a standing rule of its owner that matches one of its options.
-• Propose a note or draft an email. Both wait for the person's approval.
+• Propose a note, a team channel post, or an email. Each waits for the person's approval.
 • Write a task's page with `page_write`, when that tool is present.
 
 ## Answer for an agent

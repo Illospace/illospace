@@ -394,6 +394,21 @@ async def assigned(ctx, conn, task_id, login):
         await conn.execute("""UPDATE task_wakes SET finished_at=now() WHERE task_id=%s
             AND reason='task.handed' AND finished_at IS NULL""", (task_id,))
         await tasks._event(conn, row, "code", "woken", "The ticket is assigned.")
+    elif login:
+        from illo.ledger import people
+
+        person = await people.by_github_login(conn, login)
+        if person:
+            ref = "person:" + person["key"]
+            if row["holder"] != ref:
+                row = await one(conn, """UPDATE tasks SET holder=%s,holder_since=now(),handed_by='code',
+                    state='todo',waits_for=%s,alive_at=NULL,stopped_at=NULL WHERE id=%s RETURNING *""",
+                    (ref, ref, task_id))
+                await tasks._event(conn, row, "code", "handed", "The ticket gives the task a holder.", {"holder": row["holder"]})
+            return
+        target = "person:" + ctx.workspace.config.default_owner
+        await conn.execute("UPDATE tasks SET waits_for=%s WHERE id=%s", (target, task_id))
+        await tasks._event(conn, row, "code", "state", "The ticket waits for an owner.")
     else:
         target = "person:" + ctx.workspace.config.default_owner
         await conn.execute("UPDATE tasks SET waits_for=%s WHERE id=%s", (target, task_id))

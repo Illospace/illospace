@@ -3,7 +3,7 @@
 import json
 
 from illo.db import all_rows, one
-from illo.ledger import tasks
+from illo.ledger import drafts, tasks
 from illo.tasks import pages, progress
 from illo.tools._format import data_text
 
@@ -48,6 +48,14 @@ async def full(conn, workspace, row, viewer, *, limit=20, ctx=None):
                                   "data": data_text("task-event-data", json.dumps(event["data"]))})
     result["checks"] = [{**check, "text": data_text("task-check", check["text"])}
                         for check in await tasks.proof(conn, workspace, row, ctx)]
+    ticket_urls = [
+        link["url"] for link in row["links"] if link.get("kind") == "ticket" and link.get("url")
+    ]
+    pending = await drafts.pending_for_tickets(
+        conn, ticket_urls, viewer_person=viewer.person if viewer.human else None
+    )
+    if pending:
+        result["pending_drafts"] = pending
     return result
 
 

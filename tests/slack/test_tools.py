@@ -99,9 +99,106 @@ async def test_profiles_hide_slack_writes_and_all_slack_from_taint(app, rpc):
             )
             token = await runs.mint_token(conn, run["id"], 60)
         names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}
-        assert "slack_post_channel" not in names
+        assert ("slack_post_channel" in names) == (profile == "agent_request")
         assert ("slack_send_dm" in names) == (profile == "routine")
         assert ("slack_read_thread" in names) == (profile == "team_channel")
+
+
+async def test_agent_request_slack_post_channel_is_always_draft_with_clean_card(app, rpc, slack_client):
+    from illo.asks import cards, drafts
+
+    ctx = app.state.ctx
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        run = await runs.create(
+            conn,
+            principal="person:ada",
+            person_id=ada["id"],
+            profile="agent_request",
+            provider="fake",
+            tool_limit=12,
+            model="fake",
+        )
+        token = await runs.mint_token(conn, run["id"], 60)
+
+    # Resolve configured channel by #name and always require DM approval.
+    result = await call(
+        rpc, token, "slack_post_channel", {"channel": "#team", "text": "Release progress:\nAll checks green."}
+    )
+    assert result["decision"] == "draft"
+    assert not any(c["method"] == "chat_postMessage" for c in slack_client.calls)
+
+    # Unconfigured / private channels are denied even before drafting.
+    denied_unknown = await call(
+        rpc, token, "slack_post_channel", {"channel": "#no-such-channel", "text": "Hi"}
+    )
+    assert denied_unknown["decision"] == "deny"
+
+    original_info = slack_client.conversations_info
+
+    async def info(**kwargs):
+        if kwargs.get("channel") == "C_PRIVATE_ONLY":
+            return {"ok": True, "channel": {"id": "C_PRIVATE_ONLY", "name": "secret", "is_private": True, "is_member": True}}
+        return await original_info(**kwargs)
+
+    slack_client.conversations_info = info
+    denied_private = await call(
+        rpc, token, "slack_post_channel", {"channel": "C_PRIVATE_ONLY", "text": "Hi"}
+    )
+    assert denied_private["decision"] == "deny"
+
+    # Tick sends clean non-JSON DM card; approving posts once to C_ACME_TEAM.
+    await drafts.tick(ctx)
+    async with ctx.pool.connection() as conn:
+        row = await one(conn, "SELECT * FROM drafts WHERE id=%s", (result["result"]["draft_id"],))
+    assert row["destination"] == "channel:C_ACME_TEAM"
+    assert row["content"]["arguments"]["channel"] == "C_ACME_TEAM"
+    preview = cards.draft_preview(row)
+    assert preview.startswith("Post in <#C_ACME_TEAM>:\n> Release progress:\n> All checks green.")
+    assert '"arguments"' not in preview and '"tool"' not in preview
+    assert cards.draft_fallback(row) == "Post in <#C_ACME_TEAM>?"
+
+    await drafts.handle(
+        ctx,
+        ada,
+        {"action_id": f"draft:{row['id']}:approve", "channel": row["slack_channel"], "message_ts": row["slack_ts"]},
+    )
+    posted = [
+        c for c in slack_client.calls
+        if c["method"] == "chat_postMessage" and c.get("channel") == "C_ACME_TEAM"
+    ]
+    assert len(posted) == 1
+    assert posted[0]["text"] == "Release progress:\nAll checks green."
+    async with ctx.pool.connection() as conn:
+        assert (await one(conn, "SELECT state FROM drafts WHERE id=%s", (row["id"],)))["state"] == "sent"
+
+
+def test_slack_post_preview_escapes_hidden_chars_and_blocks_oversized():
+    from illo.asks import cards
+
+    draft = {
+        "id": 9,
+        "state": "pending",
+        "kind": "slack_post_channel",
+        "destination": "channel:C_ACME_TEAM",
+        "content": {
+            "tool": "slack_post_channel",
+            "arguments": {"channel": "C_ACME_TEAM", "text": "Hello \u202eworld <script>"},
+        },
+    }
+    preview = cards.draft_preview(draft)
+    assert "\\u202e" in preview and "\u202e" not in preview
+    assert "&lt;script&gt;" in preview
+
+    oversized = {
+        **draft,
+        "content": {
+            "tool": "slack_post_channel",
+            "arguments": {"channel": "C_ACME_TEAM", "text": "\u200b" * 20001},
+        },
+    }
+    assert cards.draft_preview(oversized) is None
+    assert not any(b["type"] == "actions" for b in cards.draft_card(oversized))
 
 
 async def test_inactive_dm_recipient_is_denied(app, rpc, rpc_token):
