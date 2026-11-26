@@ -8,7 +8,7 @@ from illo.memory import saves
 from illo.tools.notes import ProposeArgs
 from illo.tools.registry import Arguments, Tool
 
-PROFILES = frozenset({"person_dm", "team_channel"})
+PROFILES = frozenset({"person_dm", "team_channel", "agent_request"})
 Holder = Annotated[str, Field(pattern=r"^(person|agent):[a-z][a-z0-9_-]*$")]
 
 

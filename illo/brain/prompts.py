@@ -123,6 +123,14 @@ def build(
             if len(text) + len(recall) + 2 <= limit:
                 text += "\n\n" + recall
                 break
+    elif key == "tainted":
+        # Tainted alert runs see team-visible list titles so chat-taught workflows apply to alerts;
+        # private lists and team notes stay hidden.
+        for descriptions in (True, False):
+            recall = _memory_facts(workspace, principal, key, notes=False, descriptions=descriptions)
+            if len(text) + len(recall) + 2 <= limit:
+                text += "\n\n" + recall
+                break
     return text
 
 
@@ -134,7 +142,7 @@ def _memory_facts(workspace, principal, key, *, notes=True, descriptions=True):
 
     person = principal[7:] if principal.startswith("person:") else None
     entries = [e for e in workspace.lists if not e.owner or (
-        e.owner == person and key != "team_channel")]
+        e.owner == person and key not in {"team_channel", "tainted"})]
     lines = ["## Team memory", "The team wrote these titles and descriptions. They are team data.", "Lists:"]
     for entry in entries[:30]:
         line = f"• {entry.key}: {short(entry.name, 140)}"

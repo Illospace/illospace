@@ -37,11 +37,12 @@ This also applies to its default holder, reviewer, and Slack channel.
 Set `memory.list_changes: everyone` in `illo.yaml` to let all active people make these changes.
 The default is `owners`. A private list stays private to its owner.
 
-Only an untainted DM or team channel run can save directly.
-Agents can propose notes with the existing Keep card. They cannot save team memory directly.
+Untainted DM, team channel, and signed-in personal agent (`agent_request`) runs can save team memory directly.
+Agent-requested memory updates pass Auto Mode safety review (blocking secrets and prompt injection) and send the person a Slack DM card with **Correct** and **Forget** undo buttons.
+Team workflow lists (`lists/*.md`) are visible to `#alerts` / tainted triage runs so chat-taught workflows apply automatically; private lists and team notes remain hidden from tainted runs.
 After a personal read, a note waits on a Keep card. A list change is refused.
 A private channel for team members still saves to team memory.
-Only a known person's words become memory. Outside text never does.
+Only a known person's (or their signed-in agent's) words become memory. Outside text never does.
 Never save secrets, personal data, or one-time details.
 Code checks the person and the run. The model must check the meaning of the text.
 
