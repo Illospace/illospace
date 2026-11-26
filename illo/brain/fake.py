@@ -16,12 +16,17 @@ class FakeBrain:
 
     def __init__(
         self, script: list[dict] | None = None, *, transport=None, final_text: str | None = None,
-        catalog: dict[str, dict] | None = None,
+        catalog: dict[str, dict] | None = None, review_verdict: dict | str | None = None,
     ):
         self.script = script if script is not None else [{"name": "lanes_search", "arguments": {}}]
         self.catalog = catalog or {}
         self.transport = transport
         self.final_text = final_text
+        self.review_verdict = (
+            {"verdict": "allow", "reason": "Routine internal team update"}
+            if review_verdict is None
+            else review_verdict
+        )
         self.requests: list[RunRequest] = []
         self.results: list[dict] = []
         self.transcripts: list[dict] = []
@@ -36,6 +41,15 @@ class FakeBrain:
     async def run(self, request: RunRequest) -> AsyncIterator[BrainEvent]:
         """A failed HTTP call fails the run instead of pretending to use a tool."""
         self.requests.append(request)
+        if "[illo:comms-review]" in request.system_prompt:
+            yield BrainEvent(type="started")
+            text = (
+                self.review_verdict
+                if isinstance(self.review_verdict, str)
+                else json.dumps(self.review_verdict)
+            )
+            yield BrainEvent(type="final", text=text)
+            return
         results = []
         yield BrainEvent(type="started")
         async with httpx.AsyncClient(transport=self.transport, timeout=request.timeout_s) as client:

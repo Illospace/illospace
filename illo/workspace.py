@@ -81,6 +81,7 @@ class SlackChannel(Model):
     visibility: Literal["team", "private"] = "team"
     team_members_only: bool = False
     rule_files: list[str] = Field(default_factory=list)
+    agent_posts: Literal["auto", "draft", "off"] | None = None
 
 
 class SlackConfig(Model):
@@ -97,6 +98,8 @@ class SlackConfig(Model):
     channels: list[SlackChannel] = Field(default_factory=list)
     default_mode: Literal["listen", "off"] = "listen"
     default_rule_files: list[str] = Field(default_factory=list)
+    agent_posts: Literal["auto", "draft", "off"] = "auto"
+    agent_dms: Literal["auto", "draft", "off"] = "auto"
 
     def channel(self, channel_id: str) -> SlackChannel:
         """Return the listed settings or the defaults for this channel."""

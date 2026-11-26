@@ -100,14 +100,15 @@ async def test_profiles_hide_slack_writes_and_all_slack_from_taint(app, rpc):
             token = await runs.mint_token(conn, run["id"], 60)
         names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}
         assert ("slack_post_channel" in names) == (profile == "agent_request")
-        assert ("slack_send_dm" in names) == (profile == "routine")
+        assert ("slack_send_dm" in names) == (profile in {"routine", "agent_request"})
         assert ("slack_read_thread" in names) == (profile == "team_channel")
 
 
-async def test_agent_request_slack_post_channel_is_always_draft_with_clean_card(app, rpc, slack_client):
+async def test_agent_request_slack_post_channel_draft_mode_with_clean_card(app, rpc, slack_client):
     from illo.asks import cards, drafts
 
     ctx = app.state.ctx
+    ctx.workspace.config.slack.agent_posts = "draft"
     async with ctx.pool.connection() as conn:
         ada = await people.get(conn, "ada")
         run = await runs.create(
@@ -121,7 +122,7 @@ async def test_agent_request_slack_post_channel_is_always_draft_with_clean_card(
         )
         token = await runs.mint_token(conn, run["id"], 60)
 
-    # Resolve configured channel by #name and always require DM approval.
+    # Resolve configured channel by #name and require DM approval when agent_posts='draft'.
     result = await call(
         rpc, token, "slack_post_channel", {"channel": "#team", "text": "Release progress:\nAll checks green."}
     )
