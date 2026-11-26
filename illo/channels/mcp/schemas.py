@@ -163,6 +163,8 @@ class AskCreate(Arguments):
     proof: dict[str, Any] = Field(default_factory=dict)
     blocks: list[Block] = Field(default_factory=list, max_length=12)
     owner: str | None = None
+    owners: list[str] | None = Field(default=None, min_length=1, max_length=20)
+    share_saved: bool = False
     due_at: str | None = None
     expires_at: str | None = None
     source_ref: str | None = Field(default=None, min_length=1)
@@ -183,6 +185,10 @@ class AskCreate(Arguments):
 
     @model_validator(mode="after")
     def check_options(self):
+        if self.owner and self.owners:
+            raise Refusal("Give owner or owners, not both")
+        if self.owners and any(not o for o in self.owners):
+            raise Refusal("Each owner must be a non-empty person identifier")
         check_ask_text(self.model_dump_json())
         ids = [o.id for o in self.options]
         if len(set(ids)) != len(ids) or (
@@ -190,6 +196,13 @@ class AskCreate(Arguments):
         ):
             raise Refusal("Use unique option IDs and a valid recommended option")
         return self
+
+
+class AskList(Arguments):
+    state: Literal["open", "answered", "all"] = "open"
+    owner: str | None = None
+    ask_id: int | None = Field(default=None, gt=0)
+    limit: int = Field(default=20, ge=1, le=50)
 
 
 class AskPull(Arguments):

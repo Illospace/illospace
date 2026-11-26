@@ -23,6 +23,7 @@ async def test_initialize_list_and_alias_header(app, http):
         "lane_report",
         "lane_search",
         "ask_create",
+        "ask_list",
         "ask_pull",
         "ask_ack",
         "ask_cancel",

@@ -44,7 +44,7 @@ class ImageUrl(Arguments):
 class Text(Arguments):
     kind: Literal["text"]
     title: str = Field(default="", max_length=80)
-    text: str = Field(max_length=6000)
+    text: str = Field(max_length=20000)
 
 
 class TextPreview(Arguments):
@@ -52,7 +52,7 @@ class TextPreview(Arguments):
     title: str = Field(default="", max_length=80)
     name: str = Field(max_length=80)
     label: str = Field(default="", max_length=80)
-    text: str = Field(max_length=6000)
+    text: str = Field(max_length=20000)
 
 
 class Preview(TextPreview):

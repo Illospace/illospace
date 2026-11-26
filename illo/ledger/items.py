@@ -58,6 +58,22 @@ async def get(conn: Connection, source_ref: str, *, principal: str = "team") -> 
     )
 
 
+async def publish(conn: Connection, source_ref: str, *, owner_person_id: int) -> dict | None:
+    """Promote one owner-held saved item to team visibility. Never touches other people's or non-saved items."""
+    return await one(
+        conn,
+        """
+        UPDATE items
+        SET visibility='team'
+        WHERE (source_ref=%s OR id=(SELECT item_id FROM item_aliases WHERE alias=%s))
+          AND kind='saved'
+          AND owner_person_id=%s
+        RETURNING id,created_at,kind,source_ref,title,body,summary,owner_person_id,visibility,links,meta,source_at
+    """,
+        (source_ref, source_ref, owner_person_id),
+    )
+
+
 async def search(
     conn: Connection,
     query: str,

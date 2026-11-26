@@ -301,29 +301,42 @@ async def authorized_packet(conn, ctx, event, authority):
                 and episode["version"] == run["snapshot"]["version"] and await episodes.is_pending(conn, episode))
 
 
+async def _run_claimed(ctx, thread_id, lease):
+    renew = asyncio.create_task(_keep_lease(ctx, thread_id, lease))
+    try:
+        event = await _admit(ctx, thread_id, lease)
+        if event:
+            result = await ctx.gateway.receive(event)
+            if result["decision"] == "ignore":
+                await apply(ctx, event, error="authority")
+    except Exception:
+        log.error("Could not coordinate board thread %s.", thread_id)
+    finally:
+        renew.cancel()
+        await asyncio.gather(renew, return_exceptions=True)
+        async with ctx.pool.connection() as conn:
+            await _release(conn, thread_id, lease)
+
+
 async def run_coordinator(ctx):
     if not await policy.ready(ctx):
         return
     await scan(ctx)
-    for _ in range(3):
-        claimed = await _claim(ctx)
+    budget = 3
+    while budget > 0:
+        claimed = []
+        for _ in range(budget):
+            item = await _claim(ctx)
+            if not item:
+                break
+            claimed.append(item)
         if not claimed:
             return
-        thread_id, lease = claimed
-        renew = asyncio.create_task(_keep_lease(ctx, thread_id, lease))
-        try:
-            event = await _admit(ctx, thread_id, lease)
-            if event:
-                result = await ctx.gateway.receive(event)
-                if result["decision"] == "ignore":
-                    await apply(ctx, event, error="authority")
-        except Exception:
-            log.error("Could not coordinate board thread %s.", thread_id)
-        finally:
-            renew.cancel()
-            await asyncio.gather(renew, return_exceptions=True)
-            async with ctx.pool.connection() as conn:
-                await _release(conn, thread_id, lease)
+        budget -= len(claimed)
+        if len(claimed) == 1:
+            await _run_claimed(ctx, *claimed[0])
+        else:
+            await asyncio.gather(*(_run_claimed(ctx, thread_id, lease) for thread_id, lease in claimed))
 
 
 async def _run(conn, event):
@@ -605,13 +618,20 @@ async def apply(ctx, event, text=None, *, error=None):
             outcome, code = "stale", "no_longer_pending"
         elif error == "authority":
             outcome, code = "stale", "authority"
+        elif error == "cancelled":
+            outcome, code = "stale", "cancelled"
+            await conn.execute(
+                "UPDATE board_episodes SET version=version+1,next_check_at=clock_timestamp() WHERE id=%s",
+                (episode["id"],),
+            )
         elif error:
             outcome, code = "failed", error if error in {"provider", "timeout"} else "error"
         else:
             outcome, code = "invalid", "no_action"
         if outcome in {"failed", "invalid"}:
             next_errors = episode["errors"] + 1
-            delay = timedelta(0) if next_errors >= 2 else timedelta(minutes=10)
+            first_delay = timedelta(minutes=1) if episode["reason"] == "decision_needed" else timedelta(minutes=10)
+            delay = timedelta(0) if next_errors >= 2 else first_delay
             await conn.execute("""UPDATE board_episodes SET errors=%s,waits=0,version=version+1,
                 next_check_at=clock_timestamp()+%s WHERE id=%s""", (next_errors, delay, episode["id"]))
             await sensors.error(conn, "board:coordinator", "The board coordinator could not apply a decision.")
