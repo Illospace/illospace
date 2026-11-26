@@ -19,7 +19,7 @@ OWNER_FIELDS = {"name", "holders", "default_holder", "done", "reviewer", "slack_
 
 async def actor(ctx):
     run = ctx.run
-    if effective_profile(run) not in {"person_dm", "team_channel"}:
+    if effective_profile(run) not in {"person_dm", "team_channel", "agent_request"}:
         return None
     if run["profile"] == "team_channel":
         return await one(ctx.conn, """SELECT p.* FROM people p JOIN events e
@@ -47,9 +47,20 @@ async def limit(conn, person):
 async def note_check(ctx, args):
     if not await actor(ctx):
         return Decision("deny", "Memory needs a known active person's untainted request.")
-    return Decision("draft" if ctx.run["personal_read"] else "allow",
-                    "A Keep card waits after a personal read." if ctx.run["personal_read"]
-                    else "The person can save team notes.")
+    if ctx.run["personal_read"]:
+        return Decision("draft", "A Keep card waits after a personal read.")
+    if effective_profile(ctx.run) == "agent_request":
+        from illo.tools import _comms_guard as comms_guard
+
+        body = "\n".join(p for p in (args.get("title"), args.get("about"), args.get("text")) if p)
+        return await comms_guard.review_memory(
+            ctx,
+            action="note_save",
+            target_label=args.get("replaces") or f"note:{args.get('title', '')[:80]}",
+            text=body,
+            allow_draft=True,
+        )
+    return Decision("allow", "The person can save team notes.")
 
 
 def list_permission(workspace, person, args):
@@ -73,7 +84,20 @@ async def list_check(ctx, args):
     if ctx.run["personal_read"]:
         return Decision("deny", "This run read personal data. Ask again in a new conversation to change a list.")
     reason = list_permission(ctx.app.workspace, person, args)
-    return Decision("deny", reason) if reason else Decision("allow", "The person can change this list.")
+    if reason:
+        return Decision("deny", reason)
+    if effective_profile(ctx.run) == "agent_request":
+        from illo.tools import _comms_guard as comms_guard
+
+        parts = [f"{k}: {v}" for k, v in args.items() if v not in (None, "", [])]
+        return await comms_guard.review_memory(
+            ctx,
+            action="list_save",
+            target_label=f"list:{args['key']}",
+            text="\n".join(parts),
+            allow_draft=False,
+        )
+    return Decision("allow", "The person can change this list.")
 
 
 async def record(ctx, conn, *, kind, target, title, before, after, person, run_id,
@@ -183,6 +207,16 @@ async def forget_check(ctx, args):
         return Decision("deny", "Memory needs a known active person's untainted request.")
     if ctx.run["personal_read"]:
         return Decision("deny", "This run read personal data. Ask again in a new conversation to forget a note.")
+    if effective_profile(ctx.run) == "agent_request":
+        from illo.tools import _comms_guard as comms_guard
+
+        return await comms_guard.review_memory(
+            ctx,
+            action="note_forget",
+            target_label=args["ref"],
+            text=f"Forget note {args['ref']}",
+            allow_draft=False,
+        )
     return Decision("allow", "The person can forget team notes.")
 
 

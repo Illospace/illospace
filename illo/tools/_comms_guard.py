@@ -169,8 +169,10 @@ async def _request_context(ctx: ToolContext) -> str:
 async def _review_with_brain(
     ctx: ToolContext,
     *,
-    kind: Literal["channel", "dm"],
+    action_label: str,
     target_label: str,
+    content_source: str,
+    content_heading: str,
     text: str,
 ) -> Decision:
     app = ctx.app
@@ -195,13 +197,13 @@ async def _review_with_brain(
 
     original = await _request_context(ctx)
     parts = [
-        f"Action: {'post to team Slack channel' if kind == 'channel' else 'send Slack DM to teammate'}",
+        f"Action: {action_label}",
         f"Destination: {target_label}",
         f"Requester principal: {ctx.run['principal']}",
     ]
     if original:
         parts.append("Original agent submission:\n" + data_text("agent-request", original))
-    parts.append("Proposed Slack message:\n" + data_text("proposed-message", text))
+    parts.append(f"{content_heading}:\n" + data_text(content_source, text))
     user_message = "\n\n".join(parts)
 
     review_run_id = None
@@ -217,7 +219,7 @@ async def _review_with_brain(
                 provider=payer.provider,
                 model=route.model,
                 tool_limit=1,
-                event_id=ctx.run.get("event_id"),
+                event_id=None,
             )
             review_run_id = review_run["id"]
             token = await runs.mint_token(review_conn, review_run_id, int(REVIEW_TIMEOUT_S) + 10)
@@ -287,4 +289,46 @@ async def evaluate(
     )
     if hard is not None:
         return hard
-    return await _review_with_brain(ctx, kind=kind, target_label=target_label, text=text)
+    action_label = "post to team Slack channel" if kind == "channel" else "send Slack DM to teammate"
+    return await _review_with_brain(
+        ctx,
+        action_label=action_label,
+        target_label=target_label,
+        content_source="proposed-message",
+        content_heading="Proposed Slack message",
+        text=text,
+    )
+
+
+async def review_memory(
+    ctx: ToolContext,
+    *,
+    action: Literal["note_save", "list_save", "note_forget"],
+    target_label: str,
+    text: str,
+    allow_draft: bool,
+) -> Decision:
+    """Run deterministic checks and quarantined Auto Mode review for agent-requested memory updates."""
+    if contains_secret(text):
+        return Decision("deny", "Memory content appears to contain a secret or credential")
+    if has_hidden_format(text):
+        return Decision(
+            "draft" if allow_draft else "deny",
+            "Hidden formatting characters need your approval",
+        )
+    labels = {
+        "note_save": "save team memory note",
+        "list_save": "save team workflow list",
+        "note_forget": "forget team memory note",
+    }
+    verdict = await _review_with_brain(
+        ctx,
+        action_label=labels[action],
+        target_label=target_label,
+        content_source="proposed-memory",
+        content_heading="Proposed memory update",
+        text=text[:4000],
+    )
+    if verdict.outcome == "draft" and not allow_draft:
+        return Decision("deny", f"{verdict.reason} Ask the person to confirm in Slack.")
+    return verdict

@@ -37,10 +37,17 @@ def test_titles_caps_and_visibility(recall_workspace, profile, principal):
     assert text.count("• Fact ") == 40 and text.count("• list_") == 30
 
 
-@pytest.mark.parametrize("profile,principal", [("tainted", "team"), ("outsider", "outsider"), ("routine", "team")])
+@pytest.mark.parametrize("profile,principal", [("outsider", "outsider"), ("routine", "team")])
 def test_no_recall_for_other_profiles(recall_workspace, profile, principal):
     text = build(recall_workspace, principal, profile, now=NOW)
     assert "Lists:" not in text and "Team notes:" not in text and "Fact 1" not in text
+
+
+def test_tainted_sees_team_lists_only_without_notes_or_private_lists(recall_workspace):
+    text = build(recall_workspace, "team", "tainted", now=NOW)
+    assert "Lists:" in text and "• list_0: List 0" in text
+    assert "Team notes:" not in text and "Fact 1" not in text
+    assert "Private list" not in text and "Never put this body" not in text
 
 
 def test_budget_drops_notes_then_descriptions(recall_workspace, monkeypatch):
@@ -75,5 +82,6 @@ def test_memory_prompt_contract():
 
 async def test_taint_overrides_original_profile(conn, recall_workspace):
     event = InboundEvent(channel="slack", kind="message", external_id="taint")
-    text = await build_for_run(conn, recall_workspace, Authority("team", "team_channel", tainted=True), event)
-    assert "Team notes:" not in text and "Lists:" not in text
+    text = await build_for_run(conn, recall_workspace, Authority("person:ada", "person_dm", tainted=True), event)
+    assert "Team notes:" not in text and "Private list" not in text
+    assert "Lists:" in text and "• list_0: List 0" in text
