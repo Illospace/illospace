@@ -63,7 +63,7 @@ def fresh_state(state, timestamp):
     return state
 
 
-async def owner_draft(ctx, conn, run, issue, repo, event):
+async def owner_draft(ctx, conn, run, issue, repo, event, *, task_id=None):
     """Code proposes one fixed assignment. The owner still approves the stored action."""
     from illo.asks.drafts import sync_card
 
@@ -86,8 +86,13 @@ async def owner_draft(ctx, conn, run, issue, repo, event):
             names = await member_channels(ctx, conn=conn) if channel else {}
         except ValueError:
             names = {}
-        source = {"kind": "slack", "name": names.get(channel.id, channel.name) if channel else "DM",
-                  "author": author["name"] if author and not payload.get("from_automation") else "Automation"}
+        source = {
+            "kind": "slack",
+            "name": names.get(channel.id, channel.name) if channel else "DM",
+            "author": author["name"] if author and not payload.get("from_automation") else "Automation",
+            "channel_id": payload.get("channel_id"),
+            "thread_ts": payload.get("thread_ts") or payload.get("message_ts"),
+        }
         try:
             link = await ctx.slack_client.chat_getPermalink(
                 channel=payload["channel_id"], message_ts=payload["message_ts"])
@@ -99,6 +104,9 @@ async def owner_draft(ctx, conn, run, issue, repo, event):
                                   person_id=person["id"], profile="person_dm",
                                   provider="code", model="code", event_id=run.get("event_id"))
     await runs.finish(conn, owner_run["id"])
+    outside = {"owner": person["name"], "source": source, "run_id": run["id"]}
+    if task_id is not None:
+        outside["task_id"] = task_id
     draft = await drafts.create(
         conn, run_id=owner_run["id"], approver_person_id=person["id"],
         kind="github_assign_issue", destination=f"github:{repo}",
@@ -106,14 +114,14 @@ async def owner_draft(ctx, conn, run, issue, repo, event):
             "repo": repo, "number": issue["number"], "assignee": person["github_login"]},
             "github_issue": {"title": issue["title"], "link": issue["html_url"],
                              "assignees": [p["login"] for p in issue.get("assignees", [])]},
-            "outside_ticket": {"owner": person["name"], "source": source, "run_id": run["id"]}},
+            "outside_ticket": outside},
     )
     if not await sync_card(ctx, conn, draft):
         raise ValueError("Slack is not connected to the owner")
     return draft
 
 
-async def notify_unassigned(ctx, conn, run, issue, repo, event=None):
+async def notify_unassigned(ctx, conn, run, issue, repo, event=None, *, task_id=None):
     """Send one immediate card per run, with at most six cards per hour."""
     owner = ctx.workspace.config.default_owner
     key = NOTICE_PREFIX + owner
@@ -129,7 +137,7 @@ async def notify_unassigned(ctx, conn, run, issue, repo, event=None):
         state["sent"].append(timestamp)
         await kv.set(conn, key, state)
         try:
-            await owner_draft(ctx, conn, run, issue, repo, event)
+            await owner_draft(ctx, conn, run, issue, repo, event, task_id=task_id)
             if not ctx.slack_client:
                 raise ValueError("Slack is not connected")
         except Exception:

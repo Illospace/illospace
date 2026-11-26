@@ -234,7 +234,7 @@ async def create_issue(ctx: ToolContext, args: dict) -> dict:
         if task_id:
             result["task_id"] = task_id
         if not login:
-            await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue, repo, event)
+            await notify_unassigned(ctx.app, ctx.conn, ctx.run, issue, repo, event, task_id=task_id)
     return result
 
 

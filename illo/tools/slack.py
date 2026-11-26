@@ -1,11 +1,13 @@
 """Slack tools use server authority and configured destinations."""
 
+import re
 from typing import TYPE_CHECKING
 
 from pydantic import Field
 
 from illo.channels.slack.access import channel_private, require_member
 from illo.channels.slack.blocks import message_text
+from illo.channels.slack.channels import ChannelLookupError, resolve_channel
 
 if TYPE_CHECKING:
     from illo.app import AppContext
@@ -64,14 +66,40 @@ async def dm_handler(ctx: ToolContext, args: dict) -> dict:
     return await send_dm(ctx.conn, ctx.app, args)
 
 
+async def _resolve_channel_id(ctx: ToolContext, channel: str, *, allow_api: bool) -> str | None:
+    raw = channel.strip()
+    name = raw.removeprefix("#")
+    name_lower = name.lower()
+    for entry in ctx.app.workspace.config.slack.channels:
+        if raw == entry.id or name_lower == entry.name.lower():
+            return entry.id
+    if re.fullmatch(r"[CG][A-Z0-9_]+", raw):
+        return raw
+    if not allow_api:
+        return None
+    try:
+        resolved = await resolve_channel(ctx.app, name_lower, conn=ctx.conn)
+    except (ChannelLookupError, ValueError):
+        return None
+    return resolved.id
+
+
 async def post_preflight(ctx: ToolContext, args: dict) -> Decision:
-    # A draft does not contact Slack. Approval rechecks the channel.
+    # A draft after personal_read does not contact Slack. Approval rechecks the channel.
     if ctx.run.get("personal_read"):
+        channel_id = await _resolve_channel_id(ctx, args["channel"], allow_api=False)
+        if not channel_id:
+            return Decision("deny", "The channel is not configured")
+        args["channel"] = channel_id
         return Decision("allow", "The approved send checks channel visibility")
-    if not configured(ctx.app, args["channel"]) or not ctx.app.slack_client:
+    channel_id = await _resolve_channel_id(ctx, args["channel"], allow_api=bool(ctx.app.slack_client))
+    if not channel_id or not configured(ctx.app, channel_id) or not ctx.app.slack_client:
         return Decision("deny", "The channel is not configured")
-    if await channel_private(ctx.app, args["channel"], conn=ctx.conn):
+    args["channel"] = channel_id
+    if await channel_private(ctx.app, channel_id, conn=ctx.conn):
         return Decision("deny", "The channel is private")
+    if ctx.run.get("profile") == "agent_request":
+        return Decision("draft", "Agent channel posts need your approval")
     return Decision("allow", "The channel is visible to the team")
 
 
@@ -167,9 +195,9 @@ def register(registry: Registry) -> None:
             lambda a: f"channel:{a['channel']}",
             False,
             post_handler,
-            "Post in a configured team channel (`channel`: its id; `thread_ts` to answer in a thread). It becomes a draft card after a personal or private read.",
+            "Post in a configured team channel (`channel`: its id or #name; `thread_ts` to answer in a thread). Always a draft card in agent requests or after a personal or private read.",
             PostChannel,
-            profiles=frozenset({"person_dm"}),
+            profiles=frozenset({"person_dm", "agent_request"}),
             preflight=post_preflight,
         )
     )
