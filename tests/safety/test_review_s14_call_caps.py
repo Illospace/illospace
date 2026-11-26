@@ -66,7 +66,7 @@ async def test_rule_01_hourly_caps_keep_retries_saves_and_other_tokens(app, http
 @pytest.mark.parametrize(
     "name,limit",
     [
-        ("asks_create", 3),
+        ("asks_create", 10),
         ("slack_send_dm", 3),
         ("github_create_issue", 3),
         ("github_comment_issue", 5),

@@ -14,6 +14,7 @@ COLLECTOR_TOOLS = {
     "lane_report",
     "lane_search",
     "ask_create",
+    "ask_list",
     "ask_pull",
     "ask_ack",
     "ask_cancel",

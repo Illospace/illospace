@@ -591,3 +591,104 @@ async def test_thread_cooldown_defers_without_fallback_and_human_reply_clears_it
         cleared = await one(conn, "SELECT escalated_at FROM board_threads WHERE id=%s", (q1["thread_id"],))
         assert cleared["escalated_at"] is None
 
+
+async def test_cancelled_coordinator_run_retries_immediately_without_error_penalty(
+    coordinator_ctx, client, monkeypatch
+):
+    ctx = coordinator_ctx
+    worker = await client(agent="build")
+    await worker.call(
+        "ask_create",
+        {
+            "question": "Confirm you read the device policy.",
+            "kind": "action",
+            "owner": "ben",
+            "options": [
+                {"id": "yes", "label": "Read and understood"},
+                {"id": "no", "label": "Need clarification"},
+            ],
+            "recommended": "yes",
+            "source_ref": "cancel-test",
+        },
+    )
+    event = await admission(ctx)
+    assert event is not None
+    thread_id = event.payload["thread_id"]
+
+    async def cancel_start_run(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ctx.gateway.run_manager, "start_run", cancel_start_run)
+    with pytest.raises(asyncio.CancelledError):
+        await ctx.gateway.receive(event)
+
+    async with ctx.pool.connection() as conn:
+        run_row = await one(conn, "SELECT outcome, error_code FROM board_coordinator_runs ORDER BY id DESC LIMIT 1")
+        ep = await one(conn, "SELECT errors, next_check_at FROM board_episodes WHERE thread_id=%s", (thread_id,))
+        thread = await one(conn, "SELECT coordinator_lease_id FROM board_threads WHERE id=%s", (thread_id,))
+    assert run_row == {"outcome": "stale", "error_code": "cancelled"}
+    assert ep["errors"] == 0
+    assert ep["next_check_at"] <= datetime.now(UTC) + timedelta(seconds=5)
+    assert thread["coordinator_lease_id"] is None
+
+    # A genuine error on decision_needed backs off 1 minute (not 10 minutes).
+    event2 = await admission(ctx)
+    assert event2 is not None
+    await coordinator.apply(ctx, event2, error="provider")
+    async with ctx.pool.connection() as conn:
+        ep2 = await one(conn, "SELECT errors, next_check_at FROM board_episodes WHERE thread_id=%s", (thread_id,))
+    assert ep2["errors"] == 1
+    remaining = (ep2["next_check_at"] - datetime.now(UTC)).total_seconds()
+    assert 30 <= remaining <= 75
+
+
+async def test_coordinator_runs_simultaneous_decision_threads_concurrently(
+    coordinator_ctx, client, fake_brain, monkeypatch
+):
+    ctx = coordinator_ctx
+    worker = await client(agent="build")
+    await worker.call(
+        "ask_create",
+        {
+            "question": "Confirm you read the device policy.",
+            "kind": "action",
+            "owners": ["ada", "ben"],
+            "options": [
+                {"id": "yes", "label": "Read and understood"},
+                {"id": "no", "label": "Need clarification"},
+            ],
+            "recommended": "yes",
+            "source_ref": "parallel-test",
+        },
+    )
+
+    in_flight = 0
+    max_in_flight = 0
+    both_started = asyncio.Event()
+    original_receive = ctx.gateway.receive
+
+    async def tracked_receive(event, adapter=None):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        if in_flight >= 2:
+            both_started.set()
+        try:
+            await asyncio.wait_for(both_started.wait(), timeout=2.0)
+            return await original_receive(event, adapter=adapter)
+        finally:
+            in_flight -= 1
+
+    fake_brain.script = [
+        {"name": "need_wait", "arguments": {"recheck_minutes": 10}},
+        {"name": "need_wait", "arguments": {"recheck_minutes": 10}},
+    ]
+    monkeypatch.setattr(ctx.gateway, "receive", tracked_receive)
+    await coordinator.run_coordinator(ctx)
+
+    assert max_in_flight == 2
+    async with ctx.pool.connection() as conn:
+        runs_rows = await all_rows(conn, "SELECT outcome FROM board_coordinator_runs ORDER BY id")
+    assert [r["outcome"] for r in runs_rows] == ["applied", "applied"]
+
+

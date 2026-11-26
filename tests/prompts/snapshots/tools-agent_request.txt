@@ -1,7 +1,7 @@
 asks_answer_with_rule: Answer an open ask with a standing rule of its owner: the ask `id` and the `rule_id` from `rules_list`. Code answers only when the rule matches one of the ask's options; else the result is `answered: false`. Never use it to decide yourself.
-asks_create: Ask one teammate for a decision, an action, a review, or a reminder; they get a card. Then tell the requester whom you asked and what. `owner` is a person key from `people_list`; put the reason and a link in `question` or `proof`, and `options` when the answer is a choice. At most 3 per run.
+asks_create: Ask one teammate (`owner`) or several teammates (`owners`, up to 20) for a decision, an action, a review, or a reminder; each gets their own card. Then tell the requester whom you asked and what. Pass person keys from `people_list`; put context or `saved:<id>` refs in `proof` (set `share_saved: true` to publish your own private saved item for recipients), full reading material in `blocks`, and `options` when the answer is a choice. At most 10 calls per run.
 asks_get: Read one ask by `id`: the question, its options, the recommended option, and the proof that the asker gave.
-asks_list: List the open asks that this run can see; `owner` (a person key) limits the list to one person. One line per ask with its id, kind, question, owner, due time, and link.
+asks_list: List asks that this run can see (`state`: `open` by default, `answered`, or `all`). Optional `owner` or `requester` (person keys) filter the list. One line per ask with its id, kind, question, owner, status/answer, due time, and link.
 claims_take: Lock an item so that only one run handles it, for example an alert that arrives twice. `key` must be identical for each copy; use the format of a team rule if one gives it. Returns true when this run has the claim; false means that another run has it, so stop. A claim lasts 24 hours.
 connect_guide: Get the exact steps to connect an app or a coding agent to Illo. Supports Claude, Codex, and other MCP clients. Gives the address and the sign-in. Use it for each question about how to connect to Illo, for the asker or another person. Notes and memory about this can be out of date.
 connect_status: Show the team connections and this person's sign-in state. Show no keys or another person's sign-in details.
@@ -26,6 +26,7 @@ notes_search: Search the team notes only. For anything else, use `search_all`.
 people_get: Read one active team member by their `key`.
 people_list: List the active team members: key, name, role, areas, and GitHub login. Use the key in `owner`, `person`, and `assignee` arguments.
 rules_list: List the standing rules that answer asks without a person: the team's and those of the person you act for, each with its id, text, match, and answer. Use the id with `rules_remove_mine` or `asks_answer_with_rule`.
+saved_publish: Share one private `saved:<number>` item owned by the person you act for with the whole team so teammates can read it and reference it in asks.
 search_all: Search everything this run can see, ranked by match and recency. Optional `kinds`: saved, decision, note, lane_summary, archive, slack, github, doc, lane, and mail (this person's mail, DM only). Read one result in full with `search_get` and its `source_ref`.
 search_get: Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.
 skills_get: Read the steps of one team skill by its name

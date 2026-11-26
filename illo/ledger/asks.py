@@ -271,18 +271,74 @@ async def ack(conn: Connection, ask_id: int, token_id: int) -> bool:
     )
 
 
-async def compact_list(conn, *, principal, owner=None, limit=15):
+async def compact_list(
+    conn,
+    *,
+    principal,
+    owner=None,
+    requester=None,
+    state="open",
+    limit=15,
+):
     """Limit ask rows in SQL and preserve the private-read signal."""
+    state_filter = None if state == "all" else state
     return await all_rows(conn, """
-        SELECT a.id,a.kind,left(a.question,160) AS question,a.due_at,p.key AS owner,
+        SELECT a.id,a.kind,a.state,left(a.question,160) AS question,a.due_at,
+          a.options,a.answer_option,left(a.answer_text,200) AS answer_text,
+          a.answered_at,a.card_sent_at,a.slack_ts,
+          p.key AS owner,req.key AS requester,
           l.title AS lane_title,l.links AS lane_links,
           COALESCE(l.visibility,'private') AS visibility,count(*) OVER () AS total,
           bool_or(COALESCE(l.visibility,'private')='private') OVER () AS _private
         FROM asks a LEFT JOIN lanes l ON l.id=a.lane_id
         LEFT JOIN people p ON p.id=a.owner_person_id
+        LEFT JOIN people req ON req.id=a.requester_person_id
         LEFT JOIN people me ON 'person:'||me.key=%s AND me.active
-        WHERE a.state='open' AND (%s::text IS NULL OR p.key=%s)
+        WHERE (%s::text IS NULL OR a.state=%s)
+          AND (%s::text IS NULL OR p.key=%s)
+          AND (%s::text IS NULL OR req.key=%s)
           AND (l.visibility='team' OR l.owner_person_id=me.id
             OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
-        ORDER BY a.due_at NULLS LAST,a.id LIMIT %s
-    """, (principal, owner, owner, max(1,min(limit,40))))
+        ORDER BY CASE WHEN a.state='open' THEN 0 ELSE 1 END,
+          a.due_at NULLS LAST,
+          CASE WHEN a.state='open' THEN a.id END ASC NULLS LAST,
+          COALESCE(a.answered_at, a.created_at) DESC,
+          a.id DESC
+        LIMIT %s
+    """, (principal, state_filter, state_filter, owner, owner, requester, requester, max(1, min(limit, 40))))
+
+
+async def mcp_list(
+    conn,
+    *,
+    principal: str,
+    owner: str | None = None,
+    state: str = "open",
+    ask_id: int | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Read visible asks (open, answered, or all) for an MCP caller regardless of delivery_state."""
+    state_filter = None if (state == "all" or ask_id is not None) else state
+    return await all_rows(conn, """
+        SELECT a.*,
+          p.key AS owner,
+          req.key AS requester,
+          ans.key AS answered_by,
+          r.text AS rule_text
+        FROM asks a
+        LEFT JOIN lanes l ON l.id=a.lane_id
+        LEFT JOIN people p ON p.id=a.owner_person_id
+        LEFT JOIN people req ON req.id=a.requester_person_id
+        LEFT JOIN people ans ON ans.id=a.answered_by_person_id
+        LEFT JOIN rules r ON r.id=a.rule_id
+        LEFT JOIN people me ON 'person:'||me.key=%s AND me.active
+        WHERE (%s::bigint IS NULL OR a.id=%s)
+          AND (%s::text IS NULL OR a.state=%s)
+          AND (%s::text IS NULL OR p.key=%s)
+          AND (l.visibility='team' OR l.owner_person_id=me.id
+            OR (l.id IS NULL AND me.id IN (a.owner_person_id,a.requester_person_id)))
+        ORDER BY CASE WHEN a.state='open' THEN 0 ELSE 1 END,
+          COALESCE(a.answered_at, a.created_at) DESC,
+          a.id DESC
+        LIMIT %s
+    """, (principal, ask_id, ask_id, state_filter, state_filter, owner, owner, max(1, min(limit, 50))))

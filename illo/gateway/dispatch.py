@@ -178,7 +178,7 @@ class Gateway:
                 await conn.execute("DELETE FROM events WHERE id=%s AND status='received'", (event_id,))
             return {"decision": "retry", "retryable": True}
         except (Exception, asyncio.CancelledError) as exc:
-            category = failure_category(exc)
+            category = "cancelled" if isinstance(exc, asyncio.CancelledError) else failure_category(exc)
             async with ctx.pool.connection() as conn:
                 await conn.execute("UPDATE events SET status='failed' WHERE id=%s", (event_id,))
             if adapter:

@@ -2,12 +2,15 @@
 
 from pydantic import Field
 
+from illo.ledger import items
 from illo.sources import search
+from illo.tools._comms_guard import contains_secret, has_hidden_format
 from illo.tools._format import Compact, body, data_text, header, hit, iso_date, line
-from illo.tools.registry import Arguments, Tool
+from illo.tools.registry import Arguments, Refusal, Tool
 
 # Only untainted profiles may search. SQL hides private rows from other principals.
 READ_PROFILES = frozenset({"person_dm", "team_channel", "routine", "agent_request", "board_coordinator"})
+PUBLISH_PROFILES = frozenset({"person_dm", "agent_request"})
 HINT = "Search again with other words if this is not enough."
 
 
@@ -20,6 +23,10 @@ class SearchArgs(Arguments):
 class GetArgs(Arguments):
     source_ref: str = Field(min_length=1, max_length=2000)
     offset: int = Field(default=0, ge=0)
+
+
+class SavedPublishArgs(Arguments):
+    source_ref: str = Field(pattern=r"^saved:[1-9][0-9]*$")
 
 
 def format_hits(hits):
@@ -81,9 +88,29 @@ async def search_get(ctx, args):
     return Compact(data_text("search", "\n".join(lines)), row.get("visibility") == "private")
 
 
+async def saved_publish(ctx, args):
+    person_id = ctx.run.get("person_id")
+    if not person_id:
+        raise Refusal("Only a person's run can share a saved item.")
+    ref = args["source_ref"]
+    row = await items.get(ctx.conn, ref, principal=ctx.principal)
+    if not row or row["kind"] != "saved" or row["owner_person_id"] != person_id:
+        raise Refusal("Only the owner of a saved item can share it with the team.")
+    if row["visibility"] == "team":
+        return {"source_ref": row["source_ref"], "title": row["title"], "visibility": "team", "already_shared": True}
+    combined = f"{row['title']}\n{row['body']}"
+    if contains_secret(combined) or has_hidden_format(combined):
+        raise Refusal("This saved item cannot be shared automatically because it contains sensitive credentials or hidden control characters.")
+    published = await items.publish(ctx.conn, ref, owner_person_id=person_id)
+    if not published:
+        raise Refusal("Only the owner of a saved item can share it with the team.")
+    return {"source_ref": published["source_ref"], "title": published["title"], "visibility": "team", "already_shared": False}
+
+
 DESCRIPTIONS = {
     "search_all": "Search everything this run can see, ranked by match and recency. Optional `kinds`: saved, decision, note, lane_summary, archive, slack, github, doc, lane, and mail (this person's mail, DM only). Read one result in full with `search_get` and its `source_ref`.",
     "search_get": "Read one search result in full by its `source_ref` from `search_all`. A long text comes in pages of 6,000 characters: pass `offset` to read on.",
+    "saved_publish": "Share one private `saved:<number>` item owned by the person you act for with the whole team so teammates can read it and reference it in asks.",
 }
 
 
@@ -105,3 +132,17 @@ def register(registry) -> None:
                 profiles=READ_PROFILES,
             )
         )
+    registry.add(
+        Tool(
+            "saved_publish",
+            "search",
+            "write_internal",
+            lambda a: "ledger",
+            False,
+            saved_publish,
+            DESCRIPTIONS["saved_publish"],
+            SavedPublishArgs,
+            profiles=PUBLISH_PROFILES,
+            team_visible=True,
+        )
+    )

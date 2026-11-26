@@ -11,10 +11,14 @@ from illo.board import doors
 from illo.channels.mcp.schemas import check_ask_text
 from illo.db import one
 from illo.ledger import ask_workflow as ledger
-from illo.ledger import asks, board, lanes, mcp, people
+from illo.ledger import asks, board, items, lanes, mcp, people
+from illo.tasks import pages
+from illo.tasks.pages import outside
+from illo.tasks.pages.schema import Block
+from illo.tools._comms_guard import contains_secret, has_hidden_format
 from illo.tools._format import Compact, ask, body, data_text, json_text, rows
 from illo.tools.checks import Decision
-from illo.tools.registry import Arguments, Tool
+from illo.tools.registry import Arguments, Refusal, Tool
 
 READ_PROFILES = frozenset({"person_dm", "team_channel", "tainted", "routine", "agent_request", "board_coordinator"})
 PERSON_PROFILES = frozenset({"person_dm"})
@@ -23,6 +27,8 @@ RULE_PROFILES = frozenset({"person_dm", "agent_request"})
 
 class ListArgs(Arguments):
     owner: str | None = None
+    requester: str | None = None
+    state: Literal["open", "answered", "all"] = "open"
     limit: int = Field(default=15, ge=1, le=40)
 
 
@@ -37,12 +43,15 @@ class Option(Arguments):
 
 
 class CreateArgs(Arguments):
-    owner: str = Field(min_length=1)
+    owner: str | None = Field(default=None, min_length=1)
+    owners: list[str] | None = Field(default=None, min_length=1, max_length=20)
     question: str = Field(min_length=1, max_length=2000)
     kind: Literal["decision", "action", "review", "reminder"] = "decision"
     options: list[Option] = Field(default_factory=list, max_length=25)
     recommended_option: str | None = None
     proof: dict = Field(default_factory=dict)
+    blocks: list[Block] = Field(default_factory=list, max_length=12)
+    share_saved: bool = False
     lane_id: int | None = Field(default=None, gt=0)
     due_at: str | None = None
     expires_at: str | None = None
@@ -51,6 +60,8 @@ class CreateArgs(Arguments):
 
     @model_validator(mode="after")
     def visible_text(self):
+        if bool(self.owner) == bool(self.owners):
+            raise ValueError("Give either owner or owners")
         proof.check(self.proof)
         check_ask_text(self.model_dump_json())
         return self
@@ -71,7 +82,7 @@ async def asks_list(ctx, args):
         values,
         ask,
         total=values[0]["total"] if values else 0,
-        hint="Pass owner= or limit= to read more asks.",
+        hint="Pass owner=, requester=, state= ('open', 'answered', 'all'), or limit= to read more asks.",
     )
     return Compact(data_text("asks", result.text), result.private)
 
@@ -99,16 +110,73 @@ def date(value):
     return result
 
 
+async def _ensure_saved_visible(conn, proof_dict, *, principal, requester_person_id, targets, share_saved):
+    saved = await proof.saved_items(conn, proof_dict, principal)
+    for ref, item in saved.items():
+        if not item:
+            raise ValueError(f"You cannot see {ref}.")
+        missing_for_target = False
+        for target in targets:
+            if not await items.get(conn, ref, principal="person:" + target["key"]):
+                missing_for_target = True
+                break
+        if missing_for_target:
+            if (
+                share_saved
+                and requester_person_id is not None
+                and item["kind"] == "saved"
+                and item["owner_person_id"] == requester_person_id
+            ):
+                combined = f"{item['title']}\n{item['body']}"
+                if contains_secret(combined) or has_hidden_format(combined):
+                    raise Refusal(
+                        "This saved item cannot be shared automatically because it contains "
+                        "sensitive credentials or hidden control characters."
+                    )
+                published = await items.publish(conn, ref, owner_person_id=requester_person_id)
+                if not published:
+                    raise ValueError(f"The person who must answer cannot see {ref}.")
+            else:
+                raise ValueError(f"The person who must answer cannot see {ref}.")
+    return saved
+
+
 async def asks_create(ctx, args):
     args = dict(args)
-    owner = await people.get(ctx.conn, args.pop("owner"))
-    if not owner:
-        raise ValueError("The owner is missing or inactive")
+    owner_key = args.pop("owner", None)
+    owner_keys = args.pop("owners", None)
+    share_saved = args.pop("share_saved", False)
+    blocks = args.get("blocks") or []
+    if blocks and not pages.enabled(ctx.app):
+        raise Refusal(
+            "This team has no pages. Put the text in proof.text and the addresses in proof.links."
+        )
+    multi = owner_keys is not None
+    raw_keys = owner_keys if multi else [owner_key]
+    targets = []
+    seen_ids = set()
+    for key in raw_keys:
+        person = await people.get(ctx.conn, key)
+        if not person:
+            raise ValueError("The owner is missing or inactive")
+        if person["id"] not in seen_ids:
+            seen_ids.add(person["id"])
+            targets.append(person)
     lane = None
     if args["lane_id"]:
         lane = await lanes.get(ctx.conn, args["lane_id"], principal=ctx.principal)
-        if not lane or (lane["visibility"] == "private" and lane["owner_person_id"] != owner["id"]):
-            raise ValueError("The lane is not visible to the owner")
+        for person in targets:
+            if not lane or (lane["visibility"] == "private" and lane["owner_person_id"] != person["id"]):
+                raise ValueError("The lane is not visible to the owner")
+    await _ensure_saved_visible(
+        ctx.conn,
+        args["proof"],
+        principal=ctx.principal,
+        requester_person_id=ctx.run["person_id"],
+        targets=targets,
+        share_saved=share_saved,
+    )
+    files = await outside.prepare(ctx.app, blocks, store_refs=True) if blocks else []
     args["due_at"], args["expires_at"] = date(args["due_at"]), date(args["expires_at"])
     requester_token_id = None
     token = None
@@ -116,18 +184,34 @@ async def asks_create(ctx, args):
         requester_token_id = await mcp.requester_token_for_run(ctx.conn, ctx.run["id"])
         if requester_token_id:
             token = await one(ctx.conn, "SELECT * FROM tokens WHERE id=%s", (requester_token_id,))
-    ask = await asks.create(
-        ctx.conn,
-        owner_person_id=owner["id"],
-        requester_person_id=ctx.run["person_id"],
-        requester_token_id=requester_token_id,
-        **args,
-    )
-    if ctx.run["profile"] == "agent_request" and doors.coordinator_active(ctx.app.workspace):
-        await doors.attach_ask_to_board(
-            ctx.conn, ctx.app.workspace, ask, token=token, lane=lane, owner=owner, via="asks_create"
+    created = []
+    has_pages = pages.enabled(ctx.app)
+    base = pages.base_url(ctx.app) if has_pages else None
+    for person in targets:
+        row = await asks.create(
+            ctx.conn,
+            owner_person_id=person["id"],
+            requester_person_id=ctx.run["person_id"],
+            requester_token_id=requester_token_id,
+            **args,
         )
-    return {"ask_id": ask["id"], "state": ask["state"]}
+        if files:
+            await outside.replace(ctx.conn, files, ask_id=row["id"])
+        if ctx.run["profile"] == "agent_request" and doors.coordinator_active(ctx.app.workspace):
+            await doors.attach_ask_to_board(
+                ctx.conn, ctx.app.workspace, row, token=token, lane=lane, owner=person, via="asks_create"
+            )
+        entry = {"ask_id": row["id"], "state": row["state"], "owner": person["key"]}
+        if has_pages:
+            entry["page_url"] = f"{base}/web/a/{row['id']}"
+        created.append(entry)
+    if multi:
+        return {"asks": created, "count": len(created)}
+    first = created[0]
+    result = {"ask_id": first["ask_id"], "state": first["state"]}
+    if "page_url" in first:
+        result["page_url"] = first["page_url"]
+    return result
 
 
 async def answer_preflight(ctx, args):
@@ -207,14 +291,23 @@ async def asks_digest(ctx, args):
 
 
 DESCRIPTIONS = {
-    "asks_list": "List the open asks that this run can see; `owner` (a person key) limits the list to one person. One line per ask with its id, kind, question, owner, due time, and link.",
+    "asks_list": "List asks that this run can see (`state`: `open` by default, `answered`, or `all`). Optional `owner` or `requester` (person keys) filter the list. One line per ask with its id, kind, question, owner, status/answer, due time, and link.",
     "asks_get": "Read one ask by `id`: the question, its options, the recommended option, and the proof that the asker gave.",
-    "asks_create": "Ask one teammate for a decision, an action, a review, or a reminder; they get a card. Then tell the requester whom you asked and what. `owner` is a person key from `people_list`; put the reason and a link in `question` or `proof`, and `options` when the answer is a choice. At most 3 per run.",
+    "asks_create": "Ask one teammate (`owner`) or several teammates (`owners`, up to 20) for a decision, an action, a review, or a reminder; each gets their own card. Then tell the requester whom you asked and what. Pass person keys from `people_list`; put context or `saved:<id>` refs in `proof` (set `share_saved: true` to publish your own private saved item for recipients), full reading material in `blocks`, and `options` when the answer is a choice. At most 10 calls per run.",
     "asks_answer": "Answer an open ask of this person with an option id in `option`, or with `text`. Always a draft card: the answer goes out only when the person taps Send. An ask of another person is refused.",
     "asks_answer_with_rule": "Answer an open ask with a standing rule of its owner: the ask `id` and the `rule_id` from `rules_list`. Code answers only when the rule matches one of the ask's options; else the result is `answered: false`. Never use it to decide yourself.",
     "asks_cancel_mine": "Cancel an open ask that this person owns or asked, when they say it is no longer needed. Returns `cancelled: true` or `false`.",
     "asks_digest": "Older name of `digest_snapshot`, with the same result. Use `digest_snapshot`.",
 }
+
+
+def _create_destination(args: dict) -> str:
+    if args.get("owner"):
+        return f"person:{args['owner']}"
+    owners = args.get("owners") or []
+    if len(owners) == 1:
+        return f"person:{owners[0]}"
+    return "channel:team"
 
 
 def register(registry):
@@ -228,7 +321,7 @@ def register(registry):
             CreateArgs,
             "write_internal",
             frozenset({"person_dm", "team_channel", "routine", "agent_request"}),
-            lambda a: f"person:{a['owner']}",
+            _create_destination,
         ),
         (
             "asks_answer",

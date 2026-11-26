@@ -80,8 +80,21 @@ def lane(row, *, reason=True):
 
 
 def ask(row):
+    state = row.get("state")
+    answer_part = None
+    if state == "answered":
+        option = next(
+            (o.get("label") for o in (row.get("options") or []) if o.get("id") == row.get("answer_option")),
+            row.get("answer_option"),
+        )
+        chosen = short(option or row.get("answer_text"), 80)
+        when = iso_date(row.get("answered_at"))
+        answer_part = f"answered {chosen}" + (f" ({when})" if when else "") if chosen else "answered"
+    elif state and state != "open":
+        answer_part = state
     return line(row["kind"], short(row["question"], 160),
                 f"owner {row['owner']}" if row.get("owner") else None,
+                answer_part,
                 f"due {relative(row['due_at'])}" if row.get("due_at") else None,
                 f"lane {short(row['lane_title'], 60)}" if row.get("lane_title") else None,
                 first_link(row.get("lane_links")), f"id {row['id']}")

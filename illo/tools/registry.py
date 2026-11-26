@@ -26,7 +26,7 @@ class Refusal(ValueError):
 
 
 RUN_LIMITS = {
-    "asks_create": 3,
+    "asks_create": 10,
     "slack_send_dm": 3,
     "github_create_issue": 3,
     "github_comment_issue": 5,
