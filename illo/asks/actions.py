@@ -113,7 +113,9 @@ async def handle(ctx, person, action):
 _HELP_CUES = re.compile(
     r"(?:\b(?:what(?:'s|s| is| do you)?\s+(?:the\s+)?recommend|no idea|not sure|don't know|"
     r"dont know|can you explain|help me decide|which one should|what would you|what do you think|"
-    r"tu recommandes|quelle recommandation|je ne sais pas|tu conseilles|peux[- ]tu expliquer)\b)",
+    r"tu recommandes|quelle recommandation|je ne sais pas|tu conseilles|peux[- ]tu expliquer|"
+    r"ask\s+\S+\s+instead|should\s+ask|reassign|route\s+(?:this|it)\s+to|pass\s+(?:this|it)\s+to|"
+    r"send\s+(?:this|it)\s+to|demande\s+[àa])\b)",
     re.IGNORECASE,
 )
 

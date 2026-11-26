@@ -672,6 +672,7 @@ async def test_m2_schema_accepts_m1_writes_after_rollback(pool, tmp_path):
                 "1901_board_wakes.sql", "1902_board_coordinator.sql", "1903_board_coordinator_validate.sql",
                 "1904_board_files.sql", "1905_board_files_validate.sql",
                 "1906_chief_of_staff.sql", "1907_chief_of_staff_validate.sql",
+                "1908_comms_review.sql", "1909_comms_review_validate.sql",
             ]
             assert await migrate(conn, m1) == []
             saved = await one(conn, "SELECT stalled_at FROM board_threads WHERE id=%s", (thread["id"],))

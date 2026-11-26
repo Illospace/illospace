@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from illo.ledger import kv, sensors
 
 KEY = "slack:member-channels"
+PUBLIC_KEY = "slack:public-member-channels"
 
 
 class ChannelLookupError(ValueError):
@@ -58,6 +59,64 @@ async def member_channels(ctx, *, conn=None):
             })
     if failed:
         raise ValueError("Slack could not read member channels. Try again later.")
+    return channels
+
+
+async def cached_public_member_channels(ctx, *, conn=None) -> dict[str, str]:
+    """Return cached public channels without contacting Slack."""
+    async with (nullcontext(conn) if conn is not None else ctx.pool.connection()) as conn:
+        cached = await kv.get(conn, PUBLIC_KEY)
+        if cached and not cached.get("failed"):
+            return dict(cached.get("channels", {}))
+    return {}
+
+
+async def public_member_channels(ctx, *, conn=None) -> dict[str, str]:
+    """List public Slack channels Illo belongs to, cached for ten minutes."""
+    failed = False
+    async with (nullcontext(conn) if conn is not None else ctx.pool.connection()) as conn:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (PUBLIC_KEY,))
+        cached = await kv.get(conn, PUBLIC_KEY)
+        if cached and datetime.fromisoformat(cached["expires_at"]) > datetime.now(UTC):
+            failed = cached.get("failed", False)
+            channels = cached.get("channels", {})
+        else:
+            channels = {}
+            try:
+                if not ctx.slack_client:
+                    raise ValueError("Slack is not connected")
+                async with asyncio.timeout(15):
+                    cursor, seen = None, set()
+                    while True:
+                        response = await ctx.slack_client.users_conversations(
+                            types="public_channel", exclude_archived=True,
+                            limit=200, cursor=cursor,
+                        )
+                        if response.get("ok") is False or not isinstance(response.get("channels"), list):
+                            raise ValueError("Slack did not report public channels")
+                        for channel in response["channels"]:
+                            if (
+                                channel.get("is_member") is False
+                                or channel.get("is_archived")
+                                or channel.get("is_private") is True
+                            ):
+                                continue
+                            channels[channel["id"]] = channel["name"]
+                        cursor = response.get("response_metadata", {}).get("next_cursor")
+                        if not cursor:
+                            break
+                        if cursor in seen:
+                            raise ValueError("Slack channel pagination did not finish")
+                        seen.add(cursor)
+            except Exception:
+                failed = True
+                channels = {}
+            await kv.set(conn, PUBLIC_KEY, {
+                "channels": channels, "failed": failed,
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            })
+    if failed:
+        raise ValueError("Slack could not read public channels. Try again later.")
     return channels
 
 

@@ -35,7 +35,50 @@ def age_minutes(now, at):
     return max(0, int((now - at).total_seconds() / 60)) if at else None
 
 
-def _people_keys(workspace, thread, author, people, *, decision_owner_id=None):
+_GITHUB_ISSUE = re.compile(r"^https://github\.com/([a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+)/issues/([0-9]+)$")
+
+
+def parse_ticket_external_id(ticket_url: str | None) -> str | None:
+    if not ticket_url:
+        return None
+    match = _GITHUB_ISSUE.fullmatch(ticket_url.strip())
+    if not match:
+        return None
+    repo, number = match.groups()
+    return f"{repo}#{number}"
+
+
+async def ticket_requester(conn, thread, people: dict) -> str | None:
+    """Resolve who originated the thread's task or GitHub issue (`person:<key>`)."""
+    task = thread.get("task") or {}
+    created_by = task.get("created_by") or ""
+    if created_by.startswith("person:"):
+        return created_by
+    external_id = parse_ticket_external_id(thread.get("ticket_url"))
+    if not external_id:
+        return None
+    lane = await one(
+        conn,
+        "SELECT links FROM lanes WHERE source='github' AND lower(external_id)=%s LIMIT 1",
+        (external_id.lower(),),
+    )
+    if not lane:
+        return None
+    by_login = {
+        (p.get("github_login") or "").lower(): p["key"]
+        for p in people.values()
+        if p.get("github_login")
+    }
+    for link in lane.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        login = (link.get("author_login") or "").lower()
+        if login and login in by_login:
+            return f"person:{by_login[login]}"
+    return None
+
+
+def _people_keys(workspace, thread, author, people, *, decision_owner_id=None, requester=None):
     if decision_owner_id is not None:
         return [p["key"] for p in people.values() if p["id"] == decision_owner_id]
     if thread["effective_owner"] is not None:
@@ -56,7 +99,7 @@ def _people_keys(workspace, thread, author, people, *, decision_owner_id=None):
     areas = [f"person:{p['key']}" for p in people.values()
              if words.intersection(re.findall(r"\w+", " ".join(p["areas"]).casefold()))]
     return [key[7:] for key in dict.fromkeys([
-        *mentions, task.get("holder"), task.get("created_by"), f"person:{asker}",
+        *mentions, requester, task.get("created_by"), task.get("holder"), f"person:{asker}",
         *areas, f"person:{workspace.config.default_owner}",
     ]) if key and key.startswith("person:")]
 
@@ -84,11 +127,13 @@ async def _agents(conn, workspace, thread, person, author, now, posted):
     return result[:5]
 
 
-async def _candidates(conn, workspace, thread, author, people, posts, now, *, decision_owner_id=None):
+async def _candidates(conn, workspace, thread, author, people, posts, now, *, decision_owner_id=None, requester=None):
     posted = {p["actor"] if p["provenance"].get("agent_key")
               else "person:" + p["provenance"].get("person_key", "") for p in posts if not p["is_human"]}
     result = []
-    for key in _people_keys(workspace, thread, author, people, decision_owner_id=decision_owner_id):
+    for key in _people_keys(
+        workspace, thread, author, people, decision_owner_id=decision_owner_id, requester=requester
+    ):
         person = people.get(key)
         if not await acl.recipient_ok(conn, thread, person):
             continue
@@ -133,7 +178,7 @@ def _encode(packet, limit):
     return text if len(text) <= limit else None
 
 
-async def build(conn, workspace, thread, episode):
+async def build(conn, workspace, thread, episode, *, requester=None):
     now = datetime.now(UTC)
     cfg = workspace.config.board.coordinator
     author = await asker_post(conn, episode)
@@ -146,9 +191,10 @@ async def build(conn, workspace, thread, episode):
         ) p ORDER BY id""", (thread["id"], episode["post_id"]))
     people = {p["key"]: p for p in await all_rows(conn, "SELECT * FROM people ORDER BY key")}
     by_id = {p["id"]: p for p in people.values()}
+    resolved_requester = requester or await ticket_requester(conn, thread, people)
     decision_owner_id = decision_ask["owner_person_id"] if decision_ask else None
     candidates = await _candidates(conn, workspace, thread, author, people, posts, now,
-                                   decision_owner_id=decision_owner_id)
+                                   decision_owner_id=decision_owner_id, requester=resolved_requester)
     is_decision = episode["reason"] == "decision_needed"
     is_turn_cap = episode["reason"] == "turn_cap"
     allowed = {
@@ -186,6 +232,7 @@ async def build(conn, workspace, thread, episode):
                    "group_key": thread["group_key"], "posts_total": n["n"],
                    "task": {"id": task["id"], "title": task["title"][:200]} if task else None,
                    "ticket": (thread["ticket_url"] or "").removeprefix("https://github.com/").replace("/issues/", "#"),
+                   **({"requester": resolved_requester} if resolved_requester else {}),
                    "headstart_tried": [episode["headstart_target"]] if episode["headstart_target"] else []},
         "pending": [pending_entry],
         "posts": [{"id": p["id"], "from": label.name[:100], "from_kind": label.kind,

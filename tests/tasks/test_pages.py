@@ -265,7 +265,7 @@ def test_markdown_subset_and_hidden_text():
 
 
 @pytest.mark.parametrize('block', [
-    {'kind': 'text', 'text': 'x'*6001}, {'kind': 'text', 'title': 'x'*81, 'text': ''},
+    {'kind': 'text', 'text': 'x'*20001}, {'kind': 'text', 'title': 'x'*81, 'text': ''},
     {'kind': 'preview', 'name': 'a', 'label': 'x'*81, 'text': ''},
     {'kind': 'checks', 'items': []}, {'kind': 'checks', 'items': [{'claim': 'x', 'state': 'bad'}]},
     {'kind': 'checks', 'items': [{'claim': 'x', 'state': 'yes', 'source_url': 'javascript:bad'}]},
