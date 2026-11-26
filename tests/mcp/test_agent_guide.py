@@ -176,9 +176,9 @@ def test_guide_grant_and_dm_permission(profile):
     assert ("connect_guide" in names) == (profile in STATUS)
     assert ("connect_status" in names) == (profile in STATUS)
     if profile == "person_dm":
-        assert {"connect_guide", "slack_send_dm"} <= names
+        assert {"connect_guide", "slack_send_dm", "mail_search"} <= names
     if profile == "agent_request":
-        assert "connect_guide" in names and "slack_send_dm" not in names
+        assert "connect_guide" in names and "mail_search" not in names
     assert "connect_guide" not in TOOLS
     tool = registry.tools["connect_guide"]
     assert tool.profiles == registry.tools["connect_status"].profiles == STATUS

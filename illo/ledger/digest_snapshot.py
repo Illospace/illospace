@@ -288,6 +288,8 @@ def _draft_summary(row, workspace, now):
         configured = workspace.config.slack.channel(channel_id) if channel_id else None
         where = f"#{configured.name}" if configured and configured.listed else (channel_id or row["destination"])
         title = f"Post in {where}"
+    elif kind == "slack_send_dm":
+        title = f"Send DM to {args.get('person') or row['destination']}"
     else:
         title = f"Approve draft for {row['destination']}"
     return {

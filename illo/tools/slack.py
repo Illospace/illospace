@@ -12,8 +12,9 @@ from illo.channels.slack.channels import ChannelLookupError, resolve_channel
 if TYPE_CHECKING:
     from illo.app import AppContext
 
-from illo.db import Connection, one
+from illo.db import Connection, all_rows, one
 from illo.ledger import people
+from illo.tools import _comms_guard as comms_guard
 from illo.tools._format import data_text, header, line
 from illo.tools.checks import Decision
 from illo.tools.registry import Arguments, Registry, Tool, ToolContext
@@ -62,8 +63,45 @@ async def post(app: "AppContext", args: dict, *, conn=None) -> dict:
     return {"channel": args["channel"], "ts": sent["ts"]}
 
 
+async def _resolve_person(conn: Connection, value: str) -> dict | None:
+    person = await people.get(conn, value)
+    if person and person.get("active"):
+        return person
+    lower = value.strip().lower()
+    if not lower:
+        return None
+    members = await all_rows(conn, "SELECT * FROM people WHERE active")
+    matches = [m for m in members if lower in {m["key"].lower(), m["name"].lower()}]
+    return matches[0] if len(matches) == 1 else None
+
+
+async def dm_preflight(ctx: ToolContext, args: dict) -> Decision:
+    if ctx.run.get("profile") != "agent_request":
+        return Decision("allow", "The person destination is checked on send")
+    if ctx.run.get("personal_read"):
+        return Decision("allow", "Personal data checks handle draft approval")
+    person = await _resolve_person(ctx.conn, args["person"])
+    if not person or not person.get("slack_id") or not ctx.app.slack_client:
+        return Decision("deny", "The person has no Slack destination")
+    args["person"] = person["key"]
+    return await comms_guard.evaluate(
+        ctx,
+        kind="dm",
+        tool_name="slack_send_dm",
+        target=f"person:{person['key']}",
+        target_label=f"DM to {person['name']} ({person['key']})",
+        args=args,
+        text=args["text"],
+        policy=ctx.app.workspace.config.slack.agent_dms,
+    )
+
+
 async def dm_handler(ctx: ToolContext, args: dict) -> dict:
-    return await send_dm(ctx.conn, ctx.app, args)
+    sent = await send_dm(ctx.conn, ctx.app, args)
+    await comms_guard.record_sent(
+        ctx, tool_name="slack_send_dm", target=f"person:{args['person']}", text=args["text"]
+    )
+    return sent
 
 
 async def _resolve_channel_id(ctx: ToolContext, channel: str, *, allow_api: bool) -> str | None:
@@ -99,12 +137,28 @@ async def post_preflight(ctx: ToolContext, args: dict) -> Decision:
     if await channel_private(ctx.app, channel_id, conn=ctx.conn):
         return Decision("deny", "The channel is private")
     if ctx.run.get("profile") == "agent_request":
-        return Decision("draft", "Agent channel posts need your approval")
+        entry = ctx.app.workspace.config.slack.channel(channel_id)
+        policy = entry.agent_posts or ctx.app.workspace.config.slack.agent_posts
+        label = f"#{entry.name}" if entry.listed else channel_id
+        return await comms_guard.evaluate(
+            ctx,
+            kind="channel",
+            tool_name="slack_post_channel",
+            target=f"channel:{channel_id}",
+            target_label=label,
+            args=args,
+            text=args["text"],
+            policy=policy,
+        )
     return Decision("allow", "The channel is visible to the team")
 
 
 async def post_handler(ctx: ToolContext, args: dict) -> dict:
-    return await post(ctx.app, args, conn=ctx.conn)
+    sent = await post(ctx.app, args, conn=ctx.conn)
+    await comms_guard.record_sent(
+        ctx, tool_name="slack_post_channel", target=f"channel:{args['channel']}", text=args["text"]
+    )
+    return sent
 
 
 async def read_handler(ctx: ToolContext, args: dict) -> dict:
@@ -182,9 +236,10 @@ def register(registry: Registry) -> None:
             lambda a: f"person:{a['person']}",
             False,
             dm_handler,
-            "Send a Slack DM to one team member (`person`: a person key). For a question that needs an answer, use `asks_create` instead. It becomes a draft card after a personal or private read. At most 3 per run.",
+            "Send a Slack DM to one team member (`person`: a person key or name). For a question that needs an answer, use `asks_create` instead. Routine updates in agent requests send automatically after safety review; risky messages or posts after a personal read become a draft card. At most 3 per run.",
             SendDM,
-            profiles=frozenset({"person_dm", "routine"}),
+            profiles=frozenset({"person_dm", "routine", "agent_request"}),
+            preflight=dm_preflight,
         )
     )
     registry.add(
@@ -195,7 +250,7 @@ def register(registry: Registry) -> None:
             lambda a: f"channel:{a['channel']}",
             False,
             post_handler,
-            "Post in a configured team channel (`channel`: its id or #name; `thread_ts` to answer in a thread). Always a draft card in agent requests or after a personal or private read.",
+            "Post in a configured team channel (`channel`: its id or #name; `thread_ts` to answer in a thread). Routine updates in agent requests post automatically after safety review; risky messages or posts after a personal or private read become a draft card.",
             PostChannel,
             profiles=frozenset({"person_dm", "agent_request"}),
             preflight=post_preflight,

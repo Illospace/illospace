@@ -65,7 +65,7 @@ GRANT_PROFILES = {
     | {"asks_create", "notes_propose", "connectors_list", "connectors_call"},
 }
 
-PROFILE_NAMES = frozenset(GRANT_PROFILES) | {"outsider"}
+PROFILE_NAMES = frozenset(GRANT_PROFILES) | {"outsider", "comms_review"}
 
 
 @dataclass(frozen=True)
@@ -76,8 +76,8 @@ class Decision:
 
 def effective_profile(run: dict) -> str:
     """Taint and outsider status always narrow the grant, whatever the first profile was."""
-    if run["profile"] == "board_coordinator":
-        return "board_coordinator"
+    if run["profile"] in {"board_coordinator", "comms_review"}:
+        return run["profile"]
     if run["principal"] == "outsider":
         return "outsider"
     return "tainted" if run["tainted"] else run["profile"]
@@ -86,6 +86,8 @@ def effective_profile(run: dict) -> str:
 def grant_names(run: dict) -> frozenset[str]:
     """The default grant by tool name. A tool with its own `profiles` does not use it."""
     profile = effective_profile(run)
+    if profile == "comms_review":
+        return frozenset()
     if profile == "outsider":
         return frozenset({"web_read_public_page"})
     return frozenset(GRANT_PROFILES.get(profile, ()))
@@ -113,6 +115,9 @@ def in_grant(run: dict, tool) -> bool:
             return False
         if tool.risk != "read":
             return tool.family == "tasks" and run["deep_kind"] == "request"
+    # Quarantined Auto Mode review runs get zero tools.
+    if effective_profile(run) == "comms_review":
+        return False
     # Outside text has one closed grant, including tools with explicit profiles.
     if effective_profile(run) == "tainted" and tool.name not in GRANT_PROFILES["tainted"]:
         return False

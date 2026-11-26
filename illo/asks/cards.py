@@ -223,6 +223,8 @@ def draft_preview(draft: dict) -> str | None:
         return text if blocks is not None and len(blocks) <= 49 else None
     if draft.get("kind") == "slack_post_channel":
         return slack_post_preview(draft)
+    if draft.get("kind") == "slack_send_dm":
+        return slack_dm_preview(draft)
     if draft.get("kind") == "asks_answer":
         content = draft.get("answer_preview")
         if content is None:
@@ -337,6 +339,22 @@ def slack_post_preview(draft: dict) -> str | None:
     return full if blocks is not None and len(blocks) <= 49 else None
 
 
+def slack_dm_preview(draft: dict) -> str | None:
+    """Format a Slack DM draft cleanly with visible escaping."""
+    args = draft["content"].get("arguments") or {}
+    person = args.get("person", "")
+    text = args.get("text", "")
+    if not person or not text:
+        return None
+    heading = f"Send DM to {visible_escape(person)}:"
+    body = "> " + visible_escape(text).replace("\n", "\n> ")
+    full = f"{heading}\n{body}"
+    if len(full) > 120000:
+        return None
+    blocks = github_sections(full)
+    return full if blocks is not None and len(blocks) <= 49 else None
+
+
 def slack_post_card(draft: dict, text: str) -> list[dict]:
     blocks = github_sections(text)
     if draft["state"] == "pending":
@@ -418,6 +436,9 @@ def draft_fallback(draft):
     if draft.get("kind") == "slack_post_channel":
         channel = (draft["content"].get("arguments") or {}).get("channel", draft["destination"])
         return f"Post in <#{channel}>?" if channel.startswith(("C", "G")) else f"Post in {channel}?"
+    if draft.get("kind") == "slack_send_dm":
+        person = (draft["content"].get("arguments") or {}).get("person", draft["destination"])
+        return f"Send DM to {person}?"
     return f"Draft for {draft['destination']}"
 
 
@@ -473,7 +494,7 @@ def draft_card(draft: dict) -> list[dict]:
         return blocks
     if text is not None and draft.get("kind") in {"github_assign_issue", "github_comment_issue"}:
         return github_card(draft, text)
-    if text is not None and draft.get("kind") == "slack_post_channel":
+    if text is not None and draft.get("kind") in {"slack_post_channel", "slack_send_dm"}:
         return slack_post_card(draft, text)
     blocks = [section(f"Draft for {escape(draft['destination'])}")]
     if text is None:
