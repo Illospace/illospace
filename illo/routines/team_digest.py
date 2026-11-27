@@ -39,25 +39,25 @@ Keep task IDs. Link titles when a link exists. Never invent a fact.
 Use `recent_openings` to avoid the same opening line. No table or dashboard."""
 
 DEFAULT_INSTRUCTIONS = """Write the team brief for {team}. Call `team_snapshot` first.
-The brief says what changed since the last brief. It is not a list of reminders: each person gets their own tasks in their own brief.
+Write a short, natural-language digest of what actually moved across the team's repos and work since `since` — written like a sharp teammate giving an easy-to-scan update, never a ticketing bot or a raw list of task numbers.
 
-Use these parts in this order. Omit an empty part.
-- Done since the last brief: the count, and 7 titles at most, each with its proof.
-- New: each task in `new_waits` and each task in `stuck` where `new` is true. Never repeat a task in `stuck` where `new` is false; it stays in "Still waiting". One line for each: the task number, who acts, the action, and why the task waits.
-  Example of the shape: "#12, Ada: test the export on staging and report the result. The agent cannot sign in."
-- Still waiting: one line. Give each person's count from `waiting`, the oldest wait, and the action of the oldest task. Do not list these tasks again.
-- In work: one line.
-- If `handled_without_you` is greater than 0, add one short audit line: "Handled without you: N."
+How to gather the real picture:
+- Read `team_snapshot` (including `since`, `recent_board_threads`, `finished`, `new_waits`, and `stuck`).
+- When `/repos/` is available in `shell`, check recent commits since `since` across the mirrored repositories and check what is sitting on staging ahead of production (e.g. `origin/main..origin/staging` when a staging branch exists).
+- When a business, strategy, or product-context repo or team note exists, draw from it so you connect engineering work to why the team is doing it.
+- Use `recent_board_threads`, PRs, or issues when needed to check whether staging changes were tested (by agents and/or humans) or are still being iterated on.
 
-Before you write a line in "New", read the task, its ticket, and the live state with your read tools. A task in the snapshot can be done by now.
-Do not ask a person to check a fact that your tools can read. Read it, and give the result.
-If the facts show that the work is complete, say that with the proof, and ask the person to confirm.
-Never ask a person to toggle internal agent labels, reassign a ticket just to wake an agent, or edit agent allowlist config unless the task is specifically about that config.
-Say "stuck" only after you checked that nobody can move the task without a person. If an agent waits for a release or a review, say that, and name who acts.
-Leave out a fact that you cannot read. Do not end with a list of things that you could not check.
-If nothing is done and nothing is new, write one line that says so, then the "Still waiting" line.
-Write one short message, as a colleague writes it. Start with one line that makes sense on a lock screen. No table.
-Name a task only by its number. Every claim comes from a tool result of this run."""
+How to write the brief:
+- Start with one short opening line that makes sense on a lock screen.
+- Group related commits, PRs, and threads into a handful of clear, plain-English highlights (typically 3 to 7 bullets). Never enumerate every commit, PR, or internal task ID.
+- Focus on what helps the team ship: what is on staging vs. production, whether it has been tested by agents and/or humans, what looks ready to ship, and what is still iterating.
+- Only call out genuinely new blockers or decisions needed (`new_waits` and `stuck` where `new` is true) — never repeat old `stuck` tasks where `new` is false, stale multi-day waiting counts, or boilerplate counters ("In work: ...", "Handled without you: ..."). Each person already gets their own waiting items in their personal brief.
+- Never ask a person to toggle internal agent labels, reassign a ticket just to wake an agent, or edit agent allowlist config unless the task is specifically about that config.
+- Do not ask a person to check a fact that your tools can read. Read it, and give the result.
+- Keep links light and natural — do not hyperlink every clause or dump raw commit hashes. No tables.
+- Leave out a fact that you cannot verify, and do not end with a list of things you could not check.
+- If nothing meaningful moved and nothing new needs attention, say so in one short line.
+- Every claim comes from a tool result of this run."""
 
 def fallback_text(data):
     lines = ["Morning, team."]
@@ -138,8 +138,12 @@ async def send_team_due(ctx, now=None):
             if event
             else await team_snapshot(conn, ctx.workspace, now)
         )
-        active = (any(data[k] for k in ("finished", "stuck", "waiting"))
-                  or any(data["in_work"].values()) or team.send_empty)
+        active = (
+            any(data[k] for k in ("finished", "stuck", "waiting"))
+            or any(data["in_work"].values())
+            or bool(data.get("recent_board_threads"))
+            or team.send_empty
+        )
         if active or event:
             prompt = (ctx.workspace.team_digest_instructions or (DEFAULT_INSTRUCTIONS if config.digest.deep else LEGACY_INSTRUCTIONS)).replace(
                 "{team}", config.team_name

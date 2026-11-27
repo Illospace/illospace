@@ -335,8 +335,65 @@ async def handled_without_you(conn, since, *, person=None) -> int:
     return int(row["n"]) if row else 0
 
 
+async def recent_board_threads(conn, since, limit: int = 15) -> list[dict]:
+    """Read recent team-visible board threads with latest posts. Never include private threads."""
+    rows = await all_rows(
+        conn,
+        """SELECT t.id, t.title, t.state, t.ticket_url, t.last_post_at, t.resolution_summary,
+                  EXISTS (
+                      SELECT 1 FROM board_posts hp
+                      WHERE hp.thread_id = t.id AND hp.is_human
+                  ) AS human_participated
+        FROM board_threads t
+        WHERE t.visibility = 'team' AND t.last_post_at > %s
+        ORDER BY t.last_post_at DESC, t.id DESC
+        LIMIT %s""",
+        (since, limit),
+    )
+    if not rows:
+        return []
+    thread_ids = [r["id"] for r in rows]
+    posts_by_thread: dict[int, list[dict]] = {}
+    post_rows = await all_rows(
+        conn,
+        """SELECT thread_id, actor, is_human, kind, text, at
+        FROM (
+            SELECT thread_id, actor, is_human, kind, text, at,
+                   row_number() OVER (PARTITION BY thread_id ORDER BY id DESC) AS rn
+            FROM board_posts
+            WHERE thread_id = ANY(%s)
+        ) ranked
+        WHERE rn <= 2
+        ORDER BY thread_id, at ASC""",
+        (thread_ids,),
+    )
+    for p in post_rows:
+        snippet = " ".join((p["text"] or "").split())[:300]
+        posts_by_thread.setdefault(p["thread_id"], []).append({
+            "actor": p["actor"],
+            "is_human": bool(p["is_human"]),
+            "kind": p["kind"],
+            "text": snippet,
+        })
+    result = []
+    for r in rows:
+        entry = {
+            "id": r["id"],
+            "title": r["title"],
+            "state": r["state"],
+            "ticket_url": r["ticket_url"],
+            "last_post_at": r["last_post_at"],
+            "human_participated": bool(r["human_participated"]),
+            "recent_posts": posts_by_thread.get(r["id"], []),
+        }
+        if r["resolution_summary"]:
+            entry["resolution_summary"] = " ".join(r["resolution_summary"].split())[:400]
+        result.append(entry)
+    return result
+
+
 async def team_snapshot(conn, workspace, now):
-    """Read team tasks only. Keep private tasks, asks, and service faults out."""
+    """Read team tasks and team board activity only. Keep private tasks, private threads, asks, and faults out."""
     since = await brief_window(conn, TEAM_STATE_KEY, now)
     records, names = await task_records(conn, workspace, now, since)
     finished = [r for r in records if r["row"]["state"] == "done" and r["row"]["done_at"] > since]
@@ -388,11 +445,13 @@ async def team_snapshot(conn, workspace, now):
                 "new": bool(stuck_at and stuck_at > since)})
         agents += (row["holder"] or "").startswith("agent:")
         people_count += (row["holder"] or "").startswith("person:")
-    return {"team": workspace.config.team_name, "finished_total": len(finished),
+    return {"team": workspace.config.team_name, "since": since.isoformat(),
+            "finished_total": len(finished),
             "finished": [done_item(r, names) for r in finished[:7]],
             "waiting": sorted(waiting.values(), key=lambda r: -r["oldest_hours"]),
             "new_waits": new_waits, "stuck": stuck, "in_work": {"agents": agents, "people": people_count},
             "handled_without_you": await handled_without_you(conn, since),
+            "recent_board_threads": await recent_board_threads(conn, since),
             "recent_openings": await recent_openings(conn, "team_digest")}
 
 

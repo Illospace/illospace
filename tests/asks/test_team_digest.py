@@ -320,3 +320,62 @@ async def test_team_channel_delivery_uses_mrkdwn_chunks_and_stable_part_keys(
     assert all(len(p["text"]) <= 3500 and "[Review" not in p["text"] for p in sent)
     root = next(iter(slack_client.messages))
     assert all(p["thread_ts"] == root for p in sent[1:])
+
+
+async def test_team_snapshot_includes_recent_team_board_threads_only(
+    app, fake_brain, slack_client
+):
+    from illo.ledger import people
+    from illo.ledger.digest_snapshot import team_snapshot
+
+    ctx = app.state.ctx
+    configure(ctx)
+    due = NOW + timedelta(hours=5)
+    async with ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        team_thread = await one(
+            conn,
+            """INSERT INTO board_threads(title, visibility, state, created_by, ticket_url,
+                                         resolution_summary, last_post_at)
+            VALUES ('Staging feature rollout', 'team', 'resolved', 'agent:build',
+                    'https://github.com/acme/web/issues/42',
+                    'Merged to staging and verified by staging checks.', %s)
+            RETURNING id""",
+            (due - timedelta(hours=2),),
+        )
+        await conn.execute(
+            """INSERT INTO board_posts(thread_id, actor, is_human, kind, text, at)
+            VALUES (%s, 'agent:build', false, 'finding', 'Verified on staging.', %s),
+                   (%s, 'person:ada', true, 'answer', 'Looks good for Friday release.', %s)""",
+            (team_thread["id"], due - timedelta(hours=3), team_thread["id"], due - timedelta(hours=2)),
+        )
+        private_thread = await one(
+            conn,
+            """INSERT INTO board_threads(title, visibility, state, owner_person_id,
+                                         created_by, last_post_at)
+            VALUES ('Private salary note', 'private', 'open', %s, 'person:ada', %s)
+            RETURNING id""",
+            (ada["id"], due - timedelta(hours=1)),
+        )
+        await conn.execute(
+            """INSERT INTO board_posts(thread_id, actor, is_human, kind, text, at)
+            VALUES (%s, 'person:ada', true, 'message', 'Secret private note.', %s)""",
+            (private_thread["id"], due - timedelta(hours=1)),
+        )
+        snap = await team_snapshot(conn, ctx.workspace, due)
+
+    assert snap["since"]
+    threads = snap["recent_board_threads"]
+    assert len(threads) == 1
+    assert threads[0]["id"] == team_thread["id"]
+    assert threads[0]["human_participated"] is True
+    assert "Verified on staging" in threads[0]["recent_posts"][0]["text"]
+    assert "Looks good for Friday release" in threads[0]["recent_posts"][1]["text"]
+    assert "Merged to staging" in threads[0]["resolution_summary"]
+    assert all(t["id"] != private_thread["id"] for t in threads)
+
+    # Board activity alone triggers the team brief even when no tasks exist.
+    await send_team_due(ctx, due)
+    assert len(fake_brain.requests) == 1
+    assert len(posts(slack_client)) == 1
+
