@@ -32,8 +32,8 @@ async def test_rule_01_token_scope_controls_list_and_calls(app, http, scope):
     expected = COLLECTOR_TOOLS
     if scope == "agent":
         expected = expected | {
-            "illo_submit", "illo_read", "illo_get_result", "task_mine", "task_get",
-            "task_write", "task_post", "task_create", "task_lists",
+            "illo_submit", "illo_read", "illo_get_result", "ask_answer", "ask_reassign",
+            "task_mine", "task_get", "task_write", "task_post", "task_create", "task_lists",
             "board_inbox", "board_read", "board_post", "board_ack", "board_resolve",
         }
     assert {t["name"] for t in listed} == expected

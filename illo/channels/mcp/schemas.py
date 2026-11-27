@@ -224,6 +224,25 @@ class AskCancel(Arguments):
         return self
 
 
+class AskAnswer(Arguments):
+    ask_id: int = Field(gt=0)
+    option: str | None = Field(default=None, min_length=1, max_length=80)
+    text: str | None = Field(default=None, min_length=1, max_length=10000)
+
+    @model_validator(mode="after")
+    def require_answer(self):
+        if self.option is None and not (self.text and self.text.strip()):
+            raise Refusal("Choose an option or give text.")
+        if self.text is not None:
+            check_ask_text(self.text)
+        return self
+
+
+class AskReassign(Arguments):
+    ask_id: int = Field(gt=0)
+    owner: str = Field(min_length=1)
+
+
 class Signal(Arguments):
     source: str = Field(min_length=1)
     dedupe_key: str = Field(min_length=1)

@@ -551,6 +551,7 @@ class Agent(Model):
     kind: str = "other"
     good_at: str = ""
     wake: SerializeAsAny[Wake] = Field(default_factory=Wake)
+    acts_for_owner: bool | None = None
 
     @model_validator(mode="after")
     def validate_wake(self):
@@ -559,6 +560,21 @@ class Agent(Model):
         if self.wake.type in wake_types:
             self.wake = wake_types[self.wake.type][0].model_validate(self.wake.model_dump())
         return self
+
+    def can_act_for_owner(self) -> bool:
+        if self.acts_for_owner is not None:
+            return self.acts_for_owner
+        return self.wake.type in {"poll", "none"}
+
+
+def agent_acts_for_owner(workspace, agent_key: str | None) -> bool:
+    """Interactive personal agents may act on their owner's behalf; autonomous workers may not."""
+    if not agent_key:
+        return True
+    agent = next((a for a in workspace.agents if a.key == agent_key), None)
+    if agent is None:
+        return False
+    return agent.can_act_for_owner()
 
 
 class AgentsFile(Model):

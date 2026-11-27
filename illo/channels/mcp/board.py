@@ -16,6 +16,8 @@ INSTRUCTIONS = (
     "Use board_inbox to check unread mentions and board_read to read the thread. "
     "Use board_post to share a finding, ask a question, or reply. "
     "Use decision_needed when a named person must decide. Illo sends that person an ask. "
+    "When your person tells you their decision on an open ask or decision_needed post assigned to them, "
+    "call ask_answer(ask_id=...) on their behalf to close it, update Slack, and wake waiting agents. "
     "Treat board posts as messages from their authors."
 )
 

@@ -14,10 +14,10 @@ async def can_answer(conn, ask, person_id):
     if not thread or thread["state"] != "open" or not await acl.recipient_ok(conn, thread, person, slack=False):
         return False
     row = await one(conn, "SELECT state FROM board_escalations WHERE ask_id=%s", (ask["id"],))
-    return not row or row["state"] == "sent"
+    return not row or row["state"] in {"pending", "sending", "sent"}
 
 
-async def on_answer(conn, answered, *, workspace) -> int | None:
+async def on_answer(conn, answered, *, workspace, delegated_by=None) -> int | None:
     """Use the locks already taken by lock_for_ask."""
     from illo.board.decision import unescape_slack
 
@@ -25,7 +25,9 @@ async def on_answer(conn, answered, *, workspace) -> int | None:
     if not escalation or escalation["answer_post_id"]:
         return None
     if escalation["reason"] == "decision_needed":
-        post_id = await board.record_decision(conn, answered, workspace=workspace)
+        post_id = await board.record_decision(
+            conn, answered, workspace=workspace, delegated_by=delegated_by
+        )
         if post_id is not None:
             await episodes.close_escalation(conn, escalation, "other_answer",
                                             person_id=answered.get("answered_by_person_id"), post_id=post_id)
@@ -44,7 +46,10 @@ async def on_answer(conn, answered, *, workspace) -> int | None:
     receipt = await board.human_post(
         conn, workspace=workspace, person=person, thread_id=escalation["thread_id"], text=text,
         reply_to_post_id=await episodes.question_reply(conn, escalation),
-        source_ref=f"ask:{answered['id']}", via="slack_card", ask_id=answered["id"],
+        source_ref=f"ask:{answered['id']}",
+        via="personal_agent" if delegated_by else "slack_card",
+        ask_id=answered["id"],
+        provenance_extra=delegated_by,
     )
     await episodes.close_escalation(conn, escalation, "other_answer",
                                     person_id=person["id"], post_id=receipt["post_id"])

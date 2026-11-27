@@ -17,6 +17,7 @@ from illo.ledger import audit, tokens
 from illo.ledger import board as board_ledger
 from illo.ledger import mcp as ledger
 from illo.tools.registry import Tool, schema_reason
+from illo.workspace import agent_acts_for_owner
 
 from . import asks, board, lanes, reads, schemas, submissions, tasks
 
@@ -35,12 +36,26 @@ COLLECTOR_TOOLS = frozenset(
         "signal_submit",
     }
 )
-AGENT_TOOLS = COLLECTOR_TOOLS | {"illo_submit", "illo_read", "illo_get_result"} | tasks.NAMES
+OWNER_AGENT_TOOLS = frozenset({"ask_answer", "ask_reassign"})
+AGENT_TOOLS = (
+    COLLECTOR_TOOLS
+    | {"illo_submit", "illo_read", "illo_get_result"}
+    | OWNER_AGENT_TOOLS
+    | tasks.NAMES
+)
 
 
-def allowed_tools(token: dict, *, pages_enabled=False, board_enabled=True) -> frozenset[str]:
+def allowed_tools(
+    token: dict,
+    *,
+    pages_enabled=False,
+    board_enabled=True,
+    acts_for_owner: bool = True,
+) -> frozenset[str]:
     if token["scopes"] == ["agent"]:
         names = AGENT_TOOLS if pages_enabled else AGENT_TOOLS - {"task_page"}
+        if not acts_for_owner:
+            names = names - OWNER_AGENT_TOOLS
         return names | board.NAMES if board_enabled else names
     if token["scopes"] == ["collector"]:
         return COLLECTOR_TOOLS
@@ -135,6 +150,20 @@ TOOLS = {
             "Cancel an open ask of this token by `ask_id` or `source_ref`, when the question no longer matters.",
         ),
         agent_tool(
+            "ask_answer",
+            schemas.AskAnswer,
+            asks.answer_ask,
+            "write_internal",
+            "Answer an open ask or board `decision_needed` post on your person's behalf (`ask_id`, plus `option` id and/or `text`). Available only to interactive personal agents (`acts_for_owner=true`), never to autonomous workers or to the agent that created the ask. Closes the ask, posts the official decision on any linked board thread, wakes waiting agents, and updates the Slack card.",
+        ),
+        agent_tool(
+            "ask_reassign",
+            schemas.AskReassign,
+            asks.reassign_ask,
+            "write_internal",
+            "Reassign an open ask (including board decisions) owned or requested by your person to another teammate (`ask_id`, `owner`: person key, email, GitHub login, or Slack id). Preserves the board thread link so the new owner's answer wakes the waiting agent.",
+        ),
+        agent_tool(
             "signal_submit",
             schemas.Signal,
             signal_submit,
@@ -205,8 +234,12 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
         )
     name, args, decision, reason = method, params, "allow", "The request is allowed"
     config = ctx.app.workspace.config
-    allowed = allowed_tools(ctx.token, pages_enabled=config.pages.enabled,
-                            board_enabled=config.board.enabled)
+    allowed = allowed_tools(
+        ctx.token,
+        pages_enabled=config.pages.enabled,
+        board_enabled=config.board.enabled,
+        acts_for_owner=agent_acts_for_owner(ctx.app.workspace, ctx.token.get("agent_key")),
+    )
     has_board = "board_inbox" in allowed
     if method == "initialize":
         result = initialize_result(params, "illo-agents", instructions=board.INSTRUCTIONS if has_board else None)
@@ -241,7 +274,7 @@ async def dispatch(ctx: ClientContext, body) -> tuple[Response, str, dict, str, 
             validated = tool.arguments.model_validate(args)
             # Reports are snapshots: omitted fields must not reset a stored lane.
             clean = validated.model_dump(exclude_unset=name == "lane_report")
-            if name == "board_post":
+            if name in {"board_post", "ask_answer", "ask_reassign"}:
                 value = await tool.handler(ctx, clean)
             else:
                 async with ctx.conn.transaction():

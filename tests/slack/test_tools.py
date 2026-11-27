@@ -101,7 +101,7 @@ async def test_profiles_hide_slack_writes_and_all_slack_from_taint(app, rpc):
         names = {t["name"] for t in (await rpc(token, "tools/list")).json()["result"]["tools"]}
         assert ("slack_post_channel" in names) == (profile == "agent_request")
         assert ("slack_send_dm" in names) == (profile in {"routine", "agent_request"})
-        assert ("slack_read_thread" in names) == (profile == "team_channel")
+        assert ("slack_read_thread" in names) == (profile in {"team_channel", "agent_request"})
 
 
 async def test_agent_request_slack_post_channel_draft_mode_with_clean_card(app, rpc, slack_client):
@@ -281,4 +281,39 @@ async def test_slack_list_channels_and_unconfigured_hints(app, rpc, rpc_token, s
     )
     assert drafted["decision"] == "draft"
     assert len(slack_client.calls) == calls_before
+
+
+async def test_agent_request_can_read_team_slack_thread_but_not_private(app, rpc, slack_client):
+    async with app.state.ctx.pool.connection() as conn:
+        ada = await people.get(conn, "ada")
+        run = await runs.create(
+            conn,
+            principal="person:ada",
+            person_id=ada["id"],
+            profile="agent_request",
+            provider="fake",
+            tool_limit=12,
+            model="fake",
+        )
+        token = await runs.mint_token(conn, run["id"], 60)
+
+    slack_client.messages = {"100.1": {"ts": "100.1", "text": "Team alert"}}
+    team_read = await call(
+        rpc, token, "slack_read_thread", {"channel": "C_ACME_TEAM", "thread_ts": "100.1"}
+    )
+    assert team_read["decision"] == "allow"
+
+    async def private_info(**kwargs):
+        return {"channel": {"id": kwargs["channel"], "is_private": True}}
+
+    async def members(**kwargs):
+        return {"members": ["U_ACME_ADA"]}
+
+    slack_client.conversations_info = private_info
+    slack_client.conversations_members = members
+    private_read = await call(
+        rpc, token, "slack_read_thread", {"channel": "C_ACME_ALERTS", "thread_ts": "100.1"}
+    )
+    assert private_read["decision"] == "deny"
+
 

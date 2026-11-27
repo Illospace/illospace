@@ -62,7 +62,16 @@ GRANT_PROFILES = {
     "routine": READ_TOOLS | TICKET_TOOLS | {"asks_create", "slack_send_dm"},
     "agent_request": READ_TOOLS
     | TICKET_TOOLS
-    | {"asks_create", "notes_propose", "note_save", "list_save", "note_forget", "connectors_list", "connectors_call"},
+    | {
+        "asks_create",
+        "notes_propose",
+        "note_save",
+        "list_save",
+        "note_forget",
+        "slack_read_thread",
+        "connectors_list",
+        "connectors_call",
+    },
 }
 
 PROFILE_NAMES = frozenset(GRANT_PROFILES) | {"outsider", "comms_review"}

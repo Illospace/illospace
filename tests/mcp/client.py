@@ -12,10 +12,17 @@ class AgentClient:
         self.token_id, self.person_id = token_id, person_id
 
     @classmethod
-    async def create(cls, app, http, person="ada", label="acme-laptop"):
+    async def create(cls, app, http, person="ada", label="acme-laptop", agent_key=None):
         async with app.state.ctx.pool.connection() as conn:
             who = await people.get(conn, person)
-            token = await tokens.create(conn, who["id"], label, scopes=["agent"])
+            token = await tokens.create(
+                conn,
+                who["id"],
+                label,
+                scopes=["agent"],
+                agent_key=agent_key,
+                workspace=app.state.ctx.workspace if agent_key else None,
+            )
             row = await tokens.verify(conn, token)
         return cls(app, http, token, row["id"], who["id"])
 
