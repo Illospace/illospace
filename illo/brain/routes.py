@@ -73,7 +73,7 @@ def web_search_allowed(workspace, route: Route, provider: dict, deep) -> bool:
         deep is not None
         and route.kind == "deep"
         and workspace.config.web.search == "provider"
-        and deep.kind != "brief"
+        and deep.kind not in {"brief", "dream"}
         and deep.authority.profile != "person_dm"
         and not deep.customer_read
         and not deep.personal_read

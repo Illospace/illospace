@@ -35,6 +35,7 @@ async def test_board_migration_applies_to_an_existing_database_and_a_fresh_one(p
                 "1904_board_files.sql", "1905_board_files_validate.sql",
                 "1906_chief_of_staff.sql", "1907_chief_of_staff_validate.sql",
                 "1908_comms_review.sql", "1909_comms_review_validate.sql",
+                "1910_dream.sql", "1911_dream_validate.sql",
             ]
             assert await migrate(conn) == []
             assert await one(conn, "SELECT name FROM people WHERE key='ada'") == {"name": "Ada"}

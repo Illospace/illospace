@@ -6,6 +6,7 @@ chatgpt_status: Check the ChatGPT sign-in that pays for this person's runs. Retu
 connectors_call: Call one tool of a connected outside service, with `connector`, `tool`, and `arguments` as `connectors_list` shows them. A personal connector uses only this person's sign-in; write `connect my <name>` in a DM to sign in. After a personal read, team connector calls are refused. Each personal write and each outside send needs an approval card.
 connectors_list: List the connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names. A connector can be personal; the person writes `connect my <name>` in a DM to sign in.
 digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.
+dream_log: Read Illo's recent nightly dream reflections, scores, and autonomous workspace improvements.
 drive_get: Read one of this person's own Drive files by `id` from `drive_search`.
 drive_search: Search this person's own Drive files. For team documents, use `drive_shared_search`.
 github_get_commit: Read one commit by `repo` and `ref` (a branch, a tag, or a SHA): its SHA, message, date, and check runs. Use it to see if a commit is released: a release job that passed on the production branch shows that the commit is live.
