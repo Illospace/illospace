@@ -101,7 +101,7 @@ def register(registry):
             lambda args: "ledger",
             False,
             team_snapshot_read,
-            "Read the team task brief: Done, Waiting on people, Stuck, and In work. It holds team tasks only. It never reads private tasks or personal asks.",
+            "Read the team brief snapshot: Done, Waiting on people, Stuck, In work, and recent team-visible board threads since the last brief. It never reads private tasks, private threads, or personal asks.",
             Arguments,
             profiles=frozenset({"routine", "team_channel", "person_dm"}),
         )
