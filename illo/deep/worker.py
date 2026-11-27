@@ -173,8 +173,14 @@ async def tick(ctx, only_id=None):
             await conn.commit()
             return await execute(ctx, row) if row else None
         finally:
-            await conn.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
-            await conn.commit()
+            try:
+                await conn.rollback()
+                await conn.execute("SELECT pg_advisory_unlock(%s)", (WORKER_LOCK,))
+                await conn.commit()
+            except BaseException:
+                with suppress(Exception):
+                    await conn.close()
+                raise
 
 
 async def result(ctx, deep_id):

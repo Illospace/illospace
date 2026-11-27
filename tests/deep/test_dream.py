@@ -1,12 +1,16 @@
 """Nightly dream reflection runs silently, isolates private/tainted text, and safely refines workspace files."""
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
+from illo.app import create_app
+from illo.config import Config
 from illo.db import one
 from illo.deep import worker
 from illo.gateway.events import InboundEvent
@@ -15,11 +19,32 @@ from illo.ledger import dream_snapshot, people
 from illo.routines import dream
 from illo.workspace import DreamConfig, load_workspace
 from tests.tool_results import read_result
+from tests.workspaces import task_workspace
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture
+async def dream_app(pool, tmp_path, fake_brain, slack_client, github_client):
+    root = tmp_path / "team"
+    shutil.copytree(ROOT / "workspace.example", root)
+    task_workspace(root)
+    config = Config(
+        workspace_dir=root,
+        public_url="http://test",
+        revision="test-revision",
+        reload_token="test-reload",
+    )
+    application = create_app(config, pool=pool, brain_client=fake_brain)
+    fake_brain.transport = httpx.ASGITransport(app=application)
+    async with application.router.lifespan_context(application):
+        application.state.ctx.slack_client = slack_client
+        application.state.ctx.github_client = github_client
+        yield application
 
 
 def test_dream_instructions_match_example_file():
-    root = Path(__file__).resolve().parents[2]
-    assert (root / "workspace.example/routines/dream.md").read_text().strip() == dream.DEFAULT_INSTRUCTIONS
+    assert (ROOT / "workspace.example/routines/dream.md").read_text().strip() == dream.DEFAULT_INSTRUCTIONS
 
 
 def test_dream_config_validates_timezone_schedule_and_bounds():
@@ -111,8 +136,8 @@ async def test_dream_snapshot_excludes_private_and_tainted(conn, ada, workspace)
     assert any(d["tool"] == "slack_post_channel" for d in snap["tool_denials"])
 
 
-async def test_dream_end_to_end_silent_refinement_and_log(app, fake_brain, slack_client):
-    ctx = app.state.ctx
+async def test_dream_end_to_end_silent_refinement_and_log(dream_app, fake_brain, slack_client):
+    ctx = dream_app.state.ctx
     ctx.workspace = ctx.workspace.model_copy(deep=True)
     ctx.workspace.config.dream = DreamConfig(enabled=True, max_changes=3)
     note_body = "---\ntitle: Release cadence\nabout: How the team ships weekly\n---\n\nBackend ships before frontend.\n"
@@ -150,7 +175,8 @@ async def test_dream_end_to_end_silent_refinement_and_log(app, fake_brain, slack
         deep_id = await dream.queue(ctx, conn)
         await conn.commit()
 
-    await worker.tick(ctx, only_id=deep_id)
+    done = await worker.result(ctx, deep_id)
+    assert done["state"] == "done"
     assert len(fake_brain.requests) == 1
     assert not fake_brain.requests[0].web_search
 
@@ -188,8 +214,8 @@ async def test_dream_end_to_end_silent_refinement_and_log(app, fake_brain, slack
     assert entries[0]["summary"].startswith("Consolidated release order")
 
 
-async def test_dream_write_guardrails_and_max_changes(app, fake_brain):
-    ctx = app.state.ctx
+async def test_dream_write_guardrails_and_max_changes(dream_app, fake_brain):
+    ctx = dream_app.state.ctx
     root = ctx.workspace.root
     illo_yaml = root / "illo.yaml"
     illo_yaml.write_text(illo_yaml.read_text() + "\ndream:\n  enabled: true\n  max_changes: 2\n")
@@ -231,7 +257,8 @@ async def test_dream_write_guardrails_and_max_changes(app, fake_brain):
         deep_id = await dream.queue(ctx, conn)
         await conn.commit()
 
-    await worker.tick(ctx, only_id=deep_id)
+    done = await worker.result(ctx, deep_id)
+    assert done["state"] == "done"
     results = [read_result(r) for r in fake_brain.results]
     statuses = [(r["decision"], r.get("error")) for r in results]
     for idx in (0, 1, 2, 3, 4, 5, 7, 9):
@@ -257,3 +284,20 @@ async def test_dream_tools_denied_outside_dream_run(app, fake_brain):
     await ctx.gateway.run_manager.start_run(event, Authority("person:ada", "person_dm", ada["id"]), None)
     results = [read_result(r) for r in fake_brain.results]
     assert [r["decision"] for r in results] == ["deny", "deny", "deny", "deny"]
+
+
+async def test_worker_tick_releases_lock_after_aborted_transaction(app, monkeypatch):
+    ctx = app.state.ctx
+
+    async def fail_sql(conn):
+        await conn.execute("SELECT * FROM nonexistent_table_for_lock_test")
+
+    monkeypatch.setattr(worker, "recover", fail_sql)
+    with pytest.raises(Exception):
+        await worker.tick(ctx)
+
+    async with ctx.pool.connection() as conn:
+        lock = await one(conn, "SELECT pg_try_advisory_lock(%s) AS held", (worker.WORKER_LOCK,))
+        assert lock["held"]
+        await conn.execute("SELECT pg_advisory_unlock(%s)", (worker.WORKER_LOCK,))
+        await conn.commit()
