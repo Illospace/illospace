@@ -3,13 +3,16 @@
 from datetime import datetime
 
 from illo.asks import cards, proof
+from illo.asks import service as asks_service
 from illo.board import doors
+from illo.db import one
 from illo.ledger import ask_workflow as workflow
-from illo.ledger import asks, items, lanes, mcp
+from illo.ledger import asks, board, items, lanes, mcp
 from illo.tasks import pages
 from illo.tasks.pages import outside
 from illo.tools._comms_guard import contains_secret, has_hidden_format
 from illo.tools.registry import Refusal
+from illo.workspace import agent_acts_for_owner
 
 from .lanes import check_visible, owner
 
@@ -242,3 +245,164 @@ async def cancel(ctx, args: dict) -> dict:
     if not row:
         raise ValueError("The ask was not found")
     return {"ask_id": row["id"], "state": row["state"]}
+
+
+def _delegation_info(workspace, token: dict) -> tuple[dict, str]:
+    agent_key = token.get("agent_key")
+    agent = (
+        next((a for a in workspace.agents if a.key == agent_key), None) if agent_key else None
+    )
+    info = {
+        "via": "personal_agent",
+        "token_id": token["id"],
+        "token_label": token["label"],
+        **({"agent_key": agent_key} if agent_key else {}),
+        **({"agent_name": agent.name} if agent else {}),
+    }
+    label = agent.name if agent else token["label"]
+    return info, label
+
+
+async def _check_not_self_answer(conn, ask: dict, token: dict) -> None:
+    if ask.get("requester_token_id") == token["id"]:
+        raise Refusal("An agent cannot answer an ask that it created itself.")
+    agent_key = token.get("agent_key")
+    if not agent_key:
+        return
+    if ask.get("requester_token_id"):
+        req_token = await one(
+            conn, "SELECT agent_key FROM tokens WHERE id=%s", (ask["requester_token_id"],)
+        )
+        if req_token and req_token["agent_key"] == agent_key:
+            raise Refusal("An agent cannot answer an ask created by the same agent.")
+    same_actor = await one(
+        conn,
+        "SELECT 1 FROM board_posts WHERE ask_id=%s AND actor=%s LIMIT 1",
+        (ask["id"], f"agent:{agent_key}"),
+    )
+    if same_actor:
+        raise Refusal("An agent cannot answer an ask created by the same agent.")
+
+
+async def answer_ask(ctx, args: dict) -> dict:
+    if not agent_acts_for_owner(ctx.app.workspace, ctx.token.get("agent_key")):
+        raise Refusal(
+            "Only a personal interactive agent can answer asks on its owner's behalf "
+            "(autonomous workers cannot self-approve)."
+        )
+    text = args.get("text")
+    if text and (contains_secret(text) or has_hidden_format(text)):
+        raise Refusal("Answer text cannot contain secrets or hidden control characters.")
+    delegated_by, agent_label = _delegation_info(ctx.app.workspace, ctx.token)
+    async with ctx.conn.transaction():
+        ask = await board.lock_for_ask(ctx.conn, args["ask_id"])
+        if not ask or not await asks_service.is_live(ctx.conn, ask):
+            raise ValueError("The ask is no longer open.")
+        if ask["owner_person_id"] != ctx.token["person_id"]:
+            raise Refusal("You can only answer asks assigned to your person.")
+        await _check_not_self_answer(ctx.conn, ask, ctx.token)
+        option = args.get("option")
+        if option is not None and not any(o["id"] == option for o in ask["options"]):
+            raise ValueError("Choose one of the ask's option IDs.")
+        answered = await asks_service.answer(
+            ctx.conn,
+            ask["id"],
+            ctx.token["person_id"],
+            option=option,
+            text=text,
+            workspace=ctx.app.workspace,
+            delegated_by=delegated_by,
+        )
+        if not answered:
+            raise ValueError("The ask cannot accept this answer.")
+    await ctx.conn.commit()
+    await asks_service.notify_agent_answer(ctx.app, ctx.conn, answered, agent_label)
+    result = {**answer(answered), "answered": True}
+    if "board_post_id" in answered:
+        result["board_post_id"] = answered["board_post_id"]
+    return result
+
+
+async def reassign_ask(ctx, args: dict) -> dict:
+    if not agent_acts_for_owner(ctx.app.workspace, ctx.token.get("agent_key")):
+        raise Refusal(
+            "Only a personal interactive agent can reassign asks on its owner's behalf."
+        )
+    new_owner = await owner(ctx, args["owner"])
+    board_info = None
+    old_channel = None
+    old_ts = None
+    is_board = False
+    async with ctx.conn.transaction():
+        ask = await board.lock_for_ask(ctx.conn, args["ask_id"])
+        if not ask or not await asks_service.is_live(ctx.conn, ask):
+            raise ValueError("The ask is no longer open.")
+        if ctx.token["person_id"] not in {ask["owner_person_id"], ask["requester_person_id"]}:
+            raise Refusal("Only the current owner or requester can reassign this ask.")
+        caller = await one(
+            ctx.conn, "SELECT * FROM people WHERE id=%s AND active", (ctx.token["person_id"],)
+        )
+        if not caller:
+            raise Refusal("Caller is inactive.")
+        if new_owner["id"] == ask["owner_person_id"]:
+            return {
+                "reassigned": False,
+                "ask_id": ask["id"],
+                "owner": new_owner["key"],
+                "reason": "already_owner",
+            }
+        if ask["lane_id"]:
+            lane = await lanes.get(ctx.conn, ask["lane_id"], principal=ctx.principal)
+            if not lane or (
+                lane["visibility"] == "private" and lane["owner_person_id"] != new_owner["id"]
+            ):
+                raise ValueError("The lane is not visible to the new owner.")
+        saved = await proof.saved_items(ctx.conn, ask.get("proof") or {}, ctx.principal)
+        for ref, item in saved.items():
+            if not item or not await items.get(
+                ctx.conn, ref, principal="person:" + new_owner["key"]
+            ):
+                raise ValueError(f"The new owner cannot see {ref}.")
+        old_owner_id = ask["owner_person_id"]
+        old_channel, old_ts = ask.get("slack_channel"), ask.get("slack_ts")
+        is_board = await asks.is_board_ask(ctx.conn, ask)
+        if is_board:
+            board_info = await doors.reassign_board_ask(
+                ctx.conn,
+                ctx.app.workspace,
+                ask,
+                old_owner_id=old_owner_id,
+                new_owner=new_owner,
+                caller=caller,
+                slack_connected=bool(ctx.app.slack_client),
+            )
+        updated = await asks.reassign(ctx.conn, ask["id"], new_owner_id=new_owner["id"])
+        if not updated:
+            raise ValueError("The ask is no longer open.")
+    await ctx.conn.commit()
+    if ctx.app.slack_client and old_channel and old_ts:
+        notice = f"Reassigned to {new_owner['name']}."
+        try:
+            await ctx.app.slack_client.chat_update(
+                channel=old_channel,
+                ts=old_ts,
+                text=notice,
+                blocks=[cards.section(f"Reassigned to *{cards.escape(new_owner['name'])}*.")],
+            )
+        except Exception:
+            pass
+    if not is_board and ctx.app.slack_client:
+        try:
+            async with ctx.conn.transaction():
+                await asks_service.sync_card(ctx.app, ctx.conn, updated)
+            await ctx.conn.commit()
+        except Exception:
+            pass
+    result = {
+        "reassigned": True,
+        "ask_id": updated["id"],
+        "owner": new_owner["key"],
+    }
+    if board_info:
+        result["thread_id"] = board_info["thread_id"]
+    return result

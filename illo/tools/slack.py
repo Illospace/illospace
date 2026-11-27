@@ -236,7 +236,7 @@ async def read_handler(ctx: ToolContext, args: dict) -> dict:
         private = await channel_private(ctx.app, args["channel"], conn=ctx.conn)
         if private:
             person = None
-            if ctx.principal.startswith("person:"):
+            if ctx.principal.startswith("person:") and ctx.run.get("profile") != "agent_request":
                 person = await people.get(ctx.conn, ctx.principal[7:])
                 if person and person["id"] != ctx.run["person_id"]:
                     person = None
@@ -345,6 +345,6 @@ def register(registry: Registry) -> None:
             read_handler,
             "Read the current Slack thread, or a thread in a configured channel: `channel` is the channel id and `thread_ts` the timestamp of its first message. Pass `offset` for more messages.",
             ReadThread,
-            profiles=frozenset({"person_dm", "team_channel", "board_coordinator"}),
+            profiles=frozenset({"person_dm", "team_channel", "agent_request", "board_coordinator"}),
         )
     )

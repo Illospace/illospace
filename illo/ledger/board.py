@@ -667,7 +667,7 @@ async def resolve(conn, *, workspace, token, thread_id, state="resolved", summar
     return await _thread_result_with_episode(conn, row, workspace)
 
 
-async def record_decision(conn, ask, *, workspace=None) -> int | None:
+async def record_decision(conn, ask, *, workspace=None, delegated_by=None) -> int | None:
     """Append the answer while the authenticated ask service still holds its lock."""
     from illo.board.episodes import close_items
     from illo.board.wake import enqueue_for_post
@@ -695,6 +695,8 @@ async def record_decision(conn, ask, *, workspace=None) -> int | None:
         is_human = True
         person_id = ask["owner_person_id"]
         provenance = {"person_key": linked["key"], **({"via": via} if via != "person" else {})}
+        if delegated_by:
+            provenance.update(delegated_by)
     else:
         actor = "illo"
         is_human = False
@@ -848,14 +850,14 @@ async def _reset_after_human(conn, thread_id, person, post_id):
 
 
 async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_id, source_ref, via,
-                     ask_id=None):
+                     ask_id=None, provenance_extra=None):
     """Write the verified person's own words in the caller's transaction."""
     from illo.board import doors
     from illo.board.episodes import close_items
     from illo.board.wake import enqueue_for_post
     from illo.channels.slack.tasks import _visible
 
-    if via not in {"slack_thread", "slack_card", "web"} or not source_ref:
+    if via not in {"slack_thread", "slack_card", "web", "personal_agent"} or not source_ref:
         raise ValueError("Use a verified reply source.")
     if not person or not person.get("active", True):
         raise BoardError("Your account is inactive.")
@@ -910,6 +912,9 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
             kind = "decision"
             decision_ask_id = linked_ask["id"]
             decision_delivery = "acked" if await asks.is_board_native(conn, linked_ask) else "pending"
+    post_provenance = {"via": via}
+    if provenance_extra:
+        post_provenance.update(provenance_extra)
     try:
         async with conn.transaction():
             await _human_limit(conn, person)
@@ -917,7 +922,7 @@ async def human_post(conn, *, workspace, person, thread_id, text, reply_to_post_
                 (thread_id,actor,at,is_human,person_id,kind,text,reply_to_post_id,source_ref,provenance,mentions)
                 VALUES (%s,%s,clock_timestamp(),true,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                 (thread_id, actor, person["id"], kind, text, reply_to_post_id, source_ref,
-                 Jsonb({"via": via}), [target] if target else []))
+                 Jsonb(post_provenance), [target] if target else []))
             if decision_ask_id is not None:
                 await conn.execute("""UPDATE asks SET state='answered',answer_text=%s,
                     answered_by_person_id=%s,answered_via='person',answered_at=clock_timestamp(),

@@ -27,6 +27,8 @@ async def test_initialize_list_and_alias_header(app, http):
         "ask_pull",
         "ask_ack",
         "ask_cancel",
+        "ask_answer",
+        "ask_reassign",
         "signal_submit",
         "task_mine",
         "task_get",

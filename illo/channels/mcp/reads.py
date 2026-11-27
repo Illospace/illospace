@@ -17,6 +17,8 @@ CAPABILITIES = ("capabilities", "knowledge.search", "knowledge.get", "workspace.
 
 def capabilities(ctx) -> dict:
     """Return a concise, secret-free self-map of what this Illo watches, knows, and can do."""
+    from illo.workspace import agent_acts_for_owner
+
     from . import allowed_tools
 
     ws = ctx.app.workspace
@@ -72,6 +74,7 @@ def capabilities(ctx) -> dict:
             "owner": a.owner,
             "kind": a.kind,
             "wake_type": a.wake.type,
+            "acts_for_owner": a.can_act_for_owner(),
         }
         for a in ws.agents
     ]
@@ -80,6 +83,7 @@ def capabilities(ctx) -> dict:
             ctx.token,
             pages_enabled=cfg.pages.enabled,
             board_enabled=cfg.board.enabled,
+            acts_for_owner=agent_acts_for_owner(ws, ctx.token.get("agent_key")),
         )
     )
     return {
@@ -122,6 +126,9 @@ def capabilities(ctx) -> dict:
             ),
             "asks_and_comms": (
                 "Use ask_create (supports single owner or owners list) and ask_list for human decisions. "
+                "Personal interactive agents (acts_for_owner=true) can call ask_answer(ask_id, option, text) "
+                "on their owner's behalf to close open asks and board decision_needed posts (waking waiting agents "
+                "and updating the Slack card), or ask_reassign(ask_id, owner) to hand an ask to a teammate. "
                 "Use illo_submit to ask Illo to post internal team Slack updates or teammate DMs (Auto Mode reviewed)."
             ),
         },

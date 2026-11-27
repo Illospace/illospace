@@ -36,6 +36,40 @@ async def post_dm(ctx, person, text, blocks, kind, row_id, *, metadata=None, cha
     return {"channel": channel, "ts": sent["ts"]}
 
 
+async def notify_agent_answer(ctx, conn, answered: dict, agent_label: str) -> None:
+    """Update the owner's Slack card and post a concise audit notice after a personal-agent answer."""
+    if not ctx.slack_client:
+        return
+    try:
+        async with conn.transaction():
+            await sync_card(ctx, conn, answered, force=True)
+        await conn.commit()
+    except Exception:
+        pass
+    option_label = next(
+        (o["label"] for o in answered["options"] if o["id"] == answered["answer_option"]), ""
+    )
+    summary = " — ".join(
+        part for part in (option_label, (answered["answer_text"] or "").strip()) if part
+    )
+    if len(summary) > 300:
+        summary = summary[:297] + "..."
+    notice = f"Answered ask #{answered['id']} via {agent_label}: {summary}"
+    try:
+        if answered.get("slack_channel") and answered.get("slack_ts"):
+            await ctx.slack_client.chat_postMessage(
+                channel=answered["slack_channel"],
+                thread_ts=answered["slack_ts"],
+                text=notice,
+                client_msg_id=message_id("ask_agent_answer", answered["id"]),
+            )
+        else:
+            person = await one(conn, "SELECT * FROM people WHERE id=%s", (answered["owner_person_id"],))
+            await post_dm(ctx, person, notice, None, "ask_agent_answer", answered["id"])
+    except Exception:
+        pass
+
+
 async def sync_card(ctx, conn, ask, *, force=False):
     if await asks.is_board_ask(conn, ask):
         from illo.board import acl
@@ -177,7 +211,7 @@ async def prepare_card(ctx, conn, data):
     return data
 
 
-async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=None):
+async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=None, delegated_by=None):
     """All direct person answers lock the ask and write the same decision."""
     from illo.board.asks import can_answer, on_answer
 
@@ -194,9 +228,13 @@ async def answer(conn, ask_id, person_id, *, option=None, text=None, workspace=N
         if answered:
             from illo.board import doors
 
-            post_id = await board.record_decision(conn, answered, workspace=workspace)
+            post_id = await board.record_decision(
+                conn, answered, workspace=workspace, delegated_by=delegated_by
+            )
             await ledger.decision(conn, answered)
-            post_id = await on_answer(conn, answered, workspace=workspace) or post_id
+            post_id = await on_answer(
+                conn, answered, workspace=workspace, delegated_by=delegated_by
+            ) or post_id
             scout_finding = await doors.sync_scout_finding_answer(conn, answered)
             if post_id is not None:
                 answered = {**answered, "board_post_id": post_id}
