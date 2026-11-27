@@ -160,6 +160,7 @@ async def test_dream_end_to_end_silent_refinement_and_log(dream_app, fake_brain,
                 "reason": "Keep team digest concise and warm",
             },
         },
+        {"name": "dream_read_file", "arguments": {"path": "notes/release-cadence.md"}},
         {"name": "web_fetch", "arguments": {"url": "https://example.com"}},
         {"name": "slack_post_channel", "arguments": {"channel": "C_TEAM", "text": "Hi"}},
         {
@@ -181,7 +182,8 @@ async def test_dream_end_to_end_silent_refinement_and_log(dream_app, fake_brain,
     assert not fake_brain.requests[0].web_search
 
     results = [read_result(r) for r in fake_brain.results]
-    assert [r["decision"] for r in results] == ["allow", "allow", "allow", "deny", "deny", "allow"]
+    assert [r["decision"] for r in results] == ["allow", "allow", "allow", "allow", "deny", "deny", "allow"]
+    assert "Backend ships before frontend." in results[3]["result"]
     assert not slack_client.messages
 
     # Workspace files written & reloaded
