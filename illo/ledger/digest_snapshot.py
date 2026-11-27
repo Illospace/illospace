@@ -452,6 +452,7 @@ async def team_snapshot(conn, workspace, now):
             "new_waits": new_waits, "stuck": stuck, "in_work": {"agents": agents, "people": people_count},
             "handled_without_you": await handled_without_you(conn, since),
             "recent_board_threads": await recent_board_threads(conn, since),
+            "recent_briefs": await recent_briefs(conn, "team_digest"),
             "recent_openings": await recent_openings(conn, "team_digest")}
 
 
@@ -461,6 +462,21 @@ async def brief_window(conn, key, now):
         return datetime.fromisoformat(saved)
     row = await one(conn, "SELECT last_run_at FROM routine_state WHERE key=%s AND last_status IS DISTINCT FROM 'skipped'", (key,))
     return (row["last_run_at"] if row else None) or now - timedelta(days=1)
+
+
+async def recent_briefs(conn, channel, person_id=None, *, limit: int = 3, max_chars: int = 2500):
+    """Read recent completed briefs (newest first) so the next brief knows what was already introduced."""
+    person_filter = "person_id=%s" if person_id is not None else "person_id IS NULL"
+    params = (max_chars, channel, person_id, limit) if person_id is not None else (max_chars, channel, limit)
+    rows = await all_rows(
+        conn,
+        f"""SELECT created_at, left(payload->>'final_answer', %s) AS text
+        FROM events WHERE channel=%s AND {person_filter} AND status='handled'
+          AND jsonb_typeof(payload->'final_answer')='string' AND payload->>'final_answer'<>''
+        ORDER BY id DESC LIMIT %s""",
+        params,
+    )
+    return [{"at": row["created_at"].isoformat(), "text": row["text"]} for row in rows]
 
 
 async def recent_openings(conn, channel, person_id=None):

@@ -38,6 +38,28 @@ async def test_recent_openings_are_bounded_and_private(conn, ada, ben, workspace
     assert "Other person" not in str(personal["recent_openings"]) + str(team["recent_openings"])
 
 
+async def test_recent_briefs_are_bounded_and_isolated(conn, ada, workspace):
+    assert await digest_snapshot.recent_briefs(conn, "team_digest") == []
+    for index in range(4):
+        await brief_event(conn, "team_digest", None, f"Team brief {index}\nLine 2 for {index}", suffix=f"rb{index}")
+    await brief_event(conn, "digest", ada["id"], "Private personal brief", suffix="rb-personal")
+    await brief_event(conn, "team_digest", None, "Failed team brief", status="failed", suffix="rb-failed")
+    await brief_event(conn, "team_digest", None, None, suffix="rb-empty")
+    await brief_event(conn, "team_digest", None, "b" * 3000, suffix="rb-long")
+    team = await digest_snapshot.team_snapshot(conn, workspace, NOW)
+    briefs = team["recent_briefs"]
+    assert [b["text"] for b in briefs] == [
+        "b" * 2500,
+        "Team brief 3\nLine 2 for 3",
+        "Team brief 2\nLine 2 for 2",
+    ]
+    assert all(isinstance(b["at"], str) and "T" in b["at"] for b in briefs)
+    assert "Private personal brief" not in str(briefs)
+    assert "Failed team brief" not in str(briefs)
+    bounded = await digest_snapshot.recent_briefs(conn, "team_digest", limit=2, max_chars=12)
+    assert [b["text"] for b in bounded] == ["b" * 12, "Team brief 3"]
+
+
 async def test_openings_query_uses_an_index_and_a_limit(conn, ada):
     class Recorded:
         async def execute(self, query, args):
@@ -52,6 +74,12 @@ async def test_openings_query_uses_an_index_and_a_limit(conn, ada):
             await conn.execute("SET LOCAL enable_seqscan=off")
             plan = await (await conn.execute("EXPLAIN " + recorded.query, recorded.args)).fetchall()
         assert "events_brief_openings_idx" in str(plan)
+    await digest_snapshot.recent_briefs(recorded, "team_digest")
+    assert "LIMIT %s" in recorded.query
+    async with conn.transaction():
+        await conn.execute("SET LOCAL enable_seqscan=off")
+        plan = await (await conn.execute("EXPLAIN " + recorded.query, recorded.args)).fetchall()
+    assert "events_brief_openings_idx" in str(plan)
 
 
 @pytest.mark.parametrize("channel", ["digest", "team_digest"])
@@ -89,6 +117,9 @@ async def test_openings_are_frozen_before_the_model_reads_them(app, fake_brain, 
         stored = await one(conn, "SELECT payload FROM events WHERE channel=%s ORDER BY id DESC LIMIT 1", (channel,))
     key = "digest_snapshot" if channel == "digest" else "team_snapshot"
     assert stored["payload"]["payload"][key]["recent_openings"] == ["Previous opening"]
+    if channel == "team_digest":
+        assert [b["text"] for b in result["recent_briefs"]] == ["Previous opening"]
+        assert [b["text"] for b in stored["payload"]["payload"][key]["recent_briefs"]] == ["Previous opening"]
 
 
 def test_brief_instructions_match_the_example_files():
@@ -105,4 +136,6 @@ def test_brief_instructions_match_the_example_files():
     assert "recent_openings" in personal
     assert "Every number" in personal
     assert "recent_openings" in PROFILE_TEXTS["team_digest"]
+    assert "recent_briefs" in PROFILE_TEXTS["team_digest"]
+    assert "recent_briefs" in team
     assert "Every claim comes from a tool result of this run." in team
