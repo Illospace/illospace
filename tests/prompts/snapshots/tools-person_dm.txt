@@ -20,6 +20,7 @@ connectors_call: Call one tool of a connected outside service, with `connector`,
 connectors_list: List the connected outside services and the tools that this run may call, with their input schemas. Call it before `connectors_call` for the exact names. A connector can be personal; the person writes `connect my <name>` in a DM to sign in.
 deep_start: Start deep work in the background when the request needs research across repositories or the web, a careful check, or more than a few tool calls. Give the job in full: the question, what you know already, and what a good answer contains. Then tell the person that the answer comes here in a few minutes. Do not use it for a question that your tools answer now.
 digest_snapshot: Read this person's task brief: Needs you, Your agents, Done since the last brief, and Due. It also keeps open asks and owner service faults. It counts as a personal read.
+dream_log: Read Illo's recent nightly dream reflections, scores, and autonomous workspace improvements.
 drive_get: Read one of this person's own Drive files by `id` from `drive_search`.
 drive_search: Search this person's own Drive files. For team documents, use `drive_shared_search`.
 drive_shared_get: Read one file of the team's shared Drive by `id` from `drive_shared_search`.

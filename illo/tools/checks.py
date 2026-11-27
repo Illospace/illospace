@@ -102,11 +102,25 @@ def grant_names(run: dict) -> frozenset[str]:
     return frozenset(GRANT_PROFILES.get(profile, ()))
 
 
+DREAM_TOOLS = frozenset(
+    {
+        "dream_snapshot",
+        "dream_read_file",
+        "dream_write_file",
+        "dream_delete_note",
+        "dream_record_reflection",
+    }
+)
+DREAM_WRITE_TOOLS = frozenset({"dream_write_file", "dream_delete_note", "dream_record_reflection"})
+
+
 def in_grant(run: dict, tool) -> bool:
     """A tool is in the grant when it names the profile, or when the default data names the tool.
 
     A tool family states `profiles` on its own tools, so two builders never edit one list.
     """
+    if tool.name in DREAM_TOOLS:
+        return run.get("deep_kind") == "dream" and not run.get("tainted") and run.get("principal") == "team"
     if run.get("deep_kind"):
         if tool.name == "page_write" and run["deep_kind"] == "check":
             return True
@@ -116,10 +130,10 @@ def in_grant(run: dict, tool) -> bool:
             return False
         if tool.name in {"shell", "web_fetch", "findings_list", "finding_add"}:
             if tool.name == "web_fetch":
-                return run["deep_kind"] != "brief"
+                return run["deep_kind"] not in {"brief", "dream"}
             return tool.name not in {"findings_list", "finding_add"} or run["deep_kind"] == "scout"
         if tool.name in {"connectors_list", "connectors_call", "aws_read"} and tool.risk == "read":
-            return True
+            return run["deep_kind"] != "dream"
         if tool.name in {"web_read_public_page", "brief_settings"} or tool.family in {"connect", "connectors", "memory"}:
             return False
         if tool.risk != "read":
@@ -151,14 +165,20 @@ def scope(run: dict, tool) -> Decision:
         return Decision("deny", "A deep run needs team authority.")
     # These results propose a card for a person, a reminder, or one bounded restart.
     # Like a finding, a wait result can use facts from an outside read.
-    if deep and tool.risk != "read" and tool.name not in {"finding_add", "wait_result"} and not (tool.name == "page_write" and deep == "check"):
+    if (
+        deep
+        and tool.risk != "read"
+        and tool.name not in {"finding_add", "wait_result"}
+        and not (tool.name == "page_write" and deep == "check")
+        and not (tool.name in DREAM_WRITE_TOOLS and deep == "dream")
+    ):
         if not (tool.family == "tasks" and deep == "request"):
             return Decision("deny", "A deep run only reads. Put the proposal in your answer.")
         if run.get("web_read"):
             return Decision("deny", "This run read the web. Code refuses task writes after that. Put the proposal in your answer.")
     if deep and tool.name in {"web_fetch", "web_read_public_page"}:
-        if deep == "brief":
-            return Decision("deny", "A brief does not read the web.")
+        if deep in {"brief", "dream"}:
+            return Decision("deny", "This run does not read the web.")
         if run.get("personal_read"):
             return Decision("deny", "This run read private data. Code refuses the web after that.")
     if not in_grant(run, tool):

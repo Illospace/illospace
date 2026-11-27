@@ -203,6 +203,26 @@ class ScoutConfig(Model):
     _team = field_validator("team", mode="before")(WebConfig.yaml_switch.__func__)
 
 
+DreamFolder = Literal["notes", "rules", "routines", "skills"]
+
+
+class DreamConfig(Model):
+    enabled: bool = False
+    schedule: str = "0 2 * * *"
+    timezone: str | None = None
+    max_changes: int = Field(default=6, ge=1, le=20)
+    writable: list[DreamFolder] = Field(
+        default_factory=lambda: ["notes", "rules", "routines", "skills"]
+    )
+
+    _schedule = field_validator("schedule")(TeamDigestConfig.valid_cron.__func__)
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_optional_timezone(cls, value: str | None) -> str | None:
+        return Person.valid_timezone(value) if value is not None else None
+
+
 class RouteSettings(Model):
     """The fields of one run kind. A field that a route omits comes from `default`."""
 
@@ -465,6 +485,7 @@ class TeamConfig(Model):
     deep: DeepConfig = Field(default_factory=DeepConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     scout: ScoutConfig = Field(default_factory=ScoutConfig)
+    dream: DreamConfig = Field(default_factory=DreamConfig)
     run_limits: RunLimits = Field(default_factory=RunLimits)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     connect: ConnectConfig = Field(default_factory=ConnectConfig)
@@ -616,6 +637,7 @@ class Workspace(Model):
     fingerprint: str = ""
     digest_instructions: str | None = None
     team_digest_instructions: str | None = None
+    dream_instructions: str | None = None
 
     def matching_rules(
         self, principal: str, profile: str, channel_id: str | None
@@ -771,7 +793,7 @@ def load_workspace(root: Path | str) -> Workspace:
         ("routines/*.md", Routine, routines),
     ):
         for path in sorted(root.glob(pattern)):
-            if model is Routine and path.name in {"digest.md", "team-digest.md"}:
+            if model is Routine and path.name in {"digest.md", "team-digest.md", "dream.md"}:
                 continue
             target.append(
                 _model(
@@ -877,6 +899,11 @@ def load_workspace(root: Path | str) -> Workspace:
     if team_path.exists():
         text = _read(team_path)
         team_instructions = _front(team_path)["body"] if text.startswith("---\n") else text.strip()
+    dream_path = root / "routines/dream.md"
+    dream_instructions = None
+    if dream_path.exists():
+        text = _read(dream_path)
+        dream_instructions = _front(dream_path)["body"] if text.startswith("---\n") else text.strip()
     workspace = Workspace(
         root=root,
         lists=lists,
@@ -884,6 +911,7 @@ def load_workspace(root: Path | str) -> Workspace:
         warnings=warnings,
         digest_instructions=digest_instructions,
         team_digest_instructions=team_instructions,
+        dream_instructions=dream_instructions,
         people=people,
         config=config,
         rules=rules,

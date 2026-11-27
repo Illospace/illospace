@@ -47,15 +47,15 @@ async def start(
         or value(authority, "principal") == "outsider"
     ):
         raise Refusal("Deep work needs a team request that has not read outside text.")
-    if kind not in {"request", "scout", "brief", "check"} or not job.strip():
+    if kind not in {"request", "scout", "brief", "check", "dream"} or not job.strip():
         raise Refusal("Give a job for the deep work.")
     principal, profile = value(authority, "principal"), value(authority, "profile")
     person_id = value(authority, "person_id")
-    if kind == "check" and (
+    if kind in {"check", "dream"} and (
         principal != "team" or profile != "routine" or person_id is not None
         or deliver != {"none": True} or origin_event_id is not None
     ):
-        raise Refusal("Only code can start a wait check with no delivery.")
+        raise Refusal(f"Only code can start a {kind} run with no delivery.")
     origin = (
         await one(conn, "SELECT * FROM events WHERE id=%s", (origin_event_id,))
         if origin_event_id
@@ -140,6 +140,7 @@ async def start(
 
 async def setup(ctx):
     from illo.deep.worker import tick
+    from illo.routines.dream import setup as dream_setup
     from illo.routines.scout import setup as scout_setup
 
     async def work():
@@ -147,3 +148,4 @@ async def setup(ctx):
 
     ctx.every(2, work)
     await scout_setup(ctx)
+    await dream_setup(ctx)
