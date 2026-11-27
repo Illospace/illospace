@@ -157,7 +157,7 @@ async def read_file(ctx, args):
     if not target.is_file():
         raise Refusal(f"File not found: {args['path']}")
     text = target.read_text(encoding="utf-8")
-    return data_text(f"workspace-file:{args['path']}", text)
+    return data_text("workspace-file", json_text({"path": args["path"].strip(), "content": text}))
 
 
 def _enforce_write_policy(workspace, rel_path: str, top: str, name: str, content: str) -> None:
