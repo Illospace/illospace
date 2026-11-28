@@ -474,17 +474,17 @@ async def lane_signal(ctx, conn, lane, task_id=None, token=None):
                 continue
             if period["stopped"] and period["stopped"] >= since:
                 continue
+            key = f"task:stop-pending:{row['id']}"
+            pending = await kv.get(conn, key)
+            holder_since = row["holder_since"].isoformat() if row["holder_since"] else None
+            if pending and pending["holder_since"] == holder_since:
+                continue
             tickets = [link for link in row["links"] if link.get("kind") == "ticket"]
             is_open = False
             for link in tickets:
                 item = await fresh(ctx, conn, link["url"], "ticket", ttl=0)
                 is_open |= bool(item and item.get("state") == "open")
             if not is_open:
-                continue
-            key = f"task:stop-pending:{row['id']}"
-            pending = await kv.get(conn, key)
-            holder_since = row["holder_since"].isoformat() if row["holder_since"] else None
-            if pending and pending["holder_since"] == holder_since:
                 continue
             await kv.set(conn, key, {"at": datetime.now(UTC).isoformat(), "lane": lane["id"],
                                      "holder_since": holder_since})

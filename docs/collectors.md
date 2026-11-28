@@ -128,6 +128,8 @@ It sends the changes again at the next poll.
 
 Each poll sends changed lanes to `lane_report`, plus a collector liveness record.
 An empty batch still reports liveness. Every 10 minutes, the collector refreshes every selected lane.
+The server writes nothing to an unchanged closed lane (`done` or `failed`).
+The refresh still runs the task checks for that lane.
 The collector sends the title, state, last assistant text, links, repository, and machine.
 It cuts the summary to 500 characters. It sends no attachment, tool result, file content, or command output field.
 It removes code blocks and common credentials from text. This filter cannot detect all private prose.

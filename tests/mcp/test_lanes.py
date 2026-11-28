@@ -52,6 +52,62 @@ async def test_lane_upsert_events_and_closing_summary(app, http):
     results = await agent.call("lane_search", {"query": "Cobalt", "owner": "ada", "state": "done"})
     assert len(results["lanes"]) == 1
 
+    await agent.call("lane_report", {
+        "source": "t3", "external_id": "acme-1", "state": "done", "event": "Acme verified the result.",
+    })
+    async with app.state.ctx.pool.connection() as conn:
+        assert await one(conn, "SELECT kind,text FROM lane_events ORDER BY id DESC LIMIT 1") == {
+            "kind": "report", "text": "Acme verified the result.",
+        }
+
+
+async def test_refresh_skips_writes_for_unchanged_closed_lanes(app, http):
+    agent = await AgentClient.create(app, http)
+    closed = [
+        {"source": "t3", "external_id": f"acme-{i}", "state": "done"}
+        for i in range(1002)
+    ]
+    closed[0].update(
+        links=[{"url": "https://example.com/acme/1"}],
+        progress={"steps_done": 1, "steps_total": 1},
+        end_summary="The checks pass.",
+    )
+    changed = closed[-1]
+    working = {"source": "t3", "external_id": "acme-working", "state": "working"}
+
+    async def report(snapshots):
+        results = []
+        for start in range(0, len(snapshots), 500):
+            batch = await agent.call("lane_report", {"lanes": snapshots[start:start + 500]})
+            results.extend(batch["lanes"])
+        return results
+
+    async def snapshot():
+        async with app.state.ctx.pool.connection() as conn:
+            rows = await all_rows(conn, """SELECT l.external_id,l.xmin::text AS lane_xmin,
+                l.updated_at,l.last_signal_at,s.xmin::text AS search_xmin,s.vector::text
+                FROM lanes l JOIN lane_search s ON s.lane_id=l.id""")
+            summary = await one(conn, "SELECT xmin::text,source_at FROM items WHERE kind='lane_summary'")
+            events = await one(conn, "SELECT count(*) AS n FROM lane_events")
+        return {row["external_id"]: row for row in rows}, summary, events
+
+    first = await report([*closed, working])
+    before, summary_before, events_before = await snapshot()
+    assert len(before) == 1003 and events_before == {"n": 1003}
+    assert summary_before is not None
+
+    assert await report([*closed[:-1], {**changed, "summary": "The Acme check passes."}, working]) == first
+    after, summary_after, events_after = await snapshot()
+    assert summary_after == summary_before
+    assert events_after == events_before
+
+    for key in ("lane_xmin", "updated_at", "last_signal_at", "search_xmin", "vector"):
+        assert after[changed["external_id"]][key] != before[changed["external_id"]][key]
+    assert after[working["external_id"]]["last_signal_at"] > before[working["external_id"]]["last_signal_at"]
+    for lane in (changed, working):
+        del before[lane["external_id"]], after[lane["external_id"]]
+    assert len(after) == 1001 and after == before
+
 
 @pytest.mark.parametrize("owner", ["ben", "ACME-BEN-EXAMPLE", "ben@example.com", "U_ACME_BEN"])
 async def test_owner_mapping(app, http, owner):
@@ -168,7 +224,8 @@ async def test_step_fields_are_optional_and_preserved(app, http):
         assert not step["is_step"] and step["parent_ref"] is None
 
 
-async def test_reopened_lane_clears_closure_and_saved_summary(app, http):
+@pytest.mark.parametrize("state", ["review", "working"])
+async def test_reopened_lane_clears_closure_and_saved_summary(app, http, state):
     from illo.asks.service import is_live
     from illo.ledger import ask_workflow, asks
 
@@ -177,9 +234,10 @@ async def test_reopened_lane_clears_closure_and_saved_summary(app, http):
     result = await agent.call("lane_report", {
         **ref, "title": "Check the plan", "state": "done", "end_summary": "The work finished.",
     })
-    await agent.call("lane_report", {**ref, "state": "review", "summary": "Please check the plan."})
+    await agent.call("lane_report", {**ref, "state": state, "summary": "Please check the plan."})
     async with app.state.ctx.pool.connection() as conn:
         lane = await one(conn, "SELECT * FROM lanes WHERE id=%s", (result["lane_id"],))
+        assert lane["state"] == state
         assert lane["closed_at"] is None and lane["end_summary"] is None
         await ask_workflow.record_decisions(conn)
         assert await one(conn, "SELECT * FROM items WHERE source_ref=%s",
